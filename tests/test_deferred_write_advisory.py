@@ -24,7 +24,6 @@ from derived_receipt_fakes import DerivedReceiptProtocolFake
 
 from exomem import commands, corpus_aware, derived_receipts, embeddings, review_state
 from exomem import find as find_module
-from exomem import vault as vault_module
 from exomem.governance import egress as egress_module
 from exomem.governance.principal import (
     RequestPrincipal,
@@ -144,7 +143,7 @@ def _seed_page(vault: Path, name: str, body: str, *, folder: str = "Insights") -
 
 
 def _fingerprint(vault: Path, rel: str) -> str:
-    return vault_module.content_hash((vault / rel).read_text(encoding="utf-8"))
+    return hashlib.sha256((vault / rel).read_bytes()).hexdigest()
 
 
 def _prepare_custody(
@@ -591,6 +590,57 @@ def test_advisory_worker_revalidates_the_target_fingerprint_before_publish(
 # ---------------------------------------------------------------------------
 # One-generation vector reuse
 # ---------------------------------------------------------------------------
+
+
+def test_crlf_advisory_receipt_publishes_the_current_byte_generation(
+    vault: Path, encoder: _DeterministicEncoder
+) -> None:
+    target = _seed_page(vault, "byte-generation", "One café generation.")
+    path = vault / target
+    original = path.read_bytes().replace(b"\n", b"\r\n")
+    path.write_bytes(original)
+    _receipt, fingerprint = _prepare_custody(vault, batch_id="byte-generation", target_rel=target)
+
+    assert _run(vault)[0].outcome == "published"
+    assert fingerprint == hashlib.sha256(original).hexdigest()
+    assert path.read_bytes() == original
+
+
+def test_vector_handoff_refuses_a_newline_edit_during_encoding(
+    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _seed_page(vault, "encode-drift", "The canonical input moves during encoding.")
+    path = vault / target
+    expected = _fingerprint(vault, target)
+    changed = path.read_bytes().replace(b"\n", b"\r\n")
+
+    def encode_then_change(texts, **kwargs):
+        vectors = encoder(texts, **kwargs)
+        path.write_bytes(changed)
+        return vectors
+
+    monkeypatch.setattr(embeddings, "embed_texts", encode_then_change)
+    generation = embeddings.prepare_generation_vectors(vault, target, expected_fingerprint=expected)
+
+    assert generation is None
+    assert path.read_bytes() == changed
+
+
+def test_vector_handoff_rechecks_the_canonical_root_for_a_configured_alias(
+    vault: Path, encoder: _DeterministicEncoder
+) -> None:
+    target = _seed_page(vault, "root-alias", "One current generation through a root alias.")
+    alias = vault.parent / "vault-alias"
+    try:
+        alias.symlink_to(vault, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    expected = _fingerprint(vault, target)
+
+    generation = embeddings.prepare_generation_vectors(alias, target, expected_fingerprint=expected)
+
+    assert generation is not None
+    assert generation.fingerprint == expected
 
 
 def test_embedding_and_advisory_encode_generation_once(

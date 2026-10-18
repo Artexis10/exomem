@@ -47,6 +47,7 @@ from .vault import (
     content_hash,
     kb_root,
     parse_frontmatter,
+    read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
     unique_path,
@@ -1118,7 +1119,7 @@ def _supersede_writes(
     link = render_wikilink_target(rel_new, vault_root)
     writes: list[PlannedWrite] = []
     for target, expected in targets:
-        text = target.read_text(encoding="utf-8")
+        text, guard = read_guarded_text(vault_root, target)
         actual = content_hash(text)
         if actual != expected:
             raise ContentHashMismatchError(target, expected, actual)
@@ -1128,7 +1129,7 @@ def _supersede_writes(
             continue
         updated = _mark_superseded(text, link, stamp_iso)
         if updated != text:
-            writes.append(PlannedWrite(path=target, content=updated, expected_hash=expected))
+            writes.append(PlannedWrite(path=target, content=updated, expected_hash=expected, guard=guard))
     return writes
 
 

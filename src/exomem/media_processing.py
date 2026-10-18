@@ -35,11 +35,14 @@ from .kbdir import kb_dirname
 from .vault import (
     MISSING_CONTENT_HASH,
     VAULT_SCAN_SKIP_DIRS,
+    PathGuardError,
     PlannedWrite,
     batch_atomic_write,
     content_hash,
     parse_frontmatter,
     post_commit_batch_fanout,
+    read_guarded_text,
+    with_newline,
     yaml_scalar,
 )
 
@@ -935,14 +938,14 @@ def _retry_ambiguous_batch_failure(
         try:
             _confine_sidecar(vault, sidecar)
             provenance = _read_provenance(vault, binary, resolved_binary)
-            original = sidecar.read_text(encoding="utf-8")
-        except (OSError, UnicodeError, MediaProcessingError):
+            original, _guard = read_guarded_text(vault, sidecar)
+        except (OSError, UnicodeError, MediaProcessingError, PathGuardError):
             return _block_ambiguous_retry(store, durable, sidecar)
 
         try:
             _verify_binary_identity(binary, resolved_binary, provenance)
-            current = sidecar.read_text(encoding="utf-8") if sidecar.exists() else None
-        except (OSError, UnicodeError, MediaProcessingError):
+            current, _guard = read_guarded_text(vault, sidecar)
+        except (OSError, UnicodeError, MediaProcessingError, PathGuardError):
             return _block_ambiguous_retry(store, durable, sidecar)
         if current != original:
             return _block_ambiguous_retry(store, durable, sidecar)
@@ -1129,7 +1132,7 @@ def _read_sidecar_text(vault: Path, sidecar: Path) -> str | None:
             "media sidecar does not exist",
         ) from None
     try:
-        return snapshot.data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        return snapshot.data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise MediaProcessingError(
             "MEDIA_SIDECAR_INVALID",
@@ -1299,6 +1302,7 @@ def _preservable_notes(body: str) -> str | None:
     record. Only regenerated scaffolding is dropped: the title/locator lines and
     an empty ``## Extracted text`` anchor.
     """
+    body = with_newline(body, "\n")
     preserve = _preserve_module()
     kept: list[str] = []
     owned_boundary = f"{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n{_PRESERVED_HEADING}"
@@ -1457,7 +1461,7 @@ def mark_processing_unavailable(
                     tier = access.access_tier(vault, rel_binary)
                     if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
                         continue
-                    content = job.sidecar_path.read_text(encoding="utf-8")
+                    content, guard = read_guarded_text(vault, job.sidecar_path)
                     blocked = preserve.render_sidecar_processing_failure(
                         content,
                         state=media_jobs.BLOCKED,
@@ -1473,6 +1477,7 @@ def mark_processing_unavailable(
                                 path=job.sidecar_path,
                                 content=blocked,
                                 expected_hash=content_hash(content),
+                                guard=guard,
                             ),
                         ),
                         post_commit_fanout=commit_guard is None,

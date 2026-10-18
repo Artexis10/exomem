@@ -52,9 +52,12 @@ from .vault import (
     _is_reparse,
     batch_atomic_write,
     content_hash,
-    escape_wikilinks_for_log,
+    document_newline,
     kb_root,
     parse_frontmatter,
+    prepend_log_entry,
+    read_guarded_text,
+    with_newline,
     yaml_scalar,
 )
 
@@ -811,12 +814,13 @@ def preserve(
 
         top_index = kb / "index.md"
         if top_index.exists() and not raw_protection:
-            current_top = top_index.read_text(encoding="utf-8")
+            current_top, _guard = read_guarded_text(vault_root, top_index)
             new_top, _trim_note = indexes._prepend_recent_activity(
-                current_top,
+                with_newline(current_top, "\n"),
                 date_iso=date_iso,
                 summary=activity_summary,
             )
+            new_top = with_newline(new_top, document_newline(current_top))
             # Evidence writes don't change Notes/Entities counts, but keeping
             # the sub-index refresh in the path makes drift impossible to
             # accumulate from any write op (cheap walk; no-op if already-fresh).
@@ -839,7 +843,7 @@ def preserve(
 
         log_file = kb / "log.md"
         if log_file.exists() and not raw_protection:
-            current_log = log_file.read_text(encoding="utf-8")
+            current_log, _guard = read_guarded_text(vault_root, log_file)
             new_log = _prepend_log_entry(
                 current_log,
                 date_iso=stamp_iso,
@@ -1529,7 +1533,7 @@ def update_sidecar_extraction(
     structurally. Omitted (None/empty) leaves the frontmatter unchanged — every
     existing call site is unaffected.
     """
-    before = sidecar_path.read_text(encoding="utf-8")
+    before, guard = read_guarded_text(vault_root, sidecar_path)
     content = render_sidecar_extraction(
         before,
         text=text,
@@ -1545,6 +1549,7 @@ def update_sidecar_extraction(
                 path=sidecar_path,
                 content=content,
                 expected_hash=content_hash(before),
+                guard=guard,
             ),
         ),
         post_commit_fanout=not defer_index_fanout,
@@ -1562,6 +1567,8 @@ def render_sidecar_extraction(
     attempts: int | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state."""
+    newline = document_newline(before)
+    before = with_newline(before, "\n")
     if _has_ambiguous_legacy_preserved_notes(before):
         raise PreserveError(
             code="AMBIGUOUS_SIDECAR_BOUNDARY",
@@ -1591,7 +1598,7 @@ def render_sidecar_extraction(
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
-    return content
+    return with_newline(content, newline)
 
 
 def commit_media_sidecar_writes(
@@ -1666,7 +1673,7 @@ def update_sidecar_processing_failure(
     defer_graph_completion: bool = False,
 ) -> list[Path] | DeferredGraphCompletion:
     """Persist actionable worker state without replacing a pending transcript."""
-    before = sidecar_path.read_text(encoding="utf-8")
+    before, guard = read_guarded_text(vault_root, sidecar_path)
     content = render_sidecar_processing_failure(
         before,
         state=state,
@@ -1682,6 +1689,7 @@ def update_sidecar_processing_failure(
                 path=sidecar_path,
                 content=content,
                 expected_hash=content_hash(before),
+                guard=guard,
             ),
         ),
         post_commit_fanout=not defer_index_fanout,
@@ -1738,7 +1746,7 @@ def update_sidecar_processing_pending(
     next_action: str = "wait for media reconciliation",
 ) -> bool:
     """Keep changed-in-flight media automatic and actionable until reconciliation."""
-    before = sidecar_path.read_text(encoding="utf-8")
+    before, guard = read_guarded_text(vault_root, sidecar_path)
     content = render_sidecar_processing_pending(before, attempts=attempts, next_action=next_action)
     try:
         commit_media_sidecar_writes(
@@ -1748,6 +1756,7 @@ def update_sidecar_processing_pending(
                     path=sidecar_path,
                     content=content,
                     expected_hash=expected_hash or content_hash(before),
+                    guard=guard,
                 ),
             ),
         )
@@ -1760,16 +1769,20 @@ def _set_frontmatter_field(content: str, field: str, value: str) -> str:
     """Set `field: value` in the leading `---` frontmatter (replace or insert)."""
     if not content.startswith("---"):
         return content
+    original = content
+    newline = document_newline(content)
+    content = with_newline(content, "\n")
     end = content.find("\n---", 3)
     if end == -1:
-        return content
+        return original
     head, body = content[:end], content[end:]
     pattern = re.compile(rf"(?m)^{re.escape(field)}:.*$")
     if pattern.search(head):
         head = pattern.sub(f"{field}: {value}", head, count=1)
     else:
         head = head.rstrip("\n") + f"\n{field}: {value}"
-    return head + body
+    updated = head + body
+    return original if updated == content else with_newline(updated, newline)
 
 
 def _set_extracted_text(content: str, text: str) -> str:
@@ -1813,13 +1826,9 @@ def _prepend_log_entry(
     text: str, *, date_iso: str, rel_path: str, body: str
 ) -> str:
     """Insert `## [<date>] preserve | <kb-relative-path>` after the `---` separator."""
-    title = rel_path.replace(kb_prefix(), "", 1)
-    new_entry = f"## [{date_iso}] preserve | {title}\n\n{escape_wikilinks_for_log(body)}\n"
-    sep_idx = text.find(indexes.LOG_SEPARATOR)
-    if sep_idx == -1:
-        return text.rstrip() + "\n\n" + new_entry + "\n"
-    insertion_point = sep_idx + len(indexes.LOG_SEPARATOR)
-    return text[:insertion_point] + "\n" + new_entry + "\n" + text[insertion_point:]
+    return prepend_log_entry(
+        text, date_iso=date_iso, op="preserve", rel_path_no_ext=rel_path, body=body
+    )
 
 
 def _raise(code: str, missing: list[str], reason: str):

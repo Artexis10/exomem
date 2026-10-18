@@ -1942,11 +1942,7 @@ def _preflight_existing(
     before_source = exact_before_source.replace("\r\n", "\n").replace("\r", "\n")
     after_source = _place_origin_source(path, after_source, before_source=before_source)
     origin_inputs = _prepare_origin_inputs(root, path, after_source, before_source=before_source)
-    logical_before_hash = vault.content_hash(before_source)
-    if expected_before_hash is not None and expected_before_hash not in {
-        raw_before_hash,
-        logical_before_hash,
-    }:
+    if expected_before_hash is not None and expected_before_hash != raw_before_hash:
         raise SemanticWriteError("STALE_SEMANTIC_WRITE", "page changed before semantic preflight")
     # Tier-2 overwrite is the deliberate break-glass route for repairing a
     # malformed structured item that its typed adapter can no longer load.
@@ -2000,7 +1996,7 @@ def _preflight_existing(
         before = semantic_contract.build_page_state(
             root,
             path,
-            before_source,
+            exact_before_source,
             relation_registry=registry,
             language_registry=language,
             status_basis=status_basis,
@@ -2010,8 +2006,7 @@ def _preflight_existing(
             # in the short window before its freshness event is published.
             # Repair the exact evaluated page from those authoritative bytes so
             # a lagging process cache never turns a valid write into a
-            # corpus-state refusal. On a CRLF page it also gives the activation
-            # census the LF hash that grandfathering matches.
+            # corpus-state refusal.
             before_corpus = before_corpus.with_candidate(before)
         after = semantic_contract.build_page_state(
             root,
@@ -3388,11 +3383,7 @@ def preflight_move(
         root, registry=registry, language_registry=language, status_basis=status_basis
     )
     before_moved = before_corpus.pages.get(old_path)
-    normalized_source = source.replace("\r\n", "\n").replace("\r", "\n")
-    if before_moved is None or before_moved.source_hash not in {
-        vault.content_hash(source),
-        vault.content_hash(normalized_source),
-    }:
+    if before_moved is None or before_moved.source_hash != vault.content_hash(source):
         raise SemanticWriteError(
             "STALE_SEMANTIC_WRITE", "move source changed during semantic preflight"
         )
@@ -3407,14 +3398,9 @@ def preflight_move(
                 "STALE_SEMANTIC_WRITE",
                 "inbound page changed during semantic move preflight",
             ) from error
-        normalized_before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
         if (
             before_rewrite is None
-            or before_rewrite.source_hash
-            not in {
-                vault.content_hash(before_source),
-                vault.content_hash(normalized_before_source),
-            }
+            or before_rewrite.source_hash != vault.content_hash(before_source)
             or write.guard.expected_content_hash != vault.content_hash(before_source)
         ):
             raise SemanticWriteError(

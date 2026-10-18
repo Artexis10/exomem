@@ -183,6 +183,7 @@ _TEXT_SUFFIXES = frozenset(
         ".rst",
         ".rego",
         ".service",
+        ".timer",
         ".sh",
         ".sql",
         ".svg",

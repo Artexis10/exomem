@@ -577,14 +577,24 @@ def test_manifest_and_held_ordinary_census_remain_exact(tmp_path):
         )
 
 
-def test_bom_manifest_retains_existing_named_refusal(tmp_path):
-    # Capture cannot convert bytes the existing manifest parser rejects into a valid source.
+def test_bom_manifest_capture_and_import_preserve_exact_source_bytes(tmp_path):
     root, path = _items(tmp_path)
     raw = b"\xef\xbb\xbf" + path.read_bytes()
     path.write_bytes(raw)
-    with pytest.raises(collections.CollectionError, match="INVALID_COLLECTION_MANIFEST"):
-        with _capture(tmp_path, root, path):
-            pass
+    digest = hashlib.sha256(raw).hexdigest()
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
+        assert captured.manifest_bytes == raw
+        assert captured.manifest.manifest_version.hash == digest
+        conn.execute("BEGIN")
+        legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        text, stored_hash = conn.execute(
+            "SELECT manifest_text,manifest_hash FROM collection_manifests"
+        ).fetchone()
+        assert text.encode("utf-8") == raw
+        assert stored_hash == digest
+        assert conn.execute(
+            "SELECT published_sha256 FROM projection_state WHERE kind='manifest'"
+        ).fetchone()[0] == digest
     assert path.read_bytes() == raw
 
 

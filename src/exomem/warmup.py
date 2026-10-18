@@ -285,6 +285,22 @@ def warm_graph_handoff(vault_root: Path) -> dict[str, float]:
     return durations
 
 
+def prime_writer_resolver(vault_root: Path) -> None:
+    """Borrow proven structural metadata without widening ordinary recall."""
+    from . import find, freshness, semantic_contract
+
+    checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
+    if checkpoint.triple is None:
+        return
+    entries = semantic_contract.current_writer_resolver_entries(
+        vault_root, freshness_key=checkpoint.triple,
+    )
+    if entries is not None:
+        find.prime_resolver_from_entries(
+            vault_root, entries, expected_freshness=checkpoint.triple,
+        )
+
+
 def warm_caches(
     vault_root: Path,
     *,
@@ -468,6 +484,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             from . import semantic_contract
 
             semantic_contract.warm_corpus_context(vault_root)
+        _run_step(durations, "writer_resolver", lambda: prime_writer_resolver(vault_root))
         readiness.mark_ready("semantic_corpus")
     except Exception:  # noqa: BLE001 — semantic warm-up remains rebuildable
         log.warning("semantic corpus warm-up failed", exc_info=True)

@@ -452,7 +452,7 @@ def test_an_unreadable_review_state_yields_no_block_and_the_write_commits(
     def unreadable(*_args: object, **_kwargs: object) -> None:
         raise OSError("review state is unreadable")
 
-    monkeypatch.setattr(due_state_module, "served", unreadable)
+    monkeypatch.setattr(review_state_module.ReviewStateStore, "load", unreadable)
 
     receipt = report_event(tmp_path, "Batch 1")
 

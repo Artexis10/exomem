@@ -18,6 +18,7 @@ import yaml
 
 from . import freshness, privacy_log
 from .find_types import ParsedPage
+from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,6 @@ EXCLUDED_DIR_NAMES = frozenset(
 )
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
-FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 _DEFAULT_PAGE_CACHE_SIZE = 4096
 
@@ -565,7 +565,7 @@ def _parse_page_after_checkpoint(
     else:
         frontmatter = {}
         body = text
-        if text.startswith("---\n"):
+        if text.removeprefix("\ufeff").startswith("---\n"):
             # An opening fence without the complete frontmatter grammar is
             # ambiguous metadata, not proof that the page has no metadata.
             frontmatter_valid = False

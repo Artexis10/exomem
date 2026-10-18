@@ -234,13 +234,15 @@ def test_a_breach_logs_one_event_per_interval(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.parametrize("full", [False, True])
 def test_bootstrap_block_reports_only_the_calling_client(full: bool) -> None:
+    from exomem.request_latency_contract import load_contract
+
     watch = latency_watch.reset(started_at=T0, clock=_Clock(AFTER_GRACE))
     try:
         _fill(watch, n=25, total_ms=3000, client="openai-mcp/1.0.0")
         _fill(watch, n=25, total_ms=150, client="claude-code")
         block = latency_watch.bootstrap_block("openai-mcp/1.0.0", full=full)
         assert block is not None and len(block) == 1
-        assert block[0]["contract_revision"] == "request-latency-v1"
+        assert block[0]["contract_revision"] == load_contract().revision
         assert block[0]["bar_id"] == "watch-ordinary" and block[0]["source"] == "live-ring"
         if full:
             assert block[0]["coverage"]["population"] == "retained"
