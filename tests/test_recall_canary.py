@@ -98,7 +98,8 @@ def test_mcp_deep_recall_cannot_pass_the_ordinary_population(tmp_path):
     assert row["breach"] is False
 
 
-def test_mcp_canary_accepts_required_material_with_partial_warming(tmp_path):
+@pytest.mark.parametrize("enveloped", [True, False])
+def test_mcp_canary_accepts_material_from_published_recall_shapes(tmp_path, enveloped):
     from fastmcp import FastMCP
 
     from exomem.commands import op_ask_memory
@@ -106,33 +107,40 @@ def test_mcp_canary_accepts_required_material_with_partial_warming(tmp_path):
     server = FastMCP("test")
 
     def ask_memory(query: str) -> dict:
-        return {
-            "hits": [
-                {
-                    "path": "notes/example.md",
-                    "type": "note",
-                    "scope": "example",
-                    "title": "Example",
-                    "updated": "2026-01-01",
-                    "ref": "private-reference",
-                    "excerpt": query,
-                }
-            ],
-            "warming": {"components": ["pending_visibility"]},
-        }
+        hits = [
+            {
+                "path": "notes/example.md",
+                "type": "note",
+                "scope": "example",
+                "title": "Example",
+                "updated": "2026-01-01",
+                "ref": "private-reference",
+                "excerpt": query,
+            }
+        ]
+        return (
+            {
+                "hits": hits,
+                "warming": {"components": ["pending_visibility"]},
+            }
+            if enveloped
+            else hits
+        )
 
     ask_memory.__annotations__["return"] = get_type_hints(op_ask_memory, include_extras=True)[
         "return"
     ]
     server.tool(ask_memory)
+    hit_path = ["hits", 0] if enveloped else [0]
     report = _run_canary(
         tmp_path,
         server,
         [
             _canary_case(
-                state_path=["hits", 0, "type"],
+                state_path=[*hit_path, "type"],
                 state="note",
-                material_paths=[["hits", 0, "excerpt"]],
+                references=[{"path": [*hit_path, "ref"], "value": "private-reference"}],
+                material_paths=[[*hit_path, "excerpt"]],
             )
         ],
         samples=1,

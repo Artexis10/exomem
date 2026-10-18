@@ -96,14 +96,15 @@ def _canary_result(result, expected) -> tuple[str, str | None]:
         return "error", "tool-error"
     # The SDK parses the published output schema and removes its transport wrapper.
     data = result.data
-    if not isinstance(data, dict):
+    if not isinstance(data, (dict, list)):
         return "error", "malformed-terminal"
     # Public OpError and activation fields are product protocol shapes.
+    envelope = data if isinstance(data, dict) else {}
     outcome = (
         "refused"
-        if data.get("success") is False
+        if envelope.get("success") is False
         else "abstained"
-        if data.get("abstained") is True
+        if envelope.get("abstained") is True
         else "ok"
     )
     if outcome != expected.outcome:
