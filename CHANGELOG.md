@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.127.4](https://github.com/Artexis10/exomem/compare/v0.127.3...v0.127.4) (2026-10-18)
+
+
+### Bug Fixes
+
+* **observability:** expose idempotency claim timing ([#1870](https://github.com/Artexis10/exomem/issues/1870)) ([9b127e8](https://github.com/Artexis10/exomem/commit/9b127e857dde855a67547287ec4616d72bb7e4e2))
+* **recall:** reprove carried corpus and retain canary diagnostics ([#1871](https://github.com/Artexis10/exomem/issues/1871)) ([20ac8a0](https://github.com/Artexis10/exomem/commit/20ac8a0bc4c0325c1f2e24bd28c3b96798e7b2b3))
+
 ## [0.127.3](https://github.com/Artexis10/exomem/compare/v0.127.2...v0.127.3) (2026-10-18)
 
 
