@@ -136,7 +136,7 @@ For a view stamped with the current row version, it SHALL, after the file has be
 - **THEN** only the valid state is applied and no held correction remains for that view
 
 ### Requirement: Collection audit is an append-only store table with a rendered history view
-Every committed collection mutation SHALL be exactly one audit transition in the store, carrying its 24-lowercase-hex transition identifier, the operation, the actor, the sanitized reason, the before and after collection generation and manifest version, the commit time, the recorded receipt, and a hash chain over its predecessor, with one content-free audit effect per changed item naming its row, effect, and before and after versions and hashes. A bulk mutation SHALL be one transition with one effect per written row. Audit transitions SHALL copy no item values. The transition SHALL commit in the same transaction as the change it describes, so no committed change can lack its transition. Records and Planning mutations SHALL NOT write audit events to `Knowledge Base/log.md`. The substrate SHALL render, per collection, a read-only history page generated from the audit table, newest first and readable like an activity log: date, operation, actor, reason, and links to the changed item views. The page SHALL be bounded, with older transitions on numbered pages of a fixed number of transitions, and only the newest numbered page SHALL be rewritten. It SHALL be rendered for the intersection of the audiences that can read its path: an effect SHALL appear only when every such audience can read its item, and a transaction with any omitted effect SHALL be shown without its reason. Inspection SHALL verify the audit chain incrementally from a recorded verified-through point.
+Every committed collection mutation SHALL be exactly one audit transition in the store, carrying its 24-lowercase-hex transition identifier, the operation, the actor, the sanitized reason, the before and after collection generation and manifest version, the commit time, the recorded receipt, and a hash chain over its predecessor, with one content-free audit effect per changed item naming its row, effect, and before and after versions and hashes. A bulk mutation SHALL be one transition with one effect per written row. Audit transitions SHALL copy no item values. The transition SHALL commit in the same transaction as the change it describes, so no committed change can lack its transition. Records and Planning mutations SHALL NOT write audit events to `Knowledge Base/log.md`. The substrate SHALL render, per collection, a read-only history page generated from the audit table, newest first and readable like an activity log: date, operation, actor, reason, and links to the changed item views. The page SHALL be bounded, with older transitions on numbered pages of a fixed number of transitions. Ordinary append pagination SHALL rewrite only the main page and newest numbered page. Governance invalidation and repair of edited generated pages MAY regenerate older pages. It SHALL be rendered for the intersection of the audiences that can read its path: an effect SHALL appear only when every such audience can read its item, and a transaction with any omitted effect SHALL be shown without its reason. Inspection SHALL verify the audit chain incrementally from a validated verified-through point without changing canonical state. Canonical history corruption SHALL raise an integrity error rather than invent a native gap. Every native event hash input SHALL remain reconstructible from immutable stored facts.
 
 #### Scenario: Change and audit are atomic
 - **WHEN** a mutation commits or is interrupted at any point
@@ -153,6 +153,35 @@ Every committed collection mutation SHALL be exactly one audit transition in the
 #### Scenario: Editing the history page changes nothing
 - **WHEN** a user edits a history page
 - **THEN** no audit transition changes and the page is re-rendered from the table
+
+#### Scenario: Governance changes affect an older history page
+- **GIVEN** an older numbered page contains effects whose current release has changed
+- **WHEN** the page is read or reconciled
+- **THEN** stale bytes cannot release withheld effects or a mixed transaction's reason
+- **AND** the projector may regenerate that page without changing audit transitions
+- **AND** page numbers and navigation reveal no omitted transition count
+
+#### Scenario: Hidden-only history changes keep public metadata unchanged
+- **WHEN** a transaction adds only effects withheld from any audience that can read the history page
+- **THEN** the page's released content, stamps, public version, hashes, continuations and navigation remain unchanged
+- **AND** audience intersection includes default and page-only session-grant readers
+
+#### Scenario: Imported history retains its prior assessment and payloads
+- **GIVEN** an imported collection has a preserved history assessment and retained legacy correction payloads
+- **WHEN** row history is read after a native correction
+- **THEN** authorized retained legacy payloads and native versions remain readable in the existing history envelope
+- **AND** genuinely missing legacy payloads report `unavailable_legacy`
+- **AND** exhaustive verification never upgrades the imported assessment or makes unknown history acknowledgeable
+
+#### Scenario: A public history read verifies a new suffix
+- **GIVEN** admission validated a collection prefix and later transactions extend it
+- **WHEN** inspection or query reads canonical history
+- **THEN** it verifies the new suffix under its current snapshot and leaves canonical state unchanged
+- **AND** unexplained database changes invalidate prefix trust before it can be reused
+
+#### Scenario: Native history is corrupt
+- **WHEN** canonical event material or its predecessor chain fails verification
+- **THEN** the read reports a store-integrity error instead of a native gap or a governance omission
 
 #### Scenario: Activity log no longer grows with Records writes
 - **WHEN** a Records or Planning mutation commits

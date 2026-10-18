@@ -226,15 +226,25 @@ October 4 private runtime/create foundation: independent review approves current
 
 ## P3. Audit, history, and the GA gate
 
+Deliver the canonical reader and history projection as one batch after the view foundation. Reuse the current writer, authorization and publication boundaries. No new table, authorizer, projector service or public history envelope is required.
+
 - [ ] P3.1 Red: `inspect` audit over the table.
   - Statuses: `baseline` / `ok` for native history, imported `gap` / `acknowledged_gap` preserved, and `history_incomplete` from governance.
   - `audit_reader_version` is reported 1 or 2 as today, and interruption never yields a gap.
+  - Add the shared pure reader in `collection_store/history.py`. Reconstruct native event material and verify imported envelopes, collection predecessor links and the store chain. Treat corrupt canonical history as an integrity error, independently of governance omissions.
+  - Preserve every imported assessment, including `history_incomplete`, independently of exhaustive proof. Current governance can further reduce visibility; unknown history cannot become acknowledgeable.
 - [ ] P3.2 `include_agent_history`, the hash-chain verification from `audit_head` with the verified-through watermark (O(new transactions), A6), and `rebaseline` for imported legacy gaps only (it refuses on a store-native collection).
+  - Replace store refusals in `preview.py` and `planning.py` through the shared reader. Reuse `record_history` envelopes, origin projection, actor redaction and typed version decoding. Authorize current subjects and historical paths before returning history.
+  - Merge authorized retained legacy sidecar payloads with native versions; report `unavailable_legacy` only when that prior content is genuinely missing.
+  - Validate prefix trust at admission. Keep public reads report-only; advance the writer watermark before the final transaction insertion, within the existing transaction. Invalidate proof reuse after unexplained SQL, rollback, schema changes or handle replacement.
+  - Reuse lifecycle guards, fingerprints and receipts for imported-gap rebaseline. Preserve its discontinuity after later mutations and restart; native rebaseline still refuses.
 - [ ] P3.3 Red: the history page and numbered pages.
-  - Newest first, 200 entries on the main page, content-free, older transitions on numbered pages of 500, and only the newest numbered page rewritten (A6).
+  - Newest first, 200 entries on the main page, content-free, older transitions on numbered pages of 500. Ordinary appends rewrite only the main page and newest numbered page (A6). Governance invalidation and repair of edited generated pages may regenerate older pages.
   - Rendered for the intersection of audiences: an effect any reader of the page could not see is omitted, and a mixed bulk transaction drops its `why` (A8).
   - Edits are ignored and the page re-rendered.
+  - Extend `views.py`, `writer.py`, `governance.py`, `edit_back.py` and `runtime.py` through their current pending-publication and content-verification seams. Reuse the equivalence domains in `governance/projections.py`, including default and session-grant readers; add no second evaluator. Derive stamps, versions, hashes, continuations, pagination and navigation only from released history, without raw-generation or audit-head leaks.
 - [ ] P3.4 Red: a store-mode mutation neither reads nor rewrites `Knowledge Base/log.md` (R4), and existing `log.md` history is untouched.
+  Reuse `tests/test_collection_store_writer.py::test_acknowledged_item_is_readable_with_sources_and_exact_body` for the unchanged activity log. Extend existing workflows only for a concrete read-path gap; do not duplicate transaction and publication proofs.
 - [ ] P3.5 Documentation: `docs/records.md` (including the stale "exactly five actions") and the Planning docs cover the store, views, edit-back, history pages, backup and the unsupported two-writer setup. Scaffold guidance stays generic (`tests/test_scaffold_no_leak.py`).
 - [ ] P3.6 **GA gate.** This turns store mode on for migrated vaults. It requires:
   - P1a, P1b, P2 and P3 merged;
