@@ -88,6 +88,13 @@ The closest maintained option is the existing `latency_watch` with its shared su
 
 Do not relabel a stored `duration_ms` or `total_ms`. If current producers stop before response construction, measure the remaining work and introduce the complete boundary explicitly. A timer cannot measure network delivery it never observes.
 
+The existing HTTP access event adds worker entry-to-access and entry-to-final-body intervals.
+A scope stamp precedes FastMCP authentication and carrier handling; the existing send wrapper records successful final-body handoff.
+The original access duration still ends when the inner ASGI application returns.
+Missing entry or final-send evidence remains null, and a completed final send remains known despite later cleanup failure.
+The intervals overlap and exclude manager forwarding and client receipt; streaming duration describes stream lifetime.
+Early refusals before access retain their existing lack of an access event.
+
 Use the existing request correlation context to distinguish intervals. MCP middleware owns its dispatch observation; nested activation owns only its leaf observation. REST activation likewise has different command and leaf intervals. A missing correlation field prevents a joined claim, not the request itself.
 
 ### 3. Extend the watch with honest coverage

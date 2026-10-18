@@ -157,6 +157,76 @@ def test_stateless_http_keeps_get_sse_compatibility() -> None:
     assert endpoint.methods == {"GET", "POST", "DELETE"}
 
 
+def test_access_event_separates_worker_auth_and_final_body_handoff(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    import httpx
+    from fastmcp.server.auth.providers.debug import DebugTokenVerifier
+
+    from exomem import access_log
+
+    clock = [0.0]
+    verified: list[str] = []
+    monkeypatch.setattr(access_log.time, "perf_counter", lambda: clock[0])
+    caplog.set_level(logging.INFO, logger="exomem.access")
+
+    async def validate(token: str) -> bool:
+        clock[0] += 0.07
+        verified.append(token)
+        return token == "fixture-token"
+
+    mcp = server.ExomemFastMCP("boundary-test", auth=DebugTokenVerifier(validate=validate))
+
+    @mcp.tool
+    def material() -> str:
+        clock[0] += 0.01
+        return "fixture material"
+
+    app = mcp.http_app(
+        stateless_http=True, json_response=True, middleware=server.http_middleware(mcp)
+    )
+
+    async def delayed_handoff(scope, receive, send) -> None:
+        async def delayed_send(message) -> None:
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                clock[0] += 0.03
+            await send(message)
+
+        await app(scope, receive, delayed_send)
+
+    async def scenario() -> httpx.Response:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=delayed_handoff),
+                base_url="https://memory.example",
+            ) as client:
+                return await client.post(
+                    "/mcp",
+                    headers={
+                        "Authorization": "Bearer fixture-token",
+                        "Accept": "application/json, text/event-stream",
+                    },
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": "material", "arguments": {}},
+                    },
+                )
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert response.json()["result"]["content"][0]["text"] == "fixture material"
+    assert verified == ["fixture-token"]
+    records = [r for r in caplog.records if getattr(r, "event", None) == "http_request"]
+    assert len(records) == 1
+    assert records[0].fields["duration_ms"] == 40.0
+    assert records[0].fields["worker_pre_access_ms"] == 70.0
+    assert records[0].fields["worker_to_final_body_ms"] == 110.0
+
+
 @pytest.mark.parametrize("value", [True, False, "1", 1.0])
 def test_mcp_preserves_declared_strict_integer_validation(value: object) -> None:
     from pydantic import StrictInt

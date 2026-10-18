@@ -108,6 +108,8 @@ def test_logs_method_path_status_and_duration(caplog: pytest.LogCaptureFixture) 
     assert "path" not in record.fields
     assert record.fields["status"] == 400
     assert isinstance(record.fields["duration_ms"], float)
+    assert record.fields["worker_pre_access_ms"] is None
+    assert record.fields["worker_to_final_body_ms"] is None
 
 
 def test_session_id_and_cf_ray_included_when_present(caplog: pytest.LogCaptureFixture) -> None:
@@ -190,3 +192,45 @@ def test_malformed_request_host_is_not_logged(caplog: pytest.LogCaptureFixture) 
     record = next(r for r in caplog.records if getattr(r, "event", None) == "http_request")
     assert "host" not in record.content
     assert "host" not in record.fields
+
+
+@pytest.mark.parametrize("failure", ["final_send", "cleanup"])
+def test_final_body_timing_distinguishes_interrupted_send_from_later_failure(
+    failure: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = [0.0]
+    sent: list[dict] = []
+    monkeypatch.setattr(access_log.time, "perf_counter", lambda: clock[0])
+    caplog.set_level(logging.INFO, logger="exomem.access")
+
+    async def app(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        clock[0] = 0.01
+        await send({"type": "http.response.body", "body": b"first", "more_body": True})
+        clock[0] = 0.02
+        await send({"type": "http.response.body", "body": b"last"})
+        clock[0] = 0.04
+        raise RuntimeError("cleanup failed after final body")
+
+    async def handoff(message) -> None:
+        if message["type"] == "http.response.body" and not message.get("more_body", False):
+            clock[0] += 0.005
+            if failure == "final_send":
+                raise asyncio.CancelledError
+        sent.append(message)
+
+    middleware = access_log.WorkerRequestTimingMiddleware(access_log.AccessLogMiddleware(app))
+    expected_error = asyncio.CancelledError if failure == "final_send" else RuntimeError
+    with pytest.raises(expected_error):
+        asyncio.run(middleware(_scope(), _receive, handoff))
+
+    records = [r for r in caplog.records if getattr(r, "event", None) == "http_request"]
+    assert len(records) == 1
+    assert records[0].fields["worker_pre_access_ms"] == 0.0
+    if failure == "final_send":
+        assert records[0].fields["worker_to_final_body_ms"] is None
+        assert [m["body"] for m in sent if m["type"] == "http.response.body"] == [b"first"]
+    else:
+        assert records[0].fields["worker_to_final_body_ms"] == 25.0
+        assert records[0].fields["duration_ms"] == 40.0
+        assert [m["body"] for m in sent if m["type"] == "http.response.body"] == [b"first", b"last"]
