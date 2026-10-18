@@ -419,6 +419,8 @@ def test_live_event_patch_makes_hot_reads_census_free(
         "vault",
         ((str(path), freshness.stat_signature(path)) for path in pages),
     )
+    # A replacement baseline must first prove the retained corpus census.
+    assert _shared_context(vault) is first
     page = vault / _PAGE_REL
     page.write_text(_page(title="Event patched"), encoding="utf-8")
     freshness.on_files_changed(vault, changed=(page,))

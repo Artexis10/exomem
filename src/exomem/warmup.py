@@ -474,16 +474,12 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     semantic_started = time.perf_counter()
     try:
         if "semantic_corpus" in carried:
-            # Built in this same process while it was a standby. The context is
-            # captioned by a stat census, so pages the outgoing worker changed
-            # under it reparse on first use; what is carried is the cold build,
-            # 9.9 s on a 4271-page vault, which is what the admission gate was
-            # waiting on for ~30 s after a 1.6 s cutover.
-            log.info("semantic corpus carried from standby; build not repeated")
-        else:
-            from . import semantic_contract
+            log.info("semantic corpus carried from standby; re-proving after watcher seed")
+        from . import semantic_contract
 
-            semantic_contract.warm_corpus_context(vault_root)
+        # Carry the cold build, not its pre-watcher checkpoint. The existing
+        # warmer reuses unchanged pages and reconciles edits made while unwatched.
+        semantic_contract.warm_corpus_context(vault_root)
         _run_step(durations, "writer_resolver", lambda: prime_writer_resolver(vault_root))
         readiness.mark_ready("semantic_corpus")
     except Exception:  # noqa: BLE001 — semantic warm-up remains rebuildable

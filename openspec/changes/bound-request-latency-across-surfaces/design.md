@@ -22,6 +22,8 @@ Flush receipt proof and pending publication newest-first before the outermost ma
 
 Prime the broad writer resolver from the proven structural corpus after semantic warmup, with existing freshness checks. Ordinary recall retains its separate projection. Blocked edits never warm shared writer state. The existing cache and receipt machinery supply these capabilities; no new scheduler or readiness gate is needed.
 
+A carried corpus re-proves its retained census after the serving watcher seeds a new checkpoint. The existing warmer reuses unchanged pages and reconciles missed edits. An incremental publication captions the corpus only when retained history bridges its prior caption and covers every changed Markdown path.
+
 Manifest revisions refresh the touched claims projection before its served view is reused. Egress retains its independent release checks. Existing spans carry content-free CPU measurements where wall time alone cannot distinguish work from waiting.
 
 ## Context
