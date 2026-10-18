@@ -7699,12 +7699,18 @@ class LexicalStore:
                     fingerprint.update(len(encoded).to_bytes(8, "big"))
                     fingerprint.update(encoded)
             current_fingerprint = fingerprint.digest()
+
+            def same_inputs(retained_key: tuple, entry: _AdmittedStatisticsEntry) -> bool:
+                return (
+                    retained_key[0] == scope and retained_key[-1] == digest
+                    and entry.fingerprint == current_fingerprint
+                )
+
             with self._term_frequency_cache_lock:
                 statistics = next((
                     entry.statistics
                     for retained_key, entry in self._admitted_statistics.items()
-                    if retained_key[0] == scope and retained_key[-1] == digest
-                    and entry.fingerprint == current_fingerprint
+                    if same_inputs(retained_key, entry)
                 ), None)
             if statistics is None:
                 call_spans.measure(call_spans.STATS_REBUILT)
@@ -7712,6 +7718,11 @@ class LexicalStore:
                     path: stemmed.split() for path, stemmed in rows.items()
                 })
             with self._term_frequency_cache_lock:
+                # Equivalent snapshot aliases must not evict another admitted corpus.
+                # Recheck here because another reader can install during aggregation.
+                for retained_key, entry in tuple(self._admitted_statistics.items()):
+                    if same_inputs(retained_key, entry):
+                        del self._admitted_statistics[retained_key]
                 if len(self._admitted_statistics) >= _ADMITTED_STATISTICS_MAX:
                     self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
                 self._admitted_statistics[key] = _AdmittedStatisticsEntry(
