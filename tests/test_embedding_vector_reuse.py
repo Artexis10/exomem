@@ -743,7 +743,10 @@ def test_reused_counts_only_the_page_s_own_rows_on_both_spans(live) -> None:
     finally:
         call_spans.MCP_CALL_TOKEN.reset(handle)
 
-    assert spans["index.embeddings.reuse"]["fields"] == {"texts": 3, "reused": 1, "recalled": 1}
+    fields = spans["index.embeddings.reuse"]["fields"]
+    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+        "texts": 3, "reused": 1, "recalled": 1,
+    }
 
 
 # ---------------- the real invalidation paths ----------------
