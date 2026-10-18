@@ -364,21 +364,17 @@ class CollectionWriter:
             yield self._operation.field_plan(manifest).manifest
 
     def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512):
-        from . import authority
+        from . import ownership
+        from .preview import production_bound
 
         with self.read_snapshot():
-            marker = authority.routing_marker(self)
-            entries = ([(entry["collection_id"], entry["manifest_path"]) for entry in marker["collections"]]
-                       if marker is not None else self.connection.execute(
-                           "SELECT collection_id,manifest_path FROM collections ORDER BY manifest_path"
-                       ).fetchall())
+            proof = ownership.current(self.root, conn=self.connection, private=not production_bound(self.root))
+            entries = [(entry["collection_id"], entry["manifest_path"]) for entry in proof.entries
+                       if entry["collection_id"] in proof.admitted]
             manifests = []
             for cid, path in sorted(entries, key=lambda entry: entry[1]):
                 if authorize_path is not None and not authorize_path(path):
                     continue
-                if marker is not None:
-                    authority.require_selected(self.connection, marker, authority.selected_entry(self.root, marker, cid),
-                                               root=self.root)
                 head = self._operation.summary_manifest(cid)
                 if head is None:
                     head = (None, self._operation.decision(self._operation.catalog(cid)[0]))

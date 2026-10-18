@@ -19,7 +19,13 @@ Cross-host takeover, replica transport, fleet custody and divergent-host reconci
 
 Collection ownership SHALL derive from the complete admitted local store: collections, their current manifests and the existing transition intent. The proof SHALL validate the complete set before principal filtering or discovery limits. Missing manifests, invalid declarations, overlapping regions or unresolved bindings SHALL NOT produce a partial set that permits file fallback. No second durable ownership catalog SHALL be added.
 
+Admission, import and restore SHALL validate full stored-path containment against complete canonical declarations. Routine ownership proofs SHALL validate declaration namespaces without a row-wide path census. Selected projection reads and publication SHALL require each path to belong to its canonical collection. Row writes SHALL keep generated paths within declared regions.
+
 The existing mode marker SHALL remain a compatibility hint and transition preimage. Missing or older marker membership SHALL NOT return a canonical collection to file authority. Trusted production enrollment, the current fence and the acquired head SHALL establish the binding. A completed export and verified retired fence SHALL take precedence over residual prior-enrollment metadata. A dark preview database SHALL NOT establish production enrollment.
+
+First production admission SHALL include only its complete verified intent cohort when no trusted active enrollment or verified restore exists. Unrelated preview rows SHALL remain private and unchanged. A valid interrupted first-create intent SHALL remain resumable.
+
+Reverse export SHALL plan every canonical collection, even with an absent or incomplete compatibility hint. After validating the plan, its existing guarded apply MAY repair that hint before recording the existing export intent. The intent SHALL bind the resulting exact bytes. A conflicting or foreign hint SHALL remain preserved. Hint repair alone SHALL NOT change collection authority or retire the fence.
 
 Within possible collection layers, file fallback SHALL require a complete negative proof. Paths outside those layers SHALL remain usable without an available store. Possible layers SHALL derive from the existing profile placement contract, including portable path comparison and ancestor overlap. Unknown ownership can delay ordinary files inside those layers; it SHALL NOT disable provably disjoint knowledge.
 
@@ -56,6 +62,23 @@ The first schema-13 delivery SHALL include both repaired ownership and the new i
 - **WHEN** concurrent row writes preserve the complete ownership binding during a generic read
 - **THEN** those writes alone do not cause an ownership refusal
 - **AND** provider work does not hold the vault mutation boundary
+
+#### Scenario: More rows do not add an ownership census
+- **WHEN** an ordinary sibling file read obtains complete ownership proofs for collections with many rows
+- **THEN** those proofs validate declaration namespaces without enumerating item, held or projection paths
+- **AND** admission and selected projection checks retain their containment guarantees
+
+#### Scenario: Unrelated preview data stays private during first admission
+- **GIVEN** an unadmitted preview store contains a collection outside a proposed first production intent
+- **WHEN** production creation tries to enroll that store
+- **THEN** it refuses before preparation or enrollment and leaves the unrelated preview rows unchanged
+- **AND** exact recovery of a valid first-create intent remains supported
+
+#### Scenario: Export repairs only its compatibility preimage
+- **GIVEN** an admitted store has two exportable collections and its hint is absent or lists only one
+- **WHEN** the owner previews and applies reverse export
+- **THEN** the plan includes both collections and the guarded apply binds its existing intent to the complete hint
+- **AND** a crash after hint repair but before intent creation leaves collection data and authority unchanged
 
 #### Scenario: Retired enrollment does not revive an exported store
 - **WHEN** export completed and its verified fence is retired, but residual store metadata records prior enrollment
@@ -445,6 +468,10 @@ Mixed-authority marker installation SHALL be durable and no-clobber when absent.
 ### Requirement: Collection store migration is verifiable and reversible
 A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. Collection ownership SHALL derive from complete admitted canonical state; the mode marker SHALL remain a compatibility hint and transition preimage. On a multi-host vault, migration SHALL refuse while the lease coordinator does not explicitly advertise `collections-store-v1`, with a message naming the exact release to upgrade the coordinator to. Store adoption SHALL advance a separate vault-specific `collections-store-v1` capability fence with generation CAS and lease-token invalidation in one coordinator transaction, reacquire before marker cutover, and record an optional state compatibility descriptor so older releases refuse before access. Governance versions 3/4 and file-only manifests SHALL remain unchanged; ignoring extra request fields SHALL NOT establish coordinator capability. The importer SHALL read legacy audit history with an uncapped streaming reader filtered per collection. It SHALL record each view's expected hash as the hash of the exact bytes it parsed. Non-managed installs SHALL migrate through an offline command with the same proof. Store mode SHALL require writer-lease coordination: an install without a configured coordinator SHALL refuse every store step with `COLLECTION_STORE_COORDINATION_REQUIRED`, naming the single-host coordinator setup. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership; at handoff, a comparison of every collection with the basis it was pre-imported from, carrying the pre-import and its proofs forward when none changed and re-importing within the cutover budget when one did; abandoning the migration cleanly, with nothing published and the release completing in file mode, when it cannot finish in that budget or a live store's head moved since the standby copied it; and atomic publication, so that writes pause only for the ordinary bounded handoff. A failure after publication SHALL NOT stop the service: the supervisor SHALL rerun the migrator once, after the failed migrator's lease expires, before the replacement starts; when the store is still pending after that rerun, the replacement serves the vault's reads while the published store carries its intent, and the next handoff or the owner's offline apply finishes it after comparing every collection with its import basis. Only a live store that is set aside or unreadable after the step SHALL fail the handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode. A collection the store never wrote SHALL keep its files byte for byte. The export SHALL apply only offline, as the owner, with the service stopped and the operator credential; a serving process SHALL refuse it. It SHALL refuse the whole vault, naming each collection and reason, while any routed collection was created by the store, exceeds a file-mode bound, holds a value or held correction without a file form, or has a view that a person changed since the store published it. Partial reverse export remains outside this contract. Before any file changes it SHALL record an export intent in the store and publish the replica, so no host serves or adopts the store while it leaves. It SHALL retire the coordinator's store fence only after it verifies that file mode reads every collection as the store served it, and only then retire the marker by renaming it to `mode.json.exported-<utc>`, never by writing a new marker mode that released launchers cannot parse. It SHALL then tombstone the replica and the live store under the same `.exported-<utc>` suffix, retire the store's state compatibility descriptors, and keep the tombstones as evidence that no host adopts. A run cut at any step SHALL resume from its intent to the same files. It SHALL record in its intent that it verified the files before it retires the fence, and a resumed run after that retire SHALL finish the marker and tombstones without reading the files again. A retired fence alone SHALL never let a run retire the marker. A later migration SHALL mint a new store identity and enrol the fence at the next generation. Other hosts SHALL retire their stale local stores with an explicit owner step once the exported vault reaches them. Downgrade to a pre-store release SHALL require export first.
 
+Reverse export SHALL retire registered generated history views through its existing guarded targets before file verification and fence retirement. Only an absent file or exact recorded published or pending bytes SHALL qualify. Edited or unregistered history files SHALL remain preserved and block the whole export. A filename or generated header SHALL NOT authorize removal. The existing SQL tombstones SHALL retain all canonical history.
+
+Partial export SHALL retain history projection bindings so resume can accept already absent targets. Abandon SHALL mark removed history views pending for later normal regeneration without rewriting collection file views during its offline close. That close SHALL retain replica publication, checkpointing and verified head release. After verified fence retirement, recovery SHALL finish its existing renames without rechecking or removing newly authored files at former history paths.
+
 #### Scenario: Import proves its round trip
 - **WHEN** a vault with Records and Planning collections is migrated
 - **THEN** every check of the round-trip proof passes for every collection before the store is published, and no vault file changed
@@ -521,6 +548,24 @@ A vault SHALL move from file-canonical collections to the store only through a d
 - **WHEN** a migrated vault is exported back to files
 - **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
 - **AND** file mode reads every collection as the store served it
+
+#### Scenario: Reverse export retires history before its policy owner leaves
+- **GIVEN** a migrated collection has generated history with reasons and item links
+- **WHEN** the owner applies reverse export
+- **THEN** verified generated history views are absent before file verification and fence retirement
+- **AND** restricted file reads cannot recover stale history after the linked rows' policy changes
+- **AND** the SQL tombstones retain every audit row
+
+#### Scenario: Interrupted history retirement can resume or abandon
+- **WHEN** export stops after removing some verified generated history views
+- **THEN** resume accepts those absent targets and completes the existing export protocol
+- **AND** abandon retains their bindings and queues normal regeneration without rewriting collection file views
+- **AND** its offline close still publishes the replica and releases the verified head
+
+#### Scenario: Export preserves authored bytes at history paths
+- **WHEN** a history path contains edited or unregistered bytes before export verification
+- **THEN** preview or apply refuses the whole export and preserves those bytes
+- **AND** a new authored file after verified fence retirement survives recovery of the final renames
 
 #### Scenario: A collection the store created keeps the vault in the store
 - **WHEN** the owner previews an export of a vault with a collection that the store created

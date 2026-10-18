@@ -115,17 +115,24 @@ def preflight(vault_root) -> dict:
     return {**found, "dry_run": True, "coordinator": coordinator}
 
 
-def candidates(root):
-    """Rows for every blocked or skipped file collection, the ones to prove, and the marker's store ids."""
-    raw = authority.read_marker(root)
-    marker = None if raw is None else authority.parse_marker(root, raw)
+def candidates(root, *, ownership_proof=None):
+    """Find file candidates outside the complete canonical namespaces.
+
+    Private restore staging supplies one proof from its verified snapshot, only
+    while that context is open. It grants no admission or view access. Ordinary
+    callers obtain the current guarded production proof.
+    """
+    from . import ownership
+
+    proof = ownership.current(root) if ownership_proof is None else ownership_proof
 
     def routed(path):
-        return marker is not None and authority.selected_entry(root, marker, path) is not None
+        return proof.selected(root, path) is not None
 
-    store_ids = set() if marker is None else {entry["collection_id"] for entry in marker["collections"]}
+    store_ids = {entry["collection_id"] for entry in proof.entries}
     # Duplicates come through so that every copy can be named as a blocker.
-    manifests, unreadable = collections.discover_collections_with_errors(root, reject_duplicates=False)
+    manifests, unreadable = collections.discover_collections_with_errors(
+        root, reject_duplicates=False, ownership_proof=proof)
     rows = [_row(entry.path, status="blocked", blocker={"code": entry.code, "reason": entry.message})
             for entry in unreadable if not routed(entry.path)]
     shared = {}
@@ -147,8 +154,7 @@ def candidates(root):
     rows.extend(_row(manifest.path, manifest, status="skipped", reason="a dataset keeps file authority")
                 for manifest in pending if not legacy_import.importable(manifest))
     staying = [authority.file_ownership(manifest) for manifest in pending if not legacy_import.importable(manifest)]
-    if marker is not None and marker["version"] == 2:
-        staying.extend(marker["collections"])
+    staying.extend(proof.entries)
     pending = sorted((manifest for manifest in pending if legacy_import.importable(manifest)),
                      key=lambda found: found.path)
     # Each migrated collection becomes a marker entry; entries may not share an ownership

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import access, privacy_log, reserved_paths
+from .collection_store.ownership import reader
 from .vault import (
     VaultPathError,
     parse_frontmatter,
@@ -63,6 +64,7 @@ class ListDirectoryError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
+@reader
 def list_directory(
     vault_root: Path,
     *,

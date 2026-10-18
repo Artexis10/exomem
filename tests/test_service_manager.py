@@ -475,16 +475,19 @@ def test_a_candidate_older_than_the_live_store_schema_is_refused_before_worker_s
     interpreter = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON")
     if candidate == "earlier-release" and not interpreter:
         pytest.skip("requires an installed earlier reader")
+    from exomem import state_migration
     from exomem.collection_store import authority, connection, schema
 
     module = _manager()
     vault = tmp_path / "vault"
-    if candidate == "first-enrolment":
-        vault.mkdir()
-    else:
-        _mixed_marker(vault)
+    vault.mkdir()
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    state_migration.record_collection_store_schema(vault, authority_check=lambda: True)
+    state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+    if candidate != "first-enrolment":
+        _mixed_marker(vault)
     # The live store, as this release migrated it: at the current schema.
     connection.open_writer(connection.store_path(vault), lease_check=lambda: True).close()
     if candidate == "first-enrolment":
@@ -512,7 +515,7 @@ def test_a_candidate_older_than_the_live_store_schema_is_refused_before_worker_s
     # After an export to files the host keeps its store until --retire-local, and an earlier release is the way back.
     pytest.param(False, None, -1, id="exported-vault"),
     # A schema the supervisor cannot read refuses nothing, or it would also refuse the release that repairs it.
-    pytest.param(True, "eleven", -1, id="unreadable-schema"),
+    pytest.param(True, "eleven", 0, id="unreadable-schema-compatible-reader"),
 ])
 def test_the_live_store_schema_leaves_a_candidate_a_target_when_the_store_does_not_need_it(
     tmp_path, monkeypatch, routed, recorded, ceiling,
@@ -520,15 +523,19 @@ def test_the_live_store_schema_leaves_a_candidate_a_target_when_the_store_does_n
     import sqlite3
     from contextlib import closing
 
+    from exomem import state_migration
     from exomem.collection_store import connection, schema
 
     module = _manager()
     vault = tmp_path / "vault"
     vault.mkdir()
-    if routed:
-        _mixed_marker(vault)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    if routed:
+        state_migration.record_collection_store_schema(vault, authority_check=lambda: True)
+        state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+        _mixed_marker(vault)
     store = connection.store_path(vault)
     connection.open_writer(store, lease_check=lambda: True).close()
     if recorded is not None:

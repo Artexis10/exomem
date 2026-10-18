@@ -280,9 +280,11 @@ def test_old_schema_validation_preserves_archived_replica(ab, tmp_path):
     """Checking a supported earlier schema must migrate only the disposable checking copy."""
     _earlier_c(ab)
     before = replica.replica_path(ab.root).read_bytes()
-    with vault_portability.checked_collection_replica(ab.root) as reader:
+    with vault_portability.checked_collection_replica(ab.root) as verified:
+        reader = verified.connection
         assert schema.schema_version(reader) == schema.SCHEMA_VERSION
         chain.verify_store_chain(reader)
+        assert verified.source_sha256 == hashlib.sha256(before).hexdigest()
     assert replica.replica_path(ab.root).read_bytes() == before
     vault, host_root, state = _backup_roots(ab, tmp_path)
     source_before = {path.name: path.read_bytes() for path in state.iterdir()}
@@ -383,7 +385,8 @@ print(json.dumps(result))
                                 str(abc.root), str(state)], env=env, capture_output=True, text=True, timeout=150)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert json.loads(completed.stdout)["ok"]
-    with vault_portability.checked_collection_replica(vault) as reader:
+    with vault_portability.checked_collection_replica(vault) as verified:
+        reader = verified.connection
         assert reader.execute("SELECT collection_id FROM collections").fetchall() == [(CID,)]
     assert source_before == {path.name: path.read_bytes() for path in state.iterdir()}
     assert not list(vault.parent.glob(".exomem-operator-store-*"))
@@ -459,7 +462,8 @@ def test_canonical_snapshot_can_extend_the_lagging_replicas_marker(abc, tmp_path
         authority.marker_path(vault).write_text(json.dumps(marker))
     assert operator.prepare_export(vault, host_root, abc.root, source_state_directory=state,
                                    timeout_seconds=20)["ok"]
-    with vault_portability.checked_collection_replica(vault) as reader:
+    with vault_portability.checked_collection_replica(vault) as verified:
+        reader = verified.connection
         assert {row[0] for row in reader.execute("SELECT collection_id FROM collections")} == {CID, second}
 
 
@@ -488,7 +492,8 @@ def test_shared_replica_validation_keeps_pure_adoptability_conditions(abc, tmp_p
         writer.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (key, value))
     before = replica.replica_path(vault).read_bytes()
     if condition == "matching-create":
-        with vault_portability.checked_collection_replica(vault) as reader:
+        with vault_portability.checked_collection_replica(vault) as verified:
+            reader = verified.connection
             assert authority.pending_create(reader)["target_marker"] == raw
     else:
         with pytest.raises(connection.CollectionStoreError):
@@ -503,6 +508,10 @@ def test_shared_replica_validation_keeps_pure_adoptability_conditions(abc, tmp_p
 
 def test_restored_generation_two_keeps_fresh_coordinator_refusal(abc, tmp_path, monkeypatch):
     """Byte restoration cannot reset a generation-2 marker to manufacture destination authority."""
+    from conftest import _drain_background_threads
+
+    abc.release()
+    _drain_background_threads()
     target = shutil.copytree(abc.root, tmp_path / "generation-two")
     marker = authority.parse_marker(target, authority.read_marker(target))
     marker["collection_store_fence"]["generation"] = 2

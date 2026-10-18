@@ -23,7 +23,7 @@ from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass, field
 
 from .. import held_fs
-from . import authority, chain, connection, replica, schema, snapshot
+from . import authority, chain, connection, ownership, replica, schema, snapshot
 
 RECHECK_SECONDS = 10.0
 ATTENTION_SECONDS = 15 * 60.0
@@ -134,10 +134,15 @@ def staged_replica(session, check, heads):
             conn = sqlite3.connect(path, isolation_level=None)
             metadata = snapshot._validate(conn, check)
             chain.verify_store_chain(conn)
-            marker = authority.parse_marker(session.root, authority.read_marker(session.root))
+            raw = authority.read_marker(session.root)
+            marker = None if raw is None else authority.parse_marker(session.root, raw)
             collections = dict(conn.execute("SELECT collection_id,manifest_path FROM collections"))
+            canonical, _ = ownership.declarations(session.root, conn)
+            if canonical is None:
+                raise connection.CollectionStoreError(SYNC_PENDING, "the replica has no canonical declarations")
+            authority.require_projection_ownership(conn, canonical, root=session.root)
             # Preserve the takeover decision's foreign-store and lagging-replica verdicts before checking owned paths.
-            if metadata[schema.META_STORE_ID] == marker["store_id"] and all(
+            if marker is not None and metadata[schema.META_STORE_ID] == marker["store_id"] and all(
                     collections.get(entry["collection_id"]) == entry["manifest_path"] for entry in marker["collections"]):
                 authority.require_marker(conn, marker, root=session.root)
             result = Staged(

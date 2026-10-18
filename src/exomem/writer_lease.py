@@ -6338,7 +6338,7 @@ class LeaseManager:
         return True
 
     def _release_collection_store(self, token, *, deadline, cancelled=None, closing=False,
-                                  release=True):
+                                  release=True, drain_views=True):
         """Quiesce, flush the replica and hand the lease back with the flushed head.
 
         ``release=False`` is the synchronous portability-export flush: the same
@@ -6390,7 +6390,8 @@ class LeaseManager:
                     return False
                 if self.config.enabled:
                     self.validate_fencing_token(token)
-                head = runtime.flush(token, deadline=deadline, cancelled=cancelled)
+                head = runtime.flush(token, deadline=deadline, cancelled=cancelled,
+                                     **({} if drain_views else {"drain_views": False}))
                 if not release:
                     return head
                 with self._report_lock:
@@ -6607,7 +6608,7 @@ class LeaseManager:
                 logger.warning("collection store head report unavailable", exc_info=True)
                 self._record_lease_op("renew", "error")
 
-    def close(self, *, deadline=None, cancelled=None) -> None:
+    def close(self, *, deadline=None, cancelled=None, drain_views=True) -> None:
         if self._collection_store is not None:
             with self._lock:
                 if self._store_closed:
@@ -6622,6 +6623,7 @@ class LeaseManager:
                     token, deadline=(time.monotonic() + self._mutation_timeout_seconds
                                      if deadline is None else deadline),
                     cancelled=cancelled, closing=True,
+                    **({} if drain_views else {"drain_views": False}),
                 )
             finally:
                 # Keep custody until flush finishes, then let even a failed handoff's
@@ -7217,7 +7219,10 @@ def invoke_command(
     # the way out, so an except-block outside it records credential blocks into
     # a collector that is already gone, and emits no receipt for a governed read
     # that touched withheld items before failing.
-    with disclosure_boundary(injected[0], command.name) as collector:
+    from .collection_store import ownership
+
+    with ownership.read_scope(injected[0]) as ownership_scope, \
+            disclosure_boundary(injected[0], command.name) as collector:
         try:
             # Fixed phase labels carry timing only, never caller or vault data.
             with call_spans.span("command.body"):
@@ -7225,13 +7230,21 @@ def invoke_command(
             with call_spans.span("command.terminal_filter"):
                 result = postfilter(command.name, result, injected[0])
         except BaseException as error:
-            with call_spans.span("command.terminal_filter"):
-                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+            try:
+                with call_spans.span("command.terminal_filter"):
+                    postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+            finally:
+                try:
+                    ownership_scope.finish()
+                finally:
+                    with call_spans.span("command.disclosure_receipt"):
+                        emit_boundary_receipt(collector)
+            raise
+        try:
+            ownership_scope.finish()
+        finally:
             with call_spans.span("command.disclosure_receipt"):
                 emit_boundary_receipt(collector)
-            raise
-        with call_spans.span("command.disclosure_receipt"):
-            emit_boundary_receipt(collector)
         from . import call_ledger
         from .governance.egress import released_item_count
 

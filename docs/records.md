@@ -122,8 +122,8 @@ way to rewrite or reinterpret a person's canonical history.
 
 ## Human-owned storage
 
-A collection declares or infers one canonical storage strategy. All three forms
-remain ordinary files that a person can open and change without an AI client:
+A collection with file authority declares or infers one canonical storage strategy.
+These forms remain ordinary files that a person can open and change without an AI client:
 
 1. **Chronological Markdown log** — fast append-heavy dated or stably identified
    blocks, such as a training log.
@@ -158,8 +158,10 @@ mutate `.obsidian`. When the Knowledge Base directory is the Obsidian vault,
 that Exomem path. A parent-directory Obsidian configuration is a different vault
 and does not override the Knowledge Base setting.
 
-Fresh structured queries read canonical files, so a direct change in an editor
-is immediately visible. `inspect` is report-only: it can identify direct-edit
+For collections with file authority, fresh structured queries read canonical files,
+so a direct change in an editor is immediately visible. Admitted SQLite collections
+read committed SQL state and publish governed Markdown views in the background.
+`inspect` is report-only: it can identify direct-edit
 drift, duplicate or missing identities, schema violations, missing templates,
 and bounded agent-audit gaps, but it does not repair canonical files. Reconcile
 repairs only derived state.

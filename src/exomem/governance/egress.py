@@ -1937,22 +1937,16 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
 
 
 def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None = None) -> bool:
-    from .. import held_fs
-    from ..collection_store import authority
+    from ..collection_store import ownership
 
     if not policy.empty:
         return False
     writer = bound_writer(vault_root)
     if rel_path is None and writer is not None:
         return False
-    try:
-        marker = authority.read_marker(vault_root)
-    except held_fs.HeldFsError:
-        return False  # Unreadable ownership never qualifies for the empty-policy shortcut.
-    if rel_path is not None and marker is not None:
-        # Ordinary files keep their file policy; bulk consumers still require canonical C field admission.
-        return authority.owned_entry(vault_root, authority.parse_marker(vault_root, marker), rel_path) is None
-    return writer is None and marker is None
+    if rel_path is not None:
+        return ownership.owned(vault_root, rel_path) is None
+    return writer is None and ownership.file_only(vault_root)
 
 
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN))
@@ -6964,33 +6958,13 @@ def release_walk_filter(
 
 
 def _marker_owned_paths(vault_root: Path, policy: Policy) -> Callable[[str], bool] | None:
-    """The paths a collection-store marker owns, read once, when it alone blocks the shortcut.
-
-    None when the policy is not empty, a writer is bound, or no marker can be read: each of
-    those keeps the per-path decision for every path. A path the marker cannot place
-    counts as owned, so it keeps that decision too.
-    """
-    from .. import held_fs
-    from ..collection_store import authority
-    from ..collection_store.connection import CollectionStoreError
+    """Join canonical ownership for each candidate in the enclosing consumer scope."""
+    from ..collection_store import ownership
 
     if not policy.empty or bound_writer(vault_root) is not None:
         return None
-    try:
-        raw = authority.read_marker(vault_root)
-        marker = None if raw is None else authority.parse_marker(vault_root, raw)
-    except (held_fs.HeldFsError, CollectionStoreError):
-        return None
-    if marker is None:
-        return None
-
-    def owned(rel_path: str) -> bool:
-        try:
-            return authority.owned_entry(vault_root, marker, rel_path) is not None
-        except CollectionStoreError:
-            return True
-
-    return owned
+    # Each candidate joins the consumer's complete proof; no marker predicate escapes its capture.
+    return lambda rel_path: ownership.owned(vault_root, rel_path) is not None
 
 
 def restricted_release_filter(

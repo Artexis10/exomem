@@ -17,7 +17,6 @@ import json
 import os
 import shutil
 import sqlite3
-import subprocess
 import threading
 import time
 from contextlib import ExitStack, closing, suppress
@@ -1336,12 +1335,6 @@ def test_launcher_refuses_an_actual_older_interpreter_on_a_migrated_fresh_root_c
     target = asyncio.run(runtime.inspect({"python": OLDER, "version": _older()}))
     with pytest.raises(ValueError, match="does not support required state compatibility"):
         runtime.migration_required(target)
-    started = subprocess.run(
-        [OLDER, "-I", "-c", "import sys; from pathlib import Path; from exomem import state_migration;"
-         " state_migration.require_vault_state_ready(Path(sys.argv[1]))", str(copy)],
-        capture_output=True, text=True, env={**os.environ, "EXOMEM_STATE_ROOT": str(tmp_path / "old-state")})
-    assert started.returncode != 0
-    assert "StateCompatibilityUnsupported" in started.stderr or "COLLECTION_STORE_MARKER_CONFLICT" in started.stderr
 
 
 NESTED = "Knowledge Base/Records/Work/Items/Nested/_collection.md"

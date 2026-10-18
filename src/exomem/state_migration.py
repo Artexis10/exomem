@@ -284,13 +284,14 @@ def _require_collection_store_recovery(session, token) -> None:
                 chain.verify_store_chain(reader)
                 intent = authority.pending_create(reader)
                 # An export's marker is the one it retires; a create or migration's, the one it installs.
-                raw = (authority.read_marker(session.root) if intent is None
-                       else intent["expected_marker"] if intent["kind"] == authority.EXPORT
-                       else intent["target_marker"])
-                marker = authority.parse_marker(session.root, raw)
                 sid = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
-                if marker["store_id"] != sid:
-                    raise StateMigrationOfflineRequired("collection-store recovery identity differs")
+                fence = session.fence_client.collection_store_fence()
+                intended = None if intent is None else authority.parse_marker(session.root,
+                    intent["expected_marker"] if intent["kind"] == authority.EXPORT else intent["target_marker"])
+                if ((fence.enrolled and fence.store_id != sid)
+                        or intended is not None and intended["store_id"] != sid
+                        or not fence.enrolled and intended is None):
+                    raise connection.CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection-store recovery identity differs")
         session.require(token)
 
 

@@ -77,18 +77,17 @@ def production_bound(vault_root: Path) -> bool:
 
 
 def selected_writer(vault_root, selector):
-    from . import authority
+    from . import ownership
 
     writer = bound_writer(vault_root)
     if writer is None:
         return None
-    marker = authority.routing_marker(writer)
-    if marker is None:
-        return writer
-    entry = authority.selected_entry(vault_root, marker, selector)
+    proof = ownership.current(vault_root, conn=writer.connection, private=not production_bound(vault_root))
+    entry = proof.selected(vault_root, selector)
     if entry is None:
         return None
-    authority.require_selected(writer.connection, marker, entry, root=vault_root)
+    if entry["collection_id"] not in proof.admitted:
+        raise ownership.unavailable()
     return writer
 
 
@@ -126,27 +125,25 @@ def require_file_collection(vault_root, selector, *, authorize_path, notice_path
     belongs to mutation resolution alone. ``notice_path`` is the manifest path a caller
     holds for a selector by identity; an unreadable marker decides the notice on it.
     """
-    from . import authority
+    from ..cli_ops import OpError
+    from . import ownership
 
     root = Path(vault_root)
     writer = bound_writer(root)
     if writer is not None:
-        marker = authority.routing_marker(writer)
-        if marker is not None and authority.selected_entry(root, marker, selector) is not None:
+        proof = ownership.current(root, conn=writer.connection, private=not production_bound(root))
+        if proof.selected(root, selector) is not None:
             # No production caller reaches this: route() sends a routed selector to the store thread, whose dispatch() writes it.
             raise collections.CollectionError(
                 "COLLECTION_STORE_ROUTE_REQUIRED", "a store collection is written only by its store writer")
         return
     try:
-        raw = authority.read_marker(root)
-        marker = None if raw is None else authority.parse_marker(root, raw)
-    except CollectionStoreError as error:
+        proof = ownership.current(root)
+    except (CollectionStoreError, RuntimeError, OpError):
         # Which collections the store owns is unknown, so none can be written as a file.
         path = notice_path if notice_path is not None else _selector_path(root, selector)
-        _refuse(root, path, authorize_path, error.code, MARKER_UNREADABLE)
-    if marker is None:
-        return
-    entry = authority.selected_entry(root, marker, selector)
+        _refuse(root, path, authorize_path, "COLLECTION_STORE_UNAVAILABLE", MARKER_UNREADABLE)
+    entry = proof.selected(root, selector)
     if entry is None:
         return
     from .runtime import served
@@ -172,10 +169,8 @@ def _refuse(root, path, authorize_path, code, message):
 
 
 def selected_projection_writer(vault_root, path):
-    from . import authority
-
     writer = bound_writer(vault_root)
-    if writer is None or authority.routing_marker(writer) is None:
+    if writer is None:
         return writer
     with writer.read_snapshot():
         return writer if writer._operation.projection_subjects(path) is not None else None
@@ -216,7 +211,9 @@ def canonical_read(function=None, *, projection=False, unavailable=None):
             if purpose is not None and purpose != writer._operation.purpose:
                 writer._operation.refuse()
             return function(vault_root, *args, **kwargs)
-    return read
+    from .ownership import reader
+
+    return reader(read)
 
 
 def projection_decision(vault_root, path, *, policy, audience, purpose,
@@ -289,7 +286,7 @@ def dispatch(
         require_records_summary_route(vault_root, binding[1], action, values)
     writer = binding[1]
     args = {name: value for name, value in values.items() if value is not None}
-    from . import authority
+    from . import ownership
 
     if action == "describe" and profile == "records":
         from ..query_engine import route
@@ -299,8 +296,8 @@ def dispatch(
         writer._require_operation_context()
         return True, {**parse_manifest_contract(store_mode=True), "import": contract(), "query": route.contract()}
 
-    marker = authority.routing_marker(writer)
-    if marker is not None:
+    proof = ownership.current(vault_root, conn=writer.connection, private=not binding[2])
+    if proof.marker is not None:
         selector = args.get("collection", args.get("manifest_path"))
         if action == "create" and binding[2]:
             from .runtime import served_create
@@ -312,9 +309,6 @@ def dispatch(
             return False, None
         if action == "create":
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")
-    elif action == "create" and binding[2]:
-        # Only admission writes a production store's marker; a create cannot stand in for it.
-        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the store's authority marker is missing")
     if action == "describe":
         return False, None
     writer._require_operation_context()

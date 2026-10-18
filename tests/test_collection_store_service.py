@@ -17,7 +17,7 @@ import json
 import os
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -676,9 +676,8 @@ def test_a_served_create_that_misses_its_publication_deadline_recovers_without_a
     service.stop()  # the handoff publishes; a pending create would refuse it as FLUSH_PENDING
 
 
-def test_file_collections_stay_writable_while_an_unreadable_store_is_unopened(service, tmp_path):
-    """Defect: while the store is unopened, an unreadable pending create in it refuses the
-    file collections too, though they never depend on the store."""
+def test_unresolved_ownership_withholds_ambiguous_records_but_keeps_disjoint_notes_usable(service, tmp_path):
+    """An unreadable intent cannot supply a complete negative for a collection-layer path."""
     root = service.root
     service.stop()
     with closing(sqlite3.connect(connection.store_path(root))) as conn:
@@ -691,16 +690,15 @@ def test_file_collections_stay_writable_while_an_unreadable_store_is_unopened(se
         try:
             _until(lambda: getattr(runtime._SERVERS.get(root), "refusal", None) is not None)
 
-            def written():
-                try:
-                    return call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
-                                item_key=ROW, why="file write")["outcome"] == "committed"
-                except OpError as error:
-                    assert error.code == "WRITER_LEASE_REQUIRED", error  # the new writer is still starting
-                    return False
-
-            _until(written)
-            assert titles(root, KEY) == ["File row"]
+            before = ab_bytes(root)
+            with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+                call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
+                     item_key=ROW, why="file write")
+            assert ab_bytes(root) == before
+            note = "Knowledge Base/Notes/Independent.md"
+            (root / note).parent.mkdir(parents=True, exist_ok=True)
+            (root / note).write_text("Ordinary note.\n")
+            assert "Ordinary note" in call(root, "read_memory", path=note)["body"]
         finally:
             replaced.stop()
 
@@ -807,7 +805,7 @@ def test_an_import_started_before_a_restart_completes_on_the_restarted_service(s
                     database=tmp_path / "coordinator.sqlite") == ("complete", 60)
 
 
-def test_import_status_polling_does_not_restart_blocked_summary_publication(service, monkeypatch, caplog):
+def test_import_status_polling_does_not_restart_blocked_summary_publication(service, monkeypatch):
     """Progress checks must not make the store actor repeatedly wait on a busy vault."""
     import threading
 
@@ -833,10 +831,30 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
 
     monkeypatch.setattr(runtime.StoreServer, "_serve", pending_before_maintenance)
     boundary = service.manager._mutation_coordinator_for(root)
+    # Keep the deliberate refusal inside the normal maintenance backoff window.
+    ordinary_timeout = service.manager._mutation_timeout_seconds
+    monkeypatch.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+    guard = service.manager.consistency_guard
+    rejected_operations = []
+
+    @contextmanager
+    def observed_guard(*args, **kwargs):
+        entered = False
+        try:
+            with guard(*args, **kwargs) as held:
+                entered = True
+                yield held
+        except OpError as error:
+            if not entered and error.code == "MUTATION_BUSY":
+                rejected_operations.append(kwargs.get("operation"))
+            raise
+
+    monkeypatch.setattr(service.manager, "consistency_guard", observed_guard)
+
     def refusals():
-        return [record for record in caplog.records
-                if getattr(record, "event", None) == "mutation_lock_refused"
-                and record.threadName == "exomem-collection-store"]
+        # These two operation labels belong to the complete ownership proof protocol.
+        return [operation for operation in rejected_operations
+                if operation not in ("collection_ownership_read", "collection_ownership_release")]
 
     try:
         assert call(root, "record_memory", action="append", collection=CID, item_key=LATER,
@@ -845,13 +863,18 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
         with boundary.hold(timeout_seconds=0, operation="test-summary-holder", holder_kind="foreground"):
             resume.set()
             _until(lambda: bool(refusals()))
-            for _ in range(3):
-                status = imported(root, mode="status", continuation=job["continuation"])
-                assert status["state"] == "complete" and status["rows"] == initial["rows"]
-                time.sleep(0.15)
+            with pytest.raises(OpError) as busy:
+                imported(root, mode="status", continuation=job["continuation"])
+            assert busy.value.code == "MUTATION_BUSY"
             assert len(refusals()) == 1
+        for _ in range(3):
+            status = imported(root, mode="status", continuation=job["continuation"])
+            assert status["state"] == "complete" and status["rows"] == initial["rows"]
+            time.sleep(0.15)
+        assert len(refusals()) == 1
     finally:
         resume.set()
+        monkeypatch.setattr(service.manager, "_mutation_timeout_seconds", ordinary_timeout)
     page = root / manifest_path().replace("_collection.md", "Items/_summary.md")
     # An ordinary mutation still wakes publication after the held boundary clears.
     call(root, "record_memory", action="append", collection=CID,
@@ -913,8 +936,8 @@ def test_served_field_release_and_summary_use_canonical_authority_without_previe
     refused(lambda: recipient("read_memory", path=path), "COLLECTION_STORE_UNAVAILABLE")
 
 
-def test_marker_ownership_keeps_file_reads_available_when_the_store_is_corrupt(service, tmp_path):
-    """A missing store or edited projection header that either discloses C bytes or disables unrelated A/B pages."""
+def test_unavailable_canonical_ownership_keeps_disjoint_notes_available(service, tmp_path):
+    """Corrupt canonical state cannot turn ambiguous collection-layer paths into ordinary files."""
     from test_collection_field_admission import GUEST
 
     root = service.root
@@ -933,16 +956,18 @@ def test_marker_ownership_keeps_file_reads_available_when_the_store_is_corrupt(s
         (root / path).write_text("# Edited view\n\nprivate-projection-content\n")
     ordinary = "Knowledge Base/Records/Daily/Notes.md"
     (root / ordinary).write_text("# Independent knowledge\n\nordinary-content\n")
+    note = root / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Independent knowledge\n\nordinary-content\n")
     connection.store_path(root).write_bytes(b"unreadable sqlite fixture")
     restarted = Service(root, writer_lease.start_server_lifecycle())
     try:
         _until(lambda: runtime._SERVERS.get(root) is not None and runtime._SERVERS[root].runtime is None)
-        for path in (A_PATH, B_PATH, ordinary):
-            assert call(root, "read_memory", path=path)["path"] == path
+        assert "ordinary-content" in call(root, "read_memory", path=note.relative_to(root).as_posix())["body"]
         command = next(command for command in commands.product_commands_for("mcp") if command.name == "read_memory")
         for who in (OWNER, GUEST):
             with request_scope(who):
-                for path in protected:
+                for path in [*protected, A_PATH, B_PATH, ordinary]:
                     try:
                         result = writer_lease.invoke_command(command, root, path=path)
                     except (OpError, CollectionStoreError, ValueError) as error:
@@ -1314,10 +1339,8 @@ def test_projection_admission_accepts_the_served_vault_through_a_root_alias(serv
 
 
 @pytest.mark.parametrize("boundary", ["marker", "collections", "knowledge", "unreadable"])
-def test_unreadable_marker_ownership_never_admits_a_physical_projection(service, tmp_path, boundary):
-    """Unreadable or symlinked ownership must not turn a C projection into an ordinary file."""
-    from exomem import held_fs
-
+def test_an_unreadable_hint_never_admits_a_canonical_projection_as_an_ordinary_file(service, tmp_path, boundary):
+    """The canonical subject stays withheld without its serving writer, regardless of hint accessibility."""
     service.stop()
     root = service.root
     marker = authority.marker_path(root)
@@ -1332,8 +1355,8 @@ def test_unreadable_marker_ownership_never_admits_a_physical_projection(service,
         target.rename(outside)
         target.symlink_to(outside, target_is_directory=outside.is_dir())
     try:
-        with request_scope(OWNER), pytest.raises(held_fs.HeldFsError):
-            egress.release_level_for_path_only(root, "Knowledge Base/Records/Work/Items/_summary.md")
+        with request_scope(OWNER):
+            assert egress.release_level_for_path_only(root, "Knowledge Base/Records/Work/Items/_summary.md") == egress.DISCLOSURE_MIN
     finally:
         if boundary == "unreadable":
             target.chmod(0o600)

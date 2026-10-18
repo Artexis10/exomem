@@ -148,7 +148,8 @@ def prepare_export(
             work / connection.STORE_FILENAME, directory=work, deadline=deadline,
             preserve_schema=True,
         ) as artifact:
-            with vault_portability.checked_collection_replica(vault, source_path=artifact.path, check=check) as canonical:
+            with vault_portability.checked_collection_replica(vault, source_path=artifact.path, check=check) as verified:
+                canonical = verified.connection
                 canonical_meta = dict(canonical.execute("SELECT key,value FROM store_meta"))
                 if previous is not None:
                     ownership_marker = authority.parse_marker(vault, raw_marker)
@@ -156,7 +157,8 @@ def prepare_export(
                         ownership_marker = authority.upgraded_marker(vault, canonical, ownership_marker)
                     with vault_portability.checked_collection_replica(
                         vault, ancestor_witness=True, check=check,
-                    ) as old:
+                    ) as old_verified:
+                        old = old_verified.connection
                         authority.require_projection_ownership(old, ownership_marker, root=vault)
                         old_meta = dict(old.execute("SELECT key,value FROM store_meta"))
                         relation = chain.head_relation(canonical, int(old_meta[schema.META_COMMIT_SEQ]),

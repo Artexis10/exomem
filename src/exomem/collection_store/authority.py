@@ -152,14 +152,17 @@ def file_ownership(manifest):
 
 
 def require_new_file_ownership(root, marker, entry):
+    from . import ownership
     from .preview import unbound
 
     # File declarations retain authority before cutover, including when first enrollment has no routing marker.
     with unbound():
+        proof = ownership.current(root)
         manifests, errors = collections.discover_collections_with_errors(
             root, authorize_path=lambda path: marker is None or selected_entry(root, marker, path) is None)
     # An incomplete declaration cannot prove separation; its owner must repair it before creating C.
-    if any(marker is None or selected_entry(root, marker, error.path) is None for error in errors):
+    if any(proof.selected(root, error.path) is None and
+           (marker is None or selected_entry(root, marker, error.path) is None) for error in errors):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "file collection ownership is incomplete")
     for manifest in manifests:
         if _overlap(entry, file_ownership(manifest)):
@@ -216,12 +219,7 @@ VIEW_PATH = "COLLECTION_VIEW_PATH"
 
 
 def refuse_view_paths(root, paths, refusal):
-    """Raise ``refusal(code, reason)`` when the vault's mode marker gives a store collection any of ``paths``.
-
-    The file tools call this. Only the marker is read, so a vault without one opens no
-    store and keeps its file behaviour. Each caller decides a withheld path before this,
-    so a withheld view answers exactly as a missing path does.
-    """
+    """Protect canonical collection paths and their ancestors inside the caller's mutation boundary."""
     try:
         entry = _owning_entry(Path(root), paths)
     except CollectionStoreError as error:
@@ -233,20 +231,14 @@ def refuse_view_paths(root, paths, refusal):
 
 
 def _owning_entry(root, paths):
-    # A malformed or legacy marker refuses every placed path here, as it already refuses reads.
+    from . import ownership
+
     paths = [path for path in (_knowledge_base_spelling(root, path) for path in paths)
              # Marker validation keeps every owned region under the knowledge base folder.
              if collections._reference_key(root, path) is not None]
     if not paths:
         return None
-    try:
-        raw = read_marker(root)
-    except (held_fs.HeldFsError, OSError) as error:
-        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "unreadable mode marker") from error
-    if raw is None:
-        return None
-    marker = parse_marker(root, raw)
-    return next((entry for path in paths if (entry := owned_entry(root, marker, path)) is not None), None)
+    return next((entry for path in paths if (entry := ownership.owned(root, path, ancestors=True)) is not None), None)
 
 
 def _knowledge_base_spelling(root, path):
@@ -336,15 +328,20 @@ def require_projection_ownership(conn, marker, *, root):
 
 
 def required_state_compatibility_ids(root):
-    """Read launch requirements from the existing authority marker only."""
-    raw = read_marker(root)
-    if raw is None:
-        return frozenset()
-    marker = parse_marker(root, raw)
-    from ..state_migration import COLLECTION_MARKER_COMPATIBILITY_ID
+    """Trusted store enrollment requires this release's unified ownership and exposure boundary."""
+    from .. import state_migration, state_paths
+    from . import schema
 
-    return frozenset({marker["collection_store_fence"]["capability"],
-                      *([COLLECTION_MARKER_COMPATIBILITY_ID] if marker["version"] == 2 else [])})
+    manifest = state_migration._load_manifest(state_paths.vault_state_dir(root), vault_root=root)
+    owned = frozenset() if manifest is None else frozenset(manifest["descriptors"]) & state_migration._store_owned_ids()
+    if owned:
+        return owned | frozenset(schema.compatibility_ids())
+    from ..vault_portability import checked_collection_replica
+
+    with checked_collection_replica(root) as verified:
+        if verified is not None:
+            return state_migration._COLLECTION_STORE_COMPATIBILITY_IDS | frozenset(schema.compatibility_ids())
+    return frozenset()
 
 
 def _intent_collection(entry):
@@ -452,6 +449,32 @@ def intent_collection_ids(intent):
     return {entry["collection_id"] for entry in intent["collections"]}
 
 
+def require_intent_binding(conn, intent):
+    """Prove the existing intent's immutable creation or import checkpoint; return its create receipt."""
+    if intent["kind"] == EXPORT:
+        return None
+    if intent["kind"] == MIGRATE:
+        for entry in intent["collections"]:
+            if conn.execute(
+                "SELECT 1 FROM txns t JOIN collections c ON c.collection_id=t.collection_id "
+                "WHERE t.txn_id=? AND t.operation='legacy_import' AND t.legacy_event_json IS NULL "
+                "AND c.collection_id=? AND c.manifest_path=? AND c.source_path=? AND c.created_txn=t.txn_id",
+                (entry["txn_id"], entry["collection_id"], entry["manifest_path"], entry["source_path"]),
+            ).fetchone() is None:
+                raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "migration intent lacks its committed import checkpoint")
+        return None
+    row = conn.execute(
+        "SELECT t.receipt_json FROM txns t JOIN collections c ON c.collection_id=t.collection_id "
+        "WHERE t.txn_id=? AND t.operation='create' AND t.request_id=? AND t.request_hash=? "
+        "AND c.collection_id=? AND c.manifest_path=? AND c.source_path=? AND c.created_txn=t.txn_id",
+        (intent["txn_id"], intent["request_id"], intent["request_hash"], intent["collection_id"],
+         intent["manifest_path"], intent["source_path"]),
+    ).fetchone()
+    if row is None:
+        raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "create intent lacks its committed transaction")
+    return json.loads(row[0])
+
+
 def marker_status(writer, intent):
     return intent_status(writer.root, writer.connection, intent)
 
@@ -486,25 +509,25 @@ def intent_status(root, conn, intent):
 
 
 def projection_eligible(writer, projection):
-    intent = pending_create(writer.connection)
-    if intent is not None and projection["collection_id"] in intent_collection_ids(intent):
-        return marker_status(writer, intent) == "marker_admitted"
-    return collection_admitted(writer, projection["collection_id"])
+    from . import ownership
+    from .preview import production_bound
+
+    proof = ownership.current(writer.root, conn=writer.connection, private=not production_bound(writer.root))
+    path = projection.get("path")
+    owner = proof.owner(writer.root, path) if isinstance(path, str) else None
+    return (owner is not None and owner["collection_id"] == projection["collection_id"]
+            and owner["collection_id"] in proof.admitted)
 
 
 def collection_admitted(writer, collection_id):
+    from ..cli_ops import OpError
+    from . import ownership
+    from .preview import production_bound
+
     try:
-        raw = read_marker(writer.root)
-        if raw is None:
-            return writer.connection.execute(
-                "SELECT 1 FROM store_meta WHERE key=?", (MARKER_REQUIRED,)
-            ).fetchone() is None
-        marker = parse_marker(writer.root, raw)
-        sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
-        row = writer._collection_row(collection_id)
-        return marker["store_id"] == sid and any(
-            routes(entry, collection_id, row["manifest_path"], sid) for entry in marker["collections"])
-    except (held_fs.HeldFsError, OSError, CollectionStoreError):
+        return collection_id in ownership.current(writer.root, conn=writer.connection,
+            private=not production_bound(writer.root)).admitted
+    except (held_fs.HeldFsError, OSError, CollectionStoreError, RuntimeError, OpError):
         return False
 
 
@@ -514,11 +537,15 @@ def orphan_cleanup_eligible(writer, directory):
     Pending creation delays only ambiguous orphan cleanup in its view subtree;
     identified neighboring projections can still recover and publish normally.
     """
+    from . import ownership
+    from .preview import production_bound
+
+    proof = ownership.current(writer.root, conn=writer.connection, private=not production_bound(writer.root))
     directory = collections._portable_path_key(directory.as_posix())
     for cid, manifest, source, layout in writer.connection.execute(
         "SELECT collection_id,manifest_path,source_path,layout FROM collections"
     ):
-        if projection_eligible(writer, {"collection_id": cid}):
+        if cid in proof.admitted:
             continue
         source = Path(source)
         protected = (Path(manifest).parent, source.parent if layout == "markdown-log" else source)

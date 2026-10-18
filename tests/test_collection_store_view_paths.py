@@ -14,8 +14,8 @@ from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifes
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, _through_dispatcher, write_rule, write_scope
 
-from exomem import structured_collections as collections
 from exomem import reserved_paths
+from exomem import structured_collections as collections
 from exomem.collection_store import authority
 from exomem.collection_store.preview import preview_store
 from exomem.governance import egress
@@ -43,6 +43,7 @@ def vault(store):
     text = text.replace("storage:\n", "item_filename:\n  version: 1\n  fields: [title]\nstorage:\n")
     store.create_collection(manifest_path(), text, why="create")
     store.append_record(CID, item={"title": "Open plan"}, item_key=KEY, why="capture")
+    store.reconcile_views()
     sid = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     marker = authority.marker_path(store.root)
     marker.parent.mkdir(parents=True)
@@ -61,6 +62,7 @@ def vault(store):
     target = store.root / TARGET
     target.parent.mkdir(parents=True)
     target.write_text("---\ntype: insight\nstatus: active\n---\n\nTarget.\n")
+    store.reconcile_views()
     return store
 
 
@@ -79,6 +81,7 @@ def _as(vault, who, observe):
 
 def _add_secret(vault):
     vault.append_record(CID, item=SECRET_ITEM, item_key=OTHER, body="See [[Notes/target]].\n", why="capture")
+    vault.reconcile_views()
 
 
 def _files(vault):
@@ -103,12 +106,12 @@ def test_file_tools_answer_a_withheld_view_as_missing_and_refuse_a_released_one(
     assert _files(vault) == views
 
 
-def test_the_owner_file_tools_refuse_view_paths_from_the_marker_without_a_store(vault):
-    """No store is bound, as when a file tool runs outside the store thread: the marker alone decides."""
+def test_the_owner_file_tools_refuse_view_paths_from_canonical_ownership(vault):
+    """An explicitly bound private canonical writer protects both endpoints and their ancestors."""
     plain, trashed = "Knowledge Base/Notes/plain.md", "Knowledge Base/Notes/trashed.md"
     for note in (plain, trashed):
         (vault.root / note).write_text("Plain note.\n")
-    with request_scope(owner_principal()):
+    with preview_store(vault.root, vault.handle), request_scope(owner_principal()):
         _call(vault, "delete", path=trashed, confirm=True)
         in_trash = next((vault.root / "Knowledge Base/_trash").rglob("*trashed.md")).relative_to(vault.root)
         views = _files(vault)
@@ -118,7 +121,9 @@ def test_the_owner_file_tools_refuse_view_paths_from_the_marker_without_a_store(
             _call(vault, "move_file", old_path=plain, new_path=f"{ITEMS}/plain.md"),
             _call(vault, "recover_from_trash", trash_path=in_trash.as_posix(), restore_path=f"{ITEMS}/trashed.md"),
         ]
-    assert [str(answer).split(":")[0] for answer in refusals] == ["COLLECTION_VIEW_PATH"] * 4
+    # Bound previews retain the existing whole-folder floor; production ownership is covered by the service workflow.
+    assert [str(answer).split(":")[0] for answer in refusals] == [
+        "COLLECTION_VIEW_PATH", "AUDIENCE_RESTRICTED", "COLLECTION_VIEW_PATH", "COLLECTION_VIEW_PATH"]
     assert _files(vault) == views
 
 
@@ -127,10 +132,12 @@ def test_restoring_a_folder_where_a_collection_lost_its_views_refuses_them(vault
     for name in ("Items/Open plan.md", "notes.md"):
         (vault.root / "Knowledge Base/Notes/Old" / name).parent.mkdir(parents=True, exist_ok=True)
         (vault.root / "Knowledge Base/Notes/Old" / name).write_text("Stale copy.\n")
-    shutil.rmtree(vault.root / WORK)
-    with request_scope(owner_principal()):
-        _call(vault, "delete", path="Knowledge Base/Notes/Old", confirm=True, recursive=True)
+    with preview_store(vault.root, vault.handle), request_scope(owner_principal()):
+        from exomem.delete_directory import delete_directory
+
+        delete_directory(vault.root, path="Knowledge Base/Notes/Old", confirm=True, recursive=True)
         in_trash = next(path for path in (vault.root / "Knowledge Base/_trash").rglob("*Old") if path.is_dir())
+        shutil.rmtree(vault.root / WORK)
         refusal = _call(vault, "recover_from_trash", trash_path=in_trash.relative_to(vault.root).as_posix(),
                         restore_path=WORK)
     assert str(refusal).startswith("COLLECTION_VIEW_PATH:")
@@ -140,7 +147,7 @@ def test_restoring_a_folder_where_a_collection_lost_its_views_refuses_them(vault
 def test_another_casing_of_the_knowledge_base_folder_is_refused_on_a_case_folding_volume(vault, monkeypatch):
     """`move_file` rebuilds a protected destination from the caller's own spelling of the folder."""
     monkeypatch.setenv("EXOMEM_CASEFOLD_PATHS", "1")
-    with pytest.raises(ValueError, match="COLLECTION_VIEW_PATH"):
+    with preview_store(vault.root, vault.handle), pytest.raises(ValueError, match="COLLECTION_VIEW_PATH"):
         authority.refuse_view_paths(vault.root, (OPEN.replace("Knowledge Base", "knowledge base"),), ValueError)
 
 

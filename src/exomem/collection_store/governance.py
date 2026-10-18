@@ -19,7 +19,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from .. import access, find_corpus, records, vault
+from .. import access, find_corpus, vault
 from .. import structured_collections as collections
 from ..find_types import ParsedPage
 from ..governance import authorization_session_authority as authority
@@ -1384,66 +1384,22 @@ class OperationAuthorization:
 
     def projection_subjects(self, path: str) -> tuple[CanonicalSubject, ...] | None:
         """None is an ordinary file; an empty tuple is an unbound owned path."""
-        from . import authority as collection_authority
+        from . import ownership
+        from .preview import production_bound
 
+        proof = ownership.current(self.root, conn=self.conn, private=not production_bound(self.root))
+        entry = proof.owner(self.root, path)
+        if entry is None:
+            return None
+        cid = entry["collection_id"]
+        if cid not in proof.admitted:
+            return ()
+        owners = {cid}
         projection = self.conn.execute(
             "SELECT collection_id,row_id,kind FROM projection_state WHERE path=?", (path,),
         ).fetchone()
-        owners = {row[0] for row in self.conn.execute(
-            "SELECT collection_id,manifest_path,source_path FROM collections "
-            "WHERE manifest_path=? OR source_path=? OR collection_id IN "
-            "(SELECT collection_id FROM items WHERE view_path=? UNION ALL "
-            "SELECT collection_id FROM held_candidates WHERE view_path=? UNION ALL "
-            "SELECT collection_id FROM projection_state WHERE path=?)",
-            (path, path, path, path, path),
-        )}
-        if projection is not None:
-            owners.add(projection[0])
-        for cid, manifest_path, source_path, layout in self.conn.execute(
-            "SELECT collection_id,manifest_path,source_path,layout FROM collections",
-        ):
-            directory = Path(manifest_path).parent
-            roots = ((directory / records._HELD_DIRECTORY).as_posix(),
-                     (directory / "_history").as_posix())
-            log_item = False
-            if layout == "markdown-log" and path.startswith(source_path + "#"):
-                try:
-                    records._validate_item_key(path[len(source_path) + 1:])
-                    log_item = True
-                except collections.CollectionError:
-                    pass
-            if (any(path == root or path.startswith(root + "/") for root in roots)
-                    or path == (directory / "_history.md").as_posix()
-                    or (layout == "markdown-items" and
-                        (path == source_path or path.startswith(source_path + "/")))
-                    or log_item):
-                owners.add(cid)
-        raw = collection_authority.read_marker(self.root)
-        if raw is not None:
-            marker = collection_authority.parse_marker(self.root, raw)
-            if marker["version"] == 2:
-                entry = collection_authority.owned_entry(self.root, marker, path)
-                if entry is None:
-                    return None
-                collection_authority.require_selected(self.conn, marker, entry, root=self.root)
-                if owners - {entry["collection_id"]}:
-                    return ()
-                owners = {entry["collection_id"]}
-            entries = {cid: collection_authority.selected_entry(self.root, marker, cid) for cid in owners}
-            intent = collection_authority.pending_create(self.conn)
-            if intent is not None and any(entries[cid] is None for cid in
-                                          collection_authority.intent_collection_ids(intent) & owners):
-                return ()
-            owners = {cid for cid, entry in entries.items() if entry is not None}
-            for cid in owners:
-                collection_authority.require_selected(self.conn, marker, entries[cid], root=self.root)
-            entry = collection_authority.selected_entry(self.root, marker, path)
-            if entry is not None and owners != {entry["collection_id"]}:
-                return ()
-            if projection is not None and projection[0] not in owners:
-                projection = None
-        if not owners:
-            return None
+        if projection is not None and projection[0] != cid:
+            return ()
         # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
         if projection is not None and projection[2] not in {"manifest", "item", "held", "log", "summary", "history"}:
             return ()

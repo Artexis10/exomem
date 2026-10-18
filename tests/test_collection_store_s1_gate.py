@@ -384,26 +384,39 @@ def _older():
 
 
 def test_launcher_refuses_an_actual_older_interpreter_on_a_fresh_root_copy(abc, tmp_path, monkeypatch):
-    """Defect: the supported launcher hands a C vault copy to a store-blind older release."""
+    """An absent hint cannot let an older candidate replace the supported serving worker."""
     import asyncio
+
+    from conftest import _drain_background_threads
+    from test_service_manager import _supervisor
 
     from exomem.service_manager import WorkerRuntime
 
+    abc.release()
+    _drain_background_threads()
     copy = tmp_path / "copy"
     shutil.copytree(abc.root, copy)
+    authority.marker_path(copy).unlink()
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "fresh-state"))
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(copy))
     runtime = WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=8765)
     target = asyncio.run(runtime.inspect({"python": OLDER, "version": _older()}))
     with pytest.raises(ValueError, match="does not support required state compatibility"):
         runtime.migration_required(target)
-    started = subprocess.run(
-        [OLDER, "-I", "-c", "import sys; from pathlib import Path; from exomem import state_migration;"
-         " state_migration.require_vault_state_ready(Path(sys.argv[1]))", str(copy)],
-        capture_output=True, text=True, env={**os.environ, "EXOMEM_STATE_ROOT": str(tmp_path / "old-state")})
-    assert started.returncode != 0
-    assert "StateCompatibilityUnsupported" in started.stderr or "COLLECTION_STORE_MARKER_CONFLICT" in started.stderr
-    assert not (tmp_path / "old-state").exists() or not any((tmp_path / "old-state").rglob("collections.sqlite"))
+
+    async def refuse_before_handoff():
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        serving.inspect = runtime.inspect
+        serving.migration_required = runtime.migration_required
+        result = await manager.upgrade({"python": OLDER, "version": _older()})
+        assert not result["ok"]
+        assert result["error"] == "target interpreter verification failed; current admission unchanged"
+        assert serving.pid == 100
+        assert serving.events == ingress.events == []
+        assert manager.records.pending() is None
+
+    asyncio.run(refuse_before_handoff())
+    assert not (tmp_path / "fresh-state").exists()
 
 
 def test_older_interpreter_refuses_the_newer_store_schema(abc):
