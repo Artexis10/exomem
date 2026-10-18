@@ -126,7 +126,7 @@ PRIOR_CONTACT_KINDS: frozenset[str] = frozenset({"recency"})
 #: this subject". Each resolves an anchor the current turn reached by one contact
 #: kind, never alone and never with qualifiers only, and the two together count
 #: once (`_status_for_evidence` reads the set, not a count).
-#: A singleton partial name still needs independent current contact or agent choice.
+#: A singleton partial entity name needs independent current contact or agent choice.
 NAMED_BEFORE_KINDS: frozenset[str] = frozenset({"continuity", "conversation"})
 
 #: Kinds that resolve an anchor by themselves. `exact_alias` because the turn
@@ -2429,7 +2429,7 @@ def _status_for_evidence(
     specifically (a qualifier alone is not enough — the weak worded kind
     needs a second, independent fact, not merely a strengthener of itself);
     or prior naming plus at least one CONTACT kind of either family, unless
-    the candidate has a singleton partial-name contact. A prior name cannot
+    an entity candidate has a singleton partial-name contact. A prior name cannot
     distinguish that fragment from a different name. `continuity`
     still never creates a candidate and never resolves alone or with
     qualifiers only. Without prior naming, retrieved contact alone stays
@@ -2489,7 +2489,8 @@ def _status_for(
     return _status_for_evidence(
         frozenset(candidate.evidence) - without,
         recency_resolves=recency_resolves,
-        partial_name=bool(candidate.partial_name_terms),
+        # Anchor kinds are closed; retain hub/resource shorthand while grounding entity material.
+        partial_name=candidate.kind == "entity" and bool(candidate.partial_name_terms),
     )
 
 

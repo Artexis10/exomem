@@ -696,11 +696,11 @@ Use one admission predicate before both unit projection paths and before creatio
 
 For the recognized occurrence, demote only an affected ordinary-word band candidate lacking independent subject contact before material assembly. Preserve the existing name/casing protections, including multilingual names, and independently resolved anchors elsewhere in the turn. Empty or rejected rival material cannot resurrect that candidate. The conditional refinement in `band-yields-to-retrieval-carry` owns this change to its earlier material-dependent fallback. Add no model, property-to-category ontology, graph traversal, scorer adjustment or separate parser framework.
 
-#### Prior naming does not decide a singleton partial name
+#### Prior naming does not decide a singleton partial entity name
 
-A current singleton partial-name contact can name a different, unindexed subject that shares the same word. Prior naming does not supply independent evidence for that candidate. Keep the candidate and its historical evidence visible as partial; serve no lane material until independent current contact or agent choice resolves it. Exact authored aliases, full-name focus and existing independent-contact paths retain their semantics.
+An entity's current singleton partial-name contact can name a different, unindexed subject that shares the same word. Prior naming does not supply independent evidence for that candidate. Keep the candidate and its historical evidence visible as partial; serve no lane material until independent current contact or agent choice resolves it. Exact authored aliases, full-name focus and existing independent-contact paths retain their semantics.
 
-This changes surname-plus-history behavior: the active agent must select the lead or supply its full name. The agent can use existing arguments without asking the user. Reuse the candidate's partial-name metadata; add no meaning classifier, word list or whole-turn topic veto. Unspaced containment and terms registered as whole names keep their existing paths; this is not universal unknown-name detection.
+This applies to every `entity` anchor, including entity-backed projects; hubs and resources keep their existing history qualification. This changes surname-plus-history behavior: the active agent must select the lead or supply its full name. The agent can use existing arguments without asking the user. Reuse the candidate's partial-name metadata; add no meaning classifier, word list or whole-turn topic veto. Unspaced containment and terms registered as whole names keep their existing paths; this is not universal unknown-name detection.
 
 #### Open-category material without changing standing role knowledge
 

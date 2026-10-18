@@ -15,7 +15,7 @@ An anchor SHALL carry `conversation` when either of these holds:
 
 Only the newest three `user` entries and the newest two `assistant` entries SHALL be read for this purpose. Conversation text SHALL NOT be embedded, sent to recall, or read by any model.
 
-An anchor that carries `conversation` together with at least one contact kind reached by the current turn, in either segment, SHALL resolve. A candidate marked as a singleton partial-name contact SHALL remain partial when prior naming supplies its only additional evidence. Independent current contact, full-name focus or agent choice MAY resolve it. This is the same deliberate exception `continuity` has: the conversation already named that subject, and the current turn reached it again. `conversation` and `continuity` on one anchor SHALL count once.
+An anchor that carries `conversation` together with at least one contact kind reached by the current turn, in either segment, SHALL resolve. An entity candidate marked as a singleton partial-name contact SHALL remain partial when prior naming supplies its only additional evidence. Independent current contact, full-name focus or agent choice MAY resolve it. This is the same deliberate exception `continuity` has: the conversation already named that subject, and the current turn reached it again. `conversation` and `continuity` on one anchor SHALL count once.
 
 #### Scenario: The conversation promotes a partial second domain
 
@@ -35,6 +35,6 @@ An anchor that carries `conversation` together with at least one contact kind re
 
 #### Scenario: An unindexed name does not inherit a known name fragment
 
-- **WHEN** a new unindexed name shares only one partial-name term with an earlier named entity
+- **WHEN** a new unindexed name reaches an earlier entity through a contact marked as a singleton partial-name contact
 - **THEN** prior conversation does not resolve that entity or serve its lane material
 - **AND** the partial lead remains available for agent choice

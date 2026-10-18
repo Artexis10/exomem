@@ -14,7 +14,7 @@ that kind SHALL never create a candidate, SHALL never resolve an anchor on its o
 together with qualifiers only, and SHALL never override a current-turn `unresolved`
 outcome. An anchor carrying `continuity` together with at least one contact kind of
 either family SHALL resolve, except when prior naming supplies the only additional
-evidence for a candidate marked as a singleton partial-name contact. That candidate
+evidence for an entity candidate marked as a singleton partial-name contact. That candidate
 SHALL remain a visible partial lead until independent current contact, full-name focus
 or agent choice resolves it. Prior naming cannot distinguish its fragment from a
 different unindexed name. This is a deliberate exception to the rule that retrieved
@@ -89,7 +89,7 @@ SHALL hand a thread-bearing token back unchanged, so a conversation survives a w
 index or a spent request budget.
 
 #### Scenario: Continuity strengthens but does not resolve
-- **WHEN** a turn carries one contact kind, other than a singleton partial-name contact,
+- **WHEN** a turn carries one contact kind, other than an entity's singleton partial-name contact,
   for an anchor the previous packet resolved
   and passes that packet's token
 - **THEN** the anchor resolves with evidence `[<contact kind>, continuity]`, and the
@@ -97,7 +97,7 @@ index or a spent request budget.
 
 #### Scenario: A prior name does not decide a shared fragment
 - **WHEN** a turn reaches an earlier resolved entity only by a singleton partial-name
-  contact and passes that packet's token
+  entity contact and passes that packet's token
 - **THEN** the entity remains a visible partial lead and contributes no lane material
 - **AND** the agent can resolve that lead through the existing anchor choice or full-name focus
 

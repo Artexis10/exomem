@@ -19,7 +19,9 @@ import pytest
 from test_connector_boundary import PRIVATE
 from test_connector_boundary import configured_boundary as configured_boundary
 from test_governance_egress import _external, write_rule, write_scope
-from test_working_set_carry import seed_ordinary_notes
+from test_working_set_carry import CARRY_PAGE, seed_ordinary_notes
+from test_working_set_carry import budget_free as budget_free
+from test_working_set_carry import carry_vault as carry_vault
 from test_working_set_topic_turns import workshop_vault as workshop_vault
 
 from exomem import (
@@ -457,6 +459,25 @@ def test_full_name_focus_beats_a_historical_subphrase(vault: Path) -> None:
 
     assert _statuses(packet, short) == ["partial"], packet["anchors"]
     assert _statuses(packet, long) == ["resolved"], packet["anchors"]
+
+
+def test_prior_entity_fragment_does_not_hide_its_band_dependency(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entity = "Knowledge Base/Entities/Organizations/Copper Hedge.md"
+    _entity(carry_vault, entity, "Copper Hedge", "The original supplier")
+    _reindex(carry_vault)
+    monkeypatch.setattr(working_set, "signature_evidence",
+        lambda _index, _turn: ({entity: True}, "ready"))
+
+    packet = commands.op_activate_context(carry_vault,
+        turn="What did we decide about the quillon vantry window for the hedge?",
+        conversation={"recent": [{"role": "user", "text": "Copper Hedge"}]})
+
+    assert packet["generation"].get("carried_by") == "retrieval", packet
+    assert _statuses(packet, CARRY_PAGE) == ["resolved"], packet["anchors"]
+    assert _statuses(packet, entity) != ["resolved"], packet["anchors"]
+    assert not any(u["provenance"]["path"] == entity for u in packet["units"])
 
 
 def test_a_registered_alias_still_resolves_a_surname(garden_vault: Path) -> None:

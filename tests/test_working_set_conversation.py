@@ -20,14 +20,8 @@ from test_working_set_egress import _release
 from test_working_set_standing_precedent import _reindex
 
 from exomem import (
-    commands,
-    context_refs,
-    lexstore,
-    working_set,
-    working_set_conversation,
-    working_set_index,
-    working_set_resolve,
-    working_set_runtime,
+    commands, context_refs, lexstore, working_set, working_set_conversation,
+    working_set_index, working_set_resolve, working_set_runtime,
 )
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
@@ -252,19 +246,16 @@ def test_a_cue_that_names_nothing_leaves_the_packet_unchanged(cvault: Path) -> N
 
 
 def test_the_conversation_promotes_a_partial_second_domain(cvault: Path) -> None:
-    turn = "Ottilie asked about it"
-    focus = "the grant from Tidewater"
-    plain = commands.op_activate_context(cvault, turn=turn, conversation={"focus": focus})
+    plain = commands.op_activate_context(cvault, turn=TURN)
     assert _by_title(plain)["Tidewater Grant"]["status"] == "partial"
     packet = commands.op_activate_context(
-        cvault, turn=turn, conversation={"focus": focus,
-            "recent": [_user("we finished the Tidewater Grant call")]}
+        cvault, turn=TURN, conversation={"recent": [_user("we finished the Tidewater Grant call")]}
     )
     anchors = _by_title(packet)
     grant = anchors["Tidewater Grant"]
     assert grant["status"] == "resolved"
-    assert sorted(grant["evidence"]) == ["conversation", "lexical_overlap"]
-    assert grant["origin"] == "focus", "a qualifier never changes an anchor's origin"
+    assert sorted(grant["evidence"]) == ["conversation", "rare_term"]
+    assert grant["origin"] == "turn", "a qualifier never changes an anchor's origin"
     assert anchors["Ottilie Marsh"]["status"] == "resolved"
 
 
@@ -274,9 +265,7 @@ def test_a_visible_ref_is_a_conversation_qualifier(cvault: Path) -> None:
         turn=TURN,
         conversation={"refs": ["Knowledge Base/Notes/Insights/tidewater-grant-hub.md"]},
     )
-    grant = _by_title(packet)["Tidewater Grant"]
-    assert grant["status"] == "partial"
-    assert "conversation" in grant["evidence"]
+    assert _by_title(packet)["Tidewater Grant"]["status"] == "resolved"
 
 
 def test_the_conversation_alone_resolves_nothing(cvault: Path) -> None:
@@ -313,13 +302,13 @@ def test_only_the_newest_three_user_and_two_assistant_entries_are_read(cvault: P
             "recent": [_user("the Tidewater Grant"), _user(filler), _user(filler), _user(filler)]
         },
     )
-    assert "conversation" not in _by_title(oldest_user)["Tidewater Grant"]["evidence"]
+    assert _by_title(oldest_user)["Tidewater Grant"]["status"] == "partial"
     third_newest_user = commands.op_activate_context(
         cvault,
         turn=TURN,
         conversation={"recent": [_user("the Tidewater Grant"), _user(filler), _user(filler)]},
     )
-    assert "conversation" in _by_title(third_newest_user)["Tidewater Grant"]["evidence"]
+    assert _by_title(third_newest_user)["Tidewater Grant"]["status"] == "resolved"
     oldest_assistant = commands.op_activate_context(
         cvault,
         turn=TURN,
@@ -327,13 +316,13 @@ def test_only_the_newest_three_user_and_two_assistant_entries_are_read(cvault: P
             "recent": [_assistant("the Tidewater Grant"), _assistant(filler), _assistant(filler)]
         },
     )
-    assert "conversation" not in _by_title(oldest_assistant)["Tidewater Grant"]["evidence"]
+    assert _by_title(oldest_assistant)["Tidewater Grant"]["status"] == "partial"
     second_newest_assistant = commands.op_activate_context(
         cvault,
         turn=TURN,
         conversation={"recent": [_assistant("the Tidewater Grant"), _assistant(filler)]},
     )
-    assert "conversation" in _by_title(second_newest_assistant)["Tidewater Grant"]["evidence"]
+    assert _by_title(second_newest_assistant)["Tidewater Grant"]["status"] == "resolved"
 
 
 # --------------------------------------------------------------------------- #
@@ -403,15 +392,12 @@ def test_a_long_conversation_about_one_subject_does_not_resolve_it_for_another(c
 def _guarded_promotion(cvault: Path, *, leaf: bool, limit: int = 1500) -> dict:
     write_scope(cvault)
     write_rule(cvault, ceiling=0)
-    # Two separated name terms supply current contact without a whole alias or recall.
-    conversation = {"focus": "the grant from Tidewater",
-        "recent": [_user("we finished the Tidewater Grant call")]}
-    turn = "Ottilie asked about it"
+    conversation = {"recent": [_user("we finished the Tidewater Grant call")]}
     with request_scope(_external()):
         if leaf:
-            return commands.op_activate_context(cvault, turn=turn, max_chars=limit, conversation=conversation)
+            return commands.op_activate_context(cvault, turn=TURN, max_chars=limit, conversation=conversation)
         packet = working_set.compile_packet(
-            cvault, turn=turn, max_chars=limit, conversation=working_set_conversation.bound(conversation)
+            cvault, turn=TURN, max_chars=limit, conversation=working_set_conversation.bound(conversation)
         )
         return egress.guard_working_set(cvault, packet, _release())
 
@@ -450,15 +436,14 @@ def test_promoted_material_keeps_within_a_third_of_the_budget_and_comes_last(cva
 @pytest.mark.parametrize("leaf", (False, True), ids=("compiler", "command"))
 def test_promoted_standing_reach_is_budgeted_unless_the_turn_also_reached_it(cvault: Path, leaf: bool) -> None:
     schema = cvault / "Knowledge Base/_Schema/project-keys.yaml"
-    # The focus names the hub, without independently naming its attached project.
-    schema.write_text("projects:\n  funding-round:\n    folder: Funding Round\n    category: research\n", encoding="utf-8")
+    schema.write_text("projects:\n  tidewater:\n    folder: Tidewater\n    category: research\n", encoding="utf-8")
     grant = "Knowledge Base/Notes/Insights/tidewater-grant-hub.md"
     page = cvault / grant
-    page.write_text(page.read_text().replace("status: active\n", "status: active\nproject: funding-round\n", 1))
+    page.write_text(page.read_text().replace("status: active\n", "status: active\nproject: tidewater\n", 1))
     standing = "Knowledge Base/Notes/Insights/tidewater-method.md"
     decision = ("Review the original gauge records before approving the application. " * 5)[:282] + "."
     (cvault / standing).write_text(
-        "---\ntype: insight\nstatus: active\nproject: funding-round\nstanding: true\n---\n\n# Grant method\n\n"
+        "---\ntype: insight\nstatus: active\nproject: tidewater\nstanding: true\n---\n\n# Grant method\n\n"
         f"- [decision] {decision} ^first\n- [decision] {decision} ^second\n", encoding="utf-8",
     )
     _reindex(cvault)
@@ -469,7 +454,7 @@ def test_promoted_standing_reach_is_budgeted_unless_the_turn_also_reached_it(cva
     assert "promoted" not in json.dumps(packet)
 
     own = cvault / "Knowledge Base/Entities/People/Ottilie Marsh.md"
-    own.write_text(own.read_text().replace("status: active\n", "status: active\nproject: funding-round\n", 1))
+    own.write_text(own.read_text().replace("status: active\n", "status: active\nproject: tidewater\n", 1))
     _reindex(cvault)
     shared = _guarded_promotion(cvault, leaf=leaf, limit=1200)
     assert sum(len(u["text"]) for u in shared["units"] if u["provenance"]["path"] == standing) > 400
