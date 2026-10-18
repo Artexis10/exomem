@@ -41,6 +41,7 @@ from . import (
     context_roles,
     lifecycle_statuses,
     request_budget,
+    semantic_units,
     source_taxonomy,
     working_set_conversation,
     working_set_currency,
@@ -427,20 +428,28 @@ def _without_lede_repeats(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
     opens with, as a unit fragment of the same page: one sentence printed
     twice, charged twice, and reported as a second reference where there is
     one page. The page-level item already carries it, so the fragment goes.
-    Only a unit of THAT page whose whole text the lede contains; any other
-    unit of the page, and the same sentence on another page, are kept.
+    Keep qualified units: the page does not carry their metadata, authored
+    dates or correction links. Different lifecycles are not interchangeable.
+    Other units and the same sentence on another page are kept.
     """
-    ledes: dict[str, list[str]] = {}
+    ledes: dict[str, list[tuple[str, str]]] = {}
     for item in ordered:
         if item.level == "page" and item.path and item.provenance.get("source") == "profile":
-            ledes.setdefault(item.path, []).append(_folded_prose(item.text))
+            ledes.setdefault(item.path, []).append((_folded_prose(item.text), item.lifecycle))
     if not ledes:
         return tuple(ordered)
     out: list[LaneItem] = []
     for item in ordered:
-        if item.level == "unit" and item.path in ledes:
+        if (
+            item.level == "unit" and item.path in ledes and not item.updated
+            and not any(item.provenance.get(key) for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS)
+            and not item.provenance.get("corrects")
+            and not item.provenance.get("supersedes_targets")
+            and not item.provenance.get("superseded_by")
+        ):
             text = _folded_prose(item.text)
-            if text and any(text in lede for lede in ledes[item.path]):
+            if text and any(text in lede and item.lifecycle == lifecycle
+                            for lede, lifecycle in ledes[item.path]):
                 continue
         out.append(item)
     return tuple(out)

@@ -188,6 +188,31 @@ def test_an_authored_supersedes_relation_makes_its_sibling_history(tmp_path, tar
     assert order.index("pick-b") < order.index("cand-a")
 
 
+@pytest.mark.parametrize("target", ["[[#cand-a]]", "[[relay-trial#cand-a]]"])
+def test_overlapping_roles_keep_explicit_supersession_and_role_priority(tmp_path, target):
+    """Selecting one unit through two roles must not make its anchor ambiguous."""
+    _write(tmp_path, PAGE, _RELAY_PAGE.format(target=f"{target}, supersedes: [[#pick-b]]"))
+    lexstore.ensure_fresh(tmp_path)
+    items = _lane_items(tmp_path, PAGE, "precedents", "recent_change")
+
+    packet = working_set.build_packet(
+        items=items, anchors=(), roles=({"id": "recent_change"}, {"id": "precedents"}),
+        current_state=(), ambiguity=(), missing=(), max_chars=4000,
+        generation={}, status="resolved",
+    )
+
+    units = packet["units"]
+    by_anchor = {unit["ref"].rsplit("#", 1)[1]: unit for unit in units}
+    assert len(units) == len(by_anchor) == 3
+    assert by_anchor["cand-a"]["lifecycle"] == "superseded"
+    assert by_anchor["cand-a"]["history"] is True
+    assert "history" not in by_anchor["pick-b"]
+    assert "history" not in by_anchor["budget"]
+    assert all(unit["role"] == "recent_change" for unit in units)
+    order = [unit["ref"].rsplit("#", 1)[1] for unit in units]
+    assert order.index("pick-b") < order.index("cand-a")
+
+
 def test_a_supersedes_relation_naming_another_page_marks_nothing_here(tmp_path):
     """A relation authored on one page never marks a unit on another: the
     marking would otherwise tell a reader of the released page that some other

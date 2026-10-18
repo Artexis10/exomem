@@ -8,6 +8,7 @@ import io
 from pathlib import Path
 
 import pytest
+from memory_measurement import run_in_fresh_process
 
 from exomem import file_watcher
 from exomem import preserve as preserve_module
@@ -767,11 +768,14 @@ def test_preserve_refuses_oversized_stream_without_canonical_residue(
     assert not (folder / "too-large.bin.md").exists()
 
 
-def test_a_large_preserved_stream_is_never_held_whole_in_memory(vault: Path, tmp_path: Path) -> None:
+@pytest.mark.timeout(300)
+def test_a_large_preserved_stream_is_never_held_whole_in_memory(vault: Path, tmp_path: Path, request) -> None:
     """An upload session commits a file of up to 2 GiB through `preserve_stream`. The
     vault's atomic publish read the staged file into memory, twice over, so one large
     upload could exhaust the service's memory. Scaled down: a 32 MiB file publishes
     with a traced peak far below its size."""
+    if run_in_fresh_process(request, tmp_path):
+        return
     import tracemalloc
 
     size = 32 * 1024 * 1024

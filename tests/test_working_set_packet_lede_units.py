@@ -12,7 +12,12 @@ on another page, are untouched. Invented content only.
 
 from __future__ import annotations
 
-from exomem import working_set
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from exomem import commands, lexstore, working_set, working_set_index, working_set_runtime
 
 KILN = "Knowledge Base/Systems/Glaze kiln.md"
 OTHER = "Knowledge Base/Notes/Studio/firing-log.md"
@@ -26,6 +31,7 @@ def _item(
     path: str,
     text: str,
     source: str = "units",
+    updated: str = "",
 ) -> working_set.LaneItem:
     return working_set.LaneItem(
         role=role,
@@ -35,7 +41,7 @@ def _item(
         title=path.rsplit("/", 1)[-1].removesuffix(".md"),
         text=text,
         lifecycle="active",
-        updated="2026-09-01",
+        updated=updated,
         anchor=KILN,
         provenance={"source": source},
     )
@@ -48,6 +54,7 @@ LEDE = _item(
     path=KILN,
     text="[resource] The glaze kiln fires up to cone six. #resource #studio",
     source="profile",
+    updated="2026-09-01",
 )
 REPEAT = _item(
     role="resources",
@@ -107,3 +114,60 @@ def test_without_the_lede_the_unit_is_served() -> None:
     packet = _packet(REPEAT, OWN)
 
     assert {unit["ref"] for unit in packet["units"]} == {REPEAT.ref, OWN.ref}
+
+
+@pytest.mark.parametrize("qualification", [
+    {"provenance": {"verdict": "refuted"}},
+    {"provenance": {"check_by": "2027-01-15"}},
+    {"updated": "2026-08-30"},
+    {"lifecycle": "superseded"},
+    {"provenance": {"corrects": OWN.ref, "relation": "refines", "family": "refinement"}},
+    {"provenance": {"supersedes_targets": [OWN.ref]}},
+    {"provenance": {"superseded_by": [OTHER]}},
+], ids=["verdict", "review-date", "authored-date", "lifecycle", "correction", "successor", "replaced"])
+def test_a_repeated_unit_keeps_its_own_qualifications(qualification: dict) -> None:
+    """Page prose cannot replace the unit that carries a distinct qualification."""
+    qualified = replace(REPEAT, **qualification)
+
+    packet = _packet(LEDE, qualified)
+
+    served = next(unit for unit in packet["units"] if unit["ref"] == qualified.ref)
+    assert served["updated"] == qualified.updated
+    assert served["lifecycle"] == qualified.lifecycle
+
+
+def test_activation_keeps_a_repeated_claims_verdict_and_own_date(vault: Path) -> None:
+    """Repeating a judged claim in the introduction must not erase its qualification."""
+    page = vault / KILN
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: resource\nstatus: active\nupdated: 2026-10-01\n"
+        "exomem_id: 11111111-1111-4111-8111-111111111111\n---\n\n"
+        "# Glaze kiln\n\nThe glaze kiln fires up to cone six.\n\n"
+        "## Claim\n- category: fact\n- id: capacity\n"
+        "- context: observed 2026-09-03\n- verdict: refuted\n"
+        "- check_by: 2027-01-15\n\nThe glaze kiln fires up to cone six.\n",
+        encoding="utf-8",
+    )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    reference = "exomem://memory/11111111-1111-4111-8111-111111111111#capacity"
+    exact = commands.op_read_memory(vault, path=KILN, unit_ref=reference)
+
+    packet = commands.op_activate_context(
+        vault, turn="Remind me about the glaze kiln.", max_chars=4000,
+    )
+
+    claim = next(unit for unit in packet["units"] if unit["ref"] == reference)
+    assert claim["provenance"]["verdict"] == "refuted"
+    assert claim["provenance"]["check_by"] == "2027-01-15"
+    assert claim["provenance"]["source_hash"] == exact["unit"]["source_hash"]
+    assert claim["updated"] == "2026-09-03"
+    assert claim["lifecycle"] == "active"
+    assert packet["budget"]["used_chars"] <= 4000
+    from exomem._hooks import exomem_retrieve_nudge as hook
+
+    rendered = "\n".join(hook._packet_lines(packet))
+    assert "verdict=refuted check_by=2027-01-15" in rendered
+    assert reference in rendered
