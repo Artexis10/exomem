@@ -1573,10 +1573,8 @@ _CORPUS_CONTEXT_CACHE_MAX_VAULTS = 2
 #: individually bounded, so this is amplification rather than livelock, but at
 #: thousands of pages it is the dominant cost moved onto writers.
 #:
-#: Single-flight collapses the concurrent case: a second publisher that finds
-#: the same cold key returns instead of starting a second whole-vault build.
+#: The shared corpus flight collapses concurrent publishers and warmers.
 _CORPUS_POPULATE_LOCK = threading.Lock()
-_CORPUS_POPULATE_IN_FLIGHT: set[tuple[str, str]] = set()
 
 #: The memo collapses the sequential case, and is deliberately measured in the
 #: cost of the attempt that just failed rather than in a fixed number of
@@ -1598,15 +1596,44 @@ _CORPUS_POPULATE_MEMO_MAX_SECONDS = 30.0
 
 @dataclass(slots=True)
 class _CorpusContextFlight:
-    census: tuple
+    census: tuple | None
     registry_identity: tuple[Any, ...]
     language_identity: tuple[Any, ...]
     done: threading.Event = field(default_factory=threading.Event)
     result: SemanticCorpusContext | None = None
     error: BaseException | None = None
+    discarded: bool = False
 
 
 _CORPUS_CONTEXT_FLIGHTS: dict[tuple[str, str], _CorpusContextFlight] = {}
+
+
+def _claim_corpus_context_flight(
+    cache_key: tuple[str, str],
+    census: tuple | None,
+    relation_definitions: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[_CorpusContextFlight, bool]:
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        flight = _CORPUS_CONTEXT_FLIGHTS.get(cache_key)
+        if flight is not None:
+            return flight, False
+        flight = _CorpusContextFlight(
+            census,
+            (relation_definitions.core_version, relation_definitions.extension_hash),
+            (language.schema_version, language.content_hash),
+        )
+        _CORPUS_CONTEXT_FLIGHTS[cache_key] = flight
+        return flight, True
+
+
+def _finish_corpus_context_flight(
+    cache_key: tuple[str, str], flight: _CorpusContextFlight
+) -> None:
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
+            del _CORPUS_CONTEXT_FLIGHTS[cache_key]
+    flight.done.set()
 
 #: A waiter owns an interactive request budget, not the owner's vault-sized
 #: build duration.  Two seconds is fixed and deliberately non-configurable: it
@@ -1674,7 +1701,6 @@ def reset_corpus_context_cache() -> None:
     """Drop every cached corpus context; intentionally public for tests."""
     with _CORPUS_POPULATE_LOCK:
         _CORPUS_POPULATE_MEMO.clear()
-        _CORPUS_POPULATE_IN_FLIGHT.clear()
     with _CORPUS_CONTEXT_CACHE_LOCK:
         _CORPUS_CONTEXT_CACHE.clear()
         _CORPUS_CONTEXT_EVENT_TOKENS.clear()
@@ -2824,7 +2850,7 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
     behavior.
 
     Single-flighted, and memoized whenever an attempt did not stamp: see
-    ``_CORPUS_POPULATE_IN_FLIGHT`` and ``_CORPUS_POPULATE_MEMO`` for why the
+    ``_CORPUS_CONTEXT_FLIGHTS`` and ``_CORPUS_POPULATE_MEMO`` for why the
     unbounded version made writers pay for builds that could not land (#539).
 
     Neither bound can make the cache wrong. Both only ever decline to *start*
@@ -2851,12 +2877,9 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
         for key, deadline in list(_CORPUS_POPULATE_MEMO.items()):
             if started >= deadline:
                 del _CORPUS_POPULATE_MEMO[key]
-        if cache_key in _CORPUS_POPULATE_IN_FLIGHT:
-            return
         if cache_key in _CORPUS_POPULATE_MEMO:
             return
-        _CORPUS_POPULATE_IN_FLIGHT.add(cache_key)
-    admitted = False
+    admitted: bool | None = False
     try:
         admitted = _build_and_admit_corpus_context(root, cache_key)
     except Exception:  # noqa: BLE001 - the publish itself already succeeded
@@ -2864,87 +2887,95 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
     finally:
         elapsed = time.monotonic() - started
         with _CORPUS_POPULATE_LOCK:
-            _CORPUS_POPULATE_IN_FLIGHT.discard(cache_key)
-            if admitted:
+            if admitted is True:
                 _CORPUS_POPULATE_MEMO.pop(cache_key, None)
-            else:
+            elif admitted is False:
                 _CORPUS_POPULATE_MEMO[cache_key] = time.monotonic() + min(
                     _CORPUS_POPULATE_MEMO_MAX_SECONDS,
                     max(_CORPUS_POPULATE_MEMO_MIN_SECONDS, elapsed),
                 )
 
 
-def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> bool:
+def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> bool | None:
     """The L2 body of :func:`_populate_corpus_context_after_miss`.
 
-    Returns whether this call stamped a context. A discard is not an error --
+    Returns whether this call stamped a context, or None when another build owns it.
+    A discard is not an error --
     it is the admission proof correctly refusing a build the vault moved out
     from under -- but the caller has to tell a discard apart from a stamp to
     know whether retrying immediately would be productive.
     """
     relation_definitions = relation_registry.core_registry()
     language = semantic_language_registry.core_registry()
-    # L2/L3: the admission decision is made against this, captured before the
-    # walk it has to vouch for.
-    before = freshness.consumer_checkpoint(root, "vault")
-    census = _timed_corpus_census(root, "populate")
-    if census is None:
-        return False
-    # The registries were loaded BEFORE this walk, and the walk stats the two
-    # `_Schema` files at its END. A registry rewritten in between therefore
-    # produces a census that records the NEW file while the build below would
-    # use the OLD registry — and the census-reuse path admits on census
-    # equality alone (the registry identity is only re-checked on the
-    # event-hit path), so that entry would be served as current. Every other
-    # install site guards with this; so does this one. The window from here to
-    # the stamp is closed by the census re-confirm under the lock, which sees
-    # the same two files.
-    if not _registries_match_disk(root, relation_definitions, language):
-        log.info("semantic corpus populate discarded: registry moved during the walk")
-        return False
-    started = time.perf_counter()
-    context = _build_corpus_context_uncached(
-        root,
-        candidate=None,
-        relation_definitions=relation_definitions,
-        language=language,
+    # Reserve before the census so skipped publishers do no whole-vault work.
+    flight, owns_flight = _claim_corpus_context_flight(
+        cache_key, None, relation_definitions, language
     )
-    build_ms = (time.perf_counter() - started) * 1000.0
-    # Its own outcome, not "rebuild": this build is paid by the PUBLISHER, so
-    # a writer suddenly wearing a full corpus build has to be visible as that.
-    metrics.observe_duration_ms(
-        "exomem_corpus_build_ms",
-        build_ms,
-        {"caller": current_call_context(), "outcome": "populate"},
-    )
-    with _census_walk_log() as walk_log, _CORPUS_CONTEXT_UPDATE_LOCK:
-        after = freshness.consumer_checkpoint(root, "vault")
-        if after != before:
-            log.info("semantic corpus populate discarded: registry advanced mid-walk")
-            return False
+    if not owns_flight:
+        return None
+    try:
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
-                return False
-        if _deferred_corpus_census(root, walk_log, "census") != census:
-            log.info("semantic corpus populate discarded: corpus moved mid-build")
+                return None
+        # L2/L3: capture the checkpoint before the walk it has to vouch for.
+        before = freshness.consumer_checkpoint(root, "vault")
+        census = _timed_corpus_census(root, "populate")
+        if census is None:
             return False
-        with _CORPUS_CONTEXT_CACHE_LOCK:
-            if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+        # Registries loaded before the walk must still match its schema files.
+        # The final census confirmation closes the remaining admission window.
+        if not _registries_match_disk(root, relation_definitions, language):
+            log.info("semantic corpus populate discarded: registry moved during the walk")
+            return False
+        flight.census = census
+        started = time.perf_counter()
+        context = _build_corpus_context_uncached(
+            root,
+            candidate=None,
+            relation_definitions=relation_definitions,
+            language=language,
+        )
+        build_ms = (time.perf_counter() - started) * 1000.0
+        # Keep the publisher's full-build cost visible independently of warmup.
+        metrics.observe_duration_ms(
+            "exomem_corpus_build_ms",
+            build_ms,
+            {"caller": current_call_context(), "outcome": "populate"},
+        )
+        with _census_walk_log() as walk_log, _CORPUS_CONTEXT_UPDATE_LOCK:
+            after = freshness.consumer_checkpoint(root, "vault")
+            if after != before:
+                log.info("semantic corpus populate discarded: registry advanced mid-walk")
                 return False
-            _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
-            _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
-                f"{language.schema_version}:{language.content_hash}"
-            )
-            # L4: no candidate is ever involved here, and a token of None
-            # pops rather than leaving a stale caption behind.
-            _caption_corpus_context_locked(cache_key, after)
-            _trim_corpus_cache_locked(cache_key)
-    log.info(
-        "semantic corpus context populated on miss pages=%d build_ms=%.1f",
-        len(context.pages),
-        build_ms,
-    )
-    return True
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+                    return False
+            if _deferred_corpus_census(root, walk_log, "census") != census:
+                log.info("semantic corpus populate discarded: corpus moved mid-build")
+                return False
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+                    return False
+                _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+                _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                    f"{language.schema_version}:{language.content_hash}"
+                )
+                # L4: None withdraws any old caption instead of retaining it.
+                _caption_corpus_context_locked(cache_key, after)
+                _trim_corpus_cache_locked(cache_key)
+        flight.result = context
+        log.info(
+            "semantic corpus context populated on miss pages=%d build_ms=%.1f",
+            len(context.pages),
+            build_ms,
+        )
+        return True
+    except BaseException as error:
+        flight.error = error
+        raise
+    finally:
+        flight.discarded = flight.result is None and flight.error is None
+        _finish_corpus_context_flight(cache_key, flight)
 
 
 @call_spans.timed("corpus_context.build")
@@ -3000,7 +3031,11 @@ def corpus_registry_overrides(
 
 def warm_corpus_context(vault_root: Path) -> None:
     """Fill the shared structural corpus cache without classifying for any caller."""
-    _build_corpus_context_with_census(Path(vault_root))
+    _context, census = _build_corpus_context_with_census(Path(vault_root), warm=True)
+    if corpus_context_cache_enabled() and census is None:
+        raise OpError(
+            "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
+        )
 
 
 def build_corpus_context_with_census(
@@ -3138,6 +3173,8 @@ def _build_corpus_context_with_census(
     candidate: SemanticPageState | None = None,
     registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    warm: bool = False,
+    join_deadline: float | None = None,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """``build_corpus_context`` plus the exact census that validated it.
 
@@ -3275,19 +3312,13 @@ def _build_corpus_context_with_census(
             relation_definitions.extension_hash,
         )
         language_identity = (language.schema_version, language.content_hash)
-        with _CORPUS_CONTEXT_CACHE_LOCK:
-            flight = _CORPUS_CONTEXT_FLIGHTS.get(cache_key)
-            if flight is None:
-                flight = _CorpusContextFlight(
-                    census,
-                    registry_identity,
-                    language_identity,
-                )
-                _CORPUS_CONTEXT_FLIGHTS[cache_key] = flight
-                owns_flight = True
-            else:
-                owns_flight = False
+        flight, owns_flight = _claim_corpus_context_flight(
+            cache_key, census, relation_definitions, language
+        )
         if not owns_flight:
+            initial_join = join_deadline is None
+            if not warm and initial_join:
+                join_deadline = time.monotonic() + _CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
             same_inputs = (
                 flight.census == census
                 and flight.registry_identity == registry_identity
@@ -3295,12 +3326,26 @@ def _build_corpus_context_with_census(
             )
             completed = flight.done.is_set()
             if not completed:
-                # Any thread may own the flight, a bulk pass included.
-                with foreground_priority.awaiting_bulk():
-                    completed = flight.done.wait(
-                        timeout=_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
+                if warm:
+                    # Startup owns the build lifetime, not an interactive budget.
+                    completed = flight.done.wait()
+                else:
+                    assert join_deadline is not None
+                    # Recursive handoffs share one interactive waiting budget.
+                    remaining = (
+                        _CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
+                        if initial_join
+                        else max(0.0, join_deadline - time.monotonic())
                     )
-            if not completed:
+                    # Any thread may own the flight, a bulk pass included.
+                    with foreground_priority.awaiting_bulk():
+                        completed = flight.done.wait(timeout=remaining)
+            if not completed or (
+                not warm
+                and (not same_inputs or flight.discarded)
+                and join_deadline is not None
+                and time.monotonic() >= join_deadline
+            ):
                 raise OpError(
                     "MUTATION_WARMING",
                     "semantic corpus context is still being built",
@@ -3310,15 +3355,27 @@ def _build_corpus_context_with_census(
                         "retry_after_ms": 2000,
                     },
                 )
-            if not same_inputs:
+            if not same_inputs or flight.discarded:
                 return _build_corpus_context_with_census(
                     root,
                     candidate=candidate,
                     registry=registry,
                     language_registry=language_registry,
+                    warm=warm,
+                    join_deadline=join_deadline,
                 )
             if flight.error is not None:
                 raise flight.error
+            if warm:
+                # Recheck admitted cache state; a foreign census is not this warmer's proof.
+                return _build_corpus_context_with_census(
+                    root,
+                    candidate=candidate,
+                    registry=registry,
+                    language_registry=language_registry,
+                    warm=True,
+                    join_deadline=join_deadline,
+                )
             assert flight.result is not None
             # Not `census`: that is this WAITER's own pre-wait walk, pinned
             # only to confirm it is chasing the same flight (`same_inputs`
@@ -3329,6 +3386,23 @@ def _build_corpus_context_with_census(
             return flight.result, None
 
     try:
+        if flight is not None:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                late_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            if late_entry is not None and late_entry[0] == census:
+                # A publisher filled the cache before this claim. Reuse its
+                # entry through the maintained lookup, without another parse.
+                redundant_flight, flight = flight, None
+                redundant_flight.discarded = True
+                _finish_corpus_context_flight(cache_key, redundant_flight)
+                return _build_corpus_context_with_census(
+                    root,
+                    candidate=candidate,
+                    registry=registry,
+                    language_registry=language_registry,
+                    warm=warm,
+                    join_deadline=join_deadline,
+                )
         started = time.perf_counter()
         context = _build_corpus_context_uncached(
             root,
@@ -3393,17 +3467,11 @@ def _build_corpus_context_with_census(
     except BaseException as error:
         if flight is not None:
             flight.error = error
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
-                    del _CORPUS_CONTEXT_FLIGHTS[cache_key]
-            flight.done.set()
+            _finish_corpus_context_flight(cache_key, flight)
         raise
     if flight is not None:
         flight.result = context
-        with _CORPUS_CONTEXT_CACHE_LOCK:
-            if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
-                del _CORPUS_CONTEXT_FLIGHTS[cache_key]
-        flight.done.set()
+        _finish_corpus_context_flight(cache_key, flight)
     return context, (census if stored else None)
 
 

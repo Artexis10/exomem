@@ -97,6 +97,33 @@ def test_mcp_deep_recall_cannot_pass_the_ordinary_population(tmp_path):
     assert row["breach"] is False
 
 
+def test_mcp_canary_accepts_required_material_with_partial_warming(tmp_path):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def ask_memory(query: str) -> dict:
+        return {
+            "hits": [{"type": "page", "ref": "private-reference", "text": query}],
+            "warming": {"components": ["pending_visibility"]},
+        }
+
+    report = _run_canary(
+        tmp_path,
+        server,
+        [_canary_case(state_path=["hits", 0, "type"], state="page")],
+        samples=1,
+        warm_up=False,
+        check="availability",
+    )
+    assert report["availability"] == "passed"
+    assert report["check_verdict"] == "passed"
+    [attempt] = report["cases"][0]["attempts"]
+    assert attempt["outcome"] == "ok"
+    assert attempt["failure"] is None
+
+
 def test_mcp_fast_typed_refusal_fails_and_stops_the_series(tmp_path, caplog):
     from fastmcp import FastMCP
 
