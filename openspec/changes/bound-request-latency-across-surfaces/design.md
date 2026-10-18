@@ -145,6 +145,8 @@ First localize the overdue interval through a bounded isolated reproduction. Reu
 
 Canonical commits remain immune to cancellation. All existing terminal, idempotency, fencing and committed-uncertain contracts apply. Preserve exact affected paths, required component sets, derived batch custody and pending-visibility rows. This change does not choose another acknowledgement framework or bypass a fail-closed read when visibility cannot be proven.
 
+New idempotency claims validate private runtime directories and SQLite artifacts without enumerating unrelated owner files. The private owner directory isolates those entries. Existing private lock creation, liveness checks, cleanup and legacy startup hardening remain unchanged.
+
 ### 6. Prove the delivered workflow with existing instruments
 
 Use isolated installed before/after arms on identical inputs and reference state. Bind every run to installed bytes, runtime/embedding profile, SQLite, corpus counts, auth population, CPU cap, memory and window. Verify counts and sampled identities from input to stored rows to returned packets before deriving percentiles. Record exclusions and contention under the owning contract.
