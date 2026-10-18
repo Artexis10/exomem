@@ -1497,6 +1497,75 @@ def test_a_spacing_only_edit_of_a_log_block_is_rendered_again_without_a_hold(sto
     assert holds(store) == [] and txns(store) == before and path.read_bytes() == rendered
 
 
+def test_a_formatting_only_log_save_preserves_spaces_in_stored_values(store):
+    """A grammar-trimmed heading must not turn a formatting save into a correction."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    values = {"title": "  One  ", "details": [{"field": "reps", "value": " 10 "}]}
+    receipt = store.append_record(CID, item=values, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    rendered = path.read_bytes()
+    edited = rendered.replace(b"###   One  \n", b"### One\n")
+    assert edited != rendered
+    path.write_bytes(edited)
+    before = txns(store)
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    assert holds(store) == [] and txns(store) == before
+    assert json.loads(store.connection.execute("SELECT values_json FROM items").fetchone()[0]) == values
+    assert path.read_bytes() == rendered
+
+
+def test_a_log_field_edit_preserves_spaces_in_an_untouched_field(store):
+    """Editing a child row must not trim an API-written heading in the same block."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "  One  ", "details": [{"field": "reps", "value": "10"}]},
+                                  item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    rendered = path.read_bytes()
+    edited = rendered.replace(b"- reps | 10\n", b"- reps | 11\n")
+    assert edited != rendered
+    path.write_bytes(edited)
+    passes(store, 0.0, SETTLED)
+    version, raw = store.connection.execute("SELECT row_version,values_json FROM items").fetchone()
+    assert version == 2 and holds(store) == []
+    assert json.loads(raw) == {"title": "  One  ", "details": [{"field": "reps", "value": "11"}]}
+    assert len(txns(store, "view_edit")) == 1
+
+
+def test_a_stale_log_resume_preserves_untouched_padding_and_a_newer_hidden_field(store):
+    """A held child edit must not trim its old heading or undo a newer API-only field."""
+    from test_collection_store_writer import log_manifest_text
+
+    text = log_manifest_text().replace("    title: {type: string, required: true}",
+                                       "    title: {type: string, required: true}\n    note: {type: string}")
+    store.create_collection(manifest_path(), text, why="create")
+    receipt = store.append_record(CID, item={"title": "  One  ", "note": "old",
+                                  "details": [{"field": "reps", "value": "10"}]}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    stale = path.read_bytes()
+    current = store.update_record(CID, item_key=KEY, changes={"note": "new"}, why="agent",
+                                  expected_container_hash=receipt["after_container_hash"],
+                                  expected_item_version=receipt["after_item_hash"])
+    store.reconcile_views()
+    edited = stale.replace(b"- reps | 10\n", b"- reps | 11\n")
+    assert edited != stale
+    path.write_bytes(edited)
+    passes(store, 0.0, SETTLED)
+    [(held, code, _)] = holds(store)
+    assert code == "VIEW_CONFLICT"
+    store.update_record(CID, item_key=KEY, held=held, why="resume",
+                        expected_container_hash=current["after_container_hash"],
+                        expected_item_version=current["after_item_hash"])
+    values = json.loads(store.connection.execute("SELECT values_json FROM items").fetchone()[0])
+    assert values == {"title": "  One  ", "note": "new", "details": [{"field": "reps", "value": "11"}]}
+
+
 def test_a_log_block_that_names_no_row_is_held_and_appends_nothing(store):
     """Defect: a block the owner typed into the log, which no record id binds to a row, is dropped
     by the next render, or becomes a row without a governed append."""

@@ -425,17 +425,14 @@ def authentic_frame_base(writer, projection, stamp) -> bool:
                for context in [descriptor.get("render_context"), *descriptor.get("source_contexts", [])])
 
 
-def _shown(manifest, key, values, name) -> bool:
-    """Whether a row's block shows field ``name``: an empty child list or an undrawn field it does not."""
-    rest = {field: value for field, value in values.items() if field != name}
-    return (log_view.render_block(manifest, {"item_key": key, "values": values}, "\n")
-            != log_view.render_block(manifest, {"item_key": key, "values": rest}, "\n"))
-
-
-def _edit(manifest, key, old, values) -> tuple[dict, list]:
-    """What a block's ``values`` set and delete relative to ``old``; a field the block does not show stays."""
+def _edit(root, manifest, key, old, values) -> tuple[dict, list]:
+    """Diff the displayed base and proposal; apply the patch over exact canonical values."""
     changes, deleted = _changes(old, values)
-    return changes, [name for name in deleted if _shown(manifest, key, old, name)]
+    if not changes and not deleted:
+        return changes, deleted
+    rendered = log_view.render_block(manifest, {"item_key": key, "values": old}, "\n")
+    displayed = log_view.decode_block(root, manifest, rendered.encode()).values
+    return _changes(collections.normalize_item_values(manifest.schema, displayed), values)
 
 
 def _classify_block(writer, manifest, declared, row, record, stamp, block, refused) -> Classification:
@@ -461,7 +458,7 @@ def _classify_block(writer, manifest, declared, row, record, stamp, block, refus
         if payload is not None and payload[0][:12] == stamp["h"] and not log_view.stray_lines(block, record):
             try:
                 older = typed_storage.version_values(conn, row["row_id"], stamp["v"])[0]
-                untouched = _edit(manifest, key, older,
+                untouched = _edit(writer.root, manifest, key, older,
                                   collections.normalize_item_values(manifest.schema, record.values)) == ({}, [])
             except collections.CollectionError:
                 untouched = False
@@ -475,7 +472,7 @@ def _classify_block(writer, manifest, declared, row, record, stamp, block, refus
         # The store keeps the values alone, so applying them would lose the block's other text.
         return found(INVALID, issues=(_BLOCK_TEXT,))
     try:
-        changes, deleted = _edit(manifest, key, row["values"],
+        changes, deleted = _edit(writer.root, manifest, key, row["values"],
                                  collections.normalize_item_values(manifest.schema, record.values))
     except collections.CollectionError as error:
         return found(INVALID, issues=_refused(error))
@@ -520,7 +517,7 @@ def resumed_update(writer, held, manifest, before) -> dict:
                 or stamp["v"] != held["base_row_version"] or version is None or version[0][:12] != stamp["h"]):
             raise records._held_not_found()
         base = typed_storage.version_values(writer.connection, before["row_id"], stamp["v"])[0]
-        changes, deleted = _edit(manifest, before["item_key"], base,
+        changes, deleted = _edit(writer.root, manifest, before["item_key"], base,
                                  collections.normalize_item_values(manifest.schema, record.values))
         return {"action": "update", "item_key": before["item_key"], "changes": changes,
                 "delete_fields": deleted, "body": None}

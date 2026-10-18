@@ -501,6 +501,14 @@ The writer SHALL validate the whole log before applying components. Frame and ro
 
 Explicit resume of a held log block SHALL parse exactly one block under the declared grammar and reject stray text. A stale-block update SHALL rebase against its recorded row version without reverting untouched newer fields. An unbound template block SHALL use ordinary append validation, caller overrides and key derivation. Log blocks SHALL NOT adopt item-file filenames.
 
+#### Scenario: A log edit preserves untouched canonical fields
+- **GIVEN** the API stored strings with edge spaces and fields that the log does not display
+- **WHEN** the owner saves formatting changes that the declared parser discards
+- **THEN** the canonical row and its history remain unchanged
+- **WHEN** the owner changes one displayed field or resumes that change from a stale block
+- **THEN** edit-back compares the proposal with the display of its recorded base through the shared renderer and parser
+- **AND** only changed fields update; untouched stored spaces and newer undisplayed fields remain exact
+
 A direct log read SHALL require release of the manifest, every canonical row and complete fields. It SHALL prove exact current rendered bytes in the same snapshot and retain additional frame membership restrictions. An edited, stale or partly withheld log SHALL answer as absent.
 
 #### Scenario: A mixed log save preserves every component
