@@ -834,9 +834,10 @@ def measure(
             return "unknown"
 
     try:
-        example, planning_path = _prepare_collections(client)
         if transport == "connector":
             relation_target = _connector_relation_target(client)
+        example, planning_path = _prepare_collections(client)
+        if transport == "connector":
             preparation_seconds, preparation_converged, preparation_drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds)
             projection = due_state.load(root)
             # Count stored buckets, separately from the audience-filtered served view.
