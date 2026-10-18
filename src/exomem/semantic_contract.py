@@ -1718,24 +1718,38 @@ def evict_corpus_context(vault_root: Path) -> bool:
 
 def current_reference_identity_snapshot(
     vault_root: Path,
+    *,
+    declined: dict[str, int] | None = None,
 ) -> ReferenceIdentitySnapshot | None:
-    """Return the current cached identity authority without filesystem corpus work."""
+    """Return the current cached identity authority without filesystem corpus work.
+
+    ``declined`` receives the first proof failure for the caller's existing span.
+    """
+    # Decline keys name this proof's closed branches, never source content.
+    def decline(reason: str) -> None:
+        if declined is not None:
+            declined[f"declined_{reason}"] = 1
+
     root = Path(vault_root)
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
-            return None
+        if freshness.external_pending(root):
+            return decline("external_pending")
+        if not freshness.is_live(root, "vault"):
+            return decline("events_not_live")
         checkpoint = freshness.consumer_checkpoint(root, "vault")
         if checkpoint.triple is None:
-            return None
+            return decline("checkpoint_absent")
         try:
             cache_key = _corpus_cache_key(root)
         except Exception:  # noqa: BLE001 - an unkeyable root has no authority
-            return None
+            return decline("unkeyable")
         with _CORPUS_CONTEXT_CACHE_LOCK:
             entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
             caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
-            if entry is None or caption != checkpoint:
-                return None
+            if entry is None:
+                return decline("corpus_absent")
+            if caption != checkpoint:
+                return decline("checkpoint_differs")
             identity = entry[1].identity_census
             snapshot = ReferenceIdentitySnapshot(
                 checkpoint,
@@ -1745,7 +1759,7 @@ def current_reference_identity_snapshot(
                 entry[1],
             )
         if freshness.external_pending(root):
-            return None
+            return decline("changed_during_proof")
         return snapshot
 
 
@@ -1823,7 +1837,7 @@ def current_writer_resolver_entries(
             if entry is None or language_hash is None:
                 return decline("corpus_absent")
             if caption != checkpoint:
-                return decline("corpus_checkpoint_differs")
+                return decline("checkpoint_differs")
             census, context = entry
             entries = context.resolver_entries
 

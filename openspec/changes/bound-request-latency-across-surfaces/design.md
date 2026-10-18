@@ -195,6 +195,40 @@ The four-entry bound can retain four distinct vocabulary maps; alias compaction 
 
 Under a governance policy its admission also decides every page on each request, which dominates its carry cost; this change leaves that cost as it was. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
 
+### 8. Release the page while optional inbound links recover
+
+Direct page reads must not build an inbound index before releasing their held page.
+The existing inbound index is the closest maintained option; its cold path currently scans every Markdown page.
+Reuse that index with a non-building lookup, rather than add a second graph or a request-owned worker.
+The added maintenance is current-proof acquisition and demand recovery on the existing watcher.
+
+Every link summary uses this lookup, including local and REST calls without an MCP budget.
+A complete result keeps its existing inbound and outbound lists.
+Unknown inbound information uses `inbound: null`; an empty list continues to mean a complete lookup found no links.
+Outbound targets come from the held caller-projected prose.
+Existing page release, exclusion, byte checks and terminal disclosure remain in force.
+Explicit inbound operations and mutation safety keep their complete synchronous lookup.
+
+The lookup requires live freshness, no external-pending epoch and a matching resident index.
+It copies candidates and basename evidence under the existing lock without waiting, then applies caller visibility outside the lock.
+It rechecks authority before claiming completeness; missing proof, contention or change yields unknown.
+It never derives freshness through a filesystem walk.
+Incremental updates withdraw data and advance its generation before mutation, including updates while the cache is cold.
+An update proves completeness only when retained history bridges its old checkpoint and the patch covers every changed path.
+Only a current complete build or patch can publish; correctness eviction retains demand but removes data.
+
+One existing watcher reconcile thread owns optional recovery after its required recovery and deferred work.
+Runtime activation arms that work after its worker starters; required warm-up must also have ended.
+Normal and quiet modes prime only requested or previously used state; performance mode can prime eagerly.
+The owner yields to foreground work, observes shutdown, and rejects partial or obsolete publication.
+No scheduler, registry, pool, request thread or readiness gate is added.
+
+Recovery follows the existing mode cadence and can take one interval plus higher-priority work.
+Disabled observation or continuous changes can leave inbound information unknown while page reads remain available.
+The correctness cost is explicit delayed link completeness; the benefit is preserving the page response during index recovery.
+No new numerical latency bar or production performance claim follows from the isolated workflow proof.
+
+
 ## Risks / Trade-offs
 
 - Retention or observation failure can bias percentiles → Expose partial coverage and forbid complete-population claims.

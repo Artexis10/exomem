@@ -23,21 +23,19 @@ def outbound_link_targets(body: str) -> list[str]:
 def link_summary(vault_root: Path, rel_path: str, body: str) -> dict:
     """Inbound + outbound wikilink summary for the `get(links=True)` option.
 
+    Unknown inbound information is null while the existing owner rebuilds it.
     Inbound links resolve over the reader's view: for a reader other than the
     owner a bare link counts as inbound when this page's basename is unique
     among the pages it may see.
     """
     from .governance import egress
 
-    inbound = (
-        [
-            m.as_dict()
-            for m in vault.find_inbound_wikilinks(
-                vault_root, rel_path, visible=egress.visible_page_filter(vault_root)
-            )
-        ]
-        if rel_path
-        else []
+    matches = (
+        vault.cached_inbound_wikilinks(
+            vault_root, rel_path, visible=egress.visible_page_filter(vault_root)
+        )
+        if rel_path else None
     )
+    inbound = None if matches is None else [match.as_dict() for match in matches]
     prose = egress.prose_for_caller(vault_root, body, owner_path=rel_path)
     return {"inbound": inbound, "outbound": outbound_link_targets(prose)}

@@ -31,12 +31,10 @@ measuring that would measure the wrong path.
 
 from __future__ import annotations
 
-import gc
 import json
 import os
 import sys
 import threading
-import time
 import traceback
 from collections import Counter
 from pathlib import Path
@@ -955,90 +953,24 @@ def test_the_index_served_browse_returns_the_same_answer_as_the_walk(
 
 
 def test_every_request_shape_attributes_its_time(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+    vault: Path, warm_managed_cell,
 ) -> None:
-    """Keep the attribution bounds across the public request shapes.
+    """Keep attribution bounds across public request shapes with the real clock.
 
-    The table compares every shape before naming a breach. CPU samples at the
-    existing wall boundaries distinguish work from waiting in uncovered gaps.
-    The probe reports its overhead; it does not measure production latency.
+    A clock observer can charge its own delay to uncovered product time.
+    Keep the ordinary timing payloads so a breach still names its stages.
     """
     _seed_outside(vault, "integration-attrib.md")
     rel = f"{kb_dirname()}/Notes/Integration/integration-attrib-kb.md"
     _seed_kb(vault, rel, "Integration Attrib", project="project-alpha")
     _warm(vault, warm_managed_cell)
 
-    from exomem import find_types
-
-    class BoundaryClock:
-        def __init__(self) -> None:
-            self.readings: list[dict[str, Any]] = []
-            self.collectors: list[dict[str, Any]] = []
-
-        def __getattr__(self, name: str):
-            return getattr(time, name)
-
-        def perf_counter(self) -> float:
-            wall = time.perf_counter()
-            frame = sys._getframe(1)
-            collector = frame.f_locals.get("self")
-            reading = {
-                "wall": wall,
-                "thread_cpu_ns": time.thread_time_ns(),
-                "process_cpu_ns": time.process_time_ns(),
-                "thread": threading.get_ident(),
-                "collector": id(collector),
-                "phase": frame.f_code.co_name,
-                "stage": frame.f_locals.get("name"),
-            }
-            # This method name is the collector's existing serialization boundary.
-            if frame.f_code.co_name == "as_dict":
-                with collector._intervals_lock:
-                    self.collectors.append({
-                        "collector": id(collector), "start": collector._t0,
-                        "end": wall, "intervals": tuple(collector._intervals),
-                    })
-            self.readings.append(reading)
-            reading["probe_wall_ns"] = time.perf_counter_ns() - int(wall * 1e9)
-            return wall
-
-    clock = BoundaryClock()
-    gc_events: list[dict[str, Any]] = []
-
-    def observe_gc(phase: str, info: dict[str, int]) -> None:
-        gc_events.append({
-            "phase": phase, "info": dict(info), "wall": time.perf_counter(),
-            "thread": threading.get_ident(),
-        })
-
     measured: dict[str, tuple[float, float]] = {}
     diagnostics: dict[str, Any] = {}
-    # Pair existing clock boundaries with CPU; do not add attribution spans.
-    # Probe cost is visible and remains part of this diagnostic test's execution.
-    with monkeypatch.context() as patch:
-        patch.setattr(find_types, "time", clock)
-        gc.callbacks.append(observe_gc)
-        try:
-            for shape, kwargs in sorted(_SHAPES.items()):
-                clock.readings = []
-                clock.collectors = []
-                gc_events = []
-                threads = [thread.name for thread in threading.enumerate()]
-                started = time.perf_counter_ns(), time.thread_time_ns(), time.process_time_ns()
-                timings = _recall(vault, **kwargs)["timings"]
-                ended = time.perf_counter_ns(), time.thread_time_ns(), time.process_time_ns()
-                measured[shape] = (float(timings["total_ms"]), float(timings["unattributed_ms"]))
-                diagnostics[shape] = {
-                    "timings": timings, "clock_readings": clock.readings,
-                    "collectors": clock.collectors, "gc_events": gc_events,
-                    "threads_before": threads,
-                    "threads_after": [thread.name for thread in threading.enumerate()],
-                    "call_wall_ms": (ended[0] - started[0]) / 1e6,
-                    "call_thread_cpu_ms": (ended[1] - started[1]) / 1e6,
-                    "call_process_cpu_ms": (ended[2] - started[2]) / 1e6,
-                }
-        finally:
-            gc.callbacks.remove(observe_gc)
+    for shape, kwargs in sorted(_SHAPES.items()):
+        timings = _recall(vault, **kwargs)["timings"]
+        measured[shape] = (float(timings["total_ms"]), float(timings["unattributed_ms"]))
+        diagnostics[shape] = timings
 
     table = ", ".join(
         f"{shape} unattributed={unattributed:.1f}/total={total:.1f}"

@@ -6559,6 +6559,26 @@ class _InboundIndexData:
     # counted toward stem_counts — lets
     # on_files_changed() tell a rename's
     # "new" side from an in-place edit.
+    checkpoint: freshness.FreshnessCheckpoint | None = None
+    stem_paths: dict[str, set[str]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.stem_paths = {}
+        for rel in self.known_rels:
+            self.stem_paths.setdefault(PurePosixPath(rel).stem, set()).add(rel)
+
+    def _forget(self, rel: str) -> None:
+        if rel not in self.known_rels:
+            return
+        self.known_rels.remove(rel)
+        stem = PurePosixPath(rel).stem
+        paths = self.stem_paths[stem]
+        paths.remove(rel)
+        if paths:
+            self.stem_counts[stem] = len(paths)
+        else:
+            self.stem_paths.pop(stem)
+            self.stem_counts.pop(stem)
 
     def on_files_changed(
         self,
@@ -6617,14 +6637,7 @@ class _InboundIndexData:
 
         # 3. Drop the stem-count contribution for every path that is now gone.
         for rel in deleted:
-            if rel in self.known_rels:
-                stem = Path(rel).stem
-                count = self.stem_counts.get(stem, 0) - 1
-                if count > 0:
-                    self.stem_counts[stem] = count
-                else:
-                    self.stem_counts.pop(stem, None)
-                self.known_rels.discard(rel)
+            self._forget(rel)
 
         # 4. Re-read each still-existing changed file and re-add its edges +
         #    stem-count contribution (only if it's a path we didn't already
@@ -6638,19 +6651,13 @@ class _InboundIndexData:
             try:
                 text, _guard = read_guarded_text(vault_root, abs_path)
             except (OSError, UnicodeDecodeError, PathGuardError):
-                if rel in self.known_rels:
-                    stem = Path(rel).stem
-                    count = self.stem_counts.get(stem, 0) - 1
-                    if count > 0:
-                        self.stem_counts[stem] = count
-                    else:
-                        self.stem_counts.pop(stem, None)
-                    self.known_rels.discard(rel)
+                self._forget(rel)
                 continue
             if rel not in self.known_rels:
                 stem = Path(rel).stem
                 self.stem_counts[stem] = self.stem_counts.get(stem, 0) + 1
                 self.known_rels.add(rel)
+                self.stem_paths.setdefault(stem, set()).add(rel)
             for lineno, context, raw in _scan_wikilinks(text):
                 normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
                 self.buckets.setdefault(normalized, []).append(
@@ -6665,9 +6672,22 @@ class _InboundIndexData:
                 next_seq += 1
 
 
+@dataclass
+class _InboundGeneration:
+    generation: int = 0
+    demanded: threading.Event = field(default_factory=threading.Event)
+
+
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
-_INBOUND_INDEX_GENERATIONS: dict[str, int] = {}
+_INBOUND_INDEX_GENERATIONS: dict[str, _InboundGeneration] = {}
 _INBOUND_INDEX_LOCK = threading.Lock()
+
+
+def register_inbound_index(vault_root: Path) -> None:
+    """Prepare a stable demand signal before the existing watcher serves a vault."""
+    root = str(vault_root.resolve())
+    with _INBOUND_INDEX_LOCK:
+        _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
 
 
 def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
@@ -6689,11 +6709,13 @@ def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
 
 
 def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
+    from . import foreground_priority
+
     buckets: dict[str, list[_InboundEntry]] = {}
     stem_counts: dict[str, int] = {}
     known_rels: set[str] = set()
     seq = 0
-    for md in walk_vault_md(vault_root):
+    for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root)):
         try:
             md_rel = md.relative_to(vault_root).as_posix()
             text, _guard = read_guarded_text(vault_root, md)
@@ -6731,20 +6753,60 @@ def _vault_freshness_key(vault_root: Path):
     return find_module._walk_freshness_key(walk_vault_md(vault_root))
 
 
-def _inbound_index(vault_root: Path) -> _InboundIndexData:
+def _inbound_index(vault_root: Path, *, require_current: bool = False) -> _InboundIndexData:
     """The cached index, rebuilt when the vault's freshness key moves."""
     key = _vault_freshness_key(vault_root)
+    checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
-        generation = _INBOUND_INDEX_GENERATIONS.setdefault(root, 0)
+        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+        state.demanded.set()
+        generation = state.generation
         cached = _INBOUND_INDEX.get(root)
-        if cached and cached[0] == key:
+        if (
+            cached and cached[0] == key
+            and (not require_current or cached[1].checkpoint == checkpoint)
+        ):
             return cached[1]
     data = _build_inbound_index(vault_root)
+    data.checkpoint = _inbound_checkpoint(vault_root, data, key, checkpoint)
     with _INBOUND_INDEX_LOCK:
-        if _INBOUND_INDEX_GENERATIONS.get(root) == generation:
+        if state.generation == generation:
             _INBOUND_INDEX[root] = (key, data)
     return data
+
+
+def _inbound_checkpoint(
+    vault_root: Path,
+    data: _InboundIndexData,
+    key: tuple[int, int, str],
+    checkpoint: freshness.FreshnessCheckpoint,
+) -> freshness.FreshnessCheckpoint | None:
+    # A skipped unreadable page cannot establish a complete link census.
+    if (
+        checkpoint.triple is not None
+        and checkpoint.triple == key
+        and len(data.known_rels) == key[0]
+        and freshness.consumer_checkpoint(vault_root, "vault") == checkpoint
+        and not freshness.external_pending(vault_root)
+    ):
+        return checkpoint
+    return None
+
+
+def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
+    """Rebuild requested link metadata on the existing background owner."""
+    root = str(vault_root.resolve())
+    with _INBOUND_INDEX_LOCK:
+        state = _INBOUND_INDEX_GENERATIONS.get(root)
+        if not eager and (state is None or not state.demanded.is_set()):
+            return False
+    if freshness.generation(vault_root, "vault") is None or freshness.external_pending(vault_root):
+        return False
+    data = _inbound_index(vault_root, require_current=True)
+    with _INBOUND_INDEX_LOCK:
+        cached = _INBOUND_INDEX.get(root)
+        return cached is not None and cached[1] is data and data.checkpoint is not None
 
 
 def on_inbound_files_changed(
@@ -6769,42 +6831,60 @@ def on_inbound_files_changed(
     """
     if not freshness.event_indexes_enabled():
         return
-    root = str(vault_root.resolve())
-    with _INBOUND_INDEX_LOCK:
-        generation = _INBOUND_INDEX_GENERATIONS.setdefault(root, 0)
-        cached = _INBOUND_INDEX.get(root)
-        if cached is None:
-            return
     changed_list = list(changed_rels)
     deleted_list = list(deleted_rels)
     if not (changed_list or deleted_list):
         return
+    root = str(vault_root.resolve())
+    with _INBOUND_INDEX_LOCK:
+        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+        state.generation += 1
+        generation = state.generation
+        cached = _INBOUND_INDEX.pop(root, None)
+        if cached is None:
+            return
     _, data = cached
+    checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
+    bridge = (
+        freshness.delta_since(vault_root, "vault", data.checkpoint)
+        if data.checkpoint is not None else None
+    )
+    # A later patch proves the whole index only when it covers the retained suffix.
+    covered = {str(Path(root) / rel) for rel in changed_list + deleted_list}
+    complete = (
+        bridge is not None
+        and bridge.complete
+        and bridge.to == checkpoint
+        and (bridge.changed | bridge.deleted).issubset(covered)
+    )
     data.on_files_changed(vault_root, changed_list, deleted_list)
     key = _vault_freshness_key(vault_root)
+    data.checkpoint = (
+        _inbound_checkpoint(vault_root, data, key, checkpoint) if complete else None
+    )
     with _INBOUND_INDEX_LOCK:
         if (
-            _INBOUND_INDEX_GENERATIONS.get(root) == generation
-            and _INBOUND_INDEX.get(root) is cached
+            state.generation == generation
+            and _INBOUND_INDEX.get(root) is None
+            and data.checkpoint is not None
         ):
             _INBOUND_INDEX[root] = (key, data)
 
 
 def clear_inbound_index() -> None:
-    """Test hook: drop every cached inbound-link index (patch state included —
-    `known_rels`/`buckets`/`stem_counts` all live inside the cached
-    `_InboundIndexData`, so clearing the outer dict resets everything)."""
+    """Withdraw all inbound data while preserving requested background recovery."""
     with _INBOUND_INDEX_LOCK:
         _INBOUND_INDEX.clear()
-        for root in _INBOUND_INDEX_GENERATIONS:
-            _INBOUND_INDEX_GENERATIONS[root] += 1
+        for state in _INBOUND_INDEX_GENERATIONS.values():
+            state.generation += 1
 
 
 def evict_inbound_index(vault_root: Path) -> bool:
     """Withdraw one vault's rebuildable inbound-link projection."""
     root = str(Path(vault_root).resolve())
     with _INBOUND_INDEX_LOCK:
-        _INBOUND_INDEX_GENERATIONS[root] = _INBOUND_INDEX_GENERATIONS.get(root, 0) + 1
+        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+        state.generation += 1
         return _INBOUND_INDEX.pop(root, None) is not None
 
 
@@ -6833,18 +6913,90 @@ def find_inbound_wikilinks(
     for the owner): uniqueness is then counted over the pages it admits, as
     in a vault without the others. Only a basename that is shared is decided.
     """
+    return _select_inbound_wikilinks(_inbound_index(vault_root), target_rel_path, visible)
+
+
+def cached_inbound_wikilinks(
+    vault_root: Path,
+    target_rel_path: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+) -> list[InboundLink] | None:
+    """Borrow complete current evidence without a walk, build or cache wait."""
+    root = str(vault_root.resolve())
+    state = _INBOUND_INDEX_GENERATIONS.get(root)
+    if state is None:
+        return None
+    # Owner registration makes this signal stable even while evidence is contended.
+    state.demanded.set()
+    instance = freshness.consumer_checkpoint_instance()
+    generation = freshness.generation(vault_root, "vault")
+    if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
+        return None
+    try:
+        cached = _INBOUND_INDEX.get(root)
+        if cached is None:
+            return None
+        checkpoint = cached[1].checkpoint
+        if (
+            generation is None
+            or checkpoint is None
+            or (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
+        ):
+            return None
+        cache_generation = state.generation
+        data = cached[1]
+        target = target_rel_path.replace("\\", "/").removesuffix(".md")
+        full = target if target.startswith(kb_prefix()) else kb_prefix() + target
+        basename = target.rsplit("/", 1)[-1]
+        # Copy only this target's evidence; visibility never holds the cache lock.
+        snapshot = _InboundIndexData(
+            buckets={
+                key: list(data.buckets.get(key, ()))
+                for key in (full, full.removeprefix(kb_prefix()), basename)
+            },
+            stem_counts={basename: data.stem_counts.get(basename, 0)},
+            known_rels=set(data.stem_paths.get(basename, ())),
+        )
+    finally:
+        _INBOUND_INDEX_LOCK.release()
+    if freshness.external_pending(vault_root):
+        return None
+    result = _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+    if (
+        freshness.consumer_checkpoint_instance() != instance
+        or freshness.generation(vault_root, "vault") != generation
+        or freshness.external_pending(vault_root)
+        or not _INBOUND_INDEX_LOCK.acquire(blocking=False)
+    ):
+        return None
+    try:
+        if (
+            state.generation != cache_generation
+            or _INBOUND_INDEX.get(root) is not cached
+        ):
+            return None
+    finally:
+        _INBOUND_INDEX_LOCK.release()
+    return result
+
+
+def _select_inbound_wikilinks(
+    data: _InboundIndexData,
+    target_rel_path: str,
+    visible: Callable[[str], bool] | None,
+) -> list[InboundLink]:
     target = target_rel_path.replace("\\", "/").removesuffix(".md")
     target_full = target if target.startswith(kb_prefix()) else kb_prefix() + target
     target_stripped = target_full.removeprefix(kb_prefix())
     target_basename = target.rsplit("/", 1)[-1]
 
-    data = _inbound_index(vault_root)
     stem_count = data.stem_counts.get(target_basename, 0)
     if visible is not None and stem_count > 1:
         stem_count = sum(
             1
-            for rel in data.known_rels
-            if PurePosixPath(rel).stem == target_basename and visible(rel)
+            for rel in data.stem_paths.get(target_basename, ())
+            if visible(rel)
         )
     basename_unique = stem_count == 1
 
