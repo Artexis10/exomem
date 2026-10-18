@@ -177,6 +177,51 @@ A failed Job is not an export. Inspect status/events without dumping the
 Secret, volume or full Job environment. Do not start the archive Pod before
 the restore completes.
 
+## Prepare the collection replica in scratch
+
+The selected backup can contain canonical collection commits ahead of its
+published replica. Prepare the replica before mounting scratch read-only.
+Use the reviewed runtime image and original vault placement, `/data/vault`.
+The adapter derives the state directory beneath the runtime account's home
+and verifies its migration manifest. It never scans for a database or changes
+the original database, WAL, marker, instance or coordinator fence.
+
+Set `PREPARE_TIMEOUT_SECONDS` to the positive bound approved for this export.
+The bound controls this operation; it is not a measured performance promise.
+If reviewed placement does not bind the state directory, supply the reviewed
+directory under `/data/host` with `--source-state-directory`. Do not remap the
+process environment or try alternative directories.
+
+1. Run the preparer against only scratch; expect the Pod to start.
+
+```bash
+: "${PREPARE_TIMEOUT_SECONDS:?positive preparation bound required}"
+kubectl -n "$SCRATCH" run vault-prepare --image="$IMAGE" --restart=Never --overrides='{"spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":10001,"runAsGroup":10001,"fsGroup":10001,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"vault-prepare","image":"'"$IMAGE"'","command":["python3","-m","exomem.cloud_operator_portability","--vault","/data/vault","--host-root","/data/host","--original-vault","/data/vault","--timeout-seconds","'"$PREPARE_TIMEOUT_SECONDS"'"],"resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"name":"data","mountPath":"/data"},{"name":"temporary","mountPath":"/tmp"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"cell-data"}},{"name":"temporary","emptyDir":{}}]}}'
+```
+
+2. Wait for preparation; expect `Succeeded` and a content-free JSON receipt.
+
+```bash
+kubectl -n "$SCRATCH" wait --for=jsonpath='{.status.phase}'=Succeeded pod/vault-prepare --timeout="${PREPARE_TIMEOUT_SECONDS}s"
+kubectl -n "$SCRATCH" logs pod/vault-prepare
+```
+
+3. Remove the preparer before creating the archive Pod; expect deletion to finish.
+
+```bash
+kubectl -n "$SCRATCH" delete pod vault-prepare --wait=true
+```
+
+A refusal stops the archive step. Retain scratch for bounded diagnosis;
+a retry validates any replica that preparation already installed.
+A successful receipt describes prepared bytes and the store head.
+It grants no destination writer authority. A generation-2 or later marker
+still refuses a fresh coordinator; configure destination coordination through
+the separate deployment procedure before enabling store service.
+
+This preparation and staged Cloud collection proof have local integration
+coverage. The Cloud exercise dated above predates these steps.
+
 ## Encrypt and hand off `vault/`
 
 Create a short-lived archive Pod after the restore. It mounts only the scratch
@@ -238,13 +283,16 @@ if [ "$(sha256sum < "$RECIPIENTS" | cut -d' ' -f1)" != "$RECIPIENTS_SHA256" ]; t
 fi
 if kubectl -n "$SCRATCH" exec pod/vault-archive -- python3 -c '
 import os, sys, tarfile
-p = "/data/vault"
+from pathlib import Path
+from exomem.cloud_operator_portability import archive_members
+p = Path("/data/vault")
 if not os.path.isdir(p): raise SystemExit("vault directory absent")
 def safe(member):
     if not (member.isfile() or member.isdir()): raise ValueError("unsupported vault entry")
     return member
 with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as stream:
-    stream.add(p, arcname="vault", filter=safe)
+    for relative in archive_members(p):
+        stream.add(p / relative, arcname=(Path("vault") / relative).as_posix(), recursive=False, filter=safe)
 ' | age -R "$RECIPIENTS" -o "$temporary"; then
   test -s "$temporary"
   mv -- "$temporary" "$archive"

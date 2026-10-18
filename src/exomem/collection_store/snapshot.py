@@ -138,18 +138,32 @@ def migrate_copy(path: Path, check: Callable[[], None] = lambda: None) -> None:
     caller's own validation refuses a newer or unreadable one as before. The migration takes
     no writer lease and rewrites the file in place, so only a private copy may pass here.
     """
+    stopped = []
+
+    def checked():
+        try:
+            check()
+        except BaseException as error:
+            stopped.append(error)
+            raise
+
     with closing(sqlite3.connect(path, isolation_level=None)) as conn:
         try:
-            found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
-        except (sqlite3.DatabaseError, schema.SchemaMetadataError, schema.SchemaVersionError):
+            with connection.checked_sql(conn, checked):
+                found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
+                if not 0 < found < schema.SCHEMA_VERSION:
+                    return
+                _validate(conn, checked, version=found)
+        except (sqlite3.DatabaseError, schema.SchemaMetadataError, schema.SchemaVersionError) as error:
+            if stopped and error is stopped[-1]:
+                raise
             return
-        if not 0 < found < schema.SCHEMA_VERSION:
-            return
-        _validate(conn, check, version=found)
     try:
-        with connection.staging_store(path):
+        with connection.staging_store(path, check=checked):
             pass  # The staging writer migrates the copy in one transaction.
     except Exception as error:  # noqa: BLE001 - a copy that cannot migrate is as unusable as a damaged one
+        if stopped and error is stopped[-1]:
+            raise
         raise connection.CollectionStoreError(
             "COLLECTION_SNAPSHOT_INVALID", "copied store failed its schema migration"
         ) from error
@@ -177,6 +191,24 @@ def staged_snapshot(
     deadline: float,
     cancelled: Callable[[], bool] | None = None,
     scratch_token: str | None = None,
+) -> Iterator[SnapshotArtifact]:
+    """Stage the live vault store, requiring its current schema as before."""
+    with staged_store_snapshot(
+        connection.store_path(vault_root), directory=directory, deadline=deadline,
+        cancelled=cancelled, scratch_token=scratch_token,
+    ) as artifact:
+        yield artifact
+
+
+@contextmanager
+def staged_store_snapshot(
+    source_path: Path,
+    *,
+    directory: Path,
+    deadline: float,
+    cancelled: Callable[[], bool] | None = None,
+    scratch_token: str | None = None,
+    preserve_schema: bool = False,
 ) -> Iterator[SnapshotArtifact]:
     """Yield a closed, fsynced copy in the caller's existing private directory.
 
@@ -244,11 +276,10 @@ def staged_snapshot(
                     sqlite3.connect(path, isolation_level=None, timeout=_BUSY_TIMEOUT_MS / 1000)
                 ) as destination:
                     check()
-                    with closing(
-                        connection.open_reader(
-                            connection.store_path(vault_root), busy_timeout_ms=_BUSY_TIMEOUT_MS
-                        )
-                    ) as source:
+                    source = (connection._open_read_only(source_path, _BUSY_TIMEOUT_MS)[0]
+                              if preserve_schema else connection.open_reader(
+                                  source_path, busy_timeout_ms=_BUSY_TIMEOUT_MS))
+                    with closing(source):
                         check()
                         source.execute("BEGIN")
                         source.execute("SELECT key,value FROM store_meta").fetchall()
@@ -276,7 +307,8 @@ def staged_snapshot(
 
                     destination.set_progress_handler(validation_progress, 1000)
                     try:
-                        metadata = _validate(destination, check)
+                        version = schema.schema_version(destination) if preserve_schema else None
+                        metadata = _validate(destination, check, version=version)
                     except connection.CollectionStoreError as error:
                         if interruption is not None:
                             raise interruption from error.__cause__
