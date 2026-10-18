@@ -139,7 +139,11 @@ def test_direct_read_exposes_dispatcher_stages_without_changing_the_page(vault, 
 
     assert "Visible example text." in result["body"]
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
-    for name in ("command.body", "command.terminal_filter", "command.disclosure_receipt"):
+    for name in (
+        "command.body", "command.terminal_filter", "command.disclosure_receipt",
+        "read.prepare.resolve_path", "read.prepare.resolve_physical",
+        "read.prepare.inspect", "read.prepare.held_read",
+    ):
         assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
         assert stages[name]["fields"]["thread_cpu_us"] >= 0
 

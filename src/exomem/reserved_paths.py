@@ -24,7 +24,7 @@ from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 
-from . import held_fs, request_budget
+from . import call_spans, held_fs, request_budget
 from .cli_ops import OpError
 from .kbdir import kb_dirname
 
@@ -2490,6 +2490,7 @@ def _flight_wait_seconds() -> float:
     )
 
 
+@call_spans.timed("reserved.identity.baseline_wait")
 def _await_baseline_flight(
     flight: _BaselineFlight,
     timeout: float,
@@ -2777,6 +2778,7 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     return flight.catalogue
 
 
+@call_spans.timed("reserved.identity.baseline_build")
 def _build_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     """Walk one vault's private identities and stamp the generation that proved it."""
 
