@@ -2994,9 +2994,7 @@ class IdempotencyStore:
         owners_dir = _owner_lock_path(self.state_dir, "bootstrap").parent
         if stat.S_IMODE(owners_dir.stat().st_mode) & 0o077:
             raise RuntimeError("idempotency owner directory is not owner-only")
-        for owner_lock in owners_dir.glob("*.lock"):
-            if stat.S_IMODE(owner_lock.stat().st_mode) & 0o077:
-                raise RuntimeError("idempotency owner lock is not owner-only")
+        # The private directory isolates unrelated lock files; claims must not scan them.
         for item in (
             self.path,
             self.path.with_name(f"{self.path.name}-wal"),
