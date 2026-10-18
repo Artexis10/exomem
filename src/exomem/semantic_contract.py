@@ -2731,6 +2731,7 @@ def _patch_corpus_files_changed_locked(
     cache_key = _corpus_cache_key(root)
     with _CORPUS_CONTEXT_CACHE_LOCK:
         entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        cached_checkpoint = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
     if entry is None:
         return _CORPUS_PATCH_MISS
     if _config_census(root) != _stored_config_census(entry[0]):
@@ -2774,6 +2775,22 @@ def _patch_corpus_files_changed_locked(
     reconcile_paths = tuple(sorted(set(changed_paths) | set(deleted_paths)))
     if not reconcile_paths:
         return _CORPUS_PATCH_UNCHANGED
+    bridge = (
+        freshness.delta_since(root, "vault", cached_checkpoint)
+        if cached_checkpoint is not None else None
+    )
+    # A seed can hide earlier edits. Named events prove the whole context only
+    # when retained history covers its caption and every touched Markdown path.
+    caption_current = (
+        bridge is not None
+        and bridge.complete
+        and bridge.to == event_checkpoint
+        and {
+            relative(path)
+            for path in bridge.changed | bridge.deleted
+            if PurePosixPath(path).suffix.casefold() == ".md"
+        }.issubset(reconcile_paths)
+    )
     relation_definitions = relation_registry.core_registry()
     language = semantic_language_registry.core_registry()
     context = _reconcile_markdown_delta(
@@ -2795,7 +2812,10 @@ def _patch_corpus_files_changed_locked(
             _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
                 f"{language.schema_version}:{language.content_hash}"
             )
-            _caption_corpus_context_locked(cache_key, event_checkpoint)
+            if caption_current:
+                _caption_corpus_context_locked(cache_key, event_checkpoint)
+            else:
+                _drop_corpus_caption_locked(cache_key)
     return _CORPUS_PATCH_APPLIED
 
 

@@ -602,6 +602,77 @@ def test_a_promotion_carries_the_standbys_finished_warm_forward(monkeypatch, tmp
     assert record["carried_from_standby"] == sorted(carried)
 
 
+@pytest.mark.parametrize("catch_up", [False, True])
+def test_carried_corpus_reproves_reference_owners_after_watcher_seed(
+    monkeypatch, tmp_path: Path, catch_up: bool
+) -> None:
+    """A new watcher baseline must not leave reads cold or bless unwatched edits."""
+    import threading
+
+    from exomem import file_watcher, freshness, memory_refs, mode, semantic_contract, warmup
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+    freshness.clear()
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    page, other = notes / "one.md", notes / "two.md"
+    old_id = "00000000-0000-0000-0000-000000000001"
+    new_id = "00000000-0000-0000-0000-000000000002"
+    absent_id = "00000000-0000-0000-0000-000000000003"
+    page.write_text(f"---\nexomem_id: {old_id}\n---\n\nOriginal.\n", encoding="utf-8")
+    other.write_text("# Other\n", encoding="utf-8")
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(mode, "preload_cpu_caches", lambda: False)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda root: True)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    try:
+        freshness.rebaseline(tmp_path)
+        service_standby.enter_standby()
+        readiness.mark_ready("lexical")
+        service_standby.register_activation(_Activation())
+        assert service_standby.prove_graph_snapshot(tmp_path)
+        assert service_standby.build_semantic_corpus(tmp_path)
+        assert service_standby.promote(tmp_path, migrated=False)["snapshot"] == "current"
+        if catch_up:
+            page.write_text(f"---\nexomem_id: {new_id}\n---\n\nUnwatched edit.\n", encoding="utf-8")
+        watcher = object.__new__(file_watcher.FileWatcher)
+        watcher._vault_root = tmp_path
+        watcher._kb_root = tmp_path / "Knowledge Base"
+        watcher._stop = threading.Event()
+        assert watcher._reconcile_once(seed=True)
+        if catch_up:
+            other.write_text("# Other\n\nObserved edit.\n", encoding="utf-8")
+            semantic_contract.publish_corpus_files_changed(tmp_path, changed=(other,))
+            # Startup catch-up precedes warm_all and cannot prove the unseen edit.
+            assert semantic_contract.current_reference_identity_snapshot(tmp_path) is None
+
+        def no_cold_build(*args, **kwargs):
+            pytest.fail("carried corpus must reconcile without a second cold parse")
+
+        monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", no_cold_build)
+        warmup.warm_all(tmp_path)
+        assert readiness.is_ready("semantic_corpus")
+        assert semantic_contract.current_reference_identity_snapshot(tmp_path) is not None
+
+        def no_scan(*args, **kwargs):
+            pytest.fail("post-warm reference lookup scanned the vault")
+
+        monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+        owners = memory_refs.paths_for_ids_read_only(tmp_path, (old_id, new_id, absent_id))
+        rel = page.relative_to(tmp_path).as_posix()
+        assert owners == {
+            old_id: () if catch_up else (rel,),
+            new_id: (rel,) if catch_up else (),
+            absent_id: (),
+        }
+    finally:
+        semantic_contract.reset_corpus_context_cache()
+        freshness.clear()
+
+
 def test_a_component_the_standby_never_finished_is_not_carried(monkeypatch, tmp_path) -> None:
     """Carrying is a claim about work this process did, never about work it skipped."""
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
