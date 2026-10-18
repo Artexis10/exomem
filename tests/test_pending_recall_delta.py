@@ -2075,7 +2075,7 @@ def test_optional_reference_uses_the_proven_destination_of_a_pending_move(
     from exomem.governance import egress
     from exomem.governance.principal import RequestPrincipal
 
-    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "0")
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
     identity = memory_refs.new_id()
     ref = memory_refs.memory_ref(identity)
     old = "Knowledge Base/Notes/open.md"
