@@ -21,14 +21,18 @@ import sys
 import threading
 import time
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 import uvicorn
+from record_fixtures import LEDGER_COLLECTION_PATH, ledger_item
 from test_collection_store_migration import (
     MIGRATE,
     MIGRATED,
     OPERATOR,
+    PLANNING,
     WORK,
+    X3,
     edit_by_hand,
     legacy_vault,
     marker,
@@ -54,7 +58,7 @@ from exomem import (
 )
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
-from exomem.collection_store import authority, capability, chain, connection, custody
+from exomem.collection_store import authority, capability, chain, connection, custody, legacy_import
 from exomem.governance.principal import library_scope
 from exomem.lease_coordinator import create_app
 
@@ -133,7 +137,10 @@ def candidate(tmp_path, released, fault="", name=""):
     """
     prelude = (
         "import runpy, sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r})\n"
         "import exomem.collection_store.capability as capability\n"
+        "from pathlib import Path\n"
+        f"assert Path(capability.__file__).resolve().is_relative_to({str(Path(__file__).resolve().parents[1] / 'src')!r})\n"
         f"capability.RELEASED = frozenset({sorted(released)!r})\n"
         + fault +
         "arguments = [value for value in sys.argv[1:] if value != '-I']\n"
@@ -382,6 +389,33 @@ def test_a_migration_that_cannot_finish_in_its_budget_abandons_and_the_release_c
     assert written[0]["item_key"] in rows(root, WORK)
 
 
+def test_a_file_changed_after_the_refresh_under_lease_abandons_before_seal(service, tmp_path, capsys):
+    """An editor outside the lease changes the fresh import before its final comparison; publication must stop."""
+    root = service
+    operator_file(tmp_path)
+    fault = (
+        "from pathlib import Path\n"
+        "from exomem.collection_store import migration\n"
+        "stage = migration._stage\n"
+        "def refresh_then_edit(root, *args, **kwargs):\n"
+        "    result = stage(root, *args, **kwargs)\n"
+        "    if result[1] is not None:\n"
+        f"        path = Path(root) / {str(Path(WORK).parent / 'Items/Original.md')!r}\n"
+        "        path.write_text(path.read_text() + '\\nExternal edit after refresh\\n')\n"
+        "    return result\n"
+        "migration._stage = refresh_then_edit\n"
+    )
+    result = upgrade(tmp_path, Handoff(tmp_path, root, served=lambda: append_to_work(root, "After pre-import")),
+                     candidate(tmp_path, MIGRATE, fault))
+    assert result["ok"], result
+    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "abandoned"}
+    report = migrator_report(capsys)
+    assert (report["abandoned_because"], report["changed"]) == ("basis_changed", [WORK])
+    assert authority.read_marker(root) is None and not connection.store_path(root).exists()
+    assert (fence().enrolled, fence().generation) == (False, 0)
+    assert (root / WORK).parent.joinpath("Items/Original.md").read_text().count("External edit after refresh") == 2
+
+
 @pytest.fixture
 def s1(service, tmp_path, monkeypatch):
     """The legacy vault after S1 enrolled a summary collection, with a row the service wrote."""
@@ -442,6 +476,64 @@ def test_a_vault_with_a_live_s1_store_migrates_by_copy_then_swap(s1, tmp_path):
             "Summary row"]
     finally:
         serving.stop()
+
+
+def test_changed_only_handoff_preserves_proved_import_identity_and_live_bookkeeping(s1, tmp_path, capsys):
+    """Refreshing the first import must not mint later imports again or lose their held governance."""
+    root = s1
+    assert Path(connection.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1] / "src")
+    for path in (PLANNING, X3):
+        shutil.rmtree((root / path).parent)
+    head = live_head(root)
+    operator_file(tmp_path)
+    before = {}
+
+    def write_after_pre_import():
+        with closing(connection.open_reader(staging_directories(root)[0] / "staging.sqlite")) as donor:
+            before["history"] = donor.execute(
+                "SELECT receipt_json,legacy_event_json,transition_id,event_hash FROM txns "
+                "WHERE collection_id=? ORDER BY txn_id", (CID,)).fetchall()
+            before["row_id"] = donor.execute("SELECT row_id FROM items WHERE collection_id=?", (CID,)).fetchone()
+            before["held"] = donor.execute(
+                "SELECT held_id,held_bytes,governance_json,governance_hash FROM held_candidates "
+                "WHERE collection_id=?", (CID,)).fetchall()
+            basis = json.loads(donor.execute("SELECT value FROM store_meta WHERE key='migration_basis'").fetchone()[0])
+            before["basis"] = basis["collections"][CID]
+        manifest = collections.load_manifest(root, root / LEDGER_COLLECTION_PATH)
+        records.append_record(root, LEDGER_COLLECTION_PATH, item=ledger_item(slug="after-pre-import"),
+                              why="a write after pre-import", expected_container_hash=
+                              record_formats.load_adapter(root, manifest).read().snapshot)
+        stop_writer()
+        with closing(sqlite3.connect(connection.store_path(root))) as live, live:
+            live.execute("UPDATE projection_state SET stat_identity=? WHERE path=?", ("checked-after-copy", DAILY_PATH))
+        before["files"] = vault_bytes(root, outside="Knowledge Base/_Collections")
+
+    result = upgrade(tmp_path, Handoff(tmp_path, root, served=write_after_pre_import), candidate(tmp_path, S1_RELEASED))
+    assert result["ok"], result
+    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "migrated"}
+    with closing(connection.open_reader(connection.store_path(root))) as live:
+        assert live.execute("SELECT receipt_json,legacy_event_json,transition_id,event_hash FROM txns "
+                            "WHERE collection_id=? ORDER BY txn_id", (CID,)).fetchall() == before["history"]
+        assert live.execute("SELECT row_id FROM items WHERE collection_id=?", (CID,)).fetchone() != before["row_id"]
+        assert live.execute("SELECT held_id,held_bytes,governance_json,governance_hash FROM held_candidates "
+                            "WHERE collection_id=?", (CID,)).fetchall() == before["held"]
+        assert live.execute("SELECT stat_identity FROM projection_state WHERE path=?", (DAILY_PATH,)).fetchone() == (
+            "checked-after-copy",)
+        assert chain.head_relation(live, *head) == "ancestor"
+        chain.verify_store_chain(live)
+        assert live.execute("PRAGMA foreign_key_check").fetchall() == []
+        (checkpoint,) = live.execute("SELECT txn_id FROM txns WHERE collection_id=? AND legacy_event_json IS NULL",
+                                     (CID,)).fetchone()
+        entry = {**before["basis"], "txn_id": checkpoint}
+        retained = legacy_import.retained_material(live, entry, check=lambda: None)
+        assert retained is not None and retained.digest() == entry["material_digest"]
+    assert vault_bytes(root, outside="Knowledge Base/_Collections") == before["files"]
+    serving = start_service(root)
+    try:
+        assert any(row["slug"] == "after-pre-import" for row in rows(root, LEDGER_COLLECTION_PATH).values())
+    finally:
+        serving.stop()
+    capsys.readouterr()
 
 
 def test_a_live_s1_head_that_moved_after_the_copy_abandons_the_handoff(s1, tmp_path, capsys):
@@ -592,29 +684,59 @@ def test_a_lease_handback_that_raises_after_admission_reports_the_migration(serv
     assert (fence().enrolled, fence().generation) == (True, 1)
 
 
-def test_a_swap_that_stops_after_it_set_the_live_s1_store_aside_fails_the_handoff(s1, tmp_path):
-    """A migrator that reports a vault whose marker routes a store that is no longer in place as
-    abandoned, so the replacement serves a vault whose store is set aside under another name."""
+@pytest.mark.parametrize("boundary", ["before_aside", "after_aside"])
+def test_a_swap_failure_keeps_a_safe_store_serving_or_stops_the_handoff(s1, tmp_path, boundary):
+    """A failure before moving the live store can abandon; a failure after moving it must stop."""
     root = s1
+    head, original_marker = live_head(root), authority.read_marker(root)
     operator_file(tmp_path)
-    swap = candidate(tmp_path, S1_RELEASED, name="-failed-swap", fault=(
-        "import os, types\n"
-        "from exomem.collection_store import takeover\n"
-        "replaced = takeover.replace_live\n"
-        "def failing(descriptor):\n"
-        "    raise OSError(5, 'an I/O error after the live store was set aside')\n"
-        "def replace_live(*arguments, **options):\n"
-        "    takeover.os = types.SimpleNamespace(**{**vars(os), 'fsync': failing})\n"
-        "    try:\n"
-        "        return replaced(*arguments, **options)\n"
-        "    finally:\n"
-        "        takeover.os = os\n"
-        "takeover.replace_live = replace_live\n"))
+    if boundary == "before_aside":
+        fault = (
+            "import os, types\n"
+            "from exomem.collection_store import takeover\n"
+            "replaced = takeover.replace_live\n"
+            "def failing(descriptor):\n"
+            "    raise OSError(5, 'an I/O error before moving the live store')\n"
+            "def replace_live(*arguments, **options):\n"
+            "    takeover.os = types.SimpleNamespace(**{**vars(os), 'fsync': failing})\n"
+            "    try:\n"
+            "        return replaced(*arguments, **options)\n"
+            "    finally:\n"
+            "        takeover.os = os\n"
+            "takeover.replace_live = replace_live\n")
+    else:
+        fault = (
+            "from exomem.collection_store import takeover\n"
+            "replaced = takeover.replace_live\n"
+            "def replace_live(session, *arguments, **options):\n"
+            "    filesystem = session.state_fs\n"
+            "    class FailingInstall:\n"
+            "        def __getattr__(self, name):\n"
+            "            return getattr(filesystem, name)\n"
+            "        def rename(self, source, parent, leaf, **kwargs):\n"
+            "            if leaf == session.path.name:\n"
+            "                raise OSError(5, 'an I/O error after moving the live store')\n"
+            "            return filesystem.rename(source, parent, leaf, **kwargs)\n"
+            "    session.state_fs = FailingInstall()\n"
+            "    try:\n"
+            "        return replaced(session, *arguments, **options)\n"
+            "    finally:\n"
+            "        session.state_fs = filesystem\n"
+            "takeover.replace_live = replace_live\n")
+    swap = candidate(tmp_path, S1_RELEASED, name="-failed-swap", fault=fault)
     result = upgrade(tmp_path, Handoff(tmp_path, root), swap)
-    assert not result["ok"]
-    assert result["error"] == "upgrade failed after shutdown; worker is stopped; resume required"
-    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "unsafe", "code": "OSError"}
-    assert not connection.store_path(root).exists()
+
+    if boundary == "before_aside":
+        assert result["ok"], result
+        assert result["handoff"]["migration"]["collections"] == {
+            "state": "ran", "outcome": "abandoned", "code": "OSError"}
+        assert live_head(root) == head and authority.read_marker(root) == original_marker
+    else:
+        assert not result["ok"]
+        assert result["error"] == "upgrade failed after shutdown; worker is stopped; resume required"
+        assert result["handoff"]["migration"]["collections"] == {
+            "state": "ran", "outcome": "unsafe", "code": "OSError"}
+        assert not connection.store_path(root).exists()
 
 
 def test_a_failure_after_publication_that_persists_serves_the_vault_and_the_next_handoff_finishes_it(

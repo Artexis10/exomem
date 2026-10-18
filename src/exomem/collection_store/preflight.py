@@ -241,17 +241,21 @@ def _prove_one(root, manifest, staging, audit, context, record=None) -> dict:
              "legacy_audit_status": captured.legacy_inspection["status"]}
     staging.execute("BEGIN IMMEDIATE")
     try:
-        result = legacy_import.import_legacy_collection(staging, captured, audit=audit, context=context)
-        if record is not None:
-            record(captured, result)
+        with legacy_import.checked_sql(staging, audit._check):
+            result = legacy_import.import_legacy_collection(staging, captured, audit=audit, context=context)
+            if record is not None:
+                record(captured, result)
     except TimeoutError:
-        staging.execute("ROLLBACK")
+        if staging.in_transaction:
+            staging.execute("ROLLBACK")
         raise
     except _REFUSALS as error:
-        staging.execute("ROLLBACK")
+        if staging.in_transaction:
+            staging.execute("ROLLBACK")
         return _row(manifest.path, manifest, status="blocked", blocker=_blocker(error), **found)
     except BaseException:
-        staging.execute("ROLLBACK")
+        if staging.in_transaction:
+            staging.execute("ROLLBACK")
         raise
     # Kept, so that a later collection whose source path collides is named as a conflict.
     staging.execute("COMMIT")

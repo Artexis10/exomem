@@ -2279,8 +2279,8 @@ def pending_identity_candidates(
         denied_scopes = boundary.denied_scopes(who) if boundary is not None else frozenset()
     except connector_boundary.BoundaryUnavailable:
         denied_scopes = None
-    # Bridge targets need their current approved bytes, so remain uncertain.
-    possible_grants = {grant.path for grant in policy.release_grants}
+    # File release approvals cannot raise the policy ceiling; session grants can.
+    possible_grants: set[str] = set()
     if who.verified_authorization_session is not None:
         connection = None
 
