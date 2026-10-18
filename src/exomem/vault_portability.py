@@ -543,7 +543,19 @@ def _open_regular_source(
     *,
     expected_signature: tuple[int, int, int, int, int, int] | None = None,
 ) -> tuple[int, tuple[int, int, int, int, int, int]]:
-    before = _safe_lstat(path)
+    try:
+        return _open_regular_source_native(path, expected_signature=expected_signature)
+    except OSError:
+        _fail("SOURCE_CHANGED_DURING_EXPORT", "a source file changed during export")
+
+
+def _open_regular_source_native(
+    path: Path,
+    *,
+    expected_signature: tuple[int, int, int, int, int, int] | None = None,
+) -> tuple[int, tuple[int, int, int, int, int, int]]:
+    """Retain regular-source checks without reclassifying the caller's native I/O errors."""
+    before = path.lstat()
     if stat.S_ISLNK(before.st_mode):
         _fail("UNSAFE_SYMLINK", "vault exports never follow symbolic links")
     if not stat.S_ISREG(before.st_mode):
@@ -561,10 +573,7 @@ def _open_regular_source(
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        _fail("SOURCE_CHANGED_DURING_EXPORT", "a source file changed during export")
+    descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
         if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
@@ -1472,6 +1481,21 @@ class VerifiedCollectionReplica:
     source_sha256: str
 
 
+def _validate_collection_replica_connection(vault_root, reader, check):
+    """Share structural validation between the two private replica-copy owners."""
+    from .collection_store import authority, chain, ownership, snapshot
+
+    metadata = snapshot._validate(reader, check)
+    chain.verify_store_chain(reader, check=check)
+    authority.pending_create(reader)
+    canonical, _ = ownership.declarations(vault_root, reader)
+    if canonical is None:
+        _fail("INVALID_ARCHIVE", "collection replica has no canonical declarations")
+    authority.require_projection_ownership(reader, canonical, root=vault_root)
+    check()
+    return metadata, canonical
+
+
 @contextmanager
 def _checked_collection_replica_structure(
     vault_root: Path,
@@ -1480,7 +1504,7 @@ def _checked_collection_replica_structure(
     check: Callable[[], None] = lambda: None,
 ):
     """Verify private structural evidence without granting adoption or writer authority."""
-    from .collection_store import authority, chain, connection, ownership, snapshot
+    from .collection_store import connection, snapshot
 
     source_path = Path(source_path)
     # A published replica is a standalone SQLite file, never a database/WAL family.
@@ -1504,14 +1528,7 @@ def _checked_collection_replica_structure(
         check()
         snapshot.migrate_copy(path, check)
         with closing(sqlite3.connect(path, isolation_level=None)) as reader, connection.checked_sql(reader, check):
-            snapshot._validate(reader, check)
-            chain.verify_store_chain(reader, check=check)
-            authority.pending_create(reader)
-            canonical, _ = ownership.declarations(vault_root, reader)
-            if canonical is None:
-                _fail("INVALID_ARCHIVE", "collection replica has no canonical declarations")
-            authority.require_projection_ownership(reader, canonical, root=vault_root)
-            check()
+            _validate_collection_replica_connection(vault_root, reader, check)
             yield VerifiedCollectionReplica(reader, digest.hexdigest())
 
 

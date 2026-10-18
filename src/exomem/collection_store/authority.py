@@ -483,6 +483,22 @@ def require_intent_binding(conn, intent):
     return json.loads(row[0])
 
 
+def first_import_fence_matches(intent, target, fence):
+    """The actual fence is this first import's target, its pre-cut generation, or its bound predecessor."""
+    if (intent["kind"] != MIGRATE or intent["expected_marker"] is not None or "base_head" in intent):
+        return False
+    generation = target["collection_store_fence"]["generation"]
+    predecessor = intent.get("supersedes")
+    matching = (fence.enrolled and fence.store_id == target["store_id"] and fence.generation == generation)
+    if predecessor is None:
+        matching = matching or not fence.enrolled and generation == fence.generation + 1
+    else:
+        matching = generation == predecessor["generation"] + 1 and (matching or (
+            fence.enrolled and fence.store_id == predecessor["store_id"]
+            and fence.generation == predecessor["generation"]))
+    return matching and (not fence.enrolled or fence.capability == target["collection_store_fence"]["capability"])
+
+
 def marker_status(writer, intent):
     return intent_status(writer.root, writer.connection, intent)
 

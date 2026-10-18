@@ -110,14 +110,16 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
     intent = authority.pending_create(conn)
     active = False
     fence = None
-    if recorded or restored is not None or intent is not None and intent["kind"] == authority.EXPORT and intent.get("verified"):
+    required = None
+    if (recorded or restored is not None
+            or intent is not None and (intent["kind"] == authority.EXPORT and intent.get("verified")
+                                      or intent["kind"] == authority.MIGRATE and not private)):
         from ..writer_lease import CollectionStoreFenceState
         from . import admission, snapshot
 
         manager = manager or _manager(root)
         if manager.client is None:
             raise unavailable()
-        required = None
         if private:
             fence = manager.client.collection_store_fence()
         else:
@@ -190,6 +192,19 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
         if status != "marker_admitted":
             admitted -= participants
         transition = (json.dumps(intent, sort_keys=True, separators=(",", ":")), status)
+        if intent["kind"] == authority.MIGRATE and not private and not active:
+            # Only an unchanged first pre-cut import leaves files authoritative; a wrong refusal costs a retry.
+            if (not recorded and restored is None and expected is None
+                    and participants == {entry["collection_id"] for entry in entries}
+                    and "base_head" not in intent and "supersedes" not in intent and status == "pending"
+                    and fence is not None and not fence.enrolled and required is None
+                    and target["collection_store_fence"]["generation"] == fence.generation + 1):
+                return Proof((placement, sid, instance, (fence.enrolled, fence.generation), declared, transition), None)
+            raise unavailable()
+    if restored is not None and not private and not active and not (
+            intent is not None and intent["kind"] == authority.EXPORT and required is not None):
+        # An unadmitted backup cannot grant file authority; relevant readers must retry adoption.
+        raise unavailable()
     return Proof((placement, sid, instance, None if fence is None else (fence.enrolled, fence.generation),
                   declared, transition), marker, frozenset(admitted))
 

@@ -388,9 +388,15 @@ class CollectionStoreRuntime:
             return False
         if not self.path.exists():
             return True
-        # A takeover that is pending on the store's migration still releases the lease.
         with closing(connection.open_head_reader(self.path)) as reader:
-            return authority.pending_create(reader) is None
+            intent = authority.pending_create(reader)
+        if intent is None:
+            return True
+        # A fresh reader accepted no work; the migration owner still owes its own publication.
+        # A formerly admitted producer or pending create must retain its head handback obligation.
+        return (intent["kind"] == authority.MIGRATE and self._publisher is None
+                and self._admitted_token is None and self._acquisition is not None
+                and self._acquisition.fencing_token == token and self._acquisition.granted)
 
     def status(self):
         """Operator view of admission; an unresolved takeover or divergence reports attention."""

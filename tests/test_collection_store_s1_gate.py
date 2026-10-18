@@ -46,6 +46,7 @@ from exomem.collection_store import (
 )
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.collection_store.preview import preview_store
+from exomem.get_page import get_page
 from exomem.governance.principal import library_scope
 from exomem.plan_memory import plan_memory
 from exomem.record_memory import record_memory
@@ -608,6 +609,9 @@ def test_fork_is_durably_diverged_with_reads_and_a_b_writes_continuing(abc, tmp_
 
 def _adopt_late_delivery(delivered, found):
     pending = found.open()
+    assert not found.session.path.exists()
+    refused(lambda: found.write_a("Unverified sibling"), "COLLECTION_STORE_UNAVAILABLE")
+    assert "Independent" in get_page(found.root, path="Knowledge Base/Notes/Independent.md").body
     replica.replica_path(found.root).write_bytes(delivered)
     return pending, found.open(), found.read_c(), found.write_c(LATER, "On the copy")["outcome"]
 
@@ -617,6 +621,9 @@ def test_copied_vault_on_fresh_state_and_coordinator_adopts_the_replica(abc, tmp
     abc.release()
     copy = tmp_path / "copy"
     shutil.copytree(abc.root, copy)
+    note = copy / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntitle: Independent\n---\nIndependent knowledge\n")
     original, copied_ab = file_bytes(abc.root), ab_bytes(copy)
     delivered = replica.replica_path(copy).read_bytes()
     _truncated(copy)
@@ -671,10 +678,16 @@ def _newer_schema(vault):
         conn.commit()
 
 
-def _refused_replica(found):
+def _refused_replica(unproved, found):
     status = found.open()
     refused(lambda: record_memory(found.root, "query", collection=CID), "")
-    return status, found.session.path.exists(), found.write_a("A beside the refused replica")
+    if unproved:
+        refused(lambda: found.write_a("Unverified sibling"), "COLLECTION_STORE_UNAVAILABLE")
+        assert "Independent" in get_page(found.root, path="Knowledge Base/Notes/Independent.md").body
+        file_write = "withheld"
+    else:
+        file_write = found.write_a("A beside the refused replica")
+    return status, found.session.path.exists(), file_write
 
 
 @pytest.mark.parametrize(("tamper", "copied", "expected"), [
@@ -690,9 +703,17 @@ def test_unverified_replica_is_never_adopted(abc, tmp_path, tamper, copied, expe
         root = tmp_path / "copy"
         shutil.copytree(abc.root, root)
         where = dict(root=root, database=tmp_path / "copy-coordinator.sqlite", vault_id="copy")
+    unproved = copied or tamper is _foreign_lineage
+    if unproved:
+        note = root / "Knowledge Base/Notes/Independent.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("---\ntitle: Independent\n---\nIndependent knowledge\n")
     tamper(root)
-    status, live, file_write = run_host(tmp_path, tmp_path / "state-b", "host-b", _refused_replica, **where)
-    assert status["status"] == expected and not live and file_write == "committed"
+    source_bytes = replica.replica_path(root).read_bytes()
+    status, live, file_write = run_host(tmp_path, tmp_path / "state-b", "host-b",
+                                      functools.partial(_refused_replica, unproved), **where)
+    assert status["status"] == expected and not live and file_write == ("withheld" if unproved else "committed")
+    assert replica.replica_path(root).read_bytes() == source_bytes
 
 
 # --- slices 3-6: coalesced publication, export flush, backup, divergence and reconcile ------
@@ -1374,6 +1395,49 @@ def test_takeover_and_owner_evidence_never_open_the_vault_replica_in_sqlite(abc,
     assert owner.adopt_replica_preview(abc.root)["preview"]["replica"]["commit_seq"] == head[0]
     assert opened and not [database for database in opened if any(name in database for name in shared)]
     assert path.read_bytes() == before
+
+
+def test_takeover_retains_native_source_io_errors_and_archive_classification(abc, monkeypatch):
+    """A source permission failure must not become corrupt-candidate Pending or an installed store."""
+    from exomem import vault_portability
+
+    abc.release()
+    source = replica.replica_path(abc.root)
+    before = source.read_bytes()
+    failure = PermissionError(13, "source access refused")
+    lstat = Path.lstat
+
+    def refused_source(path, *args, **kwargs):
+        if path == source:
+            raise failure
+        return lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as denied:
+        denied.setattr(Path, "lstat", refused_source)
+        with pytest.raises(PermissionError) as raised, takeover.staged_replica(abc.session, lambda: None):
+            pytest.fail("unreadable source supplied takeover facts")
+        assert raised.value is failure
+        with pytest.raises(vault_portability.PortabilityError, match="SOURCE_CHANGED_DURING_EXPORT"):
+            vault_portability._open_regular_source(source)
+    assert source.read_bytes() == before
+    assert not list(abc.session.path.parent.glob(".exomem-adopt-*.sqlite"))
+
+
+def test_takeover_preserves_a_check_error_even_when_its_code_describes_invalid_bytes(abc):
+    """A custody or fencing callback owns its error identity, even across candidate validation."""
+    abc.release()
+    source = replica.replica_path(abc.root)
+    before = source.read_bytes()
+    failure = CollectionStoreError("COLLECTION_SNAPSHOT_INVALID", "the caller's check refused")
+
+    def check():
+        raise failure
+
+    with pytest.raises(CollectionStoreError) as raised, takeover.staged_replica(abc.session, check):
+        pytest.fail("a refused check supplied takeover facts")
+    assert raised.value is failure
+    assert source.read_bytes() == before
+    assert not list(abc.session.path.parent.glob(".exomem-adopt-*.sqlite"))
 
 
 def test_launcher_refuses_an_actual_v1_marker_candidate_before_handoff(abc, tmp_path, monkeypatch):

@@ -19,11 +19,11 @@ import secrets
 import sqlite3
 import time
 import uuid
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from dataclasses import dataclass, field
 
 from .. import held_fs
-from . import authority, chain, connection, ownership, replica, schema, snapshot
+from . import authority, chain, connection, replica, schema, snapshot
 
 RECHECK_SECONDS = 10.0
 ATTENTION_SECONDS = 15 * 60.0
@@ -104,59 +104,106 @@ class Staged:
     collections: dict
     relation: dict
     lineage: list
+    canonical: dict | None
+    reader: sqlite3.Connection | None = field(repr=False)
+
+    def close_reader(self):
+        if self.reader is not None:
+            self.reader.close()
+            self.reader = None
 
 
 @contextmanager
-def staged_replica(session, check, heads):
-    """Copy the shared replica into private state custody and validate exactly those bytes."""
+def staged_replica(session, raw_check, heads=()):
+    """Retain one private validated copy through routing and the takeover decision."""
+    from .. import structured_collections as collections
+    from ..cli_ops import OpError
+    from ..vault_portability import (
+        PortabilityError,
+        _cross_source_signature,
+        _open_regular_source_native,
+        _source_signature,
+        _validate_collection_replica_connection,
+    )
+
     leaf = f".exomem-adopt-{secrets.token_hex(16)}.sqlite"
     path = session.path.parent / leaf
+    source = replica.replica_path(session.root)
     digest = hashlib.sha256()
+    signature = None
+    conn = None
+    held = ExitStack()
+    stopped = None
+
+    def check():
+        nonlocal stopped
+        try:
+            raw_check()
+        except BaseException as error:
+            stopped = error
+            raise
+
     try:
         try:
-            shared = open(replica.replica_path(session.root), "rb")  # noqa: SIM115 - read-only copy
-        except FileNotFoundError:
-            yield None
-            return
-        with shared, session.state_fs.file(session.state_directory, leaf, create=True, exclusive=True,
-                                           access="write").require() as staged:
-            before = _signature(os.fstat(shared.fileno()))
-            while chunk := shared.read(1024 * 1024):
+            # A published replica has no SQLite companions; unknown families never supply recovery facts.
+            if any(os.path.lexists(str(source) + suffix) for suffix in snapshot._COMPANIONS):
+                raise connection.CollectionStoreError(SYNC_PENDING, "the replica requires SQLite companions")
+            try:
+                descriptor, before = _open_regular_source_native(source)
+            except FileNotFoundError:
+                descriptor = None
+            if descriptor is None:
+                result = None
+            else:
+                with os.fdopen(descriptor, "rb") as shared:
+                    staged = held.enter_context(session.state_fs.file(
+                        session.state_directory, leaf, create=True, exclusive=True, access="write").require())
+                    while chunk := shared.read(1024 * 1024):
+                        check()
+                        digest.update(chunk)
+                        remaining = memoryview(chunk)
+                        while remaining:
+                            remaining = remaining[os.write(staged.descriptor, remaining):]
+                    os.fsync(staged.descriptor)
+                    after = os.fstat(shared.fileno())
+                    if (_source_signature(after) != before
+                            or _cross_source_signature(source.lstat()) != _cross_source_signature(after)):
+                        raise connection.CollectionStoreError(BUSY, "the replica changed during staging")
+                    signature = _signature(after)
                 check()
-                digest.update(chunk)
-                os.write(staged.descriptor, chunk)
-            os.fsync(staged.descriptor)
-            signature = before if _signature(os.fstat(shared.fileno())) == before else None
-        conn = None
-        try:
-            # A replica an earlier release published is migrated in this private copy, never in the vault.
-            snapshot.migrate_copy(path, check)
-            conn = sqlite3.connect(path, isolation_level=None)
-            metadata = snapshot._validate(conn, check)
-            chain.verify_store_chain(conn)
-            raw = authority.read_marker(session.root)
-            marker = None if raw is None else authority.parse_marker(session.root, raw)
-            collections = dict(conn.execute("SELECT collection_id,manifest_path FROM collections"))
-            canonical, _ = ownership.declarations(session.root, conn)
-            if canonical is None:
-                raise connection.CollectionStoreError(SYNC_PENDING, "the replica has no canonical declarations")
-            authority.require_projection_ownership(conn, canonical, root=session.root)
-            # Preserve the takeover decision's foreign-store and lagging-replica verdicts before checking owned paths.
-            if marker is not None and metadata[schema.META_STORE_ID] == marker["store_id"] and all(
-                    collections.get(entry["collection_id"]) == entry["manifest_path"] for entry in marker["collections"]):
-                authority.require_marker(conn, marker, root=session.root)
-            result = Staged(
-                leaf, digest.hexdigest(), signature, metadata, collections,
-                {head: chain.head_relation(conn, *head) for head in heads if head is not None},
-                json.loads(metadata[schema.META_LINEAGE]),
-            )
-        except (connection.CollectionStoreError, chain.StoreChainError, sqlite3.DatabaseError):
-            result = Staged(leaf, digest.hexdigest(), signature, {}, {}, {}, [])
-        finally:
-            if conn is not None:
-                conn.close()
+                # Earlier schemas keep their established before/after migration validation in this same copy.
+                snapshot.migrate_copy(path, check)
+                conn = sqlite3.connect(path, isolation_level=None)
+                held.callback(conn.close)
+                with connection.checked_sql(conn, check):
+                    metadata, canonical = _validate_collection_replica_connection(session.root, conn, check)
+                    result = Staged(
+                        leaf, digest.hexdigest(), signature, metadata,
+                        {entry["collection_id"]: entry["manifest_path"] for entry in canonical["collections"]},
+                        {head: chain.head_relation(conn, *head) for head in heads if head is not None},
+                        json.loads(metadata[schema.META_LINEAGE]), canonical, conn,
+                    )
+        except (connection.CollectionStoreError, chain.StoreChainError, PortabilityError,
+                collections.CollectionError, OpError) as error:
+            if stopped is not None:
+                raise stopped from None
+            # These fixed validation codes describe candidate bytes, never authority or native I/O failures.
+            invalid = (isinstance(error, chain.StoreChainError)
+                       or isinstance(error, collections.CollectionError)
+                       or isinstance(error, connection.CollectionStoreError) and error.code in {
+                           "COLLECTION_SNAPSHOT_INVALID", "COLLECTION_STORE_MARKER_CONFLICT",
+                           "COLLECTION_STORE_CREATE_CONFLICT", SYNC_PENDING}
+                       or isinstance(error, PortabilityError) and error.code in {
+                           "INVALID_ARCHIVE", "UNSAFE_SYMLINK", "UNSAFE_SOURCE_ENTRY"}
+                       or isinstance(error, OpError) and error.code == "COLLECTION_STORE_UNAVAILABLE")
+            if not invalid:
+                if isinstance(error, PortabilityError) and error.code == "SOURCE_CHANGED_DURING_EXPORT":
+                    raise connection.CollectionStoreError(BUSY, "the replica changed while it was opened") from error
+                raise
+            result = Staged(leaf, digest.hexdigest(), signature, {}, {}, {}, [], None, conn)
         yield result
     finally:
+        held.close()  # Close the reader, then the held stage, before removing its old name.
         try:
             os.unlink(path)
         except FileNotFoundError:

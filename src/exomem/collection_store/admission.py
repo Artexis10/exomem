@@ -370,60 +370,62 @@ def _resolve(session, *, force=False):
         return previous.status()
     if not session.verify_custody():
         return _custody_lost(session, token).status()
-    try:
-        raw, marker, fence = _routed_store(session)
-    except CollectionStoreError as error:
-        if error.code != takeover.EXPORTING:
-            raise
-        # Verified unfinished export stays pending before any local installation.
-        signature = takeover.replica_signature(session.root)
-        with manager._report_lock:
+    with ExitStack() as stack:
+        routed = _routed_store(session, stack)
+        if isinstance(routed, takeover.Pending):
+            with manager._report_lock:
+                token = manager._fencing_token
+                if token is not None and runtime._admitted_token == token:
+                    return {"status": "admitted"}
+                routed.token = token
+                if previous is not None and previous.code == routed.code:
+                    routed.since = previous.since
+                runtime._takeover = routed
+            return routed.status()
+        raw, marker, fence, staged = routed
+        with manager.writer_authority_guard(vault_root=session.root):
             token = manager._fencing_token
-            if token is not None and runtime._admitted_token == token:
+            if runtime.reporting_ready(token):
                 return {"status": "admitted"}
-            state = takeover.Pending(token, error.code, error.reason, None, None, signature)
-            if previous is not None and previous.code == state.code:
-                state.since = previous.since
-            runtime._takeover = state
-        return state.status()
-    with manager.writer_authority_guard(vault_root=session.root):
-        token = manager._fencing_token
-        if runtime.reporting_ready(token):
-            return {"status": "admitted"}
-        facts, diverged, signature = _takeover_facts(session, runtime, token, raw, marker, fence)
-        action, reason = ((takeover.DIVERGED, "this store records unresolved divergence") if diverged
-                          else takeover.decide(staged=None, **facts))
-        recorded, local = facts["recorded"], facts["local"]
+            facts, diverged, signature = _takeover_facts(session, runtime, token, raw, marker, fence)
+            action, reason = ((takeover.DIVERGED, "this store records unresolved divergence") if diverged
+                              else takeover.decide(staged=None, **facts))
+            recorded, local = facts["recorded"], facts["local"]
 
-        def check():
-            manager._renew_collection_store(token, due_only=True)
-            session.require(token)
+            def check():
+                manager._renew_collection_store(token, due_only=True)
+                session.require(token)
 
-        with ExitStack() as stack:
-            staged = None
             if action == "stage":
                 heads = [None if recorded is None else (recorded.commit_seq, recorded.head_hash),
                          None if local is None else (local.commit_seq, local.head_hash)]
-                staged = stack.enter_context(takeover.staged_replica(session, check, heads))
+                if staged is None:
+                    staged = stack.enter_context(takeover.staged_replica(session, check, heads))
+                else:
+                    with connection.checked_sql(staged.reader, check):
+                        staged.relation = {head: chain.head_relation(staged.reader, *head) for head in heads if head is not None}
                 action, reason = ((takeover.SYNC_PENDING, "the vault replica has not arrived")
                                   if staged is None else takeover.decide(staged=staged, **facts))
+            if staged is not None:
+                # The same held leaf survives, but install/restamp must not retain a SQLite reader.
+                staged.close_reader()
             # nosemgrep: ep-word-membership -- takeover.decide returns these action tokens.
             if action in {"admit", "adopt", "continue"} or (
                     action == takeover.DIVERGED and local is not None and not diverged):
                 with manager.consistency_guard(session.root, operation="collection_store_takeover"):
                     action, reason = _settle(session, runtime, token, facts, staged, action, reason, check)
-        if action == "admitted":
-            return {"status": "admitted"}
-        state = takeover.Pending(token, action, reason, None if recorded is None else recorded.commit_seq,
-                                 None if local is None else local.commit_seq, signature)
-        if previous is not None and (previous.code, previous.recorded) == (state.code, state.recorded):
-            state.since = previous.since
-        with manager._report_lock:
-            # A racing resolve may have admitted this token meanwhile; never shadow it.
-            if runtime._admitted_token == token:
+            if action == "admitted":
                 return {"status": "admitted"}
-            runtime._takeover = state
-        return state.status()
+            state = takeover.Pending(token, action, reason, None if recorded is None else recorded.commit_seq,
+                                     None if local is None else local.commit_seq, signature)
+            if previous is not None and (previous.code, previous.recorded) == (state.code, state.recorded):
+                state.since = previous.since
+            with manager._report_lock:
+                # A racing resolve may have admitted this token meanwhile; never shadow it.
+                if runtime._admitted_token == token:
+                    return {"status": "admitted"}
+                runtime._takeover = state
+            return state.status()
 
 
 def _owner_operation(session, manager, fence_client, why):
@@ -433,7 +435,11 @@ def _owner_operation(session, manager, fence_client, why):
     _ProducerSession.bind(session, manager)
     _bind_fence_client(session, fence_client)
     runtime = session.runtime(retire=False)
-    return runtime, _routed_store(session)[2]
+    with ExitStack() as stack:
+        routed = _routed_store(session, stack)
+        if isinstance(routed, takeover.Pending):
+            raise routed.error()
+        return runtime, routed[2]
 
 
 def _stale_preview():
@@ -1034,7 +1040,7 @@ def _migrate_schema(session, token):
     return None
 
 
-def _routed_store(session):
+def _routed_store(session, stack):
     """The marker this takeover serves, with the coordinator's store fence bound to it.
 
     A copied vault meeting a fresh coordinator cuts the fence over from its marker,
@@ -1043,9 +1049,14 @@ def _routed_store(session):
     """
     from . import ownership
 
+    def pending(code, reason):
+        # Only known candidate/transition evidence becomes Pending; caller and native I/O failures still raise.
+        return takeover.Pending(session.manager._fencing_token, code, reason, None, None,
+                                takeover.replica_signature(session.root))
+
     _, enrolled = ownership.enrollment(session.root)
     local = session.path.exists()
-    marker = None
+    marker = staged = None
     if local:
         reader, _ = connection._open_read_only(session.path, connection.BUSY_TIMEOUT_MS)
         with closing(reader):
@@ -1059,9 +1070,9 @@ def _routed_store(session):
                     # The serving store thread resumes it, so the same request succeeds later.
                     raise connection.busy("a collection create is still publishing; retry shortly")
                 if intent["kind"] == authority.MIGRATE:
-                    raise migration_pending()
+                    return pending(takeover.SYNC_PENDING, migration_pending().reason)
                 if intent["kind"] == authority.EXPORT:
-                    raise export_pending()
+                    return pending(takeover.EXPORTING, export_pending().reason)
                 # A marker that changed under the create never resolves by retrying.
                 raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                            "create recovery owns this store; resume that create")
@@ -1074,24 +1085,41 @@ def _routed_store(session):
         if marker is None:
             raise CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "no admitted collection store remains")
     else:
-        from ..vault_portability import checked_collection_replica
+        def check():
+            if not session.check():
+                raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "producer directory custody was lost")
+            token = session.manager._fencing_token
+            if token is not None:
+                session.manager._renew_collection_store(token, due_only=True)
+                session.require(token)
 
-        # The shared verifier proves the complete replica before any recovery enrollment or installation.
-        with checked_collection_replica(session.root) as verified:
-            if verified is None:
-                raise CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "no verified collection replica remains")
-            reader = verified.connection
-            current_fence = session.fence_client.collection_store_fence()
-            marker, _ = ownership.declarations(session.root, reader, generation=max(1, current_fence.generation))
-            if raw is not None:
-                hint = authority.parse_marker(session.root, raw)
-                marker = {**marker, "authority_epoch": hint["authority_epoch"],
-                          "collection_store_fence": hint["collection_store_fence"]}
-            elif not current_fence.enrolled or current_fence.store_id != marker["store_id"]:
-                raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "restore lacks a matching store fence")
+        staged = stack.enter_context(takeover.staged_replica(session, check))
+        if staged is None or not staged.metadata:
+            return pending(takeover.SYNC_PENDING, "the vault replica is missing, incomplete or invalid")
+        marker = staged.canonical
+        current_fence = session.fence_client.collection_store_fence()
+        if current_fence.enrolled and current_fence.store_id != marker["store_id"]:
+            return pending(takeover.DIVERGED, "the replica differs from the coordinator store")
+        if raw is not None:
+            hint = authority.parse_marker(session.root, raw)
+            if hint["store_id"] != marker["store_id"]:
+                return pending(takeover.DIVERGED, "the replica differs from the backup identity")
+            try:
+                authority.require_marker(staged.reader, hint, root=session.root)
+            except CollectionStoreError as error:
+                if error.code != "COLLECTION_STORE_MARKER_CONFLICT":
+                    raise
+                return pending(takeover.SYNC_PENDING, error.reason)
+            marker = {**marker, "authority_epoch": hint["authority_epoch"],
+                      "collection_store_fence": hint["collection_store_fence"]}
+        elif not current_fence.enrolled:
+            return pending(takeover.SYNC_PENDING, "restore lacks a matching store fence")
+        refusal = takeover.replica_adoptability(staged.metadata, raw)
+        if refusal is not None:
+            return pending(*refusal)
     fence = _store_fence(session.fence_client, session.fence_client.collection_store_fence(), marker,
                          initial=marker["collection_store_fence"]["generation"] == 1)
-    return raw, marker, fence
+    return raw, marker, fence, staged
 
 
 def _takeover_facts(session, runtime, token, raw, marker, fence):
