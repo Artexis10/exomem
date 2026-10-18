@@ -1596,7 +1596,7 @@ _CORPUS_POPULATE_MEMO_MAX_SECONDS = 30.0
 
 @dataclass(slots=True)
 class _CorpusContextFlight:
-    census: tuple
+    census: tuple | None
     registry_identity: tuple[Any, ...]
     language_identity: tuple[Any, ...]
     done: threading.Event = field(default_factory=threading.Event)
@@ -1610,7 +1610,7 @@ _CORPUS_CONTEXT_FLIGHTS: dict[tuple[str, str], _CorpusContextFlight] = {}
 
 def _claim_corpus_context_flight(
     cache_key: tuple[str, str],
-    census: tuple,
+    census: tuple | None,
     relation_definitions: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> tuple[_CorpusContextFlight, bool]:
@@ -2907,26 +2907,9 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> b
     """
     relation_definitions = relation_registry.core_registry()
     language = semantic_language_registry.core_registry()
-    # L2/L3: the admission decision is made against this, captured before the
-    # walk it has to vouch for.
-    before = freshness.consumer_checkpoint(root, "vault")
-    census = _timed_corpus_census(root, "populate")
-    if census is None:
-        return False
-    # The registries were loaded BEFORE this walk, and the walk stats the two
-    # `_Schema` files at its END. A registry rewritten in between therefore
-    # produces a census that records the NEW file while the build below would
-    # use the OLD registry — and the census-reuse path admits on census
-    # equality alone (the registry identity is only re-checked on the
-    # event-hit path), so that entry would be served as current. Every other
-    # install site guards with this; so does this one. The window from here to
-    # the stamp is closed by the census re-confirm under the lock, which sees
-    # the same two files.
-    if not _registries_match_disk(root, relation_definitions, language):
-        log.info("semantic corpus populate discarded: registry moved during the walk")
-        return False
+    # Reserve before the census so skipped publishers do no whole-vault work.
     flight, owns_flight = _claim_corpus_context_flight(
-        cache_key, census, relation_definitions, language
+        cache_key, None, relation_definitions, language
     )
     if not owns_flight:
         return None
@@ -2934,6 +2917,17 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> b
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
                 return None
+        # L2/L3: capture the checkpoint before the walk it has to vouch for.
+        before = freshness.consumer_checkpoint(root, "vault")
+        census = _timed_corpus_census(root, "populate")
+        if census is None:
+            return False
+        # Registries loaded before the walk must still match its schema files.
+        # The final census confirmation closes the remaining admission window.
+        if not _registries_match_disk(root, relation_definitions, language):
+            log.info("semantic corpus populate discarded: registry moved during the walk")
+            return False
+        flight.census = census
         started = time.perf_counter()
         context = _build_corpus_context_uncached(
             root,
@@ -3376,6 +3370,22 @@ def _build_corpus_context_with_census(
             return flight.result, None
 
     try:
+        if flight is not None:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                late_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            if late_entry is not None and late_entry[0] == census:
+                # A publisher filled the cache before this claim. Reuse its
+                # entry through the maintained lookup, without another parse.
+                redundant_flight, flight = flight, None
+                redundant_flight.discarded = True
+                _finish_corpus_context_flight(cache_key, redundant_flight)
+                return _build_corpus_context_with_census(
+                    root,
+                    candidate=candidate,
+                    registry=registry,
+                    language_registry=language_registry,
+                    warm=warm,
+                )
         started = time.perf_counter()
         context = _build_corpus_context_uncached(
             root,

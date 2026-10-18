@@ -222,6 +222,49 @@ def test_warm_rebuilds_after_a_shared_populate_discards_its_context(
     assert semantic_contract.current_reference_identity_snapshot(vault) is not None
 
 
+def test_warm_reuses_a_publication_that_finishes_before_its_flight_claim(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A late startup claim must reuse an equivalent corpus already admitted."""
+    page = vault / _PAGE
+    freshness.seed(vault, "vault", [(str(page), freshness.stat_signature(page))])
+    paused = threading.Event()
+    release = threading.Event()
+    first_claim = True
+    builds: list[Path] = []
+    real_claim = semantic_contract._claim_corpus_context_flight
+    real_build = semantic_contract._build_corpus_context_uncached
+
+    def claim(*args: Any, **kwargs: Any) -> Any:
+        nonlocal first_claim
+        if first_claim:
+            first_claim = False
+            paused.set()
+            assert release.wait(15), "the warmer was not released"
+        return real_claim(*args, **kwargs)
+
+    def build(root: Path, **kwargs: Any) -> Any:
+        builds.append(root)
+        return real_build(root, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_claim_corpus_context_flight", claim)
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", build)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        warmer = pool.submit(semantic_contract.warm_corpus_context, vault)
+        try:
+            assert paused.wait(5)
+            assert index_sync.publish_corpus_delta(vault, changed=[page]) is True
+        finally:
+            release.set()
+        warmer.result(timeout=5)
+
+    assert builds == [vault]
+    entry = semantic_contract._CORPUS_CONTEXT_CACHE[semantic_contract._corpus_cache_key(vault)]
+    assert entry[1].pages[_PAGE].title == "One"
+    assert entry[0] == semantic_contract._corpus_census(vault)
+    assert semantic_contract.current_reference_identity_snapshot(vault) is not None
+
+
 def _flight_inputs(vault: Path) -> tuple[Any, Any, tuple, tuple[str, str]]:
     registry = relation_registry.load_registry(vault)
     language = semantic_language_registry.load_registry(vault)

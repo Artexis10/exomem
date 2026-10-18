@@ -1043,7 +1043,13 @@ def test_a_second_publisher_joins_no_second_whole_vault_build(
     entered = threading.Event()
     release = threading.Event()
     calls: list[Path] = []
+    censuses: list[Path] = []
     real_build = semantic_contract._build_corpus_context_uncached
+    real_census = semantic_contract._corpus_census
+
+    def counted_census(root: Path):
+        censuses.append(root)
+        return real_census(root)
 
     def blocking_build(root: Path, **kwargs):
         calls.append(root)
@@ -1052,15 +1058,18 @@ def test_a_second_publisher_joins_no_second_whole_vault_build(
         return real_build(root, **kwargs)
 
     monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", blocking_build)
+    monkeypatch.setattr(semantic_contract, "_corpus_census", counted_census)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         first = pool.submit(semantic_contract._populate_corpus_context_after_miss, vault)
         assert entered.wait(_OBSERVE_SECONDS), "the first publisher never reached the build"
 
         # The second publisher finds the same cold key mid-build and must
-        # return rather than start its own.
+        # return without another whole-vault census or parse.
+        before = len(censuses)
         semantic_contract._populate_corpus_context_after_miss(vault)
         assert len(calls) == 1
+        assert len(censuses) == before
 
         release.set()
         first.result(timeout=10)
