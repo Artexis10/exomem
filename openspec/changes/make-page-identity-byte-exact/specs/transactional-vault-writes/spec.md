@@ -15,6 +15,13 @@ A hash that identifies a canonical page, guards its replacement, or proves deriv
 - **WHEN** another writer changes the bytes after a guarded read
 - **THEN** the existing drift checks refuse the stale replacement or publication
 
+#### Scenario: A page starts with a UTF-8 byte order mark
+
+- **WHEN** a canonical page has one UTF-8 byte order mark before its Markdown frontmatter fence
+- **THEN** readers parse its metadata through the shared fence definition and hash its exact stored bytes
+- **AND** incomplete frontmatter, malformed YAML and duplicate identities retain their existing refusal behavior
+- **AND** existing reference and semantic parser versions invalidate derived rows built under the earlier parser
+
 ### Requirement: Identity backfill preserves existing document bytes
 
 Adding a missing page identity SHALL preserve the document's existing newline representation and content outside the inserted field. Existing malformed or duplicate identity checks SHALL remain unchanged.

@@ -92,7 +92,10 @@ def render_units(
 
 
 def _run(arguments, *, timeout=10):
-    return subprocess.run(arguments, capture_output=True, text=True, check=True, timeout=timeout)
+    return subprocess.run(
+        arguments, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        check=True, timeout=timeout,
+    )
 
 
 def _properties(unit: str, interface: str) -> dict:
@@ -368,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
         result = {"state": "unconfigured", "failure": "invalid-configuration"}
     print(json.dumps(result, sort_keys=True))
     return (
+        # nosemgrep: ep-word-membership -- These are closed observer states, not user vocabulary.
         0 if result["state"] in ("disabled", "scheduled", "healthy-availability", "absent") else 1
     )
 

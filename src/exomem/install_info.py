@@ -231,7 +231,7 @@ def package_identity(package_mode: str, *, role: str) -> dict:
     if package_mode == "source":
         result = subprocess.run(
             ["git", "-C", str(origin.parent), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
         )
         revision = result.stdout.strip() if result.returncode == 0 else None
     return {

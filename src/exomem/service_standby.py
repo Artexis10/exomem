@@ -501,21 +501,27 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
 def reprove_until_promoted(
     vault_root: Path, *, poll_seconds: float | None = None
 ) -> bool:
-    """Keep the graph proof current until promotion or discard.
+    """Keep cutover proofs current until promotion or discard.
 
     Returns whether a proof is held when it stops. Reads only, like the proof;
     the supervisor's warm budget still bounds how long a standby may wait.
     """
+    from . import readiness
+
     interval = REPROVE_POLL_SECONDS if poll_seconds is None else poll_seconds
     while True:
         with _lock:
             if not _standby or _promoting or _promoted or _discarded:
                 return _proved_token is not None
             stop = _discard_requested
+            catalogue_built = _detached_built
         try:
             reprove_graph_snapshot_if_due(vault_root)
         except Exception:  # noqa: BLE001 - a failed re-proof leaves the held proof
             log.warning("standby graph snapshot re-proof failed", exc_info=True)
+        if not catalogue_built and not readiness.is_ready("lexical"):
+            if prove_retrieval_catalog(vault_root):
+                _warm_proven_catalogue(vault_root)
         if stop.wait(interval):
             with _lock:
                 return _proved_token is not None
@@ -562,6 +568,22 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
     except Exception:  # noqa: BLE001 - an unprovable catalog is a waiting component
         log.warning("standby retrieval catalog proof failed", exc_info=True)
         return False
+
+
+def _warm_proven_catalogue(vault_root: Path) -> None:
+    """Prime the same local caches after either initial or repeated proof."""
+    from . import mode, readiness
+
+    readiness.mark_ready("retrieval_catalog")
+    try:
+        warmup.warm_caches(
+            vault_root,
+            preload_models=_preload_allowed(),
+            preload_cpu_caches=mode.preload_cpu_caches(),
+        )
+    except Exception:  # noqa: BLE001 - caches are rebuildable on demand
+        log.warning("standby cache warm-up failed", exc_info=True)
+    readiness.mark_ready("lexical")
 
 
 def prepare_detached_catalog(vault_root: Path) -> bool:
@@ -785,7 +807,7 @@ def warm(vault_root: Path) -> None:
     component stays ``waiting`` and the supervisor's warm budget decides what
     happens next.
     """
-    from . import freshness, mode, readiness
+    from . import freshness, readiness
     from .service_manager import standby_warm_budget
 
     vault_root = Path(vault_root)
@@ -802,16 +824,7 @@ def warm(vault_root: Path) -> None:
         except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
             log.warning("standby recall registry seed failed", exc_info=True)
         if prove_retrieval_catalog(vault_root):
-            readiness.mark_ready("retrieval_catalog")
-            try:
-                warmup.warm_caches(
-                    vault_root,
-                    preload_models=_preload_allowed(),
-                    preload_cpu_caches=mode.preload_cpu_caches(),
-                )
-            except Exception:  # noqa: BLE001 - caches are rebuildable on demand
-                log.warning("standby cache warm-up failed", exc_info=True)
-            readiness.mark_ready("lexical")
+            _warm_proven_catalogue(vault_root)
         elif prepare_detached_catalog(vault_root):
             # No caches are warmed over rows promotion replaces. The build took
             # up to a minute, during which this unwatched registry went stale;

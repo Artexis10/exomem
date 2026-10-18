@@ -21,7 +21,8 @@ from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+# Cached negative rows must rebuild when frontmatter recognition changes.
+SCHEMA_VERSION = 4
 REF_PREFIX = "exomem://memory/"
 ID_FIELD = "exomem_id"
 _REFERENCE_REBUILD_LOCK = threading.Lock()

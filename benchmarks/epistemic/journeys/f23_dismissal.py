@@ -8,27 +8,11 @@ emission rather than N. Both are claims about what a runtime does, so this
 driver runs the episode against the installed CLI and projects only what the
 runtime produced.
 
-**The counter half is decided on this runtime, and it was not always.** The
-zero-carrier inventory this docstring used to record — `adoption_studio` apply,
-`maintain_memory` fix, `preserve_artifacts` and `process_media` each reaching
-the write carrier ZERO times, so a batch delivered no block and the assertion
-reported `unsupported` — was retired by
-`openspec/changes/extend-due-state-to-bulk-carriers`, which made the operation
-leaves carriers. The bulk step's `adopt --mode copy-as-sources` now commits
-twelve governed writes and delivers exactly one block at its terminal, so the
-assertion evaluates on an emission delta of ONE against a write delta of TWELVE.
-
-Two things about that block, because the shape of the evidence matters more
-than its sign. First, the leaves still reach `due_state.block_for_write` zero
-times: the block is a BATCH block served once at the invocation's terminal
-(`due_state.block_for_batch`), which is why the batch-once claim is a property
-of the terminal rather than of the scope. Second, and this is the part easiest
-to misread, the twelve pages do NOT move the counts — `copy-as-sources` wraps
-each original inside a fenced Capture block on a `type: source` page, so they
-add zero due items (see :func:`seed_bulk_documents`). The block is delivered as
-the FIRST QUALIFYING RESPONSE of the session, and every CLI step here is its own
-process and therefore its own session. Reading a delivered block as evidence
-that the bulk pages changed the totals would be reading it wrong.
+The bulk step commits twelve governed source writes. They add no due items
+because each original becomes a fenced capture on a source page. Advice now
+counts affected pages, so the source-only batch delivers no block. Its counter
+assertion is therefore `unsupported`: zero emissions cannot prove repetition
+control. The compiled-page carrier test supplies the positive batch evidence.
 
 **The envelope is discovered, never assumed.** The discovery, the refusal, and
 the subprocess wrapper are :mod:`.f26_carrier`'s, imported rather than copied:
@@ -53,9 +37,8 @@ The episode, in order:
    which is what an engine restart is from the vault's point of view.
 5. One bulk ingest: ``adopt --mode copy-as-sources`` over
    :data:`BULK_DOCUMENTS` legacy files in a single command. Twelve governed
-   writes, still zero trips through the per-write carrier, and exactly one
-   block delivered at the invocation's terminal — recorded honestly, not
-   smoothed.
+   writes and zero delivered blocks, because the affected source pages have
+   no due items.
 
 **What is projected as an unsolicited signal, and what is not.** Anything the
 default review union re-lists under the dismissed identity is projected as a
@@ -136,10 +119,8 @@ DEFAULT_PASSES = 3
 PROMINENCE_LEVELS: tuple[str, ...] = _prominence_levels()
 
 #: Files the single bulk-ingest command absorbs. Two would satisfy the
-#: assertion's `writes >= 2` floor; twelve makes the difference between one
-#: emission and one-per-write impossible to read as noise. The leaf carries as
-#: of `extend-due-state-to-bulk-carriers`, so twelve is what the write counter
-#: records and the emission comparison is decided at one.
+#: assertion's `writes >= 2` floor; twelve keeps a useful bulk denominator.
+#: Source pages have no due items, so this journey records zero emissions.
 BULK_DOCUMENTS = 12
 BULK_DIRECTORY = "legacy"
 

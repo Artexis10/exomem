@@ -10,6 +10,8 @@ Read exact bytes once and decode without universal-newline translation. Reuse gu
 
 Audit text-read-to-hash call sites across the package. Repair the readers and their comparisons together. Identity backfill preserves the source's newline representation when inserting its field.
 
+Share the Markdown fence definition across canonical and find readers, including one leading UTF-8 byte order mark. Bump the existing reference schema and semantic parser versions so old negative rows rebuild through ordinary recovery. These versions govern derived data; they do not change the collection store schema or authorize collection migration.
+
 The closest maintained solution is the existing guarded-read and atomic-write layer. Extending its use avoids another hash library, migration framework, or normalization pass.
 
 ## Risks / Trade-offs

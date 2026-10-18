@@ -44,6 +44,24 @@ def _dismissals(vault_root: Path) -> dict:
     return review_state_module.ReviewStateStore(vault_root).load()["records"]
 
 
+def test_a_record_batch_carries_only_its_matched_planning_pages(tmp_path: Path) -> None:
+    seed_vault(tmp_path)
+    for title in ("Batch 1", "Batch 2", "Batch 3"):
+        queue_item(tmp_path, title)
+    due_state_module.reconcile(tmp_path)
+    report_event(tmp_path, "Batch 1")
+
+    with due_state_module.batch_scope(tmp_path):
+        report_event(tmp_path, "Batch 2")
+        report_event(tmp_path, "Batch 3")
+
+    block = due_state_module.block_for_batch(tmp_path)
+    assert block["scope"] == "affected_paths"
+    assert block["total"] == 2
+    assert block["categories"] == {FAMILY: 2}
+    assert due_state_module.served(tmp_path)["total"] == 3
+
+
 def test_the_lifecycle_route_from_queued_intent_to_reported_consequence(
     tmp_path: Path,
 ) -> None:
@@ -60,8 +78,10 @@ def test_the_lifecycle_route_from_queued_intent_to_reported_consequence(
     third = report_event(tmp_path, "Batch 3")
 
     assert _open_titles(tmp_path) == {"Batch 1", "Batch 2", "Batch 3"}
-    assert third["due_state"]["total"] == 3
-    assert third["due_state"]["categories"] == {FAMILY: 3}
+    assert third["due_state"]["scope"] == "affected_paths"
+    assert third["due_state"]["total"] == 1
+    assert third["due_state"]["categories"] == {FAMILY: 1}
+    assert due_state_module.served(tmp_path)["total"] == 3
 
     # 2. The same outcome stated twice is one event, not two: the identity comes
     #    from the collection's own declared natural key.

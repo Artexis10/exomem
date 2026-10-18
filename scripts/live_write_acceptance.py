@@ -411,6 +411,26 @@ def _connector_read_your_write(client: Any, marker: str, rel_path: str) -> str:
         return "unknown"
 
 
+def _connector_relation_target(client: Any) -> str:
+    """Use a compiled fixture anchor, never an arbitrary search hit or manifest."""
+    _, recalled = client.call("ask_memory", {
+        "query": "", "scope": "kb-only", "mode": "keyword", "limit": 1,
+        "detail": "full", "types": ["insight"], "result_level": "page",
+    })
+    hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
+    if isinstance(hits, list) and hits and hits[0].get("path"):
+        return str(hits[0]["path"]).removesuffix(".md")
+    marker = f"acceptanceanchor{uuid.uuid4().hex}"
+    _, seeded = client.call("remember", {
+        "title": f"Acceptance anchor {uuid.uuid4().hex}",
+        "content": _remember_content("Acceptance anchor", marker, None),
+        "note_type": "insight", "suggestions": False, "response_detail": "compact",
+    })
+    if seeded.get("outcome") in ("held", "refused") or not seeded.get("path"):
+        raise RuntimeError("the public fixture call did not create a compiled relation anchor")
+    return str(seeded["path"]).removesuffix(".md")
+
+
 def _readonly_receipt_connection(vault_root: Path) -> sqlite3.Connection:
     """Observe an existing supported store without product repair wrappers."""
     connection = sqlite3.connect(
@@ -815,6 +835,7 @@ def measure(
     try:
         example, planning_path = _prepare_collections(client)
         if transport == "connector":
+            relation_target = _connector_relation_target(client)
             preparation_seconds, preparation_converged, preparation_drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds)
             projection = due_state.load(root)
             # Count stored buckets, separately from the audience-filtered served view.
@@ -829,10 +850,6 @@ def measure(
             due_items = None
             retrieval = connector_runtime.get("retrieval") or {}
             recall_admission = str(retrieval.get("state", "unverified"))
-            _, recalled = client.call("ask_memory", {"query": "", "scope": "kb-only", "mode": "keyword", "limit": 1, "detail": "full"})
-            hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
-            if isinstance(hits, list) and hits:
-                relation_target = hits[0].get("path", "").removesuffix(".md") or None
         else:
             recall_admission = str(
                 managed_recall.enter_managed_recall(root, full_startup=True).get("state", "unknown")

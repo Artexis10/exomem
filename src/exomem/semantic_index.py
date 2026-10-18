@@ -17,7 +17,8 @@ import yaml
 from . import memory_refs, relation_registry, semantic_language_registry, semantic_units, vault
 from .vocabulary import instances
 
-PARSER_VERSION = 5
+# Matching source bytes must not reuse an older parser's interpretation.
+PARSER_VERSION = 6
 _GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v5"
 _ACTIVE_PARENT_STATES: ContextVar[Mapping[str, SemanticParentIndexState] | None] = ContextVar(
     "exomem_semantic_parent_states", default=None

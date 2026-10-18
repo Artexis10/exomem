@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from exomem import activation_manifest, deferred_write_advisory, memory_refs, semantic_index
+from exomem import find as find_module
 from exomem import vault as vault_module
 
 
@@ -35,7 +36,10 @@ def test_current_page_consumers_and_replacement_share_stored_byte_identity(
     state = semantic_index.build_parent_index_state(tmp_path, path)
     shared = semantic_index.build_parent_index_state(tmp_path, path, source=text)
     census = activation_manifest.build_census(tmp_path)
+    parsed = find_module._parse_page(path, path.stat().st_mtime, tmp_path, content=original)
 
+    assert parsed is not None and parsed.frontmatter_valid
+    assert parsed.page_type == "insight"
     assert guard.expected_content_hash == vault_module.content_hash(text) == expected
     assert state.parent_source_hash == shared.parent_source_hash == expected
     assert census.by_path[rel].source_hash == expected
@@ -54,6 +58,17 @@ def test_current_page_consumers_and_replacement_share_stored_byte_identity(
         vault_root=tmp_path,
     )
     assert path.read_bytes() == replacement.encode("utf-8")
+
+
+def test_incomplete_bom_frontmatter_remains_invalid(tmp_path: Path) -> None:
+    path = tmp_path / "page.md"
+    raw = b"\xef\xbb\xbf---\r\ntype: insight\r\n"
+    path.write_bytes(raw)
+
+    parsed = find_module._parse_page(path, path.stat().st_mtime, tmp_path, content=raw)
+
+    assert parsed is not None and not parsed.frontmatter_valid
+    assert path.read_bytes() == raw
 
 
 def test_newline_only_concurrent_edit_refuses_a_stale_replacement(tmp_path: Path) -> None:

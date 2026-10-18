@@ -1091,6 +1091,7 @@ def apply_manifest_write_delta(
             row["complete"] = retained.get("complete") is True
         claims[str(manifest.path)] = row
         save(vault_root, {**current, "claims": claims})
+        _track_batch_path(vault_root, str(manifest.path))
 
 
 @canonical_read
@@ -1742,6 +1743,7 @@ def apply_observation_write_delta(
         else:
             pages[str(path)] = _bucket([replacement], now.date(), now=now)
         categories[_OBSERVATION_FAMILY] = pages
+        _track_batch_path(vault_root, str(path))
         return _persist_delta(
             Path(vault_root), current, categories, now.date(), count_write=False
         )
@@ -1754,6 +1756,7 @@ def _settle_observations_for_record(
     key: str,
     values: Mapping[str, Any],
     today: dt.date,
+    affected_paths: set[str] | None = None,
 ) -> None:
     """Refresh one record's reflection support without rescanning Records."""
     from . import audit as audit_module
@@ -1813,8 +1816,11 @@ def _settle_observations_for_record(
             changed = True
         if not changed:
             continue
+        replacement = _bucket(retained, today) if retained else None
+        if affected_paths is not None and replacement != pages.get(page_path):
+            affected_paths.add(page_path)
         if retained:
-            pages[page_path] = _bucket(retained, today)
+            pages[page_path] = replacement
         else:
             pages.pop(page_path, None)
 
@@ -2024,7 +2030,8 @@ def _carried_backfill_cursors(current: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _prune_missing_joined(
-    vault_root: Path, pages: dict[str, Any], today: dt.date
+    vault_root: Path, pages: dict[str, Any], today: dt.date,
+    affected_paths: set[str] | None = None,
 ) -> None:
     """Drop joined records whose file is gone, and any entry that empties.
 
@@ -2059,6 +2066,8 @@ def _prune_missing_joined(
                 rebuilt.append(replacement)
         if not changed:
             continue
+        if affected_paths is not None:
+            affected_paths.add(item_path)
         if rebuilt:
             pages[item_path] = _bucket(rebuilt, today)
         else:
@@ -2075,6 +2084,7 @@ def apply_record_write_delta(
     values: Mapping[str, Any],
     previous: Mapping[str, Any] | None = None,
     today: dt.date | None = None,
+    affected_paths: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Fold ONE committed record into the projection. Never reads Records.
 
@@ -2134,7 +2144,7 @@ def apply_record_write_delta(
         if _observations_at_write_time():
             observation_pages = dict(categories.get(_OBSERVATION_FAMILY) or {})
             _settle_observations_for_record(
-                observation_pages, manifest, path, key, values, today
+                observation_pages, manifest, path, key, values, today, affected_paths
             )
             categories[_OBSERVATION_FAMILY] = observation_pages
         if not _settles_at_write_time():
@@ -2217,7 +2227,9 @@ def apply_record_write_delta(
                     _compose_outcome_entry(Path(vault_root), component, sorted(joined)),
                     today,
                 )
-        _prune_missing_joined(Path(vault_root), pages, today)
+                if affected_paths is not None:
+                    affected_paths.add(item.source.path)
+        _prune_missing_joined(Path(vault_root), pages, today, affected_paths)
         categories[_OUTCOME_FAMILY] = pages
         return _persist_delta(
             Path(vault_root),
@@ -2239,6 +2251,7 @@ def apply_plan_write_delta(
     values: Mapping[str, Any],
     previous: Mapping[str, Any] | None = None,
     today: dt.date | None = None,
+    affected_paths: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Fold ONE committed plan write into the projection. Usually reads nothing.
 
@@ -2285,7 +2298,7 @@ def apply_plan_write_delta(
             # Item-wide, and the only case that is: a closed item is not a
             # finding under ANY binding.
             _drop_item_entries(pages, str(path), str(key), today)
-            _prune_missing_joined(Path(vault_root), pages, today)
+            _prune_missing_joined(Path(vault_root), pages, today, affected_paths)
             categories[_OUTCOME_FAMILY] = pages
             return _persist_delta(Path(vault_root), current, categories, today)
         plan_fields = {str(name) for row in rows for name in dict(row.get("join") or {}).values()}
@@ -2315,7 +2328,7 @@ def apply_plan_write_delta(
                     ),
                     today,
                 )
-            _prune_missing_joined(Path(vault_root), pages, today)
+            _prune_missing_joined(Path(vault_root), pages, today, affected_paths)
             categories[_OUTCOME_FAMILY] = pages
             return _persist_delta(Path(vault_root), current, categories, today)
         planning = _load_projection_manifest(Path(vault_root), str(manifest.path)) or manifest
@@ -2358,7 +2371,7 @@ def apply_plan_write_delta(
                 else None
             )
             _put_outcome_entry(pages, str(path), str(key), records_path, entry, today)
-        _prune_missing_joined(Path(vault_root), pages, today)
+        _prune_missing_joined(Path(vault_root), pages, today, affected_paths)
         categories[_OUTCOME_FAMILY] = pages
         return _persist_delta(Path(vault_root), current, categories, today)
 
@@ -2409,6 +2422,7 @@ def block_for_structured_write(
         return None
     profile = str(getattr(manifest, "semantic_profile", "") or "")
     delta = apply_plan_write_delta if profile == "planning" else apply_record_write_delta
+    affected_paths = {path}
     payload = delta(
         vault_root,
         manifest,
@@ -2417,14 +2431,16 @@ def block_for_structured_write(
         values=values,
         previous=previous,
         today=today,
+        affected_paths=affected_paths,
     )
     if payload is None:
         return None
-    _track_batch_path(vault_root, path)
+    for affected_path in affected_paths:
+        _track_batch_path(vault_root, affected_path)
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        return _affected_block(vault_root, frozenset({path}), today=today, payload=payload)
+        return _affected_block(vault_root, frozenset(affected_paths), today=today, payload=payload)
 
 
 # --------------------------------------------------------------------------
