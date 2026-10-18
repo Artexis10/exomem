@@ -567,6 +567,22 @@ The owning task 6.1 remains open until reference, principal, encoder, contention
 and stage evidence cover its current contract. Missed diagnostic targets fail
 neither a ceiling nor a release.
 
+## Recall availability
+
+The packaged MCP canary checks private cases through the existing public tools.
+On a schema mismatch, the attempt can retain `schema_failure` with the validator
+keyword and `schema_path_sha256`. The hash covers the first rejected schema
+path encoded with compact JSON separators. It comes from the same validation
+pass and does not include raw paths, messages, constants or response content.
+
+Join this fingerprint to the case-file digest, case identity and observer
+version. It supports correlation; different assertions can share a validator
+path through references or composition. It does not uniquely identify an
+assertion, establish its product cause or list every failure. Predictable paths
+can have guessable hashes;
+the fingerprint permits correlation and does not guarantee secrecy. Missing
+diagnostic metadata does not change the failed result.
+
 ## Doctor
 
 The `observability` check covers log-directory writes, rotation sizes, and
