@@ -170,6 +170,9 @@ _mutation_logger = logging.getLogger("exomem.calls")
 _ACTIVE_WRITE_FENCE: ContextVar[tuple[Any, int] | None] = ContextVar(
     "exomem_active_write_fence", default=None
 )
+_ACTIVE_COLLECTION_FILE_WRITE: ContextVar[tuple[Any, Any, bytes | None] | None] = ContextVar(
+    "exomem_active_collection_file_write", default=None
+)
 _ACTIVE_MUTATION_TRACE: ContextVar[tuple[str, str, str] | None] = ContextVar(
     "exomem_active_mutation_trace", default=None
 )
@@ -4351,8 +4354,10 @@ class LeaseManager:
         self._active_mutations = 0
         self._last_activity_monotonic = time.monotonic()
         self._collection_store = None
-        # Set by start_server_lifecycle: this process serves the store, so it needs its runtime.
+        # Set by start_server_lifecycle: generic file writes must protect the store's ownership.
         self._serves_collection_store = False
+        self._file_store_acquisition = None
+        self._file_store_marker = None
         self._store_bound = False
         self._store_borrowers: dict[int, int] = {}
         self._store_handoff = False
@@ -4400,21 +4405,11 @@ class LeaseManager:
             pass
 
     def _offers_collection_store_capability(self) -> bool:
-        """Whether this process may pass the vault's collection store fence.
-
-        The fence keeps out releases that do not know the store. In this release, a process
-        that does not serve the store refuses a record_memory or plan_memory request for a
-        collection that the marker routes to the store. A pending create, migration or export
-        names collections whose routing is changing, and a first enrolment cuts the fence
-        before it installs the marker. In those windows the fence alone keeps writers off the
-        files the intent works on, so such a process offers the capability only when a marker
-        exists and the store records no pending intent. The serving process offers it only
-        with its store runtime attached, as before.
-        """
+        """Offer the store fence capability for a producer or proved unrelated file writes."""
         if self._collection_store is not None:
             return True
         if self._serves_collection_store:
-            return False
+            return self._collection_file_marker() is not None
         try:
             import sqlite3
             from contextlib import closing
@@ -4425,7 +4420,7 @@ class LeaseManager:
             root = resolve_vault()
             if authority.read_marker(root) is None:
                 return False
-            # A plain read of the one intent key, so that a media child loads no store libraries.
+            # Preserve the media child's lightweight admission; it does not serve general file writes.
             uri = f"{connection.store_path(root).resolve().as_uri()}?mode=ro"
             with closing(sqlite3.connect(uri, uri=True)) as store:
                 pending = store.execute(
@@ -4434,6 +4429,15 @@ class LeaseManager:
             return pending is None
         except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
             return False
+
+    def _collection_file_marker(self, acquired=None, *, vault_root=None):
+        try:
+            from .collection_store import replica
+            from .vault import resolve_vault
+
+            return replica.file_writer_marker(resolve_vault() if vault_root is None else Path(vault_root), acquired)
+        except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
+            return None
 
     def _store_refused(self) -> bool:
         """With the lock held: wait out a coalesced publication, then refuse closure or handoff.
@@ -4503,6 +4507,14 @@ class LeaseManager:
                     f"replica is read-only; current writer is {holder_text(record.holder, record.expires_at)}",
                     "Send the mutation to the current writer or retry after its lease expires.",
                 )
+            if (self._serves_collection_store and self._collection_store is None
+                    and record.required_collection_store_capability is not None):
+                marker = self._collection_file_marker(record)
+                if marker is None:
+                    raise OpError("WRITER_LEASE_REQUIRED", "current local store publication is unverified")
+                self._file_store_acquisition, self._file_store_marker = record, marker
+            else:
+                self._file_store_acquisition = self._file_store_marker = None
             self._record_lease_op("acquire", "granted")
             self._fencing_token = record.fencing_token
             self._expires_at = record.expires_at
@@ -4770,6 +4782,7 @@ class LeaseManager:
         provably means no outstanding fence anywhere in this process.
         """
         fence_context: Token[tuple[Any, int] | None] | None = None
+        file_context = None
         counted = False
         admission_now = int(time.time()) if attachment_now is None else attachment_now
         if session_open_admission and activation_admission:
@@ -4810,12 +4823,19 @@ class LeaseManager:
                 lease = self.ensure_writer()
                 if self.config.enabled:
                     fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+                if self._serves_collection_store and self._collection_store is None:
+                    # Keep this mutation's file classification if a producer attaches during staging.
+                    file_context = _ACTIVE_COLLECTION_FILE_WRITE.set((
+                        self, self._file_store_acquisition, self._file_store_marker,
+                    ))
                 self._active_mutations += 1
                 self._last_activity_monotonic = time.monotonic()
             counted = True
         try:
             yield
         finally:
+            if file_context is not None:
+                _ACTIVE_COLLECTION_FILE_WRITE.reset(file_context)
             if fence_context is not None:
                 _ACTIVE_WRITE_FENCE.reset(fence_context)
             if counted:
@@ -6583,7 +6603,13 @@ class LeaseManager:
                 if self._collection_store is not None:
                     self._renew_collection_store(token)
                     continue
-                record = self.client.renew(token)
+                marker = (self._collection_file_marker(self._file_store_acquisition)
+                          if self._file_store_acquisition is not None else None)
+                record = self.client.renew(token, **(
+                    {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
+                    if (self._file_store_acquisition is not None and marker is not None
+                        and marker == self._file_store_marker) else {}
+                ))
                 with self._lock:
                     if self._fencing_token != token:
                         continue
@@ -6672,6 +6698,25 @@ def validate_active_write_fence() -> None:
         return
     manager, fencing_token = active
     manager.validate_fencing_token(fencing_token)
+
+
+def validate_active_collection_file_paths(vault_root: Path, paths: Iterable[Path]) -> None:
+    """Keep generic file effects outside store ownership while its producer is unavailable."""
+    active = _ACTIVE_COLLECTION_FILE_WRITE.get()
+    if active is None:
+        return
+    from .collection_store import authority
+
+    manager, acquired, marker = active
+    root = Path(vault_root).resolve()
+    if acquired is not None:
+        current = manager._collection_file_marker(acquired, vault_root=root)
+        if current is None or marker is None or current != marker:
+            raise OpError("WRITER_LEASE_REQUIRED", "current local store publication is unverified")
+    authority.refuse_view_paths(
+        root, (path.resolve().relative_to(root).as_posix() for path in paths
+               if path.resolve().is_relative_to(root)), OpError, expected_marker=marker,
+    )
 
 
 _MANAGERS: dict[LeaseConfig, LeaseManager] = {}

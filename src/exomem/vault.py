@@ -5757,7 +5757,7 @@ def _validate_batch_write_access(
     auxiliary_manifest: Any | None = None,
 ) -> None:
     """Fail closed when any planned target is outside or newly write-protected."""
-    from . import access, vocabulary_auxiliaries
+    from . import access, vocabulary_auxiliaries, writer_lease
     from .governance import connector_boundary
 
     vault_resolved = vault_root.resolve()
@@ -5819,6 +5819,10 @@ def _validate_batch_write_access(
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
+    # Decide access before ownership so refused paths reveal no store routing information.
+    writer_lease.validate_active_collection_file_paths(
+        vault_root, (target for write in writes for target in (write.path, *write.ensure_directories)),
+    )
 
 
 @contextmanager

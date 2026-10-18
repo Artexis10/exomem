@@ -54,7 +54,7 @@ from exomem.collection_store import (
     importer,
     owner,
     replica,
-    schema,
+    runtime,
     tokens,
 )
 from exomem.collection_store.preview import preview_store
@@ -188,13 +188,7 @@ def test_a_derived_import_keeps_rows_out_of_the_store_and_rebuilds_them_while_ro
         assert reader.execute("SELECT MAX(row_count_after) FROM import_members WHERE collection_id=?",
                               (DERIVED,)).fetchone() == (12,)
 
-    def published():
-        with closing(connection.open_reader(store_path)) as reader:
-            meta = dict(reader.execute("SELECT key,value FROM store_meta"))
-        head = json.loads(meta.get(schema.META_PUBLISHED_REPLICA_HEAD) or "null")
-        return head is not None and str(head["commit_seq"]) == meta[schema.META_COMMIT_SEQ]
-
-    _until(published, 30)
+    runtime.flush_for_export(root)
     page = root / PATH.replace("_collection.md", "Items/_summary.md")
     _until(lambda: page.exists() and "12 imported rows after 3 imported members" in page.read_text(), 30)
     portable = owner.backup(root, destination=tmp_path / "portable.sqlite")

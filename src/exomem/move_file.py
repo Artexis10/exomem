@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy, working_set_heat
+from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
@@ -136,7 +137,7 @@ def _admit_publication(vault_root: Path, rel: str, content: bytes | None) -> Non
         raise MoveFileError("WRITE_REFUSED", "target is unavailable") from None
 
 
-def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
+def _held_rename(vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool = False) -> None:
     try:
         # `old_rel` is always a source this call's caller has already resolved
         # to an existing on-disk spelling (including a macOS-origin NFD name
@@ -150,7 +151,10 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
             new_rel,
             source_kind="file",
             physical=True,
+            rollback=rollback,
         )
+    except OpError as error:
+        raise MoveFileError(error.code, error.message) from error
     except reserved_paths.ReservedPathLeafError as error:
         if error.code == "CROSS_DEVICE":
             raise MoveFileError(
@@ -917,7 +921,7 @@ def move_file(
                         try:
                             _held_rename(vault_root, *paired_binary)
                         except MoveFileError:
-                            _held_rename(vault_root, new_rel, old_rel)
+                            _held_rename(vault_root, new_rel, old_rel, rollback=True)
                             raise
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
@@ -950,8 +954,8 @@ def move_file(
                     )
                     try:
                         if paired_binary is not None:
-                            _held_rename(vault_root, paired_binary[1], paired_binary[0])
-                        _held_rename(vault_root, new_rel, old_rel)
+                            _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
+                        _held_rename(vault_root, new_rel, old_rel, rollback=True)
                     except MoveFileError as rollback_error:
                         raise RuntimeError(
                             f"move link rewrite failed ({error}); rename rollback also "
@@ -1053,7 +1057,7 @@ def move_file(
                 "move_file: link-update batch failed for %s -> %s", old_rel, new_rel
             )
             try:
-                _held_rename(vault_root, new_rel, old_rel)
+                _held_rename(vault_root, new_rel, old_rel, rollback=True)
             except MoveFileError as rollback_error:
                 raise RuntimeError(
                     f"move link rewrite failed ({e}); rename rollback also failed: "
