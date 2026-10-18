@@ -97,10 +97,10 @@ def _canary_result(result, expected) -> tuple[str, str | None]:
     data = result.structured_content
     if not isinstance(data, dict) or result.data is None:
         return "error", "malformed-terminal"
-    # Public OpError, warming and activation fields are product protocol shapes.
+    # Public OpError and activation fields are product protocol shapes.
     outcome = (
         "refused"
-        if data.get("ok") is False or "warming" in data
+        if data.get("ok") is False
         else "abstained"
         if data.get("abstained") is True
         else "ok"

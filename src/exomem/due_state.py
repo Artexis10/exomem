@@ -77,6 +77,7 @@ projection state.
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import functools
 import hashlib
@@ -275,8 +276,8 @@ def _load_shared(vault_root: Path) -> dict[str, Any] | None:
     The projection reaches about 20 MB on a large vault, and decoding it cost
     0.3 s on every activation. `save` only ever replaces the file, so its token
     names its bytes. The token is taken before the read, so a file replaced in
-    between is parsed again on the next call, never served stale. Callers read
-    the result and never change it; a writer calls `load` for its own copy.
+    between is parsed again on the next call, never served stale. Callers never
+    change the result; a writer copies the branches its delta changes.
     """
     token = _file_token(state_path(vault_root))
     if token is None:
@@ -312,6 +313,7 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
                 # fsynced on every governed write, so its size is a per-write cost.
                 # Indentation cost ~2.5x for a machine-read file nobody diffs;
                 # `sort_keys` stays for determinism.
+                # Stream the payload to avoid allocating another full-size string.
                 json.dump(
                     payload,
                     handle,
@@ -332,6 +334,8 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
                 pass
             raise
     except Exception:  # noqa: BLE001 — a projection write never breaks a caller
+        with _SHARED_LOCK:
+            _SHARED.pop(str(vault_root), None)
         log.debug("could not persist the due-state projection", exc_info=True)
 
 
@@ -404,7 +408,7 @@ def _ledger_section(vault_root: Path, payload: dict[str, Any] | None = None) -> 
     if section is not None:
         return _emission_section({"emission": section})
     if payload is None:
-        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+        payload = _load_shared(vault_root) or _UNPERSISTED.get(str(vault_root))
     return _emission_section(payload)
 
 
@@ -1080,7 +1084,7 @@ def apply_manifest_write_delta(
     if manifest.semantic_profile != "records":
         return
     with _LOCK:
-        current = load(vault_root)
+        current = _load_shared(vault_root)
         if current is None:
             return
         claims = dict(current.get("claims") or {})
@@ -1179,7 +1183,7 @@ def routing_targets(
 
     root = Path(vault_root)
     writer = bound_writer(root)
-    state = {"claims": _recompute_claims(root)} if writer is not None else payload or load(root)
+    state = {"claims": _recompute_claims(root)} if writer is not None else payload or _load_shared(root)
     rows = (state or {}).get("claims")
     if not isinstance(rows, Mapping):
         return []
@@ -1261,7 +1265,7 @@ def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, 
     root = Path(vault_root)
     if selected_writer(root, manifest_path) is not None:
         return _recompute_claims(root).get(manifest_path, {}).get("items", [])
-    row = ((load(root) or {}).get("claims") or {}).get(manifest_path)
+    row = ((_load_shared(root) or {}).get("claims") or {}).get(manifest_path)
     if not isinstance(row, Mapping) or not isinstance(row.get("items"), list):
         return []
     try:
@@ -1271,7 +1275,7 @@ def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, 
     if keep is not None and not keep(manifest_path):
         return []
     return [
-        dict(item)
+        copy.deepcopy(dict(item))
         for item in row["items"]
         if isinstance(item, Mapping)
         and type(item.get("path")) is str
@@ -1528,7 +1532,7 @@ def apply_write_delta(
     from . import find as find_module
 
     today = today or dt.date.today()
-    payload = load(vault_root)
+    payload = _load_shared(vault_root)
     if payload is None:
         return None
 
@@ -1556,7 +1560,7 @@ def apply_write_delta(
     grouped = _entries_from_findings(vault_root, findings)
 
     with _LOCK:
-        current = load(vault_root) or payload
+        current = _load_shared(vault_root) or payload
         categories = dict(current.get("categories") or {})
         role_index = current.get("role_state")
         if isinstance(role_index, dict):
@@ -1566,7 +1570,7 @@ def apply_write_delta(
                 try:
                     artifact_role_state.apply_delta(vault_root, rel, page, families=enabled)
                     if page is not None and page.page_type == "experiment":
-                        role_index["has_origins"] = True
+                        role_index = {**role_index, "has_origins": True}
                 except Exception:  # noqa: BLE001 - committed mutation retains its receipt
                     log.debug("artifact role delta unavailable", exc_info=True)
         for category in PAGE_DELTA_CATEGORIES:
@@ -1612,7 +1616,7 @@ def apply_write_delta(
                 if isinstance(current.get("bindings"), dict)
                 else {}
             ),
-            "claims": dict(current.get("claims") or {}),
+            "claims": current.get("claims") or {},
             "role_state": role_index,
             **_carried_backfill_cursors(current),
         }
@@ -1662,7 +1666,7 @@ def apply_observation_write_delta(
 
     `facets` are the page's type, category, project and tags; they are stored
     so a serve under a narrower audience re-applies `claims.match` exactly as
-    the write did.
+    the write did. Return None when the bucket is unchanged or state is unavailable.
     """
     if not _observations_at_write_time() or not state_path(vault_root).exists():
         return None
@@ -1671,7 +1675,7 @@ def apply_observation_write_delta(
         now = now.replace(tzinfo=dt.UTC)
     now = now.astimezone(dt.UTC)
     with _LOCK:
-        current = load(vault_root)
+        current = _load_shared(vault_root)
         if current is None:
             return None
         categories = dict(current.get("categories") or {})
@@ -1765,12 +1769,17 @@ def apply_observation_write_delta(
                                 retained[key] for key in sorted(retained)
                             ],
                         }
-        if replacement is None:
+        bucket = _bucket([replacement], now.date(), now=now) if replacement is not None else None
+        _track_batch_path(vault_root, str(path))
+        if bucket is None:
+            if str(path) not in pages:
+                return None
             pages.pop(str(path), None)
         else:
-            pages[str(path)] = _bucket([replacement], now.date(), now=now)
+            if bucket == pages.get(str(path)):
+                return None
+            pages[str(path)] = bucket
         categories[_OBSERVATION_FAMILY] = pages
-        _track_batch_path(vault_root, str(path))
         return _persist_delta(
             Path(vault_root), current, categories, now.date(), count_write=False
         )
@@ -2042,7 +2051,7 @@ def _persist_delta(
                 else {}
             )
         ),
-        "claims": claims if claims is not None else dict(current.get("claims") or {}),
+        "claims": claims if claims is not None else current.get("claims") or {},
         "role_state": current.get("role_state"),
         **_carried_backfill_cursors(current),
     }
@@ -2135,7 +2144,7 @@ def apply_record_write_delta(
     if not state_path(vault_root).exists():
         return None
     with _LOCK:
-        current = load(vault_root)
+        current = _load_shared(vault_root)
         if current is None:
             return None
         claims = dict(current.get("claims") or {})
@@ -2303,7 +2312,7 @@ def apply_plan_write_delta(
     if not state_path(vault_root).exists():
         return None
     with _LOCK:
-        current = load(vault_root)
+        current = _load_shared(vault_root)
         if current is None:
             return None
         if not _settles_at_write_time():
