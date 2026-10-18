@@ -8,35 +8,35 @@
     }
   },
   "activate_context": {
-    "description": "Compile authorized context for a human turn or agent task refresh.\n\nFollow live recall policy; reuse injected context. Keep turn verbatim.\nFor task_refresh, put the task in conversation.focus. intent_resolution\nqualifies the human request separately. Origin labels cues, not human words.\nReturns bounded context, state, refs and provenance; abstains instead of guessing.\nFor a follow-up whose subject the conversation establishes, select its visible anchor.\nOtherwise, supply optional conversation.focus naming current subjects, including attachment cues.\nFocus is an agent cue; it cannot settle ambiguity in the human turn.\nask_memory recalls gaps; read_memory opens refs.\nReads no attachments. Due items and refresh grant no write authority.",
+    "description": "Compile bounded authorized context; abstain rather than guess.\n\nFollow live recall policy; reuse held context. For long threads or attachments,\npass conversation as needed. origin=focus marks agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nDue items and refresh grant no writes.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "turn": {
           "default": "",
-          "description": "Original human message verbatim. Empty abstains.",
+          "description": "Human turn verbatim; never a summary. Empty abstains.",
           "type": "string"
         },
         "max_chars": {
           "default": 4000,
-          "description": "Prose ceiling, clamped to 500..8,000; overflow becomes pointers.",
+          "description": "Prose cap clamped to 500..8,000; overflow becomes pointers.",
           "type": "integer"
         },
         "purpose": {
           "type": "string",
-          "description": "Visibility purpose; never ranking."
+          "description": "Visibility; never ranking."
         },
         "continuity": {
           "type": "string",
-          "description": "Prior token unchanged; drop on compaction or new session."
+          "description": "Prior token unchanged; drop on compaction/new session."
         },
         "anchor": {
           "type": "string",
-          "description": "Visible compiled ref chosen for a prior subject, ambiguity or correction. Hidden and ineligible refs refuse alike."
+          "description": "Visible compiled ref for an established prior subject, ambiguity or correction. Hidden and ineligible refs refuse alike."
         },
         "include_timings": {
           "default": false,
-          "description": "Include stage timings.",
+          "description": "Stage timings.",
           "type": "boolean"
         },
         "client": {
@@ -45,11 +45,11 @@
         },
         "session": {
           "type": "string",
-          "description": "Stable opaque conversation ID, at most 256 characters."
+          "description": "Stable opaque conversation ID; max 256 chars."
         },
         "workspace": {
           "type": "string",
-          "description": "Thread project key, at most 256 characters."
+          "description": "Thread project key; max 256 chars."
         },
         "conversation": {
           "additionalProperties": false,
@@ -97,11 +97,11 @@
             }
           },
           "type": "object",
-          "description": "Optional fields: focus (one line/240 chars), refs (12 already-read pages),\nrecent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history."
+          "description": "All optional: focus (one line/240 chars; current subjects and attachment names/objects),\nrefs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history."
         },
         "trigger": {
           "default": "user_turn",
-          "description": "user_turn for initial recall; task_refresh keeps turn and uses focus.",
+          "description": "user_turn: initial recall. task_refresh: keep turn; task in focus; intent_resolution qualifies human intent separately.",
           "enum": [
             "user_turn",
             "task_refresh"
@@ -110,7 +110,7 @@
         },
         "initiator": {
           "type": "string",
-          "description": "Descriptive caller label; grants no authority. Invalid labels ignored."
+          "description": "Caller label; no authority. Invalid labels ignored."
         }
       },
       "type": "object"
