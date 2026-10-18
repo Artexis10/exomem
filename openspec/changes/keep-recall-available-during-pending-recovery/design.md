@@ -47,6 +47,46 @@ Current access, policy, catalogue identity, and terminal byte checks remain mand
 Public diagnostics stay content-free and preserve restricted callers' existing suppression.
 Raw pending paths remain internal; revealing those names would require their own release proof.
 
+### Retain one catalogue during bounded selection
+
+The existing request binding retains checkpoints while each catalogue operation opens another connection.
+An ordinary publication can therefore invalidate an admitted request before its next query.
+Removing that comparison would mix eligibility, rows, and statistics from different catalogues.
+Reuse one SQLite read transaction for catalogue selection, then materialize its results and close it before provider work.
+This adds no persistent state, shared cache, registry, scheduler, or schema migration.
+
+Prepare required query encodings and cold independent indexes before opening the transaction.
+Preserve hot cache hits through a short lookup view before encoding.
+On a miss, discard its request evidence, prepare encodings after closing, then select under a newly admitted view using the original arguments.
+Give the discarded lookup private warnings and catalogue output; retain its actual cost in request timings.
+Admit both scope checkpoints, schema, semantic identity, and policy identity from the same connection.
+Reuse existing query bodies for scope membership, filters, ordering, parent hints, lexical candidates, unit candidates, statistics, and selected page hashes.
+Exact and lagging scopes both read their membership from that admitted view.
+Do not apply a foreground delta through the retained connection.
+Strict readiness uses independent connections and explicit current checkpoints.
+
+Materialize page and unit selections before closing, including requested widening candidates and their ordering.
+Apply widening exclusions after primary reranking without increasing its existing candidate depth.
+Run reranking and later assembly after closing the transaction, using retained selections and passages.
+Cache hits, exceptions, and cancellation close the view; nested recalls restore their caller's binding.
+A copied execution context must not share a SQLite connection across threads.
+No model load, query encoding, or reranking may retain that connection.
+
+The catalogue view does not freeze canonical files, vector indexes, media, or graph state.
+Retain pending suppression and request-owned proven pages after global custody retirement.
+Compare canonical hydration with selected `pages.content_hash`, using the existing page snapshot hash.
+Omit changed or unproved evidence and disclose incomplete coverage; never recover historical bytes from an unrelated current page.
+Canonical omissions can reduce the pool for later ranking; they never justify reading a newer catalogue's rows or statistics.
+Keep existing unit generations and fresh terminal authority and byte checks.
+Independent chunk or media evidence gains no catalogue-generation proof from path membership alone.
+
+Data publication alone may advance without invalidating the admitted view.
+Current policy or semantic identity changes still invalidate its interpretation.
+Disclose known projection lag and incomplete evidence through existing response fields, and keep partial results out of shared caches.
+Preserve the existing decline for widening that was already lagging at admission.
+Atomic replacement retains its WAL quiescence proof and may decline while a reader holds the old view.
+Keep selection short because a retained WAL reader can delay replacement and a DELETE-mode reader can block incremental commits.
+
 ### Separate redaction evidence from current reference resolution
 
 An optional citation lookup must not cancel material that passed recall admission.
@@ -120,6 +160,7 @@ The former protects data and authorization; the latter avoids making unrelated r
 - Missing reference identity can hide a duplicate. Preserve typed unavailability for exact identifier operations that need a uniqueness proof.
 - Automatic replay can disturb retry order. Preserve backoff, fair bounded selection, exact claims, and existing fan-out ownership.
 - A completed batch can retain custody after a crash. Retire it independently of new foreground requests or hydrated overlay state.
+- A retained reader can delay publication. Close it before provider work and preserve the publisher's existing safe decline and recovery.
 
 ## Migration Plan
 

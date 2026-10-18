@@ -81,7 +81,35 @@ from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
-_ADMITTED_CATALOG: ContextVar[tuple[Path, Mapping[str, object]] | None] = ContextVar(
+@dataclass
+class _CatalogReadView:
+    """One request's SQL snapshot, never a snapshot of independent stores."""
+
+    store: LexicalStore
+    connection: sqlite3.Connection | None
+    checkpoints: Mapping[str, object]
+    semantic_identity: str
+    page_hashes: dict[str, str | None] = field(default_factory=dict)
+    incomplete: bool = False
+    owner_thread: int = field(default_factory=threading.get_ident)
+
+    def capture_page_hashes(self, paths: Iterable[str]) -> None:
+        missing = list(dict.fromkeys(path for path in paths if path not in self.page_hashes))
+        if missing and self.connection is not None and self.owner_thread == threading.get_ident():
+            self.page_hashes.update(self.store.page_content_hashes(missing))
+
+    def close(self) -> None:
+        conn, self.connection = self.connection, None
+        if conn is not None:
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+
+
+_ADMITTED_CATALOG: ContextVar[
+    tuple[Path, Mapping[str, object], _CatalogReadView | None] | None
+] = ContextVar(
     "admitted_recall_catalog", default=None
 )
 
@@ -89,7 +117,7 @@ _ADMITTED_CATALOG: ContextVar[tuple[Path, Mapping[str, object]] | None] = Contex
 @contextlib.contextmanager
 def admitted_catalog_scope(vault_root: Path):
     """Isolate one recall's published checkpoints, including nested recalls."""
-    token = _ADMITTED_CATALOG.set((Path(vault_root).resolve(), MappingProxyType({})))
+    token = _ADMITTED_CATALOG.set((Path(vault_root).resolve(), MappingProxyType({}), None))
     try:
         yield
     finally:
@@ -104,7 +132,10 @@ def bind_admitted_catalog(vault_root: Path, checkpoints: Mapping[str, object]) -
         raise RuntimeError("catalogue admission requires its request scope")
     if set(checkpoints) - {"kb", "vault"}:
         raise ValueError("catalogue admission requires canonical scopes")
-    _ADMITTED_CATALOG.set((root, MappingProxyType(dict(checkpoints))))
+    view = current[2]
+    if view is not None and dict(checkpoints) != view.checkpoints:
+        raise ValueError("catalogue admission cannot replace a retained view's checkpoints")
+    _ADMITTED_CATALOG.set((root, MappingProxyType(dict(checkpoints)), view))
 
 
 def _admitted_catalog_checkpoint(vault_root: Path, scope: str) -> object | None:
@@ -112,6 +143,45 @@ def _admitted_catalog_checkpoint(vault_root: Path, scope: str) -> object | None:
     if current is None or current[0] != Path(vault_root).resolve():
         return None
     return current[1].get("kb" if scope == "kb-only" else scope)
+
+
+def _admitted_catalog_view(vault_root: Path) -> _CatalogReadView | None:
+    current = _ADMITTED_CATALOG.get()
+    if current is None or current[0] != Path(vault_root).resolve():
+        return None
+    view = current[2]
+    # Contexts can cross worker threads; SQLite handles cannot follow them.
+    if view is None or view.owner_thread != threading.get_ident() or view.connection is None:
+        return None
+    return view
+
+
+@contextlib.contextmanager
+def catalog_selection_scope(vault_root: Path):
+    """Admit and retain SQL selection, closing before provider work begins."""
+    from . import freshness as freshness_module
+
+    root = Path(vault_root).resolve()
+    current = _ADMITTED_CATALOG.get()
+    if current is None or current[0] != root:
+        raise RuntimeError("catalogue selection requires its request scope")
+    store = get_store(root)
+    view = store._capture_read_view()
+    if view is None:
+        yield None
+        return
+    token = _ADMITTED_CATALOG.set((root, view.checkpoints, view))
+    try:
+        lagging = tuple(
+            scope for scope, checkpoint in view.checkpoints.items()
+            if freshness_module.live_recall_checkpoint(root, scope) != checkpoint
+        )
+        yield RecallProjectionAdmission(dict(view.checkpoints), lagging)
+    finally:
+        try:
+            view.close()
+        finally:
+            _ADMITTED_CATALOG.reset(token)
 
 
 def _checkpoint_policy_current(vault_root: Path, checkpoint: object) -> bool:
@@ -2919,6 +2989,12 @@ def search_semantic_units(
             current.append(hit)
         else:
             stale_paths.add(hit.parent_path)
+    view = _admitted_catalog_view(vault_root)
+    if stale_paths and view is not None:
+        # Changed parents reduce this admitted answer; they cannot cancel unrelated units.
+        view.incomplete = True
+        _schedule_repair(vault_root)
+        return current
     if stale_paths and _repair_stale and repair:
         # Registry edits and missed watcher events can invalidate a parent
         # generation without changing the FTS match itself. Repair only the
@@ -3052,6 +3128,12 @@ def search_semantic_units_result(
         else:
             stale_paths.add(hit.parent_path)
     if not stale_paths:
+        return CatalogQueryResult(current, result.readiness)
+    view = _admitted_catalog_view(vault_root)
+    if view is not None:
+        # Keep strict callers exact; the retained reader discloses its omitted parents.
+        view.incomplete = True
+        _schedule_repair(vault_root)
         return CatalogQueryResult(current, result.readiness)
     if _repair_stale and repair:
         store = get_store(vault_root)
@@ -3747,6 +3829,78 @@ class LexicalStore:
         return False
 
     # -------------------------------------------------------------- plumbing
+
+    def _capture_read_view(self) -> _CatalogReadView | None:
+        """Capture both published scopes from one already-pinned transaction."""
+        from . import freshness as freshness_module
+        from .vocabulary.registry import RegistryError
+
+        if backend() == "python" or self._failed or not self.path.exists():
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect()
+            conn.execute("BEGIN")
+            identity = catalog_semantic_identity(self.vault_root)
+            if not self._schema_is_current(conn) or self._meta_catalog_identity(conn) != identity:
+                return None
+            checkpoints: dict[str, object] = {}
+            for scope in freshness_module.SCOPES:
+                checkpoint = self._meta_checkpoint(conn, scope)
+                if (
+                    checkpoint is None or checkpoint.triple is None
+                    or not _checkpoint_policy_current(self.vault_root, checkpoint)
+                ):
+                    return None
+                checkpoints[scope] = checkpoint
+            if (
+                catalog_semantic_identity(self.vault_root) != identity
+                or any(
+                    not _checkpoint_policy_current(self.vault_root, checkpoint)
+                    for checkpoint in checkpoints.values()
+                )
+            ):
+                return None
+            view = _CatalogReadView(self, conn, MappingProxyType(checkpoints), identity)
+            conn = None  # The selection scope now owns rollback and close.
+            return view
+        except RegistryError:
+            return None
+        except sqlite3.Error as error:
+            self._catalog_readiness_error(error, backend())
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _view_readiness(
+        self, view: _CatalogReadView, scope: str, checkpoint: object | None = None
+    ) -> CatalogReadiness:
+        """Validate interpretation while ordinary publication may advance."""
+        conn = view.connection
+        target = view.checkpoints.get(scope)
+        valid = (
+            view.store is self and conn is not None and conn.in_transaction
+            and target is not None
+            and (checkpoint is None or _checkpoint_state(checkpoint) == _checkpoint_state(target))
+            and _checkpoint_policy_current(self.vault_root, target)
+            and self._schema_is_current(conn)
+            and self._meta_catalog_identity(conn) == catalog_semantic_identity(self.vault_root)
+        )
+        return CatalogReadiness("available" if valid else "stale", bool(valid), backend())
+
+    @contextlib.contextmanager
+    def _query_connection(self):
+        """Borrow only an active selection handle; ordinary opens stay owned."""
+        view = _admitted_catalog_view(self.vault_root)
+        if view is not None and view.store is self:
+            yield view.connection
+            return
+        conn = self._connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         """Ordinary-read connection: bounded busy/synchronous policy only.
@@ -7285,6 +7439,14 @@ class LexicalStore:
         """
         from .vault import VaultLockError
 
+        view = _admitted_catalog_view(self.vault_root)
+        if view is not None and view.store is self:
+            ready = self._view_readiness(view, scope)
+            if not ready.complete:
+                _schedule_repair(self.vault_root)
+                return None
+            # Legacy content lanes borrow A too; reconciliation would replace its proof.
+            return query_fn(view.connection)
         try:
             with self._publication_lock():
                 conn = self._connect()
@@ -8088,6 +8250,20 @@ class LexicalStore:
         from . import freshness as freshness_module
 
         backend_name = backend()
+        # Explicit checkpoints belong to strict proofs or independent callers.
+        # Only an ambient request query may borrow its selection transaction.
+        view = _admitted_catalog_view(self.vault_root)
+        if recall_checkpoint is None and view is not None:
+            from .vocabulary.registry import RegistryError
+
+            try:
+                return self._view_readiness(view, scope)
+            except RegistryError:
+                return CatalogReadiness("definitions_unavailable", False, backend_name)
+            except sqlite3.Error as error:
+                return self._catalog_readiness_error(
+                    error, backend_name, schedule_repair=schedule_repair
+                )
         if recall_checkpoint is None:
             recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
         target_checkpoint = (
@@ -8285,30 +8461,24 @@ class LexicalStore:
         answers: dict[str, tuple[str | None, ...] | None] = dict.fromkeys(rel_paths, None)
         if self._failed or not self.path.exists():
             return answers
-        try:
-            conn = self._connect()
-        except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical page-row probe declined (%s)")
-            return answers
         columns = ", ".join((*_ELIGIBILITY_COLUMNS, "content_hash"))
         try:
-            if not self._schema_is_current(conn):
+            with self._query_connection() as conn:
+                if not self._schema_is_current(conn):
+                    return answers
+                for rel in rel_paths:
+                    row = conn.execute(
+                        f"SELECT {columns} FROM pages WHERE path = ?",  # noqa: S608 - fixed names
+                        (rel,),
+                    ).fetchone()
+                    if row is not None:
+                        answers[rel] = tuple(
+                            None if value is None else str(value) for value in row
+                        )
                 return answers
-            for rel in rel_paths:
-                row = conn.execute(
-                    f"SELECT {columns} FROM pages WHERE path = ?",  # noqa: S608 - fixed names
-                    (rel,),
-                ).fetchone()
-                if row is not None:
-                    answers[rel] = tuple(
-                        None if value is None else str(value) for value in row
-                    )
-            return answers
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical page-row probe declined (%s)")
             return dict.fromkeys(rel_paths, None)
-        finally:
-            conn.close()
 
     def unit_categories_of(self, paths: Iterable[str]) -> dict[str, frozenset[str]] | None:
         """The categories each page's own semantic units are filed under.
@@ -8505,9 +8675,9 @@ class LexicalStore:
         if not self.path.exists():
             return None
         try:
-            conn = self._connect()
-            try:
-                conn.execute("BEGIN")
+            with self._query_connection() as conn:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN")
                 if not self._schema_is_current(conn) or _checkpoint_state(
                     self._meta_checkpoint(conn, scope)
                 ) != _checkpoint_state(checkpoint):
@@ -8523,8 +8693,6 @@ class LexicalStore:
                     f"SELECT path, title FROM pages WHERE {col} = 1 ORDER BY path"
                 ).fetchall()
                 return [(str(path), title) for path, title in rows]
-            finally:
-                conn.close()
         except sqlite3.Error as error:
             self._catalog_readiness_error(error, backend_name)
             return None
@@ -8576,6 +8744,20 @@ class LexicalStore:
         from . import freshness as freshness_module
         from .vocabulary.registry import RegistryError
 
+        view = _admitted_catalog_view(self.vault_root)
+        if view is not None:
+            try:
+                readiness = self._view_readiness(view, scope, recall_checkpoint)
+                if not readiness.complete:
+                    _schedule_runtime_catalog_repair(self.vault_root)
+                    return CatalogQueryResult(None, readiness)
+                return CatalogQueryResult(query_fn(view.connection), readiness)
+            except RegistryError:
+                return CatalogQueryResult(
+                    None, CatalogReadiness("definitions_unavailable", False, backend())
+                )
+            except sqlite3.Error as error:
+                return CatalogQueryResult(None, self._catalog_readiness_error(error, backend()))
         if recall_checkpoint is None:
             recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
         readiness = (
