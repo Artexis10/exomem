@@ -159,6 +159,12 @@ October 4 private runtime/create foundation: independent review approves current
   - `maintain_memory(mode="collections-store-reconcile")` is preview-first and turns every item changed after the fork point into a held correction;
   - `describe` and the doctor probe state that writers without the lease are unsupported.
 - [ ] P1b.7 Cloud: preserve a consistent snapshot of the cell-state-root store in operator export and staged restore, excluding `-wal` / `-shm`; Cloud import runs the importer and proof in staging through the existing helpers.
+  - Prepare only the replica inside an exclusive restored scratch vault. Bind its canonical source through the reviewed original placement and state manifest; never scan for a plausible database.
+  - Reuse SQLite backup and archive classification. Preserve source bytes through a private database/WAL clone, validate supported schemas privately, and reject incompatible lineage or unfinished store operations.
+  - Keep the existing encrypted tar format and its `vault/` wrapper. Exclude disposable publication work through the shared classifier, without a second exclusion vocabulary.
+  - Share replica validation with ZIP restore. Cloud import proves file collections in private staging before any destination rename; generic restore keeps its existing invalid-file preservation.
+  - Prove a lagging replica plus a newer acknowledged canonical row, wrong binding, corrupt history, publication scratch filtering and older-schema byte preservation. Restored bytes do not claim destination admission.
+- [ ] P1b.7a Configure and verify writer-lease coordination for Cloud cells before store enablement. Reuse the coordinator contract, credentials, capability and topology. Preserve generation-2+ refusal on a fresh coordinator; do not reset an imported fence. Snapshot and restore wiring alone does not satisfy this dependency.
 - [ ] P1b.8 **Phase gate.**
   - The round-trip proof is green on the generated legacy vaults.
   - Backup under concurrent writes is integrity-checked at 10,000 items.

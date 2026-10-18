@@ -319,6 +319,11 @@ def require_marker(conn, marker, *, root):
         require_selected(conn, marker, entry, root=root)
     if marker["version"] == 1:
         marker = upgraded_marker(root, conn, marker)
+    require_projection_ownership(conn, marker, root=root)
+
+
+def require_projection_ownership(conn, marker, *, root):
+    """Check projections against ownership that the current canonical marker already proved."""
     routed = {entry["collection_id"] for entry in marker["collections"]}
     for cid, path in conn.execute(
             "SELECT collection_id,path FROM projection_state UNION "
