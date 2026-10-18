@@ -828,7 +828,9 @@ def _apply_pending_identity(
         # a governed mutation to the wrong page. Path-based recall stays usable.
         from .find import RetrievalIndexWarming
 
-        raise RetrievalIndexWarming(site="pending_visibility_incomplete", status="temporarily_unavailable")
+        raise RetrievalIndexWarming(
+            site="pending_visibility_incomplete", status="temporarily_unavailable"
+        )
     surviving = [path for path in rows if path not in projection.refs_by_path]
     pending_paths = projection.paths_by_id.get(memory_ref(exomem_id), ())
     for path in pending_paths:
@@ -949,7 +951,9 @@ def paths_for_ids_read_only(
                 blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
             )
         resolved = {
-            identifier: tuple(_apply_pending_identity(root, identifier, list(paths), projection=projection))
+            identifier: tuple(
+                _apply_pending_identity(root, identifier, list(paths), projection=projection)
+            )
             for identifier, paths in resolved.items()
         }
     return resolved
