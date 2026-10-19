@@ -5766,6 +5766,25 @@ def op_list_directory(
 
     Errors: INVALID_PATH; NOT_FOUND; NOT_A_DIR.
     """
+    return _list_directory_payload(vault_root, path, recursive, include_hidden)
+
+
+#: One `browse_memory` list page: readable by an agent client, and a bound on
+#: the work of one call whatever the folder holds.
+_BROWSE_LIST_DEFAULT_LIMIT = 200
+_BROWSE_LIST_MAX_LIMIT = 1000
+
+
+def _list_directory_payload(
+    vault_root: Path,
+    path: str,
+    recursive: bool,
+    include_hidden: bool,
+    *,
+    limit: int | None = None,
+    cursor: str | None = None,
+) -> dict:
+    """A whole listing, or with `limit` one page and its continuation."""
     from .governance.policy import is_governance_path
 
     # The policy tree is not vault content for ANY audience — the same
@@ -5775,21 +5794,30 @@ def op_list_directory(
     # path that does not exist.
     if is_governance_path(path or ""):
         raise ValueError(f"NOT_FOUND: no such vault path: {path}")
+    listing = str(path or "").replace("\\", "/").strip().strip("/")
     try:
+        after = (
+            None if cursor is None
+            else list_directory_module.decode_cursor(cursor, listing, recursive)
+        )
         result = list_directory_module.list_directory(
             vault_root,
             path=path,
             recursive=recursive,
             include_hidden=include_hidden,
+            limit=limit,
+            after=after,
+            exclude=is_governance_path,
         )
     except list_directory_module.ListDirectoryError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     payload = result.as_dict()
-    entries = payload.get("entries")
-    if isinstance(entries, list):
-        payload["entries"] = [
-            entry for entry in entries if not is_governance_path(str((entry or {}).get("path", "")))
-        ]
+    if limit is not None:
+        payload["truncated"] = result.truncated
+        payload["next_cursor"] = (
+            list_directory_module.encode_cursor(listing, recursive, result.entries[-1])
+            if result.truncated and result.entries else None
+        )
     return payload
 
 
@@ -7421,6 +7449,8 @@ def op_browse_memory(
     include_hidden: bool = False,
     samples: int = 5,
     recursive: bool = False,
+    limit: int | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Browse vault folders; read-only.
 
@@ -7429,8 +7459,12 @@ def op_browse_memory(
         max_depth: Depth.
         samples: Per folder.
         recursive: Recurse in list mode.
+        limit: List page size; default 200, at most 1000.
+        cursor: A list response's next_cursor, to continue it.
     """
     if mode == "overview":
+        if limit is not None or cursor is not None:
+            raise ValueError("INVALID_MODE: limit and cursor apply to mode 'list'")
         return op_overview(
             vault_root,
             path=path,
@@ -7439,11 +7473,14 @@ def op_browse_memory(
             samples=samples,
         )
     if mode == "list":
-        return op_list_directory(
+        page = _BROWSE_LIST_DEFAULT_LIMIT if limit is None else limit
+        return _list_directory_payload(
             vault_root,
-            path=path,
-            recursive=recursive,
-            include_hidden=include_hidden,
+            path,
+            recursive,
+            include_hidden,
+            limit=min(max(page, 1), _BROWSE_LIST_MAX_LIMIT),
+            cursor=cursor,
         )
     raise ValueError("INVALID_MODE: browse_memory mode must be 'overview' or 'list'")
 

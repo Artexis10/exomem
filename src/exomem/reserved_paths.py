@@ -15,7 +15,7 @@ import threading
 import time
 import unicodedata
 from collections import ChainMap
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -2052,8 +2052,13 @@ def list_generic_tree(
     *,
     recursive: bool = True,
     identities: IdentityCatalogue | None = None,
+    select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
 ) -> tuple[GenericTreeEntry, ...]:
-    """Enumerate an ordinary tree while structurally removing private state."""
+    """Enumerate an ordinary tree while structurally removing private state.
+
+    `select` receives every releasable `(relative_path, kind)` in walk order and
+    returns the relative paths to open, stat and read; None opens them all.
+    """
 
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
@@ -2063,7 +2068,25 @@ def list_generic_tree(
             value,
             recursive=recursive,
             identities=current,
+            select=select,
         )
+
+
+def list_generic_names(
+    vault_root: Path,
+    value: object,
+    *,
+    recursive: bool = True,
+) -> tuple[tuple[str, str], ...]:
+    """The releasable `(relative_path, kind)` pairs of a tree, opening no entry."""
+    names: list[tuple[str, str]] = []
+
+    def record(candidates: list[tuple[str, str]]) -> tuple[str, ...]:
+        names.extend(candidates)
+        return ()
+
+    list_generic_tree(vault_root, value, recursive=recursive, select=record)
+    return tuple(names)
 
 
 def _list_generic_tree_held(
@@ -2072,6 +2095,7 @@ def _list_generic_tree_held(
     *,
     recursive: bool,
     identities: IdentityCatalogue,
+    select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
 ) -> tuple[GenericTreeEntry, ...]:
 
     if value == ".":
@@ -2114,6 +2138,7 @@ def _list_generic_tree_held(
                     )
                     raise ReservedPathLeafError(code)
                 records = enumerated.require()
+            candidates: list[tuple[held_fs.SagaRecord, str]] = []
             for record in records:
                 if any(
                     record.relative_path == prefix
@@ -2134,7 +2159,13 @@ def _list_generic_tree_held(
                     if record.identity.kind == "directory":
                         hidden_prefixes.append(record.relative_path)
                     continue
-
+                candidates.append((record, child))
+            chosen = None if select is None else frozenset(
+                select([(record.relative_path, record.identity.kind) for record, _ in candidates])
+            )
+            for record, child in candidates:
+                if chosen is not None and record.relative_path not in chosen:
+                    continue
                 parent_path, leaf = _leaf_spelling(child)
                 if record.identity.kind == "directory":
                     directory_result = filesystem.parent(child)
