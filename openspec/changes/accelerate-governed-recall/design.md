@@ -966,10 +966,14 @@ it, and the timing table keeps one row per stage:
   `converge-graph-incrementally`; this change ensures a rebuild in flight cannot
   invalidate the read-side caches.
 
-- **[Risk] A request session pins an old catalogue generation.** → The session
-  opens after the request's readiness proof and holds that checkpoint for the
-  whole request, as `_serve_from_ready_catalog_result` does for one query today.
-  A publication during the request is caught by the same checkpoint check.
+- **[Risk] A request session pins an old catalogue generation.** → Selection
+  retains one catalogue transaction bound to the admitted checkpoints and
+  closes it before model loading, encoding and reranking
+  (`keep-recall-available-during-pending-recovery`). An ordinary data
+  publication during the request leaves the selected rows, membership and
+  statistics unchanged, and the response discloses the lag. An access-policy
+  or semantic-identity change still refuses. Strict readiness keeps its own
+  current proof.
 - **[Risk] Seeded corpus vectors hide a dense-search cost.** → Dense cost is a
   function of the matrix size and the candidate counts, which the seeded corpus
   keeps; the live-cell series after each release runs on real vectors.
