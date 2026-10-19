@@ -1895,6 +1895,29 @@ def clear_stores() -> None:
         )
 
 
+def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
+    """Whether a consumed full request was answered by an exact delta replay.
+
+    Most full requests only observed a stored checkpoint trailing the registry.
+    Answering each with a whole-corpus pass held the publication barrier long
+    enough to make concurrent watcher batches miss it, which stranded the next
+    delta and requested another pass. The proof runs here on the repair worker,
+    never on a request path, and a replay that cannot prove both scopes exactly
+    current keeps the full pass: this does less work, never less repair.
+    """
+    # The worker's store protocol requires only `rebuild_atomic` and
+    # `retry_deferred_upsert`; a store without a catch-up keeps the full pass.
+    catch_up = getattr(store, "catch_up_lagging_delta", None)
+    if catch_up is None or not catch_up():
+        return False
+    return (
+        runtime_retrieval_catalog_proof(
+            vault_root, require_live_projection=True, schedule_repair=False
+        )
+        is not None
+    )
+
+
 def _schedule_repair(
     vault_root: Path,
     *,
@@ -2067,14 +2090,19 @@ def _schedule_repair(
                         _FULL_REBUILD_REQUESTED.discard(key)
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _FULL_REBUILDS_IN_FLIGHT.add(key)
-                        _set_repair_progress(key, "building")
-                    repaired = store.rebuild_atomic()
-                    # Telemetry is observational, never part of the scheduler's
-                    # store protocol. Minimal stores used by tests/integrations
-                    # may expose only `rebuild_atomic`.
-                    outcome = getattr(store, "_last_rebuild_result", None) or (
-                        "published" if repaired else "error"
-                    )
+                        _set_repair_progress(key, "targeted" if rebuild else "building")
+                    if rebuild and _caught_up_without_rebuild(vault_root, store):
+                        repaired = True
+                        outcome = "targeted"
+                    else:
+                        _mark_active_repair_phase(vault_root, "building")
+                        repaired = store.rebuild_atomic()
+                        # Telemetry is observational, never part of the scheduler's
+                        # store protocol. Minimal stores used by tests/integrations
+                        # may expose only `rebuild_atomic`.
+                        outcome = getattr(store, "_last_rebuild_result", None) or (
+                            "published" if repaired else "error"
+                        )
                 else:
                     with _REPAIRS_LOCK:
                         _set_repair_progress(key, "targeted")
@@ -4307,9 +4335,10 @@ class LexicalStore:
         observation as canonical made every healthy live write veto publication.
 
         Schema/identity/existence changes still conflict. A checkpoint advance is
-        accepted only when it is the exact same-process target already replayed
-        into the temp catalogue; foreign or uncovered checkpoint changes remain
-        incomparable and fail closed.
+        accepted only when the temp catalogue already holds it: the exact target,
+        or a generation of the same registry and recall policy between the
+        build's start and that target. Foreign, policy-changed or backwards
+        checkpoint changes remain incomparable and fail closed.
         """
         changed = [
             key
@@ -4326,11 +4355,40 @@ class LexicalStore:
                 if before == after:
                     continue
                 target = targets.get(scope)
-                if after is None or target is None or after != target:
+                if after is None or target is None:
+                    changed.append(f"checkpoint:{scope}")
+                elif after != target and not LexicalStore._replayed_between(
+                    before, after, target
+                ):
                     changed.append(f"checkpoint:{scope}")
         if changed:
-            log.debug("lexical publication guard changed fields: %s", tuple(changed))
+            # INFO, not DEBUG: field names only, and without them a declined
+            # publication cannot be attributed from production logs.
+            log.info("lexical publication guard changed fields: %s", tuple(changed))
         return bool(changed)
+
+    @staticmethod
+    def _replayed_between(before, after, target) -> bool:
+        """Whether a live checkpoint lies inside the replacement's replayed span.
+
+        Under steady traffic the watcher blesses the live catalogue between the
+        build's start capture and the barrier, while the next event is still
+        unblessed, so live rarely equals the rebased target exactly. The temp
+        holds this registry's exact state at `target` (its start capture plus
+        every retained generation replayed up to it, proved by the final
+        census), so it contains any state the same registry and policy attested
+        at or below `target`. Publishing therefore advances live.
+        """
+        if before is None:
+            return False
+        lineage = (after.instance_id, after.policy_version, after.access_policy_fingerprint)
+        return (
+            (before.instance_id, before.policy_version, before.access_policy_fingerprint)
+            == lineage
+            and (target.instance_id, target.policy_version, target.access_policy_fingerprint)
+            == lineage
+            and before.generation <= after.generation <= target.generation
+        )
 
     @staticmethod
     def _live_regressed(now_guard: dict, temp_targets: dict, current_identity: str) -> bool:
@@ -5814,6 +5872,58 @@ class LexicalStore:
         except (sqlite3.Error, OSError) as e:
             log.info("lexical targeted retry failed (%s); rebuilding", e)
             return False
+
+    def catch_up_lagging_delta(self) -> bool:
+        """Replay the registry delta a lagging catalogue misses, without a scan.
+
+        A watcher batch that misses the barrier leaves an uncovered delta that no
+        later batch can bless. When this process's registry still bridges each
+        scope's stored checkpoint with a complete, untainted delta, and the
+        union fits the foreground cap, replaying those identities is the
+        watcher's own bounded apply, deletions included. Returns whether that
+        replay committed (trivially, when nothing lags). A retired or stale
+        store, a foreign or adopted origin, lost history, a reconcile-tainted
+        delta or an oversized one returns False and keeps the full pass.
+        """
+        from . import freshness as freshness_module
+
+        if self._failed or not self.path.exists():
+            return False
+        lagging: set[str] = set()
+        try:
+            conn = self._connect()
+            try:
+                if not self._schema_is_current(conn):
+                    return False
+                identity = catalog_semantic_identity(self.vault_root)
+                if self._meta_catalog_identity(conn) != identity:
+                    return False
+                for scope in ("kb", "vault"):
+                    if not freshness_module.recall_is_live(self.vault_root, scope):
+                        return False
+                    stored = self._meta_checkpoint(conn, scope)
+                    current = freshness_module.recall_checkpoint(self.vault_root, scope)
+                    if (
+                        stored is None
+                        or current is None
+                        or stored.instance_id != current.instance_id
+                    ):
+                        return False
+                    delta = freshness_module.recall_delta_since(
+                        self.vault_root, scope, stored
+                    )
+                    if not delta.complete or delta.requires_source_proof:
+                        return False
+                    lagging |= delta.changed | delta.deleted
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False
+        if len(lagging) > CATALOG_FOREGROUND_DELTA_CAP:
+            return False
+        if not lagging:
+            return True
+        return self.retry_deferred_upsert([Path(path) for path in sorted(lagging)])
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""

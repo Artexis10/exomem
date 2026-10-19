@@ -127,6 +127,83 @@ def test_deferred_watcher_reconciles_current_files_after_newer_foreground_batch(
     assert lexstore.search_bm25(tmp_path, "intermediatechange", k=3, scope="kb") == []
 
 
+def test_a_stranded_catalogue_catches_up_without_a_whole_corpus_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """A missed watcher batch must not cost a whole-corpus rebuild.
+
+    Once one batch misses the publication barrier, later batches cannot bless
+    their uncovered delta, so the stored checkpoint stays behind and every
+    request asks for a full pass, whose own barrier makes the next batch miss.
+    The worker replays the exact registry delta instead, deletions included.
+    """
+    store, changed, removed = live_catalogue
+    changed.write_text("# After\n\nafterchange\n", encoding="utf-8")
+    removed.unlink()
+    # The registry records this generation; its lexical batch never lands.
+    freshness.on_files_changed(tmp_path, changed=[changed], deleted=[removed])
+    later = changed.parent / "later.md"
+    later.write_text("# Later\n\nlatercontent\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[later])
+    assert store.apply_watcher_batch([later], [])
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is None, "a batch blessed a delta it did not cover"
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    lexstore._schedule_repair(tmp_path)
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == [], "a lagging catalogue was rebuilt from the whole corpus"
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "afterchange", k=3, scope="kb")
+    assert lexstore.search_bm25(tmp_path, "latercontent", k=3, scope="kb")
+    assert lexstore.search_bm25(tmp_path, "beforeremoval", k=3, scope="kb") == []
+
+
+@pytest.mark.parametrize("decline", ["retired store", "delta over the foreground cap"])
+def test_a_full_request_the_delta_cannot_answer_still_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue, decline: str
+) -> None:
+    """Re-applying rows cannot heal a store retired as corrupt, and replaying
+    an oversized delta under the barrier would block writers longer than the
+    detached build it replaces."""
+    store, changed, _removed = live_catalogue
+    if decline == "retired store":
+        changed.write_text("# After\n\nafterchange\n", encoding="utf-8")
+        freshness.on_files_changed(tmp_path, changed=[changed])
+        store._failed = True
+    else:
+        bulk = []
+        for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1):
+            page = changed.parent / f"bulk-{index}.md"
+            page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+            bulk.append(page)
+        freshness.on_files_changed(tmp_path, changed=bulk)
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    lexstore._schedule_repair(tmp_path)
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == [True]
+
+
 @pytest.fixture(autouse=True)
 def _clean_repair_state():
     """Every test starts with no pending repair work and leaves none behind."""
