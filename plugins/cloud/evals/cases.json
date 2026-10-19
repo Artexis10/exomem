@@ -53,7 +53,7 @@
     },
     {
       "id": "cloud-capability-boundary", "polarity": "negative", "fresh_chat": true,
-      "setup": "No file or native file handle has been supplied. Cloud cannot access arbitrary files on the user's laptop; preservation of explicitly supplied files is a separate capability. Media processing/reading and vault adoption remain unavailable on this Cloud connection.",
+      "setup": "No file or native file handle has been supplied. Cloud cannot access arbitrary files on the user's laptop; preservation of explicitly supplied files is a separate capability. Media processing works only on files already in this Cloud vault; video reading and artifact transfer are unavailable, and vault adoption serves staged imports only.",
       "prompt": "Read the audio file on my laptop through this cloud connection. Do not pretend you have access.",
       "forbidden": ["transfer_artifact", "adopt_vault", "process_media", "read_media"],
       "no_mutations": true,

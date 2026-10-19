@@ -14,9 +14,12 @@
   - no `.env` file is read.
 - [x] 2.2 Add `CloudCellTokenVerifier` to `server_auth.py`, and add the cloud branch of `build_server` in `server.py` on the standalone path (D1)
 - [x] 2.3 Add `CLOUD_SURFACE_EXCLUSIONS` (`transfer_artifact`, `adopt_vault`, `process_media`, `read_media`, each with a reason and a lifting condition) and remove its members from the served surface. Test the listed surface.
-- [ ] 2.3a Reconcile the `process_media` exclusion after documents and OCR shipped in [#1661](https://github.com/Artexis10/exomem/pull/1661).
+- [x] 2.3a Reconcile the `process_media` exclusion after documents and OCR shipped in [#1661](https://github.com/Artexis10/exomem/pull/1661).
   Its claim that the image has no media dependencies is stale. Decide the manual-processing contract before amending or lifting the exclusion.
   Verify the resulting reason, lifting condition and served tool surface together. Automatic ingestion does not prove manual retry or reprocessing.
+  Decision (owner, 2026-10-19): lift the exclusion. Tenants get `status`, `process` and `retry` through the cell's queue, brakes and engine selection; `read_media` stays excluded.
+  Evidence: `tests/test_cloud_cell.py` asserts the exclusion set and the served cloud tool list; `tests/test_media_processing.py::test_process_media_product_leaf_preserves_a_completed_transcript` covers manual process and retry on completed work.
+  The Cloud plugin evaluator now reads `CLOUD_SURFACE_EXCLUSIONS` instead of its own copy. Cells receive the change only through an approved image roll.
 - [x] 2.4 Content-free logging in cloud mode:
   - extend `content_private_logging_enabled` to cloud mode and install the redaction hook;
   - use the content-free call trace;
