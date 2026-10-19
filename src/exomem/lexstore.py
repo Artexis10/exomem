@@ -8948,8 +8948,9 @@ class LexicalStore:
             try:
                 readiness = self._view_readiness(view, scope, recall_checkpoint)
                 if not readiness.complete:
-                    # The stored checkpoint differs from the target; the worker's catch-up
-                    # must prove it exactly current, or the full pass runs.
+                    # Only metadata disagrees (view, checkpoint, policy, schema or
+                    # identity); the worker's catch-up must prove the catalogue
+                    # exactly current, or the full pass runs.
                     _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(None, readiness)
                 return CatalogQueryResult(query_fn(view.connection), readiness)
@@ -8992,8 +8993,9 @@ class LexicalStore:
                     # The pinned snapshot no longer matches the readiness proof — a
                     # publication landed between the verdict and this transaction.
                     # Defer rather than serve an unvalidated (possibly regressed)
-                    # generation; the repair worker reconciles it. The worker's catch-up
-                    # must prove it exactly current, or the full pass runs.
+                    # generation; the repair worker reconciles it. Only metadata
+                    # disagrees, so its catch-up must prove the catalogue exactly
+                    # current, or the full pass runs.
                     _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
