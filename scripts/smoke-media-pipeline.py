@@ -81,15 +81,23 @@ def _smoke(vault: Path) -> int:
     os.environ["EXOMEM_VAULT_PATH"] = str(vault)
     os.environ["EXOMEM_UPLOAD_TOKEN"] = TOKEN
 
-    from PIL import Image, ImageDraw
     from starlette.testclient import TestClient
 
-    from exomem import embeddings, server, upload_tokens
-    from exomem import find as find_module
+    from exomem import server
 
     server.load_dotenv = lambda *a, **k: None  # don't let repo .env clobber the smoke vault
     print("building server (loads bge + CLIP; first time is slow)…")
-    client = TestClient(server.build_server(require_auth=False).http_app())
+    # The media worker starts in the server lifespan, which TestClient runs
+    # only when it is entered as a context manager.
+    with TestClient(server.build_server(require_auth=False).http_app()) as client:
+        return _lanes(vault, client)
+
+
+def _lanes(vault: Path, client) -> int:
+    from PIL import Image, ImageDraw
+
+    from exomem import embeddings, upload_tokens
+    from exomem import find as find_module
 
     def up_token():
         return upload_tokens.mint(TOKEN, scope="upload")
