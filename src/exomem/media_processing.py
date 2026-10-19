@@ -438,7 +438,7 @@ def reconcile_media(
                 )
                 == "valid"
             ):
-                _discard_stale_job(vault, binary, sidecar, media_type)
+                _retire_completed_ocr(vault, binary, sidecar, media_type)
                 return ReconcileResult(media_type, "completed", sidecar, None)
             raise MediaProcessingError(
                 "MEDIA_CHANGED_DURING_RECONCILIATION",
@@ -456,7 +456,7 @@ def reconcile_media(
                     )
                 )
             _verify_binary_identity(binary, resolved_binary, provenance)
-            _discard_stale_job(vault, binary, sidecar, media_type)
+            _retire_completed_ocr(vault, binary, sidecar, media_type)
             result = ReconcileResult(media_type, "completed", sidecar, None)
         else:
             assert pending is not None
@@ -568,6 +568,7 @@ def reconcile_all_media(
     examined = 0
     attempted = 0
     last_examined: Path | None = None
+    held = False
     for binary in _iter_rotating_governed_media(
         vault,
         kb,
@@ -578,22 +579,24 @@ def reconcile_all_media(
         if examined >= limit:
             break
         examined += 1
-        last_examined = binary
         if _needs_reconciliation(vault, binary, store):
             attempted += 1
             try:
                 reconcile_one(binary)
             except OpError as error:
-                if (
-                    propagate_transient_errors
-                    and error.code in _TRANSIENT_COORDINATION_CODES
-                ):
-                    raise
+                if error.code in _TRANSIENT_COORDINATION_CODES:
+                    if propagate_transient_errors:
+                        raise
+                    # The cursor stops before this file, so the next pass
+                    # starts with it instead of a full rotation later.
+                    held = True
                 _log_reconcile_op_error(
                     error, binary, vault, activity="media reconciliation"
                 )
             except Exception:  # noqa: BLE001 - one artifact must not abort discovery
                 log.warning("media reconciliation failed for %s", binary, exc_info=True)
+        if not held:
+            last_examined = binary
     if last_examined is not None and store is not None:
         store.set_discovery_cursor(last_examined)
     return attempted
@@ -620,11 +623,12 @@ def _iter_rotating_governed_media(
         yield from _iter_governed_media(vault, kb_root)
         return
 
+    # The wrap ends with the cursor file itself, so a vault whose only media
+    # file is the cursor still has that file examined.
     for binary in _iter_governed_media(vault, kb_root):
-        relative = binary.relative_to(vault).as_posix()
-        if relative == after:
-            break
         yield binary
+        if binary.relative_to(vault).as_posix() == after:
+            break
 
 
 def _iter_governed_media(vault: Path, kb_root: Path):
@@ -672,6 +676,20 @@ def _iter_governed_media(vault: Path, kb_root: Path):
         stack.extend(reversed(directories))
 
 
+def is_reconciled_pending(vault: Path, binary: Path, text: str) -> bool:
+    """Whether reconciliation has rendered this pending sidecar of `binary`.
+
+    A stub that preserve wrote is not yet: reconciliation renders and queues it.
+    """
+    media_type = classify_media(binary)
+    if media_type is None:
+        return False
+    frontmatter, _body, raw_frontmatter = parse_frontmatter(text)
+    return raw_frontmatter is not None and _is_pending_sidecar_shape(
+        vault, binary, frontmatter, media_type
+    )
+
+
 def _needs_reconciliation(
     vault: Path,
     binary: Path,
@@ -693,7 +711,7 @@ def _needs_reconciliation(
     if raw_frontmatter is None:
         return True
     if _is_completed_sidecar_shape(vault, binary, frontmatter, body, media_type):
-        return store is not None and store.has_binary(binary)
+        return store is not None and store.has_pending_ocr(binary)
     if _is_pending_sidecar_shape(vault, binary, frontmatter, media_type):
         if not media_engines.stage_enabled(media_type):
             return False  # waits for its engine; nothing to queue until it is enabled
@@ -1067,12 +1085,12 @@ def retry_all_media(
     return requeued
 
 
-def _discard_stale_job(
+def _retire_completed_ocr(
     vault: Path, binary: Path, sidecar: Path, media_type: str
 ) -> None:
     if not media_jobs.job_store_path(vault).exists():
         return
-    media_jobs.MediaJobStore(vault, create=False).discard(
+    media_jobs.MediaJobStore(vault, create=False).retire_ocr(
         media_jobs.MediaJob(
             binary_path=binary,
             sidecar_path=sidecar,

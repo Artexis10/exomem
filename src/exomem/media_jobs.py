@@ -826,6 +826,34 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def retire_ocr(self, job: MediaJob) -> int:
+        """Retire the OCR stage of an artifact already completed in Markdown.
+
+        A queued CLIP or re-embed stage stays queued, and the row goes only when
+        no stage remains. Without a claim, a running row is left to its own result.
+        """
+        binary_rel = self._relative(job.binary_path)
+        key = self._key(binary_rel, job.media_type)
+        if job.id is not None:
+            match, params = "do_ocr = 1 AND id = ? AND claim_revision = ?", (job.id, job.claim_revision)
+        else:
+            match, params = "do_ocr = 1 AND job_key = ? AND state != 'running'", (key,)
+        conn = self._connect()
+        try:
+            with conn:
+                deleted = conn.execute(
+                    "DELETE FROM jobs WHERE " + match + " AND do_clip = 0 AND do_reembed = 0",
+                    params,
+                ).rowcount
+                kept = conn.execute(
+                    "UPDATE jobs SET do_ocr = 0, state = 'pending', last_error = NULL, "
+                    "updated_at = ? WHERE " + match,
+                    (time.time(), *params),
+                ).rowcount
+                return int(deleted + kept)
+        finally:
+            conn.close()
+
     def claim_next(self, admit: Any = None) -> MediaJob | None:
         """Claim the oldest pending job.
 
@@ -1438,9 +1466,18 @@ class MediaJobStore:
             conn.close()
 
     def finalize_result(
-        self, result: MediaJobResult, *, requeue_remaining: bool, keep_ocr: bool = False
+        self,
+        result: MediaJobResult,
+        *,
+        requeue_remaining: bool,
+        keep_ocr: bool = False,
+        ocr_complete: bool = False,
     ) -> bool:
-        """CAS-remove a published result, retaining only stages the child did not own."""
+        """CAS-remove a published result, retaining only stages the child did not own.
+
+        `ocr_complete` says the sidecar already holds a completed transcript, so
+        no OCR stage is kept whatever the result or its generation.
+        """
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -1461,7 +1498,9 @@ class MediaJobStore:
                 return False
             if requeue_remaining:
                 remaining_ocr = (
-                    int(row["do_ocr"])
+                    0
+                    if ocr_complete
+                    else int(row["do_ocr"])
                     if keep_ocr
                     or result.kind != "extraction"
                     or int(row["ocr_generation"]) > result.ocr_generation
@@ -1567,6 +1606,18 @@ class MediaJobStore:
         try:
             return conn.execute(
                 "SELECT 1 FROM jobs WHERE binary_rel = ? LIMIT 1",
+                (binary_rel,),
+            ).fetchone() is not None
+        finally:
+            conn.close()
+
+    def has_pending_ocr(self, binary_path: Path) -> bool:
+        """Whether the ledger still holds an OCR stage for this exact binary."""
+        binary_rel = self._relative(binary_path)
+        conn = self._connect()
+        try:
+            return conn.execute(
+                "SELECT 1 FROM jobs WHERE binary_rel = ? AND do_ocr = 1 LIMIT 1",
                 (binary_rel,),
             ).fetchone() is not None
         finally:

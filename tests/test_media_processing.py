@@ -1093,6 +1093,48 @@ def test_rotating_cursor_reaches_later_missing_media_across_bounded_passes(
     )
 
 
+def test_a_busy_refusal_does_not_move_the_cursor_past_the_only_media_file(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused reconcile still advanced the cursor to its file, and the rotation
+    never yields the cursor file, so a vault's only media file was never
+    reconciled again."""
+    media_processing = _media_processing()
+    only = _drop_media(vault, "only.m4a")
+    real_reconcile = media_processing.reconcile_media
+    calls: list[str] = []
+
+    def busy_once(root: Path, binary: Path, **kwargs: object):
+        calls.append(binary.name)
+        if len(calls) == 1:
+            raise OpError("MUTATION_BUSY", "vault mutation boundary is busy")
+        return real_reconcile(root, binary, **kwargs)
+
+    monkeypatch.setattr(media_processing, "reconcile_media", busy_once)
+
+    media_processing.reconcile_all_media(vault, limit=10)
+    media_processing.reconcile_all_media(vault, limit=10)
+
+    assert calls == ["only.m4a", "only.m4a"]
+    assert only.with_name(only.name + ".md").exists()
+
+
+def test_the_rotation_reexamines_the_only_media_file_after_its_sidecar_is_lost(
+    vault: Path,
+) -> None:
+    """The rotation stopped before the cursor file, so once a vault's only media
+    file was the cursor, a lost sidecar was never rebuilt by the sweep."""
+    media_processing = _media_processing()
+    only = _drop_media(vault, "only.m4a")
+    sidecar = only.with_name(only.name + ".md")
+    media_processing.reconcile_all_media(vault, limit=10)
+    sidecar.unlink()
+
+    media_processing.reconcile_all_media(vault, limit=10)
+
+    assert sidecar.exists()
+
+
 def test_periodic_reconciliation_discards_stale_job_for_completed_sidecar(
     vault: Path,
 ) -> None:

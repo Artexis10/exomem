@@ -1693,7 +1693,8 @@ class MediaWorker:
             if media_processing.has_completed_transcript(
                 current_content, media_type=job.media_type
             ):
-                self._store.discard(job)
+                # The OCR stage is done; a queued CLIP or re-embed stage still runs.
+                self._store.finalize_result(result, requeue_remaining=True, ocr_complete=True)
             else:
                 self._store.terminalize_result(
                     result,
@@ -1860,6 +1861,8 @@ class MediaWorker:
 
     def _scan_pending_ocr(self) -> int:
         """Re-enqueue every `extracted_by: pending` sidecar under the KB. Returns count."""
+        from . import media_processing
+
         kb = self._vault_root / kb_dirname()
         if not kb.is_dir():
             return 0
@@ -1872,15 +1875,23 @@ class MediaWorker:
             if not self._is_automatic_media_sidecar(sidecar):
                 continue
             try:
-                head = sidecar.read_text(encoding="utf-8")[:800]
+                text = sidecar.read_text(encoding="utf-8")
             except OSError:
                 continue
+            head = text[:800]
             if _PENDING_MARKER not in head:
                 continue
             ef = _EVIDENCE_FILE_RE.search(head)
             if not ef:
                 continue
             binary = self._vault_root / ef.group(1).strip()
+            # Reconciliation renders a preserved stub and queues it itself. A job
+            # claimed against the stub went stale as soon as it did. Scene frames
+            # are this worker's own sidecars, so restart recovery keeps them.
+            if _PARENT_MEDIA_MARKER not in head and not media_processing.is_reconciled_pending(
+                self._vault_root, binary, text
+            ):
+                continue
             # Enqueue only the sidecar this binary actually owns. A stray copy —
             # a Syncthing `.sync-conflict-*.md`, a manual duplicate — still carries
             # `evidence_file:` pointing back here, and queueing it minted a SECOND
@@ -2183,7 +2194,9 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     )
                     if media_processing.has_completed_transcript(
                         current_content, media_type=job.media_type
-                    ) or binary_only_stale:
+                    ):
+                        store.retire_ocr(job)
+                    elif binary_only_stale:
                         store.discard(job)
                     else:
                         store.mark(

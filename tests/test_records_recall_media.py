@@ -51,7 +51,16 @@ def test_worker_discovery_never_opens_or_queues_raw_record_sidecars(
     raw = _drop_media(vault, raw_rel)
     admitted = _drop_media(vault, admitted_rel)
     raw_sidecar = _pending_sidecar(raw, raw_rel)
-    _pending_sidecar(admitted, admitted_rel)
+    # Restart recovery queues a pending sidecar that reconciliation rendered and
+    # whose job was lost.
+    media_processing.reconcile_media(vault, admitted, explicit=False)
+    media_jobs.MediaJobStore(vault).discard(
+        media_jobs.MediaJob(
+            binary_path=admitted,
+            sidecar_path=admitted.with_name(admitted.name + ".md"),
+            media_type="image",
+        )
+    )
     original_read_text = Path.read_text
 
     def deny_raw_sidecar(self: Path, *args: object, **kwargs: object) -> str:
