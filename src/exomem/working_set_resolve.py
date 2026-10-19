@@ -950,7 +950,13 @@ def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset(
     in two characters is not the case it was reasoned about. So is a term in
     `acronyms` — the caller's intersection of the turn's two-capital words
     with the anchor title's (`RARE_TERM_MIN_CHARS`).
+
+    A term with no letter at all is never a lead: "08:30" splits into "08"
+    and "30", and a clock, a count or a year names nothing on its own. A
+    model number such as "zq7400" carries letters and keeps the exemption.
     """
+    if not any(character.isalpha() for character in term):
+        return False
     return (
         len(term) >= RARE_TERM_MIN_CHARS
         or not term.isascii()
