@@ -2923,30 +2923,26 @@ def test_supervisor_backs_off_while_children_find_no_writer_authority(
         return _RefusedChild()
 
     monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
-    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.002)
     monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
     monkeypatch.setattr(worker, "_launch_child", launch)
 
-    thread = threading.Thread(target=worker._supervise)
-    thread.start()
+    stop_at = now[0] + 80.0
 
-    def settle() -> None:
-        time.sleep(0.15)
+    def poll(_timeout):
+        # Process each refused child before advancing the synthetic clock.
+        if worker._child is None:
+            if now[0] >= stop_at:
+                worker._stop_event.set()
+            else:
+                now[0] += 10
+        return False
 
-    try:
-        settle()
-        assert len(launches) == 1
-        for _ in range(8):  # 80 simulated seconds, one step at a time
-            now[0] += 10
-            settle()
-        # The delay doubles from 5 s. A fixed 5 s delay relaunches at every
-        # 10 s step instead: nine children here.
-        assert launches == [1000.0, 1010.0, 1020.0, 1040.0, 1080.0]
-    finally:
-        worker._stop_event.set()
-        worker._wake.set()
-        thread.join(timeout=2)
-    assert not thread.is_alive()
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    # The delay doubles from 5 s. A fixed 5 s delay relaunches at every
+    # 10 s step instead: nine children here.
+    assert launches == [1000.0, 1010.0, 1020.0, 1040.0, 1080.0]
 
 
 def test_child_marks_unavailable_engine_blocked(vault, monkeypatch: pytest.MonkeyPatch) -> None:
