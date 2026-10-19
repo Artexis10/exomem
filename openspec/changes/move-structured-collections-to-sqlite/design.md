@@ -678,6 +678,15 @@ The isolated diagnostic (`scripts/measure-records-append-latency.py`, 10,000 row
 
 Each acquire's server time is mostly its `COMMIT` (6.6 ms, WAL with `synchronous=FULL`) and closing its per-request connection (3.4 ms). The close is consistent with a last-connection WAL checkpoint; no system-call trace was taken. The coordinator windows total 31.38/47.13 ms p50/p95 of a 66.55/75.50 ms append. Each inspect also makes four or five status reads, about 6 ms. Removing every coordinator request would still leave the append above 20 ms.
 
+**Coordinator connection reuse, 2026-10-19.** The coordinator's lease store now keeps one SQLite connection, and a store dispatch proves ownership once for its own checks. Four 1,000-row runs alternated before (`f8cd6c119`) and after. Two of them lost their per-append totals to a join defect in the probe's report, not in the product. Their per-request timings are complete:
+
+| Arm | Acquire client p50, ms | Acquire server p50, ms | Acquire `COMMIT` / close p50, ms | Status reads per run |
+| --- | ---: | ---: | ---: | ---: |
+| Before (2 runs) | 11.86, 11.60 | 11.02, 10.88 | 6.7 / 3.5 | 353 |
+| After (2 runs) | 4.95, 4.63 | 3.95, 3.88 | 3.5 / 0 | 285 |
+
+The intact before/after pair shows the append p50/p95 moving from 65.48/75.71 ms to 48.19/58.81 ms. The coordinator windows per append fall from 30.94 to 14.50 ms p50, and the requests per append fall from 8 to 6. The paired median append difference is −17.27 ms, with a descriptive bootstrap 95% interval of −18.53 to −14.91 ms over 30 positions. The inspect difference is +0.22 ms [−1.81, 2.15]: no change. One sequential pair on one host establishes no installed gain. Append still misses 20 ms.
+
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
 **End-to-end append budget.** #1457's SQLite prototype confirms the storage layer is flat: 2.6–3.8 ms with synchronous projection at both 1,000 and 10,000 items. Its end-to-end estimate of about 93/100 ms p50/p95 is dominated by about 90 ms of shared cost outside storage, which that composite carried over unchanged from today's writer. That 90 ms is the real target of the 20 ms goal. The budget, per stage at p95:
