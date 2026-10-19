@@ -901,7 +901,20 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
 
 
 def _serve_main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="exomem")
+    # Static protocol examples keep help independent of optional product imports.
+    parser = argparse.ArgumentParser(
+        prog="exomem",
+        description="Serve the MCP server by default, or run product commands directly.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Discover the operating contract and available product commands:\n"
+            "  exomem bootstrap --profile compact --json\n\n"
+            "Inspect the bootstrap arguments:\n"
+            "  exomem bootstrap --help\n\n"
+            "Inspect any product command's arguments:\n"
+            "  exomem <command> --help"
+        ),
+    )
     parser.add_argument(
         "--transport",
         choices=("stdio", "http", "streamable-http"),
