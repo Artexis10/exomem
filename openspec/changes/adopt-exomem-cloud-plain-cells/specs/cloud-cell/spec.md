@@ -56,8 +56,9 @@ A cloud cell SHALL publish the standard product tool surface, minus the members 
 #### Scenario: Excluded command
 
 - **WHEN** a client lists tools on a cloud cell
-- **THEN** `transfer_artifact`, `process_media` and `read_media` are absent
+- **THEN** `transfer_artifact` and `read_media` are absent
 - **AND** `adopt_vault` is present for staged import adoption
+- **AND** `process_media` is present for the cell's documents and OCR jobs
 - **AND** every other product tool, including `configure_memory` and `activate_context`, is present
 
 ### Requirement: A cloud cell can serve read-only

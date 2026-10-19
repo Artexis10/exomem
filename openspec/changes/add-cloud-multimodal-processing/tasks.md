@@ -22,9 +22,12 @@ These checks do not establish every format on a production cell, claude.ai attac
 - [ ] 2.2 Qualify owner-sized documents/OCR backfill against the existing latency, freshness, memory and node-headroom gates. State the drain bound before the run, and report excluded over-budget jobs.
 - [ ] 2.3 Verify the known-content subset against a personal install under a predeclared agreement bound. Reuse existing image samples where their version and conditions match.
 - [ ] 2.4 Record each accepted engine's anonymous-memory and VmData budgets, image size and OOM-group setting. Verify no OOM or serving restart during acceptance.
-- [ ] 2.5 Resolve whether new OCR packs need explicit reprocessing of completed sidecars. Verify that completed text stays unchanged unless that mode is requested.
+- [x] 2.5 Resolve whether new OCR packs need explicit reprocessing of completed sidecars. Verify that completed text stays unchanged unless that mode is requested.
+  Decision (owner, 2026-10-19): no reprocessing mode for now. A new pack or OCR fix leaves completed text unchanged, and later work reopens this only when such a change alters real tenant sidecars.
+  Evidence: `media_processing._completed_provenance_state` decides completion from the file identity and sidecar shape only, never from OCR configuration.
+  `tests/test_media_processing.py::test_valid_completed_transcript_is_preserved_and_not_requeued` and `::test_process_media_product_leaf_preserves_a_completed_transcript` keep completed bytes through reconciliation, `process` and `retry`.
 
-Automatic ingestion is delivered. Manual `process_media` exposure remains a separate decision in `adopt-exomem-cloud-plain-cells` task 2.3a.
+Automatic ingestion is delivered. Manual `process_media` exposure is decided in `adopt-exomem-cloud-plain-cells` task 2.3a: Cloud cells serve it.
 
 ## 3. Image search and optional captions
 
