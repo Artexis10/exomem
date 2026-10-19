@@ -126,6 +126,59 @@ def test_dispatcher_reports_committed_collection_and_held_lifecycle(store):
     assert store.inspect_collection(CID)["coverage"]["held"] == 0
 
 
+def test_dispatched_store_append_reuses_its_contract_and_fans_out_nothing(store, monkeypatch):
+    """A store append must not YAML-parse an unchanged manifest again, must use a revised one,
+    and must acknowledge without index fan-out, because its item views are recall-excluded."""
+    from test_due_state_bulk_carriers import _command
+
+    from exomem import index_sync, vault, writer_lease
+    from exomem.collection_store.preview import preview_store
+
+    def invoke(action, **kwargs):
+        with preview_store(store.root, store.handle):
+            result = writer_lease.invoke_command(
+                _command("record_memory"), store.root, action=action,
+                response_detail="full", **kwargs,
+            )
+        assert result["status"] == "committed"
+        return result["diagnostics"]
+
+    invoke("create", manifest_path=manifest_path(), manifest_text=manifest_text(),
+           why="create", scaffold=False)
+    invoke("append", collection=CID, item={"title": "Warm"}, why="capture")
+    parses, fanouts = [], []
+    # Manifest lookups are cheap cache hits; a YAML parse of the unchanged manifest is the cost.
+    parse = vault.parse_frontmatter
+
+    def counted_parse(text, **kwargs):
+        parsed = parse(text, **kwargs)
+        if parsed[0].get("type") == "collection":
+            parses.append(parsed[0]["title"])
+        return parsed
+
+    monkeypatch.setattr(vault, "parse_frontmatter", counted_parse)
+    for module, name in ((index_sync, "upsert_after_write"), (vault, "post_commit_batch_fanout")):
+        monkeypatch.setattr(module, name,
+                            lambda *a, _call=getattr(module, name), _name=name, **k:
+                            fanouts.append(_name) or _call(*a, **k))
+    invoke("append", collection=CID, item={"title": "Cached"}, why="capture")
+    assert parses == [] and fanouts == []
+
+    state = store.inspect_collection(CID)
+    invoke("revise", collection=CID,
+           manifest_text=manifest_text().replace("    count: {type: integer}\n",
+                                                 "    count: {type: integer}\n    status: {type: string}\n"),
+           expected_manifest_hash=state["lifecycle_guards"]["expected_manifest_hash"],
+           expected_container_hash=state["snapshot"], why="add a field")
+    invoke("append", collection=CID, item={"title": "Revised", "status": "new"}, why="capture")
+    stored = store.connection.execute(
+        "SELECT values_json FROM items WHERE collection_id=? AND json_extract(values_json, '$.title')=?",
+        (CID, "Revised"),
+    ).fetchone()[0]
+    assert json.loads(stored)["status"] == "new"
+    assert fanouts == []
+
+
 @pytest.mark.parametrize("profile", ["records", "planning"])
 def test_public_query_reads_committed_store_rows_without_rendered_files(paired, profile):
     from exomem.collection_store.preview import preview_store
