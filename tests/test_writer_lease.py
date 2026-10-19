@@ -4070,14 +4070,17 @@ def test_in_flight_mutation_blocks_release_until_it_completes(tmp_path: Path) ->
     assert manager._maybe_idle_release(1) is True
 
 
-@pytest.mark.parametrize(("seconds_left", "acquisitions"), [(25.0, 1), (5.0, 2)])
-def test_a_nested_guard_reuses_the_operations_grant_only_while_it_has_margin(
-    tmp_path: Path, seconds_left: float, acquisitions: int
+@pytest.mark.parametrize(
+    ("grant_age", "reuse", "acquisitions"), [(5.0, True, 1), (25.0, True, 2), (5.0, False, 2)]
+)
+def test_a_nested_guard_reuses_the_operations_grant_only_when_it_asks_and_the_grant_is_young(
+    tmp_path: Path, grant_age: float, reuse: bool, acquisitions: int
 ) -> None:
-    # A 30 s lease renews every 10 s: a grant with 25 s left is reused, one with 5 s left is acquired again.
-    manager = _idle_manager(tmp_path, LeaseRecord("desktop", time.time() + seconds_left, 1))
+    # A 30 s lease renews every 10 s: a 5 s old grant is reused, a 25 s old one is acquired again.
+    manager = _idle_manager(tmp_path, LeaseRecord("desktop", time.time() + 30.0, 1))
     with manager.writer_authority_guard():
-        with manager.writer_authority_guard():
+        manager._granted_monotonic -= grant_age
+        with manager.writer_authority_guard(reuse_operation_grant=reuse):
             assert manager._active_mutations == 2
     assert manager.client.acquisitions == acquisitions
 

@@ -293,7 +293,9 @@ def _mutate(vault_root, method, *args, **kwargs):
         # boundary, so a second one would only advance the commit generation a second time.
         return method(*args, **kwargs)
 
-    with active_manager().mutation_guard(vault_root, operation=method.__name__):
+    # The store write revalidates its token with the coordinator before it commits, so this guard may keep
+    # the operation's grant instead of asking for a second one.
+    with active_manager().mutation_guard(vault_root, operation=method.__name__, reuse_operation_grant=True):
         return method(*args, **kwargs)
 
 

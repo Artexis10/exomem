@@ -992,6 +992,19 @@ def test_a_store_write_inside_the_operations_guard_asks_the_coordinator_for_one_
     assert client.acquires - granted_before == 1
 
 
+def test_a_file_effect_nested_in_an_operation_is_refused_once_the_operations_grant_is_revoked(coordinated):
+    from exomem.create_directory import create_directory
+
+    runtime, store, _ = coordinated
+    with runtime.manager.mutation_guard(runtime.root, operation="outer_operation"):
+        # The cut revokes the holder and advances the token, as a takeover by another replica does.
+        store.transition_schema_fence("vault", expected_generation=0, schema_version=3)
+        with pytest.raises(OpError) as refused:
+            create_directory(runtime.root, path="Notes/after-the-cut")
+    assert refused.value.code == "WRITER_SCHEMA_FENCE_MISMATCH"
+    assert not (runtime.root / "Notes").exists()
+
+
 def test_a_schema_cut_after_the_operations_grant_fences_the_store_write(coordinated):
     from exomem.record_memory import record_memory
 
