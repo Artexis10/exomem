@@ -498,13 +498,20 @@ def build_packet(
         from . import find, unit_corrections
 
         seeds = {item.ref: item for item in reversed(items) if item.level == "unit" and item.ref}
+        source_versions: dict[str, list[tuple[str, Sequence[Mapping[str, Any]]]]] = {}
+        for item in items:
+            if item.level == "unit" and item.ref and item.relations:
+                source_versions.setdefault(item.ref, []).append(
+                    (str(item.provenance.get("source_hash") or ""), item.relations),
+                )
         parent_reads = find.UnitParentReads()
         visible = visible if visible is not None else unit_corrections.reader_view(status_basis.root)
         tentative: dict[str, LaneItem] = {}
         tentative_outgoing: dict[tuple[str, str, str, str], LaneItem] = {}
 
         def outgoing_key(candidate: Mapping[str, Any]) -> tuple[str, str, str, str]:
-            return tuple(candidate[key] for key in ("source_ref", "source_hash", "relation", "unit_ref"))
+            return (candidate["source_ref"], candidate["source_hash"],
+                    candidate["relation"], candidate["unit_ref"])
 
         def admit_outgoing(candidate: dict[str, Any]) -> bool:
             hit = parent_reads.exact(
@@ -516,13 +523,8 @@ def build_packet(
             target = _unit_items(None, [hit], parent_reads=parent_reads)[0]
             if not _reader_admitted((target,), visible):
                 return False
-            seed = seeds[candidate["source_ref"]]
-            ordering = status_basis.ordering(seed.lifecycle, path=seed.path or None)
-            history = " (historical source)" if ordering is not None and ordering.historical else ""
             tentative_outgoing[outgoing_key(candidate)] = replace(
-                target, role=seed.role, anchor=seed.path, promoted=seed.promoted,
-                request_anchors=seed.request_anchors,
-                why=f"{seed.ref} {candidate['relation']}{history}; read the exact related unit.",
+                target, why=f"{candidate['source_ref']} {candidate['relation']}; read the exact related unit.",
             )
             return True
 
@@ -548,8 +550,7 @@ def build_packet(
 
         discovered = unit_corrections.discover(
             status_basis.root, tuple(seeds), accept=admit_counterpart, keep=visible,
-            outgoing_sources={ref: (str(item.provenance.get("source_hash") or ""), item.relations)
-                              for ref, item in seeds.items() if item.relations},
+            outgoing_sources=source_versions,
             accept_outgoing=admit_outgoing,
         )
         correction_status = discovered["status"]
@@ -804,7 +805,10 @@ def build_packet(
         for (source_ref, source_hash, _relation, _target), pointer_item in outgoing_pointers.items():
             source = served_sources.get((source_ref, source_hash))
             if source is not None and source.promoted == promoted:
-                _budget_pointer(replace(pointer_item, role=source.role, promoted=source.promoted,
+                ordering = status_basis.ordering(source.lifecycle, path=source.path or None)
+                history = "Historical source. " if ordering is not None and ordering.historical else ""
+                _budget_pointer(replace(pointer_item, role=source.role, anchor=source.path, promoted=source.promoted,
+                                        why=history + pointer_item.why,
                                         request_anchors=source.request_anchors),
                                 "requires_read", exact_path=True)
 

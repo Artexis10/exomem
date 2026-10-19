@@ -29,7 +29,7 @@ def discover(
     accept: Callable[[dict[str, Any]], bool],
     keep: Callable[[str], bool] | None = None,
     deadline: float | None = None,
-    outgoing_sources: Mapping[str, tuple[str, Sequence[Mapping[str, Any]]]] | None = None,
+    outgoing_sources: Mapping[str, Sequence[tuple[str, Sequence[Mapping[str, Any]]]]] | None = None,
     accept_outgoing: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     """Discover references once; the caller admits exact units before the cap.
@@ -83,19 +83,20 @@ def discover(
                 partial = True
                 continue
             seeds[candidates[0]["node_key"]] = reference
-            source = (outgoing_sources or {}).get(reference)
-            if source is not None and accept_outgoing is not None:
+            versions = (outgoing_sources or {}).get(reference)
+            if versions and accept_outgoing is not None:
                 parent = view.parent(candidates[0]["path"])
                 resolved = parent.structure.resolve_unit(reference) if parent is not None else None
                 unit = (parent.structure.units[resolved.index]
                         if resolved is not None and resolved.status == "found" and resolved.index is not None
                         else None)
-                source_hash, relations = source
-                if unit is None or not source_hash or unit.source_hash != source_hash:
+                relations = next((relations for source_hash, relations in versions
+                                  if unit is not None and source_hash and unit.source_hash == source_hash), None)
+                if relations is None:
                     partial = True
                     continue
                 outgoing_seeds[candidates[0]["node_key"]] = (
-                    reference, source_hash, frozenset(str(row.get("raw") or "") for row in relations),
+                    reference, unit.source_hash, frozenset(str(row.get("raw") or "") for row in relations),
                 )
         admitted: dict[str, dict[str, Any]] = {}
         per_seed: dict[str, int] = {}

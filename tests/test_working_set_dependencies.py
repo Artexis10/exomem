@@ -127,11 +127,11 @@ def _selected(root: Path, path: str, fragment: str):
     return working_set._unit_items(None, [hit])[0]
 
 
-def _packet(root: Path, items, *, max_chars=4000, visible=None):
+def _packet(root: Path, items, *, max_chars=4000, visible=None, roles=()):
     from exomem import lifecycle_statuses, working_set
 
     return working_set.build_packet(
-        items=items, anchors=(), roles=(), current_state=(), ambiguity=(), missing=(),
+        items=items, anchors=(), roles=roles, current_state=(), ambiguity=(), missing=(),
         max_chars=max_chars, generation={}, status="resolved", visible=visible,
         status_basis=lifecycle_statuses.Basis(root),
     )
@@ -190,6 +190,26 @@ def test_stable_source_reference_does_not_attach_current_relations_to_old_prose(
     assert packet["generation"]["correction_context"] == "partial"
 
 
+def test_stale_duplicate_cannot_shadow_the_served_current_claims_relation(exact_relations) -> None:
+    from dataclasses import replace
+
+    from test_relation_fragment_targets import SOURCE, TARGET
+    from test_unit_correction_context import _publish
+
+    root, index, old, _second = exact_relations
+    path = root / SOURCE
+    path.write_text(path.read_text().replace("The first operation may proceed.", "The first operation uses the revised procedure."))
+    _publish(index)
+    current = replace(_selected(root, SOURCE, "first"), role="primary")
+    old = replace(old, role="secondary")
+    assert old.ref == current.ref and old.provenance["source_hash"] != current.provenance["source_hash"]
+    packet = _packet(root, (old, current), roles=({"id": "primary"}, {"id": "secondary"}))
+    assert [row["text"] for row in packet["units"]] == [current.text]
+    target = _selected(root, TARGET, "rich-1")
+    assert [row["ref"] for row in packet["pointers"]] == [target.ref]
+    assert packet["pointers"][0]["role"] == "primary"
+
+
 @pytest.mark.parametrize("fragment", ["missing", "dup"])
 def test_missing_or_ambiguous_target_never_substitutes_another_unit(exact_relations, fragment: str) -> None:
     from test_relation_fragment_targets import DUP_TARGET, SOURCE, TARGET
@@ -229,7 +249,7 @@ def test_outgoing_discovery_discards_tentative_pointers_after_proof_loss(
 
     result = unit_corrections.discover(
         root, [first.ref], accept=lambda _row: True, deadline=now + 1,
-        outgoing_sources={first.ref: (first.provenance["source_hash"], first.relations)},
+        outgoing_sources={first.ref: [(first.provenance["source_hash"], first.relations)]},
         accept_outgoing=accept,
     )
     assert admitted
