@@ -64,6 +64,11 @@ For newly supported conversational semantic corrections, the owning writer SHALL
 
 Revision history SHALL use the canonical owner's storage and recovery boundary, not a disposable retrieval projection. Historical reads SHALL be bounded and subject to current disclosure and retention policy. Missing, withheld or pruned historical content SHALL be unavailable without invented reconstruction or permission leakage. Supported backup/export/restore SHALL preserve retained history. Current-state reads SHALL remain usable without loading every revision.
 
+Note and unit history reads SHALL report `status: retained` only when at least one revision is independently admitted and usable.
+Otherwise they SHALL report `status: unavailable`.
+Every result SHALL report `coverage: unverified`; counts describe only admitted usable revisions, never complete retention.
+Missing, withheld, corrupt and unreadable history SHALL remain indistinguishable when no revision can be admitted.
+
 #### Scenario: Two refinements do not create three visible pages
 
 - **WHEN** an authorized agent qualifies the same interpretation twice through the supported correction route
@@ -79,6 +84,19 @@ Revision history SHALL use the canonical owner's storage and recovery boundary, 
 
 - **WHEN** a supported object accumulates many corrections and is restored through its supported portability path
 - **THEN** current reads and a bounded history page remain bounded, retained revision meanings survive, and measured write/storage amplification is reported separately
+
+#### Scenario: No usable revision is available
+
+- **WHEN** no retained revision can be independently admitted and validated
+- **THEN** note and unit history report `status: unavailable` and `coverage: unverified`
+- **AND** counts describe zero usable revisions without revealing whether other history exists
+- **AND** the current page remains readable under its existing authority
+
+#### Scenario: Only part of retained history is usable
+
+- **WHEN** a history read admits some revisions while other entries cannot be admitted or validated
+- **THEN** the result reports `status: retained` and `coverage: unverified`
+- **AND** counts, ordering and pagination describe only admitted usable revisions without revealing unavailable entries
 
 ### Requirement: Ordinary agents correct individual claims in their canonical home
 
