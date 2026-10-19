@@ -53,7 +53,8 @@ class SQLiteLeaseStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         # One connection for the store's life. A per-request connection's close is the last
         # close, so SQLite checkpointed the WAL into the database file after every grant.
-        # SQLite connections must not cross fork(): a forked child opens its own store.
+        # Do not fork while this store is open: a child's own connection shares the parent's
+        # in-process SQLite lock state, so the parent's close can checkpoint the WAL away under it.
         self._conn = _connection(path, factory=sqlite3.Connection, check_same_thread=False)
         self._conn_lock = threading.Lock()
         weakref.finalize(self, self._conn.close)

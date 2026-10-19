@@ -1083,8 +1083,8 @@ make the first fence cut on a new coordinator. Keep the coordinator database in
 the backups, and restore a copy taken after the latest migration. A running
 coordinator keeps recent grants and fences in its `-wal` file, so the database
 file alone is not current. Back it up with SQLite's online backup API, for
-example `sqlite3 writer-leases.sqlite ".backup copy.sqlite"`, or copy it while
-the coordinator is stopped.
+example `sqlite3 writer-leases.sqlite ".backup copy.sqlite"`. A plain file copy is
+complete only after a clean stop; after a crash, copy its `-wal` file with it.
 
 #### When an export cannot finish
 
