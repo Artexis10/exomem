@@ -61,6 +61,8 @@ def test_queued_versions_keep_installed_predecessor_policy_after_restart(store, 
         receipt = store.update_record(CID, item_key=KEY, changes={"title": title, "tags": []},
             why="correct", expected_container_hash=receipt["after_container_hash"],
             expected_item_version=receipt["after_item_hash"])
+    store.revise_collection(CID, manifest_text=text.replace("title: Work", "title: Revised"),
+                            why="revise", **store.inspect_collection(CID)["lifecycle_guards"])
     assert path.read_bytes() == physical
     root, db = store.root, store.handle.path
     store.handle.close()
