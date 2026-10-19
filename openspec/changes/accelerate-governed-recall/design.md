@@ -421,7 +421,7 @@ Every slow stage pays per request for something the catalogue generation
 already fixes. Each fix keeps results identical, and an identity test compares
 it with the current path on the reference corpus.
 
-- **Parent hints and eligibility metadata.** `_emitted_parent_hints_query`
+- **Baseline parent hints and eligibility metadata.** `_emitted_parent_hints_query`
   (`lexstore.py:8382-8394`) joins `pages` to `json_each(?)`. SQLite walks the
   `pages_kb` index and scans `json_each` once per KB page, so the work is KB
   pages times candidates. The `IN` form does not fix it. `lexstore` never runs
@@ -449,11 +449,15 @@ it with the current path on the reference corpus.
   `fts JOIN pages` from `pages_kb`, which is linear in the KB, while the 3.53
   that a local uv venv bundles drives the join from `MATCH`. The replays above
   and `sqlcheck.txt` ran on 3.53.1. #1649 pins every FTS5 `MATCH` join with
-  `CROSS JOIN` (`lexstore._FTS_PAGES`). The keyword lane's `_substring_query`
-  (`lexstore.py:8441`) still uses `tri JOIN pages`, so slice 6.3 pins its
-  `MATCH` branch with `CROSS JOIN` the same way. Its branch without a `MATCH`,
-  where every token is under three characters, scans `pages_kb` by design and
-  stays. A *reference SQLite* is therefore the one that CI's system Python or
+  `CROSS JOIN` (`lexstore._FTS_PAGES`). The keyword lane uses a separate
+  trigram table; the BM25 defect does not establish its plan.
+  Exact keyword checks on SQLite 3.45.1 and 3.50.4 already drive `pages`
+  from `tri MATCH`, with primary-key probes and bounded work per match.
+  The current bounded plan is retained: forcing `CROSS JOIN` showed no plan
+  improvement in unrestricted or allowed-path checks.
+  These checks establish no installed latency gain.
+  Its short-token branch still scans `pages_kb` by design.
+  A *reference SQLite* is therefore the one that CI's system Python or
   a Cloud cell links, 3.45.1 or 3.46.1 today. The reference runs link one, and
   the structural gate and every plan check also run on 3.45.1, the older
   (decision 9). No verdict then rests on a plan that neither CI nor a Cloud
