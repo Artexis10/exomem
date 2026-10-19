@@ -281,9 +281,11 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
                 "read_memory",
             }.issubset(tools):
                 issues.append("capability_mismatch")
-            if set(tools).intersection(
-                {"transfer_artifact", "process_media", "read_media"}
-            ):
+            # Imported here, not at module load: the registry is heavy and only
+            # this check needs it. Reading it keeps one list of excluded tools.
+            from .commands import CLOUD_SURFACE_EXCLUSIONS
+
+            if set(tools).intersection(CLOUD_SURFACE_EXCLUSIONS):
                 issues.append("excluded_capability_exposed")
             engagement = result.get("engagement", {})
             envelope = engagement.get("envelope")

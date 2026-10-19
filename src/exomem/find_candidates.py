@@ -752,13 +752,18 @@ def collect_candidates(
     parent_hints: Mapping[str, str | None] | None = None
     if admitted_raw_paths:
         recall_checkpoint = snapshot.recall_checkpoint(scope)
-        hint_result = lexstore.emitted_parent_hints_result(
-            vault_root,
-            admitted_raw_paths,
-            scope=scope,
-            freshness=snapshot.for_scope(scope),
-            recall_checkpoint=recall_checkpoint,
-        )
+        with _span(timings, "parent_hints"):
+            hint_result = lexstore.emitted_parent_hints_result(
+                vault_root,
+                admitted_raw_paths,
+                scope=scope,
+                freshness=snapshot.for_scope(scope),
+                recall_checkpoint=recall_checkpoint,
+            )
+            _mark_source(
+                timings, "parent_hints",
+                find_types.SOURCE_INDEX if hint_result.readiness.complete else find_types.SOURCE_DECLINED,
+            )
         if hint_result.readiness.complete:
             parent_hints = hint_result.value
 

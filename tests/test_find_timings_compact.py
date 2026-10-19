@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, query_log
+from exomem import commands, lexstore, query_log
 from exomem import find as find_module
 
 
@@ -22,10 +22,22 @@ def test_default_find_shape_unchanged(vault: Path) -> None:
     assert "timings" not in out[0]
 
 
-def test_timings_envelope_and_stages(vault: Path) -> None:
+@pytest.mark.parametrize("hints_available", [True, False])
+def test_timings_envelope_and_stages(
+    vault: Path, warm_managed_cell, monkeypatch, hints_available: bool
+) -> None:
+    warm_managed_cell(vault)
+    if not hints_available:
+        monkeypatch.setattr(
+            lexstore, "emitted_parent_hints_result",
+            lambda *_args, **_kwargs: lexstore.CatalogQueryResult(
+                None, lexstore.CatalogReadiness("stale", False, lexstore.backend())
+            ),
+        )
     out = commands.op_find(vault, query="metabolism", include_timings=True)
     assert isinstance(out, dict)
     assert set(out) == {"hits", "timings"}
+    assert out["hits"]
     t = out["timings"]
     assert t["total_ms"] >= 0
     assert "cache" in t and "hit" in t["cache"]
@@ -40,6 +52,8 @@ def test_timings_envelope_and_stages(vault: Path) -> None:
     assert "bm25" in stages
     assert "keyword" in stages
     assert "vector" in stages
+    assert "parent_hints" in stages
+    assert stages["parent_hints"]["source"] == ("index" if hints_available else "declined")
     assert "fusion" in stages
     assert "filter_hits" in stages
     assert "serialize" in stages
@@ -47,6 +61,15 @@ def test_timings_envelope_and_stages(vault: Path) -> None:
     for entry in stages.values():
         for key in entry:
             assert key in ("ms", "skipped", "error", "calls", "cache_hit", "source", "parent")
+
+
+def test_parent_hint_stage_is_absent_without_candidates(vault: Path) -> None:
+    out = commands.op_find(
+        vault, query="nomatchingqueryzz", include_timings=True
+    )
+
+    assert out["hits"] == []
+    assert "parent_hints" not in out["timings"]["stages"]
 
 
 def test_timed_ranking_matches_untimed(vault: Path) -> None:

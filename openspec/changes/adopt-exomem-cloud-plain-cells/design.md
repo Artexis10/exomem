@@ -78,7 +78,8 @@ Facts verified against the code, including by the independent critic review of 2
 3. **Tool surface.**
    - The members of `CLOUD_SURFACE_EXCLUSIONS` are removed from the MCP server after registration.
    - Each entry uses the `SurfaceExclusion` shape: `command`; `reason`, stating what is technically broken; and `lifted_when`.
-   - The current members are `transfer_artifact`, `process_media` and `read_media`; staged import enables `adopt_vault`.
+   - The current members are `transfer_artifact` and `read_media`; staged import enables `adopt_vault`.
+   - `process_media` is served. Its `status`, `process` and `retry` operations use the cell's own media queue, pressure brakes and `EXOMEM_MEDIA_ENGINES` selection, so an engine that is off gets no work and a retry never returns over-budget work.
    - Legacy MCP aliases (`EXOMEM_MCP_LEGACY_COMPAT`) are never registered in cloud mode. A cell has no legacy clients, and aliases would re-expose the leaves of excluded commands.
 4. **Read-only mode.** With `EXOMEM_CLOUD_READ_ONLY=1` the cell refuses every mutating command with `CLOUD_CELL_READ_ONLY`, before vault access. Mutation is classified from the command registry, not from a copied list. Reads keep working.
 5. **Routes.** Only MCP (`/mcp`), `/health` and `/health/ready` are registered. REST (`/api/*`), `/upload` and `/download` are not, because FastMCP custom routes do not inherit MCP authentication.
