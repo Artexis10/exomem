@@ -1946,10 +1946,25 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
     if catch_up is None:
         return False
     try:
-        return catch_up() and _admit_if_current(vault_root)
+        if not catch_up():
+            return False
+        if _admit_if_current(vault_root):
+            return True
+        return _declined_catch_up("not_current")
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         log.info("lexical catch-up declined (%s); rebuilding", error)
         return False
+
+
+def _declined_catch_up(reason: str, **counts: object) -> bool:
+    """Log why a lag-only request still costs a full pass, and return False.
+
+    Each reason is the fixed name of one refusal in `catch_up_lagging_delta` or
+    its caller, never a vault path, so the next whole-corpus pass is attributable.
+    """
+    detail = "".join(f" {key}={value}" for key, value in counts.items())
+    log.info("lexical catch-up declined (%s)%s; rebuilding", reason, detail)
+    return False
 
 
 def _schedule_repair(
@@ -5926,47 +5941,57 @@ class LexicalStore:
         watcher's own bounded apply, deletions included. Returns whether that
         replay committed (trivially, when nothing lags). A retired or stale
         store, a foreign or adopted origin, lost history, a reconcile-tainted
-        delta or an oversized one returns False and keeps the full pass.
+        delta or an oversized one returns False, logs which refusal it was and
+        keeps the full pass.
         """
         from . import freshness as freshness_module
 
         if self._failed or not self.path.exists():
-            return False
+            return _declined_catch_up("store_failed")
         lagging: set[str] = set()
         try:
             conn = self._connect()
             try:
                 if not self._schema_is_current(conn):
-                    return False
+                    return _declined_catch_up("schema")
                 identity = catalog_semantic_identity(self.vault_root)
                 if self._meta_catalog_identity(conn) != identity:
-                    return False
+                    return _declined_catch_up("identity")
                 for scope in freshness_module.SCOPES:
                     if not freshness_module.recall_is_live(self.vault_root, scope):
-                        return False
+                        return _declined_catch_up("not_live", scope=scope)
                     stored = self._meta_checkpoint(conn, scope)
                     current = freshness_module.recall_checkpoint(self.vault_root, scope)
-                    if (
-                        stored is None
-                        or current is None
-                        or stored.instance_id != current.instance_id
-                    ):
-                        return False
+                    if stored is None or current is None:
+                        return _declined_catch_up("no_checkpoint", scope=scope)
+                    if stored.instance_id != current.instance_id:
+                        return _declined_catch_up("instance", scope=scope)
                     delta = freshness_module.recall_delta_since(
                         self.vault_root, scope, stored
                     )
-                    if not delta.complete or delta.requires_source_proof:
-                        return False
+                    if not delta.complete:
+                        return _declined_catch_up("incomplete", scope=scope)
+                    if delta.requires_source_proof:
+                        return _declined_catch_up(
+                            "source_proof",
+                            scope=scope,
+                            changed=len(delta.changed),
+                            deleted=len(delta.deleted),
+                        )
                     lagging |= delta.changed | delta.deleted
             finally:
                 conn.close()
-        except sqlite3.Error:
-            return False
+        except sqlite3.Error as error:
+            return _declined_catch_up("store_error", error=type(error).__name__)
         if len(lagging) > CATALOG_FOREGROUND_DELTA_CAP:
-            return False
+            return _declined_catch_up(
+                "over_cap", paths=len(lagging), cap=CATALOG_FOREGROUND_DELTA_CAP
+            )
         if not lagging:
             return True
-        return self.retry_deferred_upsert([Path(path) for path in sorted(lagging)])
+        if not self.retry_deferred_upsert([Path(path) for path in sorted(lagging)]):
+            return _declined_catch_up("replay_failed", paths=len(lagging))
+        return True
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
