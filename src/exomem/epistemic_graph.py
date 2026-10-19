@@ -7391,7 +7391,12 @@ class EpistemicGraphIndex:
         if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
             return False
         if not path.exists():
-            self._delete_path(conn, rel, commit=commit)
+            # Own rows only, as a rebuild leaves them: a drain or refresh re-derives
+            # the pages linking here, and removing their edges erased the
+            # unresolved edge an earlier path in the same pass had just written.
+            with conn if commit else nullcontext():
+                self._drop_own_rows(conn, rel)
+                _bump_generation(conn)
             return False
         # Admission is deliberately before title/body parsing.  Raw Records
         # may never become a graph node, edge source, or resolver entry.
@@ -11106,10 +11111,21 @@ def _relation_target(
         return None
     if not canonical:
         return None
-    dst_key, dst_page_key, fragment_metadata = (
-        _relation_destination(vault_root, canonical, warning, fragment)
-        if landing is None else landing(canonical, warning, fragment)
-    )
+    if warning and fragment and not any(
+        visible is None or visible(candidate) for candidate in _link_candidates(resolver, target)
+    ):
+        # No page this derivation may see carries the fragment: keep the authored
+        # address so a reader learns the dependency is gone. A reader denied the
+        # page gets the same destination and fragment outcome, as in a vault
+        # without it. Rows written before this rule stay bare until their source
+        # is re-derived; a public delete rebuilds, so no schema bump is forced.
+        page_key = _file_key(_with_md(canonical))
+        dst_key, dst_page_key, fragment_metadata = page_key, page_key, _unlanded_fragment(fragment)
+    else:
+        dst_key, dst_page_key, fragment_metadata = (
+            _relation_destination(vault_root, canonical, warning, fragment)
+            if landing is None else landing(canonical, warning, fragment)
+        )
     return dst_key, dst_page_key, _target_kind(vault_root, canonical), {
         "target_resolution": "unresolved" if warning else "resolved",
         **fragment_metadata,
@@ -11438,6 +11454,16 @@ def _relation_destination(
         )
     outcome = _fragment_outcome(resolved, fragment)
     return page_key, page_key, {**metadata, "fragment_resolution": outcome}
+
+
+def _unlanded_fragment(fragment: str) -> dict[str, str]:
+    """A fragment with no page to resolve against, and why it stays unlanded."""
+    return {
+        "target_fragment": fragment,
+        "fragment_resolution": (
+            "missing" if semantic_units.is_unit_anchor_shaped(fragment) else "not_unit"
+        ),
+    }
 
 
 def _fragment_outcome(resolved: _PageUnit, fragment: str) -> str:
@@ -12479,7 +12505,7 @@ class GraphView:
         )
         if definition is not None:
             row = {**row, "metadata": {**metadata, "relation_family": definition.family}}
-        if metadata.get("target_fragment"):
+        if metadata.get("target_fragment") and metadata.get("target_resolution") != "unresolved":
             row = self._land(row)
         return row
 
@@ -12683,12 +12709,7 @@ class GraphView:
         page_key = _file_key(_with_md(canonical))
         if not fragment or warning:
             return page_key, page_key, {}
-        row = self._land({"dst_key": page_key, "metadata": {
-            "target_fragment": fragment,
-            "fragment_resolution": (
-                "missing" if semantic_units.is_unit_anchor_shaped(fragment) else "not_unit"
-            ),
-        }})
+        row = self._land({"dst_key": page_key, "metadata": _unlanded_fragment(fragment)})
         return str(row["dst_key"]), page_key, dict(row["metadata"])
 
     def node_path(self, key: str) -> str | None:
