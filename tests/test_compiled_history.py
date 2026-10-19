@@ -214,14 +214,65 @@ def test_revisions_do_not_rotate_at_registry_history_limit_and_paginate(
     first = commands.op_read_memory(tmp_path, path=PAGE, include_history=True, history_limit=2)[
         "revision_history"
     ]
-    assert first["retained"] == 22 and first["returned"] == 2 and first["truncated"]
+    # `retained` counts the admitted entries this read examined, never total retention.
+    assert first["retained"] == 3 and first["returned"] == 2 and first["truncated"]
     second = compiled_history.read(tmp_path, path=PAGE, limit=2, continuation=first["continuation"])
     assert "Wording 21." in first["revisions"][0]["prior"]["source"]
     assert "Wording 19." in second["revisions"][0]["prior"]["source"]
+    walked = _walk_history(tmp_path, limit=5)
+    assert len(walked) == 22
+    assert all(f"Wording {21 - i}." in r["prior"]["source"] for i, r in enumerate(walked))
     retained = list((tmp_path / compiled_history.history_root()).rglob("*.json"))
     assert len(retained) == 22
     with pytest.raises(ValueError):
         commands.op_read_memory(tmp_path, path=retained[0].relative_to(tmp_path).as_posix())
+
+
+def _walk_history(root: Path, *, limit: int) -> list[dict]:
+    seen, continuation = [], None
+    while True:
+        page = compiled_history.read(root, path=PAGE, limit=limit, continuation=continuation)
+        seen += page["revisions"]
+        if not page["truncated"]:
+            return seen
+        continuation = page["continuation"]
+
+
+def _entry_files_oldest_first(root: Path) -> list[Path]:
+    return sorted((root / compiled_history.history_root()).rglob("*.json"), key=lambda p: p.name)
+
+
+def test_a_history_page_does_not_depend_on_entries_beyond_its_lookahead(
+    tmp_path: Path, owner
+) -> None:
+    """A deep history must page without opening old entries: a damaged ancient snapshot
+    must not change the newest page, or make every read pay for all retained depth."""
+    _write_page(tmp_path, source=_page_source("- [rule] Wording 0. ^stable"))
+    for index in range(1, 26):
+        _correct(tmp_path, f"Wording {index}.", "A source clarified this interpretation.")
+    intact = compiled_history.read(tmp_path, path=PAGE, limit=3)
+    for path in _entry_files_oldest_first(tmp_path)[:15]:
+        path.write_text("not json", encoding="utf-8")
+    assert compiled_history.read(tmp_path, path=PAGE, limit=3) == intact
+    assert intact["returned"] == 3 and intact["truncated"] and intact["retained"] == 4
+
+
+def test_pagination_skips_unavailable_entries_without_revealing_them(
+    tmp_path: Path, owner
+) -> None:
+    _write_page(tmp_path, source=_page_source("- [rule] Wording 0. ^stable"))
+    for index in range(1, 10):
+        _correct(tmp_path, f"Wording {index}.", "A source clarified this interpretation.")
+    files = _entry_files_oldest_first(tmp_path)  # Wording 0..8 snapshots, oldest first.
+    for position in (1, 5, 6):
+        files[position].write_text("not json", encoding="utf-8")
+    walked = _walk_history(tmp_path, limit=2)
+    versions = [r["version"] for r in walked]
+    assert len(walked) == 6 and versions == sorted(versions, reverse=True)
+    assert len(set(versions)) == 6
+    assert not {files[p].stem for p in (1, 5, 6)} & set(versions)
+    first = compiled_history.read(tmp_path, path=PAGE, limit=2)
+    assert first["retained"] == 3 and first["continuation"] == first["revisions"][-1]["version"]
 
 
 def test_export_and_restore_keep_prior_compiled_interpretations(tmp_path: Path, owner) -> None:

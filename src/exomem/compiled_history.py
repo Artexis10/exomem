@@ -220,9 +220,14 @@ def read(
     directory = history_dir(parent_ref)
     names = registry_history.kept_names(root, directory, suffix=".json") or []
     retained = 0
-    older_count = 0
     page = []
+    truncated = False
     for name in names:
+        version = name.removesuffix(".json")
+        # Names are newest first and sorted by version: entries not older than the
+        # continuation are skipped without being opened.
+        if after is not None and version >= after:
+            continue
         entry = _admitted_entry(
             root,
             registry_history.read_kept(root, directory, name),
@@ -236,11 +241,11 @@ def read(
         ):
             continue
         retained += 1
-        version = name.removesuffix(".json")
-        if after is None or version < after:
-            older_count += 1
-            if len(page) < size:
-                page.append((version, entry))
+        if len(page) == size:
+            # One further admitted entry proves more exist; nothing older is opened.
+            truncated = True
+            break
+        page.append((version, entry))
     revisions = []
     who = effective_principal()
     for version, entry in page:
@@ -265,7 +270,6 @@ def read(
         revisions.append(
             {**entry, "version": version, "status": "available", "prior": prior, "actor": actor}
         )
-    truncated = older_count > size
     return {
         "parent_ref": parent_ref,
         "unit_ref": unit_ref,
