@@ -22,6 +22,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 PLANNING_ID = "2db90f18-70df-4e41-986e-2d7d7db1caca"
 PLANNING_COLLECTION = "Knowledge Base/Planning/Work/_collection.md"
 ITEMS_DIR = "Knowledge Base/Planning/Work/Items"
@@ -634,9 +636,17 @@ def test_no_motivation_key_is_named_ref_and_no_count_is_a_boolean(tmp_path: Path
         assert all(type(value) is int for value in item["divergence"].values())
 
 
+@pytest.mark.parametrize(
+    ("projection_current", "expected_scans"),
+    [(True, 0), (False, 1)],
+    ids=["projection-current", "projection-not-current"],
+)
 def test_the_resolution_work_is_equal_whether_or_not_the_hidden_page_exists(
     tmp_path: Path,
     monkeypatch: Any,
+    corpus_cache_on: None,
+    projection_current: bool,
+    expected_scans: int,
 ) -> None:
     """The response is not the only channel; the work performed is one too.
 
@@ -646,17 +656,27 @@ def test_the_resolution_work_is_equal_whether_or_not_the_hidden_page_exists(
     call learned whether a hidden page held the id, with no authoring
     prerequisite at all. Keying the scan on sidecar availability instead closed
     that channel and opened a correctness hole — a page written outside a
-    governed write read as absent — so the resolver scans unconditionally and
-    the work is a function of the batch alone.
+    governed write read as absent. So vault state alone chooses the source: the
+    server's current identity projection when it holds one, otherwise one scan
+    for the whole batch. Either way the hidden page does not change the work.
 
     Asserting the call count rather than wall clock, because the leak is the
     decision to scan, and a timing assertion would be flaky under load while
     proving strictly less.
     """
-    from exomem import memory_refs, plan_progress
+    from exomem import freshness, graph_sync, memory_refs, plan_progress, semantic_contract
     from exomem.governance.principal import request_scope
 
     with_page, without_page = _pair(tmp_path)
+    for root in (with_page, without_page):
+        # Join the graph rebuild the fixture's writes started first: it
+        # reconciles freshness when it ends, which clears a pending edit.
+        graph_sync.await_active_rebuild(root, timeout=30)
+        freshness.rebaseline(root)
+        semantic_contract.build_corpus_context(root)
+        if not projection_current:
+            # An edit made behind the server is pending: the projection is stale.
+            freshness.mark_external_pending(root)
 
     def _counted(root: Path) -> list[Any]:
         scans.append(str(root))
@@ -667,14 +687,16 @@ def test_the_resolution_work_is_equal_whether_or_not_the_hidden_page_exists(
     monkeypatch.setattr(memory_refs, "_scan_pages", _counted)
 
     with request_scope(_external()):
-        plan_progress.review(with_page)
+        present = plan_progress.review(with_page)
     present_scans = len(scans)
 
     scans.clear()
     with request_scope(_external()):
-        plan_progress.review(without_page)
+        absent = plan_progress.review(without_page)
     absent_scans = len(scans)
 
-    assert present_scans == absent_scans
+    assert present_scans == absent_scans == expected_scans
     # Non-vacuity: equality would also hold if neither review resolved anything.
-    assert present_scans >= 1
+    for result in (present, absent):
+        released = _by_title(result, "Cites a released page")
+        assert _motivation_entry(released)["resolved"] is True

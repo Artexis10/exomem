@@ -41,6 +41,71 @@ from exomem.governance.principal import RequestPrincipal, request_scope
 TODAY = dt.date(2026, 8, 16)
 TOMORROW = dt.date(2026, 8, 17)
 
+
+def test_write_advice_counts_only_affected_pages(vault: Path) -> None:
+    affected = _prediction(vault, "affected", check_by="2026-08-01")
+    _prediction(vault, "unrelated", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+
+    advice = due_state_module.block_for_write(vault, affected, today=TODAY)
+
+    assert advice is not None
+    assert advice["total"] == 1
+    assert advice["scope"] == "affected_paths"
+    assert due_state_module.served(vault, today=TODAY)["total"] == 2
+
+
+def test_local_delivery_does_not_reset_global_emission_history(vault: Path) -> None:
+    affected = _prediction(vault, "affected", check_by="2026-08-01")
+    _prediction(vault, "unrelated", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    due_state_module.reset_emission_state()
+    global_advice = due_state_module.served(vault, today=TODAY)
+    assert due_state_module.should_emit(global_advice, vault_root=vault)
+
+    local_advice = due_state_module.block_for_write(vault, affected, today=TODAY)
+    assert due_state_module.should_emit(local_advice, vault_root=vault)
+
+    assert not due_state_module.should_emit(global_advice, vault_root=vault)
+    assert not due_state_module.should_emit(local_advice, vault_root=vault)
+
+
+def test_batch_advice_counts_union_of_affected_pages(vault: Path) -> None:
+    first = _prediction(vault, "first", check_by="2026-08-01")
+    second = _prediction(vault, "second", check_by="2026-08-01")
+    _prediction(vault, "unrelated", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+
+    with due_state_module.batch_scope(vault):
+        first_advice = due_state_module.block_for_write(vault, first, today=TODAY)
+        second_advice = due_state_module.block_for_write(vault, second, today=TODAY)
+        assert not due_state_module.should_emit(first_advice, vault_root=vault)
+        assert not due_state_module.should_emit(second_advice, vault_root=vault)
+    advice = due_state_module.block_for_batch(vault, today=TODAY)
+
+    assert advice["scope"] == "affected_paths"
+    assert advice["total"] == 2
+    assert due_state_module.served(vault, today=TODAY)["total"] == 3
+
+
+def test_delivery_records_the_fingerprint_that_was_shown(vault: Path) -> None:
+    from exomem import review_state
+
+    affected = _prediction(vault, "affected", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    delivered = due_state_module.block_for_write(vault, affected, today=TODAY)
+    old = delivered["top"][0]
+    _prediction(vault, "affected", check_by="2026-08-02")
+    current = due_state_module.block_for_write(vault, affected, today=TODAY)["top"][0]
+    assert old["fingerprint"] != current["fingerprint"]
+
+    due_state_module.mark_emitted(delivered, vault_root=vault)
+
+    state = review_state.ReviewStateStore(vault).load()
+    review_id = old["ref"].rsplit("/", 1)[-1]
+    assert review_state.surfaced_family(state, review_id, old["fingerprint"]) == old["category"]
+    assert review_state.surfaced_family(state, review_id, current["fingerprint"]) is None
+
 INSIGHTS = "Knowledge Base/Notes/Insights"
 RESTRICTED = "Knowledge Base/Notes/Patterns"
 
@@ -607,8 +672,9 @@ def test_a_withheld_item_contributes_zero_everywhere(vault: Path) -> None:
     assert [row["due_since"] for row in block["top"]] == ["2026-08-01"]
 
 
+@pytest.mark.parametrize("bounded", [False, True])
 def test_the_served_view_is_byte_identical_to_a_vault_without_the_item(
-    vault: Path, tmp_path: Path
+    vault: Path, tmp_path: Path, bounded: bool,
 ) -> None:
     """Withheld must be indistinguishable from nonexistent — including in ORDERING.
 
@@ -622,18 +688,48 @@ def test_the_served_view_is_byte_identical_to_a_vault_without_the_item(
     due_state_module.reconcile(vault, today=TODAY)
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
         _reset_governance_caches()
-        withheld_view = _served(vault)
+        withheld_view = (
+            due_state_module.served_entries(
+                vault, today=TODAY, paths=frozenset({f"{RESTRICTED}/hidden.md", f"{INSIGHTS}/visible.md"}), recover=False,
+            ) if bounded else _served(vault)
+        )
 
     (vault / f"{RESTRICTED}/hidden.md").unlink()
     find_module.clear_cache()
     due_state_module.reconcile(vault, today=TODAY)
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
         _reset_governance_caches()
-        absent_view = _served(vault)
+        absent_view = (
+            due_state_module.served_entries(
+                vault, today=TODAY, paths=frozenset({f"{RESTRICTED}/hidden.md", f"{INSIGHTS}/visible.md"}), recover=False,
+            ) if bounded else _served(vault)
+        )
 
     assert json.dumps(withheld_view, sort_keys=True) == json.dumps(
         absent_view, sort_keys=True
     )
+
+
+def test_bounded_due_reads_follow_the_current_principal_and_release_policy(vault: Path) -> None:
+    """A warm owner list must not leak into a subset read after authority changes."""
+    path = _prediction(vault, "restricted", check_by="2026-08-01", folder=RESTRICTED)
+    due_state_module.reconcile(vault, today=TODAY)
+    _restrict_patterns(vault)
+    owner = RequestPrincipal(audience_id="owner", surface="cli")
+    external = RequestPrincipal(audience_id=EXTERNAL, surface="mcp")
+    before = due_state_module.served_entries(vault, today=TODAY, principal=owner)
+    assert [row["path"] for row in before] == [path]
+    assert due_state_module.served_entries(
+        vault, today=TODAY, principal=external, paths=frozenset({path}), recover=False,
+    ) == []
+    assert due_state_module.served_entries(
+        vault, today=TODAY, principal=owner, paths=frozenset({path}), recover=False,
+    ) == before
+
+    _restrict_patterns(vault, ceiling=5)
+    assert due_state_module.served_entries(
+        vault, today=TODAY, principal=external, paths=frozenset({path}), recover=False,
+    ) == before
 
 
 def test_an_audience_that_may_see_everything_sees_everything(vault: Path) -> None:

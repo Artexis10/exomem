@@ -275,13 +275,13 @@ _ADMISSION_REFUSALS = (BoundaryUnavailable, membership.MembershipUnresolved, OSE
                        reserved_paths.ReservedPathLeafError)
 
 
-def permits(root: Path, path: str, who: RequestPrincipal, *, content: bytes | None = None) -> bool:
+def permits(root: Path, path: str, who: RequestPrincipal, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     """Admit a named file through the shared membership kernel before disclosure."""
     try:
         root = Path(root)
         current = snapshot(root)
         denied = current.denied_scopes(who) if current is not None else frozenset()
-        return _permits_denied(root, path, denied, who, content=content)
+        return _permits_denied(root, path, denied, who, content=content, artifact_copy=artifact_copy)
     except _ADMISSION_REFUSALS:
         return False
 
@@ -319,23 +319,24 @@ def permits_filter(root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
 
 
 def _permits_denied(root: Path, path: str, denied: frozenset[str], who: RequestPrincipal,
-                    *, content: bytes | None = None) -> bool:
+                    *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     if not denied:
         return True
     if root / path == activation_manifest.manifest_path(root):
         return False
     compiled = policy.load(root)
-    return _permits_membership(root, path, denied, compiled, content=content, who=who)
+    return _permits_membership(root, path, denied, compiled, content=content, who=who, artifact_copy=artifact_copy)
 
 
 def _permits_membership(root: Path, path: str, denied: frozenset[str], compiled: policy.Policy,
                         *, content: bytes | None = None, who: RequestPrincipal | None = None,
-                        proposed_companion: companions.BoundCompanion | None = None) -> bool:
+                        proposed_companion: companions.BoundCompanion | None = None,
+                        artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     try:
         from ..collection_store.preview import bound_writer
 
         writer = bound_writer(root)
-        if writer is not None and content is None and proposed_companion is None:
+        if writer is not None and content is None and proposed_companion is None and artifact_copy is None:
             with writer.read_snapshot():
                 operation = writer._operation
                 if who != operation.who:
@@ -346,14 +347,14 @@ def _permits_membership(root: Path, path: str, denied: frozenset[str], compiled:
                         not denied.intersection(membership.evaluate_metadata(target.basis.subject, compiled))
                         for target in targets
                     )
-        if path.lower().endswith(".md"):
+        if path.lower().endswith(".md") and artifact_copy is None:
             raw = content if content is not None else reserved_paths.read_generic_bytes(root, path).data
             page = find_corpus.parse_page(root / path, 0, root, content=raw)
             if page is None:
                 return False
             scopes = membership.evaluate_snapshot(page, compiled, content_hash=hashlib.sha256(raw).hexdigest())
         else:
-            scopes = membership.evaluate_path_only(root, path, compiled, proposed_companion=proposed_companion).require_classified()
+            scopes = membership.evaluate_path_only(root, path, compiled, proposed_companion=proposed_companion, artifact_copy=artifact_copy).require_classified()
         return not denied.intersection(scopes)
     except (BoundaryUnavailable, membership.MembershipUnresolved, OSError,
             reserved_paths.ReservedPathLeafError):

@@ -50,6 +50,7 @@ _DEFINITION_FIELDS = {
     "scope",
     "status",
     "replaced_by",
+    "presentation_role",
 }
 
 
@@ -70,6 +71,8 @@ class RelationDefinition:
     status: str = "active"
     replaced_by: str | None = None
     core: bool = False
+    # Optional renderer metadata never changes the relation's meaning or display label.
+    presentation_role: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -84,6 +87,7 @@ class RelationDefinition:
             ("parent", self.parent),
             ("inverse", self.inverse),
             ("replaced_by", self.replaced_by),
+            ("presentation_role", self.presentation_role),
         ):
             if scalar_value:
                 out[key] = scalar_value
@@ -191,6 +195,13 @@ class RelationRegistry:
         )
 
 
+def traversable_resolution_status(status: str | None) -> bool:
+    """Whether a selected relation resolution supplies an authored graph fact."""
+    # Deprecated facts remain traversable; unregistered and out-of-scope ones do not.
+    # nosemgrep: ep-word-membership -- the closed outcomes that `resolve()` above emits.
+    return status in {"core", "alias", "extension", "deprecated"}
+
+
 def normalize_relation(label: str) -> str:
     return re.sub(r"[\s-]+", "_", str(label or "").strip().lower().rstrip(":"))
 
@@ -212,6 +223,7 @@ def core_registry() -> RelationRegistry:
             direction=str(value.get("direction", "directed")),
             inverse=value.get("inverse"),
             origins=frozenset(value.get("origins") or ["semantic_relation"]),
+            presentation_role=value.get("presentation_role"),
             core=True,
         )
     return RelationRegistry(version, "none", definitions)
@@ -419,6 +431,8 @@ def _definition_document(definition: RelationDefinition) -> dict[str, Any]:
         value["inverse"] = definition.inverse
     if definition.replaced_by is not None:
         value["replaced_by"] = definition.replaced_by
+    if definition.presentation_role is not None:
+        value["presentation_role"] = definition.presentation_role
     scope: dict[str, list[str]] = {}
     if definition.projects:
         scope["projects"] = sorted(definition.projects)
@@ -474,6 +488,8 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
 
 
 def _merge_existing_extension(old: dict[str, Any], patch: dict[str, Any]) -> None:
+    if "presentation_role" in patch:
+        old["presentation_role"] = patch["presentation_role"]
     immutable = {
         "parent",
         "family",
@@ -797,6 +813,16 @@ def _parse_extension_data(
                     severity="warning" if key in grandfathered else "error",
                 )
             )
+        presentation_role = value.get("presentation_role")
+        # Renderer roles are identifier-shaped metadata; unknown roles remain valid.
+        if presentation_role is not None and (
+            not isinstance(presentation_role, str) or not _KIND_RE.fullmatch(presentation_role)
+        ):
+            findings.append(_finding(
+                "invalid_presentation_role", f"{span}.presentation_role",
+                "must be an identifier or null", relation=key,
+            ))
+            presentation_role = None
         definition = RelationDefinition(
             key=key,
             description=description,
@@ -849,6 +875,7 @@ def _parse_extension_data(
             status=status,
             replaced_by=_optional(value.get("replaced_by")),
             core=False,
+            presentation_role=presentation_role,
         )
         extensions[key] = definition
     canonical = set(core.core) | set(extensions)
@@ -1102,7 +1129,8 @@ def _replacement_closure(
 # --------------------------------------------------------------------------- #
 
 #: Generic attributes a relation entry carries, in overlay field order.
-_ATTRIBUTE_FIELDS = ("family", "direction", "inverse", "origins", "source_kinds", "target_kinds")
+_MEANING_ATTRIBUTES = ("family", "direction", "inverse", "origins", "source_kinds", "target_kinds")
+_ATTRIBUTE_FIELDS = (*_MEANING_ATTRIBUTES, "presentation_role")
 
 
 class _Adapter:
@@ -1127,6 +1155,8 @@ class _Adapter:
             }
             if definition.inverse:
                 attributes["inverse"] = definition.inverse
+            if definition.presentation_role is not None:
+                attributes["presentation_role"] = definition.presentation_role
             for name in ("source_kinds", "target_kinds"):
                 if getattr(definition, name):
                     attributes[name] = sorted(getattr(definition, name))
@@ -1195,6 +1225,8 @@ class _Adapter:
             raw["status"] = entry.status
             if entry.replaced_by:
                 raw["replaced_by"] = entry.replaced_by
+            if "presentation_role" in entry.attributes:
+                raw["presentation_role"] = entry.attributes["presentation_role"]
             return
         row: dict[str, Any] = {"parent": entry.parent, "description": entry.description}
         attributes = entry.attributes
@@ -1243,7 +1275,10 @@ SPEC = vocabulary_registry.RegistrySpec(
     attributes=frozenset({*_ATTRIBUTE_FIELDS, "scope"}),
     # Relations keep their meaning fixed in place; a new meaning is a new key.
     immutable=frozenset(
-        {"parent", "description", *(f"attributes.{name}" for name in (*_ATTRIBUTE_FIELDS, "scope"))}
+        {
+            "parent", "description",
+            *(f"attributes.{name}" for name in (*_MEANING_ATTRIBUTES, "scope")),
+        }
     ),
     replacement_required=True,
     family="relation-type/v1",

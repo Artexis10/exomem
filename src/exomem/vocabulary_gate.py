@@ -114,7 +114,7 @@ class _BatchAuthority:
         self.committed = False
 
     def commit(self) -> None:
-        self.evidence.recheck()
+        self.evidence.recheck(phase="after")
         manifest = list(self.authority.authority_use_manifest(self.reservation))
         receipt = vocabulary_authority._canonical_receipt_for_writer(
             operation=self.operation, receipt_id=self.context.receipt_id
@@ -132,6 +132,9 @@ class _BatchAuthority:
         self.committed = True
         self.closed = True
         self._close_evidence()
+
+    def before_publication(self) -> None:
+        self.evidence.recheck(phase="before")
 
     def _close_evidence(self) -> None:
         try:
@@ -168,35 +171,13 @@ def _stage_bytes(artifact) -> bytes:
 
 
 def _auxiliary_roles(root: Path, images, manifest) -> dict[str, str]:
-    if manifest is None:
-        return {}
     from . import vocabulary_auxiliaries
-    from .vocabulary_auxiliaries import DerivedAuxiliaryManifest
-
-    if (
-        not isinstance(manifest, DerivedAuxiliaryManifest)
-        or manifest._seal is not vocabulary_auxiliaries._SEAL  # noqa: SLF001
-        or manifest.root != root.absolute()
-    ):
-        raise vocabulary_authority.VocabularyAuthorityDenied("derived auxiliary declaration changed")
-    by_path = {image.path: image for image in images}
-    primary = by_path.get(manifest.primary_path)
-    if primary is None or primary.after_sha256 != manifest.primary_after_sha256:
-        raise vocabulary_authority.VocabularyAuthorityDenied("derived auxiliary declaration changed")
-    roles: dict[str, str] = {}
-    for claim in manifest.entries:
-        image = by_path.get(claim.path)
-        if (
-            image is None
-            or claim.role not in vocabulary_auxiliaries._ROLES  # noqa: SLF001
-            or claim.path == manifest.primary_path
-            or claim.path in roles
-            or image.before_sha256 != claim.before_sha256
-            or image.after_sha256 != claim.after_sha256
-        ):
-            raise vocabulary_authority.VocabularyAuthorityDenied("derived auxiliary declaration changed")
-        roles[claim.path] = claim.role
-    return roles
+    try:
+        return vocabulary_auxiliaries.validate(root, images, manifest)
+    except ValueError as error:
+        raise vocabulary_authority.VocabularyAuthorityDenied(
+            "derived auxiliary declaration changed"
+        ) from error
 
 
 def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifest=None) -> _BatchAuthority | None:

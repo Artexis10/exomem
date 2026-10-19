@@ -246,6 +246,16 @@ ticket and retries via reconcile. Missed/unobserved direct edits converge by
 watcher-periodic reconcile; arbitrary-editor linearizability requires an
 out-of-scope broker/journal.
 
+A pass that publishes behind (`graph-incremental-convergence`) SHALL emit its
+own ticket instead, because the exact epoch and projection identity are what
+moved. That ticket SHALL bind a coherent epoch at a generation no lower than the
+acknowledgement the sidecar keeps, a live sidecar that still holds exactly that
+acknowledgement, a live registry whose delta from the stored recall checkpoint
+is complete, no newer external epoch, the unchanged access policy, and the exact
+temp-file identity. The same bounded checks apply under canonical authority. It
+SHALL queue its repair after the readers drain and before the replacement, and
+it SHALL never advance the acknowledgement or publish the graph as current.
+
 #### Scenario: Original-index edit races final publication
 - **WHEN** the original index changes at either real freshness seam during final publication
 - **THEN** the temporary pass is not published as current

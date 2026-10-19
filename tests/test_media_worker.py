@@ -59,7 +59,7 @@ class _RecordingMutationManager:
 def _preserve_media_stub(vault, filename="rec.mp3"):
     """Preserve a media binary with no text → a `pending` stub sidecar."""
     return preserve.preserve_bytes(
-        vault, scope="Yolo", category="audio", filename=filename, data=b"FAKEBYTES"
+        vault, scope="Rental", category="audio", filename=filename, data=b"FAKEBYTES"
     )
 
 
@@ -1844,7 +1844,11 @@ def test_crlf_pending_sidecar_uses_raw_byte_identity_at_transcript_commit(
     result = _preserve_media_stub(vault, filename="windows-crlf.m4a")
     binary = vault / result.path
     sidecar = vault / result.sidecar_path
-    sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+    preserved = (
+        f"\n{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n"
+        "## Preserved notes\n\nOriginal cassette label.\n"
+    ).encode("utf-8")
+    sidecar.write_bytes((sidecar.read_bytes() + preserved).replace(b"\n", b"\r\n"))
     worker = media_worker.MediaWorker(vault, execution_mode="inline")
     job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
     monkeypatch.setattr(
@@ -1863,6 +1867,8 @@ def test_crlf_pending_sidecar_uses_raw_byte_identity_at_transcript_commit(
     content = sidecar.read_text(encoding="utf-8")
     assert "processing_state: completed" in content
     assert "[0:00] Windows transcript committed." in content
+    assert preserve.SIDECAR_PRESERVED_NOTES_SENTINEL in content
+    assert "Original cassette label." in content
 
 
 def test_pending_state_cas_preserves_concurrent_completed_transcript(
@@ -1871,7 +1877,7 @@ def test_pending_state_cas_preserves_concurrent_completed_transcript(
     result = _preserve_media_stub(vault, filename="pending-cas.m4a")
     sidecar = vault / result.sidecar_path
     sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
-    expected_hash = content_hash(sidecar.read_text(encoding="utf-8"))
+    expected_hash = content_hash(sidecar.read_bytes().decode("utf-8"))
     completed_bytes: bytes | None = None
     real_batch = preserve.batch_atomic_write
 
@@ -1904,7 +1910,7 @@ def test_pending_state_cas_updates_unchanged_crlf_sidecar(vault) -> None:
     result = _preserve_media_stub(vault, filename="pending-cas-crlf.m4a")
     sidecar = vault / result.sidecar_path
     sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
-    expected_hash = content_hash(sidecar.read_text(encoding="utf-8"))
+    expected_hash = content_hash(sidecar.read_bytes().decode("utf-8"))
 
     updated = preserve.update_sidecar_processing_pending(
         vault,
@@ -1925,7 +1931,7 @@ def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     result = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="photos",
         filename="guarded.jpg",
         data=b"\xff\xd8\xff",
@@ -1968,7 +1974,7 @@ def test_scene_artifacts_and_reembed_publish_under_guard(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     result = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="video",
         filename="guarded.mp4",
         data=b"video",
@@ -2089,7 +2095,7 @@ def test_parent_media_change_during_clip_compute_skips_stale_index_and_scenes(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     result = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="video",
         filename="changes-during-clip.mp4",
         data=b"original-video",
@@ -2493,7 +2499,7 @@ def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     res = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="photos",
         filename="p.jpg",
         data=b"\xff\xd8\xff",
@@ -2521,7 +2527,7 @@ def test_a_clip_job_queued_before_clip_was_disabled_skips_clip(vault, monkeypatc
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     res = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="photos",
         filename="p.jpg",
         data=b"\xff\xd8\xff",
@@ -2551,10 +2557,10 @@ def test_scan_unindexed_images_enqueues(vault, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     preserve.preserve_bytes(
-        vault, scope="Yolo", category="photos", filename="x.jpg", data=b"\xff\xd8\xff", text="t"
+        vault, scope="Rental", category="photos", filename="x.jpg", data=b"\xff\xd8\xff", text="t"
     )
     preserve.preserve_bytes(
-        vault, scope="Yolo", category="photos", filename="y.png", data=b"\x89PNG", text="t"
+        vault, scope="Rental", category="photos", filename="y.png", data=b"\x89PNG", text="t"
     )
     w = media_worker.MediaWorker(vault)
     assert w._scan_unindexed_images() == 2  # both images queued for CLIP
@@ -2887,6 +2893,56 @@ def test_supervisor_backs_off_after_transient_child_exit(
         worker._wake.set()
         thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+def test_supervisor_backs_off_while_children_find_no_writer_authority(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="no-authority.mp3")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(
+        binary_path=vault / result.path,
+        sidecar_path=vault / result.sidecar_path,
+        media_type="audio",
+    )
+    monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: False)
+    refused = media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _RefusedChild:
+        pid = 2_147_483_645
+        returncode = refused
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        launches.append(now[0])
+        return _RefusedChild()
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    stop_at = now[0] + 80.0
+
+    def poll(_timeout):
+        # Process each refused child before advancing the synthetic clock.
+        if worker._child is None:
+            if now[0] >= stop_at:
+                worker._stop_event.set()
+            else:
+                now[0] += 10
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    # The delay doubles from 5 s. A fixed 5 s delay relaunches at every
+    # 10 s step instead: nine children here.
+    assert launches == [1000.0, 1010.0, 1020.0, 1040.0, 1080.0]
 
 
 def test_child_marks_unavailable_engine_blocked(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3707,7 +3763,7 @@ def test_find_surfaces_media_fields(vault, monkeypatch: pytest.MonkeyPatch) -> N
     # Provide text so the sidecar is populated + keyword-findable; media frontmatter is set either way.
     preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="audio",
         filename="meeting.mp3",
         data=b"X",
@@ -4366,8 +4422,8 @@ def test_the_signature_moves_on_a_real_enqueue(vault) -> None:
 # through the full SQLite owner path every 5 s, forever: 63 of 954 profile
 # samples on an idle cell. While nothing changes it now doubles from 5 s up to
 # 60 s. Any work, any store change and any in-process enqueue put it back at
-# 5 s. The idle interval test advances its polling clock directly. Store-change
-# tests use an accelerated clock, so two real seconds represent 200 s of idle.
+# 5 s. The idle and store-change tests advance their polling clock directly. The
+# enqueue test uses an accelerated clock: two real seconds represent 200 s of idle.
 
 
 def _hundredfold_clock():
@@ -4428,25 +4484,27 @@ def test_a_store_change_puts_the_backed_off_recheck_back_at_five_seconds(
     monkeypatch.setattr(
         worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
     )
-    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.005)
-    monkeypatch.setattr(media_worker, "_clock", _hundredfold_clock())
-    checks = _record_store_checks(monkeypatch, worker)
-    thread = threading.Thread(target=worker._supervise, daemon=True)
-    thread.start()
-    try:
-        # 150 s of idle: the re-check has backed off to 60 s.
-        time.sleep(1.5)
-        # Another process writes the store without creating work for this one.
-        changed_at = media_worker._clock()
-        os.utime(worker._store.path)
-        # 30 s more: one re-check at the floor would land, a backed-off one not.
-        time.sleep(0.3)
-    finally:
-        worker._stop_event.set()
-        worker._wake.set()
-        thread.join(timeout=5)
-    assert not thread.is_alive()
+    now = 0.0
+    changed_at = None
 
+    def poll(_timeout):
+        nonlocal now, changed_at
+        now += 0.5
+        if now == 150.0:
+            # Change the real signature between checks, after the 135 s idle read closed.
+            os.utime(worker._store.path)
+            changed_at = now
+        if now >= 180.0:
+            worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now)
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    checks = _record_store_checks(monkeypatch, worker)
+
+    worker._supervise()
+
+    assert changed_at is not None
     after_change = [check for check in checks if check >= changed_at]
     assert len(after_change) >= 3, (
         f"after the store changed at {changed_at:.1f}s the store was checked at "
@@ -4924,7 +4982,7 @@ def test_a_scanned_pdf_waits_for_ocr_and_is_read_once_ocr_is_on(vault, monkeypat
     document = fitz.open()
     document.new_page()
     result = preserve.preserve_bytes(
-        vault, scope="Yolo", category="documents", filename="scan.pdf", data=document.tobytes()
+        vault, scope="Rental", category="documents", filename="scan.pdf", data=document.tobytes()
     )
     sidecar = vault / result.sidecar_path
     store = media_jobs.MediaJobStore(vault)

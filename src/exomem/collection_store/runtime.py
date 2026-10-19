@@ -21,6 +21,7 @@ from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 
+from .. import foreground_priority, state_paths
 from . import connection, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 PUBLISH_INTERVAL_SECONDS = 60.0
 #: A burst of commits shares one publication once writes pause this long.
 PUBLISH_SETTLE_SECONDS = 1.0
+#: The cutoff share for starting optional view work; an in-flight filesystem call or
+#: required finalization may finish later. Pending views leave time for replica publication.
+DRAIN_SHARE = 0.5
 #: The `_Collections/` watch (A4): stat the replica every tick; hash it only when that changes.
 WATCH_SECONDS = 1.0
 _BUSY_RETRY_SECONDS = 0.05
@@ -40,9 +44,9 @@ class _Publisher:
     """Coalesced replica publication and the `_Collections/` watch for one admitted store.
 
     Publication copies a pinned snapshot outside the vault-wide mutation boundary, so
-    writes, file-collection writes included, proceed during the copy. Only its two
-    brief steps hold the boundary, each taken at an idle instant: recording the intent,
-    and verifying and swapping the copy; a write arriving during one waits for it. The watch
+    writes, file-collection writes included, proceed during the copy and verification.
+    Brief steps hold the boundary at idle instants and compare held-file witnesses
+    before each effect; a write arriving during one waits for it. The watch
     hashes the replica against the digest this instance last published when its stat
     signature changes. A foreign rewrite that keeps inode, size and mtime is found by
     the next publication's check-then-swap, which records the divergence and preserves
@@ -199,6 +203,7 @@ class _Scope:
             )
 
     def wrap(self, value):
+        from .census import Census
         from .governance import OperationAuthorization, ReleaseCache
         from .inspection import InspectionCache
         from .writer import CollectionWriter
@@ -210,6 +215,7 @@ class _Scope:
         if isinstance(value, (
             sqlite3.Connection, sqlite3.Cursor, connection.WriterConnection,
             CollectionWriter, OperationAuthorization, ReleaseCache, InspectionCache,
+            Census,
             AbstractContextManager, Iterator,
         )):
             return _Borrowed(value, self)
@@ -321,6 +327,17 @@ class CollectionStoreRuntime:
             self._acquisition = record
             self._admitted_token = None
 
+    def rebind(self, identity):
+        """Serve ``identity``, the ``(store_id, instance_id)`` an owner step made live under the boundary.
+
+        The step replaced the live store or continued it as a new tenure, which the
+        identity check of ``sample_head`` would otherwise refuse, and a pending takeover
+        verdict described the store before it.
+        """
+        with self.manager._report_lock:
+            self._identity = identity
+            self._takeover = None
+
     def record_admission(self, token):
         self._admitted_token = token
         self._takeover = None
@@ -335,10 +352,13 @@ class CollectionStoreRuntime:
         return [found.get(key) for key in keys]
 
     def replica_current(self):
-        """Whether the replica already carries the live committed head (a spurious commit note)."""
+        """Whether the replica already carries the live committed head and lease epoch."""
         head = self.sample_head()
-        (published,) = self._meta(schema.META_PUBLISHED_REPLICA_HEAD)
-        return published is not None and (
+        published, published_epoch, epoch = self._meta(
+            schema.META_PUBLISHED_REPLICA_HEAD, schema.META_PUBLISHED_REPLICA_EPOCH,
+            schema.META_LEASE_EPOCH,
+        )
+        return published is not None and published_epoch == epoch and (
             json.loads(published)["commit_seq"], json.loads(published)["head_hash"]
         ) == (head.commit_seq, head.head_hash)
 
@@ -371,8 +391,15 @@ class CollectionStoreRuntime:
             return False
         if not self.path.exists():
             return True
-        with closing(connection.open_reader(self.path)) as reader:
-            return authority.pending_create(reader) is None
+        with closing(connection.open_head_reader(self.path)) as reader:
+            intent = authority.pending_create(reader)
+        if intent is None:
+            return True
+        # A fresh reader accepted no work; the migration owner still owes its own publication.
+        # A formerly admitted producer or pending create must retain its head handback obligation.
+        return (intent["kind"] == authority.MIGRATE and self._publisher is None
+                and self._admitted_token is None and self._acquisition is not None
+                and self._acquisition.fencing_token == token and self._acquisition.granted)
 
     def status(self):
         """Operator view of admission; an unresolved takeover or divergence reports attention."""
@@ -426,7 +453,9 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_VAULT_MISMATCH", "the live store placement changed"
             )
-        with closing(connection.open_reader(self.path)) as reader:
+        # A store an earlier release wrote keeps its head where this reads it; its writer
+        # migrates the schema once this head lets the lease manager acquire for the store.
+        with closing(connection.open_head_reader(self.path)) as reader:
             reader.execute("BEGIN")
             metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
             head = CollectionStoreHead(
@@ -473,13 +502,24 @@ class CollectionStoreRuntime:
         self._identity = (head.store_id, head.instance_id)
 
     def _admit(self, token, *, reads=False):
+        from .takeover import SCHEMA_PENDING
+
         if self.manager.config.enabled:
             self.manager.validate_fencing_token(token)
+        # Reads of an unadmitted copy continue, except while its migration fails: the
+        # refusal then names the failure and its retry, and reads never repeat the attempt.
         if not self.reporting_ready(token) and not (
-            reads and self._takeover is not None and self.path.exists()
+            reads and self._takeover is not None and self._takeover.code != SCHEMA_PENDING and self.path.exists()
         ):
             raise self._refusal()
         self.sample_head()
+
+    def _record_schema(self, token, version, **authority):
+        """Record what a store at ``version`` requires, around this runtime's migration of an earlier store."""
+        from .. import state_migration
+
+        state_migration.record_collection_store_schema(
+            self.root, version=version, authority_check=lambda: self._authority(token, **authority))
 
     def _authority(self, token, *, progress=False, reads=False):
         if progress:
@@ -489,6 +529,7 @@ class CollectionStoreRuntime:
 
     @contextmanager
     def checkout(self):
+        from ..cli_ops import OpError
         from . import capability
 
         capability.require_not_disabled(self.root)
@@ -503,12 +544,24 @@ class CollectionStoreRuntime:
         with self.manager._collection_store_checkout():
             # A rollback between the first check and borrowing must also refuse this checkout.
             capability.require_not_disabled(self.root)
-            lease = self.manager.ensure_writer()
-            self._admit(lease.fencing_token, reads=True)
-            if self._handle is None or self._writer_token != lease.fencing_token:
+            with self.manager._lock:
+                token = self.manager._fencing_token
+            if token is not None:
+                try:
+                    # Admission checks coordinator expiry and revocation without renewing write activity.
+                    self._admit(token, reads=True)
+                except OpError as error:
+                    if error.code != "WRITER_FENCED":
+                        raise
+                    token = None
+            if token is None:
+                # Reacquire only before lending the handle; in-flight authority checks never reacquire.
+                token = self.manager.ensure_writer(cause="read").fencing_token
+                self._admit(token, reads=True)
+            if self._handle is None or self._writer_token != token:
                 with self.manager.consistency_guard(self.root, operation="collection_store_open"):
                     with self.manager._lock:
-                        if self._handle is not None and self._writer_token != lease.fencing_token:
+                        if self._handle is not None and self._writer_token != token:
                             if (self.manager._store_borrowers != {threading.get_ident(): 1}
                                     or not self._retire_handle()):
                                 raise connection.CollectionStoreError(
@@ -517,13 +570,19 @@ class CollectionStoreRuntime:
                         if self._handle is None:
                             self.sample_head()
                             # Opening may serve reads of an unadmitted copy; transactions never.
+                            # It migrates a copy an earlier release wrote, after recording the
+                            # new schema's IDs as admission's writer does, so reads continue. That
+                            # can precede a refusal of the pending takeover; the launcher's store
+                            # schema check refuses an earlier release afterwards, as after any migration.
                             opening = [True]
                             self._handle = connection.open_writer(
                                 self.path, lease_check=lambda: self._authority(
-                                    lease.fencing_token, reads=opening[0])
+                                    token, reads=opening[0]),
+                                schema_guard=lambda version: self._record_schema(
+                                    token, version, reads=True),
                             )
                             opening[0] = False
-                            self._writer_token = lease.fencing_token
+                            self._writer_token = token
             handle, changed = self._handle, False
             before = handle.connection.total_changes
             try:
@@ -538,7 +597,8 @@ class CollectionStoreRuntime:
                 if changed and self._publisher is not None:
                     self._publisher.note_commit()
 
-    def _publication_writer(self, token):
+    @contextmanager
+    def _publication_writer(self, token, *, borrow_cached=False):
         """This store's writer for a publication step; the caller holds the boundary."""
         if not self._authority(token, progress=True):
             raise connection.CollectionStoreError(
@@ -548,16 +608,46 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_CUSTODY_UNVERIFIED", "single-host custody no longer verifies; nothing was published"
             )
+        handle = self._handle if borrow_cached else None
+        if (handle is not None and not handle._closed and handle.path == self.path
+                and self._writer_token == token):
+            with self.manager._lock:
+                exclusive = (self.manager._store_publishing and self.manager._store_handoff
+                             and not self.manager._store_borrowers and not self.manager._active_mutations)
+            if not exclusive or handle.connection.in_transaction or handle.core.in_transaction():
+                raise connection.CollectionStoreError(
+                    "COLLECTION_STORE_BUSY", "the cached writer is not idle inside a publication window"
+                )
+            # A3: exclusive publication borrows the same connection, retaining its change witness and warm cache.
+            owner, reusable = handle._owner_thread, False
+            handle._owner_thread = threading.get_ident()
+            try:
+                yield handle
+                reusable = not (handle._closed or handle.connection.in_transaction or handle.core.in_transaction())
+                if not reusable:
+                    raise connection.CollectionStoreError(
+                        "COLLECTION_STORE_BUSY", "the publication writer did not return idle"
+                    )
+            finally:
+                try:
+                    if not reusable:
+                        self._handle = self._writer_token = None
+                        handle.close()
+                finally:
+                    handle._owner_thread = owner
+            return
         if not self._retire_handle():
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_BUSY", "the retired writer still has a transaction"
             )
-        return connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True))
+        with connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True),
+                                    schema_guard=lambda version: self._record_schema(token, version, progress=True)) as writer:
+            yield writer
 
     def publish(self, token, *, deadline):
-        """Coalesced publication (A9): copy outside the vault-wide boundary, swap under it.
+        """Coalesced publication (A9): verify outside exclusion and revalidate before effects.
 
-        Each boundary step is brief and taken at an idle instant. The swap step first
+        Each boundary step is brief and taken at an idle instant. Each resumed step first
         renews the lease with the coordinator, so a host that lost it while copying
         abandons the swap. Returns the published head (possibly older than the live
         one), or None when the store was busy before anything was recorded.
@@ -577,7 +667,7 @@ class CollectionStoreRuntime:
                         "COLLECTION_STORE_LEASE_REQUIRED", "the writer lease was lost during the copy"
                     ) from error
             with manager._store_publication_window(token, patience=patience, cancelled=cancelled):
-                with self._publication_writer(token) as writer:
+                with self._publication_writer(token, borrow_cached=True) as writer:
                     yield writer, lambda: self._authority(token, progress=True)
 
         try:
@@ -596,9 +686,48 @@ class CollectionStoreRuntime:
         head = self.sample_head()
         return CollectionStoreHead(head.store_id, head.instance_id, result.commit_seq, result.head_hash)
 
-    def flush(self, token, *, deadline, cancelled=None):
+    def _drain_views(self, handle, *, deadline, cancelled=None):
+        """Install the views that committed changes left pending, before a handoff or a stop (design §5).
+
+        It publishes what the serving store thread would, under the release that lets that
+        thread publish, through the same reconcile. Half of the time left sets a cooperative
+        cutoff for starting optional work; in-flight filesystem calls and required finalization
+        still finish. Unfinished views stay pending for the next holder's startup pass.
+        """
+        from . import capability
+
+        if not capability.views_published(self.root):
+            return
+        from ..governance import principal
+        from .writer import CollectionWriter
+
+        now = time.monotonic()
+        deadline = now + max(0.0, deadline - now) * DRAIN_SHARE
+
+        def stopped():
+            return time.monotonic() >= deadline or (cancelled is not None and cancelled())
+
+        writer, after, passes = CollectionWriter(self.root, handle), None, 0
+        try:
+            with principal.library_scope():
+                # One pass installs each view; the next confirms it current. Each pass is one window.
+                while passes < 2 and not stopped():
+                    if handle.connection.execute(
+                            "SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
+                        return
+                    after = writer.reconcile_views(
+                        limit=VIEW_BATCH_PATHS, after=after, pending_only=True, stop=stopped,
+                        missing_ready=handle.census(self.root).missing_ready
+                        if capability.collection_views_enabled(self.root) else None)["next_path"]
+                    passes += after is None
+        except Exception:  # noqa: BLE001 - the next holder's startup pass installs what is left
+            logger.warning("pending collection views were not installed before the handoff", exc_info=True)
+
+    def flush(self, token, *, deadline, cancelled=None, drain_views=True):
         """Called only after admission stops, drainage and boundary acquisition."""
         with self._publication_writer(token) as writer:
+            if drain_views:
+                self._drain_views(writer, deadline=deadline, cancelled=cancelled)
             result = replica.publish_replica(
                 self.root, writer, authority_check=lambda: self._authority(token, progress=True),
                 deadline=deadline, cancelled=cancelled,
@@ -624,6 +753,10 @@ class CollectionStoreRuntime:
 
 #: The facades whose collection selectors the vault's marker can route to the store.
 _STORE_COMMANDS = frozenset({"record_memory", "plan_memory"})
+#: The commands that carry a curation or episode Records step. They go to the store thread only
+#: when a step they run or seal writes a collection the marker routes to the store (``route``).
+# nosemgrep: ep-word-set -- the two command names the command registry fixes for curation steps.
+_CURATION_COMMANDS = frozenset({"maintain_memory", "episode_memory"})
 #: How long the idle store thread waits for a request before it looks for import jobs again.
 IMPORT_IDLE_SECONDS = 1.0
 #: How long it leaves running jobs that advanced nothing (blocked or refused) alone.
@@ -634,6 +767,8 @@ DERIVED_RETRY_SECONDS = 2.0
 BACKFILL_BATCH_ROWS = 128
 #: Paths per pending-view publication window: one collection's summary pages at their bounds.
 VIEW_BATCH_PATHS = 16
+# Bound watcher metadata independently of collection size; overflow requests a later census.
+_VIEW_CHANGE_CAPACITY = 1024
 #: How often it retries a vault whose store it could not open.
 OPEN_RETRY_SECONDS = 30.0
 _SERVERS: dict[Path, StoreServer] = {}
@@ -647,61 +782,85 @@ def serve(vault_root, manager):
     Called at service startup and standby promotion. A vault that routes nothing to a
     store starts its thread at its first store-routed request instead.
     """
-    from . import authority
+    from . import ownership
 
     root = Path(vault_root).resolve()
     with _SERVERS_LOCK:
         _SERVED[root] = manager
-    if authority.read_marker(root) is not None:
+    if not ownership.file_only(root):
         _server(root)
 
 
 def route(command, vault_root, arguments):
     """The store thread a request must run on, or None when file collections answer it.
 
-    A selector the vault's marker routes to the store, a NEW summary collection's create
-    and Records discovery run on the store thread of the service serving this vault;
+    A selector the vault's marker routes to the store, a NEW summary collection's create,
+    Records discovery, and a curation or episode command that runs a Records step on a
+    store collection run on the store thread of the service serving this vault;
     a caller that bound its own writer keeps it. Without that service a routed selector
     refuses (C never falls back to its views), a summary create on a vault with no store
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
     """
     from ..cli_ops import OpError
-    from .preview import bound_writer
+    from .preview import UNSERVED, bound_writer
 
     root = Path(vault_root).resolve()
-    if command not in _STORE_COMMANDS or bound_writer(root) is not None:
+    if bound_writer(root) is not None:
         return None
-    from . import authority
+    if command in _CURATION_COMMANDS:
+        return _curation_route(command, root, arguments)
+    if command not in _STORE_COMMANDS:
+        return None
+    from . import ownership
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
-    raw = authority.read_marker(root)
+    proof = ownership.current(root)
     summary = command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments)
-    if raw is not None or summary:
+    if proof.marker is not None or summary:
         # Only a vault with a store, or a summary create that may enrol one, pays for the store libraries.
         from . import connection
 
         connection.load_store_libraries()
     if summary:
-        if raw is None:
+        if proof.marker is None:
             from . import admission, capability
 
             capability.require_records_summary(root)
             raise admission.enrollment_required()
     elif command == "record_memory" and arguments.get("action") in {"describe", "inspect"} and selector is None:
-        server = None if raw is None else _server(root)
+        server = None if proof.marker is None else _server(root)
         return server if server is not None and server.runtime is not None else None
-    elif selector is None or raw is None or (authority.selected_entry(
-            root, authority.parse_marker(root, raw), selector) is None and not _creating(root, selector)):
+    elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):
         return None
     server = _server(root)
+    if server is None and not summary:
+        return None  # Collection resolution decides visibility before reporting an unavailable store.
     if server is None:
         raise OpError(
-            "COLLECTION_STORE_UNAVAILABLE",
-            "this collection lives in the collection store, which only the running Exomem service serves",
-            "Send the request to the service that serves this vault.",
+            "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
         )
     return server
 
+
+def _curation_route(command, root, arguments):
+    """The store thread for a curation or episode command that runs a Records step on a store collection.
+
+    A step on a collection the store owns commits through the store writer, which only the store
+    thread holds, so the whole command runs there. Every other curation, in a vault with a store
+    or without one, keeps its path. With no service or an unavailable canonical ownership proof,
+    nothing is routed. The step's own resolution then refuses and alone decides whether this caller
+    may hear that the collection exists. Raising here would tell every caller first.
+    """
+    from ..cli_ops import OpError
+    from . import curation_step
+
+    try:
+        if not curation_step.needs_store(root, command, arguments):
+            return None
+    except (connection.CollectionStoreError, OpError):
+        return None
+    connection.load_store_libraries()
+    return _server(root)
 
 
 def projection_route(vault_root, path):
@@ -709,7 +868,7 @@ def projection_route(vault_root, path):
     import os
 
     from ..cli_ops import OpError
-    from . import authority
+    from . import ownership
     from .preview import bound_writer
 
     root = Path(vault_root)
@@ -718,16 +877,14 @@ def projection_route(vault_root, path):
     # Resolve Windows root junctions before no-follow anchoring.
     if os.name == "nt" or root.is_symlink():
         root = root.resolve()
-    raw = authority.read_marker(root)
-    if raw is None:
+    if not ownership.relevant(path):
         return None
-    root = root.resolve()
-    # Bind marker bytes to the canonical root, never to the earlier path spelling.
-    raw = authority.read_marker(root)
-    if raw is None:
-        return None
-    marker = authority.parse_marker(root, raw)
-    entry = authority.owned_entry(root, marker, path)
+    canonical = state_paths.resolved_vault_path(root, expanduser=False)
+    if canonical != root:
+        # Bind marker bytes to the canonical root, never to the earlier path spelling.
+        # A root that is already canonical was just read there: recall routes every hit.
+        root = canonical
+    entry = ownership.owned(root, path)
     if entry is None:
         return None
     server = _server(root)
@@ -736,7 +893,7 @@ def projection_route(vault_root, path):
     return server
 
 def _durable_create(root):
-    """The marker entry of a create left pending on disk, or None when there is none or it cannot be read.
+    """The marker entries a pending intent left on disk, or None when there is none or it cannot be read.
 
     File collections route through here too, so a store that cannot be read must leave
     them on their file route rather than refuse them.
@@ -746,12 +903,13 @@ def _durable_create(root):
     try:
         if not connection.store_path(root).exists():
             return None
-        with closing(connection.open_reader(connection.store_path(root))) as reader:
+        with closing(connection.open_head_reader(connection.store_path(root))) as reader:
             intent = authority.pending_create(reader)
+    # The head reader denies other columns as sqlite3.Error, so a read past store_meta would look like no intent here.
     except (connection.CollectionStoreError, sqlite3.Error, OSError):
         return None
-    return None if intent is None else {"collection_id": intent["collection_id"],
-                                        "manifest_path": intent["manifest_path"]}
+    return None if intent is None else [{"collection_id": entry["collection_id"], "manifest_path": entry["manifest_path"]}
+                                        for entry in intent["collections"]]
 
 
 def _creating(root, selector):
@@ -767,7 +925,7 @@ def _creating(root, selector):
     if pending is None and server is not None and server.session is None:
         # Not open yet, as after a restart: a create left pending is only on disk so far.
         pending = _durable_create(root)
-    return pending is not None and authority.selected_entry(root, {"collections": [pending]}, selector) is not None
+    return pending is not None and authority.selected_entry(root, {"collections": pending}, selector) is not None
 
 
 def summary_create(root, arguments):
@@ -807,9 +965,10 @@ def served_create(vault_root, arguments):
         raise connection.CollectionStoreError(
             "COLLECTION_STORE_UNAVAILABLE", "only the service serving this vault creates a summary collection")
     session = server.session
-    if not session.fence_client.collection_store_fence().enrolled:
-        # Served, so this vault's store was enrolled: a coordinator that no longer knows it was replaced.
-        raise admission.adoption_required()
+    fence = session.fence_client.collection_store_fence()
+    if not fence.enrolled:
+        # Served, so this vault's store was enrolled: its coordinator was replaced, or retired the fence.
+        raise admission.unenrolled(fence)
     with server.lent() as lend:
         result = admission.create_new(
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
@@ -820,8 +979,8 @@ def served_create(vault_root, arguments):
             # create's until this thread's create tick resumes it, so this request ends
             # without a fresh checkout and says so.
             lend.resume = False
-            server.pending_create = {"collection_id": result["collection_id"], "manifest_path":
-                                     collections._reference_key(root, arguments["manifest_path"])}
+            server.pending_create = [{"collection_id": result["collection_id"], "manifest_path":
+                                      collections._reference_key(root, arguments["manifest_path"])}]
             result = {**result, "warnings": [*result.get("warnings", ()), (
                 f"collection_publication_pending ({result.get('reason')}): the collection is created and "
                 "the service is finishing its publication; until then store requests refuse as "
@@ -859,14 +1018,48 @@ def _server(root):
         return server
 
 
+def notify_view_change(root, path, *, destination=None, directory=False):
+    """Wake an existing store thread with a filesystem hint, without opening or calling it."""
+    watched_root = Path(root)
+    root = watched_root.resolve()
+
+    def relative(value):
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            return candidate.as_posix()
+        try:
+            return candidate.relative_to(watched_root).as_posix()
+        except ValueError:
+            try:
+                return candidate.relative_to(root).as_posix()
+            except ValueError:
+                return str(candidate)  # A move outside the vault retains its destination hint.
+
+    change = (relative(path), None if destination is None else relative(destination), directory)
+    with _SERVERS_LOCK:
+        server = _SERVERS.get(root)
+    if server is None:
+        return
+    with server._condition:
+        if server._closed:
+            return
+        if change in server._view_changes or len(server._view_changes) < _VIEW_CHANGE_CAPACITY:
+            server._view_changes[change] = False
+        else:
+            server._view_census_needed = True
+        server._condition.notify_all()
+
+
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
-    def __init__(self, work):
+    def __init__(self, work, *, wake_maintenance=True, read_only=False):
         import contextvars
 
         self.context = contextvars.copy_context()
         self.work = work
+        self.wake_maintenance = wake_maintenance
+        self.read_only = read_only
         self.taken = False
         self.done = threading.Event()
         self.result = self.error = None
@@ -898,30 +1091,44 @@ class StoreServer:
         # When each maintenance tick is next due; between two requests the most overdue one runs.
         self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0}
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
+        self._derived_pass = None  # the running rebuild's bulk pass budget, across its steps
         self._views_after = None  # where the current pass over pending views continues
-        self._views_passes = 0  # completed passes since the last request
+        self._views_passes = 0  # completed passes since the last maintenance wake
+        self._edit_back = None  # this store's edit-back settle state, made at its first views tick
+        self._edit_handle = None
+        self._history_policy = None  # the handle and compiled policy whose history pages the drain has queued
+        # False waits for exact-path lookup; True retains an unhandled hint for the census.
+        self._view_changes = {}
+        self._view_census_needed = False
+        self._view_retry_at = 0.0
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
-        self.pending_create = None  # the marker entry a served create left pending, until it finishes
+        self.pending_create = None  # the marker entries a served create left pending, until it finishes
         self._requests = deque()
         self._closed = False
         self._condition = threading.Condition()
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work):
-        """Run ``work`` on the store thread and return its result or raise its error."""
+    def call(self, work, *, wake_maintenance=True, read_only=False):
+        """Run ``work`` on the store thread and return its result or raise its error.
+
+        ``read_only`` says the work changes nothing, so it runs under one view of path
+        placement, host configuration and governance policy (``_serve``)."""
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
 
         entry = time.monotonic()
         completion_deadline = acknowledgement_budget_deadline(entry)
         deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
-        request = _Call(work)
+        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
         with self._condition:
             if not self._closed:
                 self._requests.append(request)
                 self._condition.notify_all()
+        # Between two rebuild steps this thread waits as a bulk pass while other requests run;
+        # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition:
             while not request.taken:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._closed:
@@ -952,13 +1159,19 @@ class StoreServer:
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
+                if self._view_work_due(now):
+                    self._ticks["views"] = min(self._ticks["views"], now)
                 due = min(self._ticks.values())
                 request = self._take(max(0.0, min(due, now + IMPORT_IDLE_SECONDS) - now))
                 if request is not None:
                     self._serve(request)
-                    # The request may have started a job, revised a declaration or left views pending.
-                    self._ticks = dict.fromkeys(self._ticks, 0.0)
-                    self._views_after, self._views_passes = None, 0
+                    if request.wake_maintenance:
+                        # The request may have started a job, revised a declaration or left views pending.
+                        self._ticks = dict.fromkeys(self._ticks, 0.0)
+                        self._views_after, self._views_passes = None, 0
+                    if self._view_work_due(time.monotonic()):
+                        # Saved views get one bounded turn even when requests never stop arriving.
+                        self._ticks["views"] = time.monotonic() + self._views_tick()
                 elif time.monotonic() >= due:
                     # One tick per turn, so a waiting request is taken between any two.
                     name = min(self._ticks, key=self._ticks.get)
@@ -977,6 +1190,26 @@ class StoreServer:
             self._condition.notify_all()
             return request
 
+    def _view_work_due(self, now):
+        if now < self._view_retry_at:
+            return False
+        with self._condition:
+            notified = any(not checked for checked in self._view_changes.values())
+        return notified or (self._ticks["views"] <= now and self._edit_back is not None
+                            and self._edit_back.wait(now) <= 0)
+
+    def take_view_hints(self):
+        """Transfer retained path/move/directory hints and the overflow flag to the store's census.
+
+        The caller takes responsibility for these hints. A watcher never invokes this or expands
+        directories. Both checked and unchecked hints share the one bounded mailbox until taken.
+        """
+        with self._condition:
+            hints, census = tuple(self._view_changes), self._view_census_needed
+            self._view_changes.clear()
+            self._view_census_needed = False
+        return hints, census
+
     def _open(self):
         from ..cli_ops import OpError
         from . import admission
@@ -987,12 +1220,13 @@ class StoreServer:
             # The writer credential reads the coordinator's fence; moving it is the operator's.
             fence_client = self.manager.client
             if fence_client is None:
-                raise connection.CollectionStoreError(
-                    "COLLECTION_STORE_LEASE_REQUIRED", "serving the collection store needs the configured writer lease")
-            if not fence_client.collection_store_fence().enrolled:
+                raise admission.coordination_required("serving the collection store")
+            fence = fence_client.collection_store_fence()
+            if not fence.enrolled:
                 # A copied vault, or a replaced coordinator, that never enrolled this store: the
                 # fence cut is the owner's offline step, which the writer credential cannot make.
-                raise admission.adoption_required()
+                # A retired fence means this host's marker predates the vault's export to files.
+                raise admission.unenrolled(fence)
             # A create left pending before a restart: its requests are busy, not missing.
             self.pending_create = _durable_create(self.root)
             try:
@@ -1014,10 +1248,22 @@ class StoreServer:
 
     def _serve(self, request):
         from ..cli_ops import OpError
+        from ..governance import policy
         from .preview import preview_store
 
         def bound():
             with ExitStack() as scope:
+                if request.read_only:
+                    # Opened here, inside the work, so each view lives exactly as long as the work
+                    # does: a caller that gets MUTATION_ACKNOWLEDGEMENT_PENDING returns while this
+                    # still runs. Governance policy stays pinned through the release, which a read's
+                    # snapshot allows. Path resolution and the connector ceiling are pinned for the
+                    # body only: the terminal egress filter re-reads them live. The MCP second pass
+                    # runs outside both scopes, so it stays live too. A write opens neither: it can
+                    # wait for the mutation boundary and must then decide on the policy and ceiling
+                    # it finds, not on the ones it read before the wait.
+                    scope.enter_context(state_paths.resolution_scope())
+                    scope.enter_context(policy.request_policy_snapshot())
                 scope.enter_context(preview_store(self.root, self.runtime))
                 self._scope = scope
                 try:
@@ -1081,10 +1327,17 @@ class StoreServer:
         if self.runtime is None or self.session is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
-            with closing(connection.open_reader(self.runtime.path)) as reader:
-                if authority.pending_create(reader) is None:
-                    self.pending_create = None
-                    return IMPORT_IDLE_SECONDS
+            # The resume migrates a store an earlier release left with this intent; until then only its head reads.
+            with closing(connection.open_head_reader(self.runtime.path)) as reader:
+                intent = authority.pending_create(reader)
+            if intent is None:
+                self.pending_create = None
+                return IMPORT_IDLE_SECONDS
+            if intent["kind"] != authority.CREATE:
+                # Only the owner's `exomem collections migrate --apply` finishes a migration: it
+                # first rechecks each collection's files against the basis it imported. Only the
+                # owner's `exomem collections export` finishes an export, with the service stopped.
+                return IMPORT_IDLE_SECONDS
             with principal.library_scope():
                 result = admission.resume_local(self.session, self.manager, fence_client=self.session.fence_client)
         except Exception:  # noqa: BLE001 - the create stays pending and is retried
@@ -1167,12 +1420,15 @@ class StoreServer:
         each derived collection (``derived_rows``). After that, a plain read of the derived file
         finds the rebuilds still running, so an idle store takes no checkout. A rebuild waiting
         on a missing source retries after ``DERIVED_RETRY_SECONDS``; one that finishes lets the
-        import jobs it held continue at once.
+        import jobs it held continue at once. A rebuild is background work: a step ends after
+        its batch when another request waits or runs, and the next step waits for it.
         """
         from ..governance import principal
         from . import capability, derived_rows
         from .preview import preview_store
 
+        # The running rebuild's pass continues only from a step that advanced; any other return ends it.
+        rebuild, self._derived_pass = self._derived_pass, None
         if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
@@ -1182,50 +1438,127 @@ class StoreServer:
             if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
                     and not derived_rows.rebuilds_pending(self.runtime.path):
                 return IMPORT_IDLE_SECONDS
+            if rebuild is not None:
+                # A rebuild is one bulk pass across its steps: before the next one it waits while
+                # another request runs (``foreground_priority``), holding no boundary and no store
+                # checkout, so a handoff or a publication never waits on it. A store request ends
+                # the wait (``call``), and the step then ends after one batch (``_derived_aside``).
+                with foreground_priority.bulk(budget=rebuild):
+                    foreground_priority.yield_to_foreground()
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                outcome = derived_rows.step(self.root, writer)
+                outcome = derived_rows.step(self.root, writer, aside=self._derived_aside)
                 self._derived_handle = writer.handle
         except Exception:  # noqa: BLE001 - a refused step leaves the rebuild for a later tick
             logger.warning("derived collection rows could not advance; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS
+        if outcome == "advanced":
+            self._derived_pass = rebuild or foreground_priority.PassBudget()
         if outcome == "done":
             self._ticks["import"] = 0.0
         # A missing source may return any moment; a mismatch waits on a revise or an upgrade.
         return {"advanced": 0.0, "done": 0.0, "stopped": DERIVED_RETRY_SECONDS,
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
-    def _views_tick(self):
-        """Publish pending views, such as summary pages, a window at a time; returns the seconds until the next tick.
+    def _derived_aside(self):
+        """Whether a rebuild step ends after its batch, which only releases the boundary sooner.
 
-        A committed change leaves summary pages pending; they publish here, after its
-        acknowledgement, through the store's reconcile path, as the in-process owner. A
-        window holds at most ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages
-        at their bounds. A view installed by one pass is confirmed current by the next, so
-        two passes follow each request; views still pending then, which cannot publish yet,
-        wait for the next request or the retry interval.
+        A store request is queued, a writer waits for the boundary, or another request runs. The
+        waiter count is checked on its own: a request that awaits bulk work releases every pass,
+        so ``foreground_elsewhere`` is then false, however many writers wait.
+        """
+        return (bool(self._requests) or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
+                or foreground_priority.foreground_elsewhere())
+
+    def _views_tick(self):
+        """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
+
+        It runs while the release enables ``collection-views-v1`` or ``records-summary-v1``,
+        unless the vault's rollback disabled it. Under ``collection-views-v1``, edit-back
+        (``edit_back``) reads every item, manifest and log view at its first tick and every 60 s
+        after, outside the write transaction, and turns each settled edit into a governed
+        update or a held correction. Then a committed change's pending views, such as
+        summary pages and log views, publish a window at a time through the store's reconcile path, as
+        the in-process owner. A window holds at most
+        ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages at their bounds. A
+        view installed by one pass is confirmed current by the next, so two passes follow
+        each maintenance wake; views still pending then, which cannot publish yet, wait for
+        the next wake or the retry interval. Import status polling preserves these passes
+        and retry deadlines. Watcher notifications force exact-path reads. Between requests,
+        every edit-back or census turn uses one bounded window.
         """
         from ..governance import principal
-        from . import capability
+        from . import capability, edit_back
         from .preview import _mutate, preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None or not capability.views_published(self.root):
+            self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
             return IMPORT_IDLE_SECONDS
+        views = capability.collection_views_enabled(self.root)
+        self._view_retry_at = 0.0 if views else time.monotonic() + IMPORT_IDLE_SECONDS
+        if views and (self._edit_back is None or self._edit_handle is not self.runtime._handle):
+            self._edit_back = edit_back.EditBack()
+        with self._condition:
+            changes = [change for change, checked in self._view_changes.items() if not checked][:VIEW_BATCH_PATHS]
+            for change in changes:
+                self._view_changes[change] = True
+            dirty = self._view_census_needed
+            self._view_census_needed = False
+        paths = {path for path, destination, directory in changes if destination is None and not directory}
+        # Without edit-back, the publication pass alone sets the next tick, as before it existed.
+        wait = self._edit_back.wait(time.monotonic()) if views else float("inf")
+        if views and (changes or dirty):
+            wait = 0.0
+        if views and wait <= 0:
+            try:
+                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    owned = self._edit_back.notify(writer, paths)
+                    self._edit_back.hints(writer, [change for change in changes
+                                                  if change[0] not in owned or change[1] is not None or change[2]], dirty)
+                    wait = self._edit_back.run(writer, now=time.monotonic(), mutate=lambda method, *args, **kwargs:
+                                               _mutate(self.root, method, *args, **kwargs),
+                                               limit=VIEW_BATCH_PATHS)
+                    self._edit_handle = self.runtime._handle
+                with self._condition:
+                    for change in changes:
+                        if self._view_changes.get(change) is True:
+                            del self._view_changes[change]
+            except Exception:  # noqa: BLE001 - an edit that cannot be classified now is read again later
+                logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
+                wait = IMPORT_RETRY_SECONDS
+                self._view_retry_at = time.monotonic() + IMPORT_RETRY_SECONDS
+                with self._condition:
+                    self._view_census_needed |= dirty
+                    for change in changes:
+                        if change in self._view_changes:
+                            self._view_changes[change] = False
+        with self._condition:
+            if views and self._view_retry_at <= time.monotonic() \
+                    and any(not checked for checked in self._view_changes.values()):
+                wait = 0.0
         try:
+            from ..governance import policy
+
+            history_policy = (self.runtime._handle, policy.load(self.root).fingerprint)
+            if history_policy != self._history_policy:
+                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    fingerprint = _mutate(self.root, writer.invalidate_history_pages)
+                    self._history_policy = (self.runtime._handle, fingerprint)
             with closing(connection.open_reader(self.runtime.path)) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0
-                    return IMPORT_IDLE_SECONDS
+                    return min(wait, IMPORT_IDLE_SECONDS)
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 result = _mutate(self.root, writer.reconcile_views, limit=VIEW_BATCH_PATHS,
-                                 after=self._views_after, pending_only=True)
+                                 after=self._views_after, pending_only=True,
+                                 missing_ready=writer.handle.census(self.root).missing_ready if views else None)
         except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
             logger.warning("pending collection views could not publish; retrying later", exc_info=True)
             self._views_after = None
-            return IMPORT_RETRY_SECONDS
+            return min(wait, IMPORT_RETRY_SECONDS)
         self._views_after = result["next_path"]
         if self._views_after is None:
             self._views_passes += 1
-        return 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS
+        return min(wait, 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS)
 
     def _close(self):
         with self._condition:

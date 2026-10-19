@@ -31,12 +31,9 @@ container.
 
 Note on the C1 privilege table (round 6, task 4.4): this role itself creates
 only the four roles; Substrate's scripts/exomem-cloud-grants.sql, the single
-implementation of the C1 privilege table, is Substrate's own script, copied
-byte-for-byte into infra/cellctl/tests/fixtures/exomem_cloud_grants.sql
-(alongside exomem_cloud_schema.sql, a byte-for-byte copy of Substrate
-migrations 0056+0057) -- the same fixture paths cellctl's own tests use, and
-the ones the coordinator refreshes from Substrate lane C's worktree at
-integration. The test_c1_grants_* tests below apply both fixtures for real
+implementation of the C1 privilege table, comes from the pinned canonical
+Substrate contract. The shared controller fixture loader supplies its baseline
+schema, paid-storage migration and grants. The test_c1_grants_* tests apply them
 and assert the resulting C1 privileges live. test_cross_role_writes_refused
 above is a different, still-valid scenario -- the baseline before any grants
 script has ever run at all, which this role alone is responsible for (task
@@ -47,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import textwrap
@@ -477,18 +475,13 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
                 check=False,
             )
 
-            # Task 4.4 (round 6): apply Substrate's REAL grants script
-            # (infra/cellctl/tests/fixtures/exomem_cloud_grants.sql, copied
-            # byte-for-byte from Substrate lane C's worktree) to the migrated
-            # C1-C1d schema (exomem_cloud_schema.sql, same fixture directory --
-            # also used by cellctl's own tests, per the coordinator) and prove
-            # the C1 privilege table (design.md's "C1 privileges") live.
+            # Apply the canonical companion schema and grants through the shared fixture loader.
             # exomem_tenants is a pre-existing table 0056 only references by FK
             # -- its stub, and one seed cell row the privilege probes act on,
             # live in this test-setup SQL only, never in the fixture files.
             # Substrate migration 0017 defines status; the real gateway grants require it.
-            schema_fixture = (ROOT / "infra/cellctl/tests/fixtures/exomem_cloud_schema.sql").read_text()
-            grants_fixture = (ROOT / "infra/cellctl/tests/fixtures/exomem_cloud_grants.sql").read_text()
+            loader = runpy.run_path(str(ROOT / "infra/cellctl/src/cellctl/control_test_contract.py"))
+            schema_fixture, grants_fixture = loader["control_test_sql"](ROOT / "infra/cellctl/tests/fixtures")
             migration_sql = work / "c1-migration.sql"
             migration_sql.write_text(
                 "-- Test-setup-only stub and seed row; never part of the fixture files.\n"

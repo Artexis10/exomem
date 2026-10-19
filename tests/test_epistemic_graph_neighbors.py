@@ -340,3 +340,41 @@ def test_content_edit_moves_token_like_a_rebuild(tmp_path: Path) -> None:
     assert rebuilt[0] == incremental[0]
     assert rebuilt[1] == incremental[1]
     assert rebuilt[3] != incremental[3]
+
+
+def test_a_page_past_the_checkpoint_bound_keeps_its_graph_context_and_the_census(
+    tmp_path: Path,
+) -> None:
+    """A large page's node row must not withhold the graph reads around it."""
+    import sqlite3
+
+    from exomem import graph_sync, relation_census
+    from exomem.governance.principal import library_scope
+
+    vault = tmp_path / "vault"
+    big = "Knowledge Base/Notes/Insights/big.md"
+    sections = "\n\n".join(
+        f"## Section {i}\n\nParagraph {i} discusses topic {i % 97} with several plain words."
+        for i in range(7000)
+    )
+    _write(vault, big, f"---\ntype: insight\nstatus: active\n---\n# Big\n\n{sections}\n")
+    _write(
+        vault,
+        SEED,
+        "---\ntype: insight\nstatus: active\n---\n# Seed\n\n## Relations\n"
+        "- evidenced_by [[Knowledge Base/Notes/Insights/big]]\n",
+    )
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+    with sqlite3.connect(idx.path) as conn:
+        (stored,) = conn.execute(
+            "SELECT length(metadata) FROM graph_nodes WHERE path = ?", (big,)
+        ).fetchone()
+    assert stored > graph_sync._CHECKPOINT_READ_LIMIT
+
+    with library_scope():
+        context = epistemic_graph.graph_context(vault, path=big)
+        census = relation_census.census(vault)
+    assert context["available"] is True
+    assert SEED in {node["path"] for node in context["nodes"]}
+    assert census["available"] is True

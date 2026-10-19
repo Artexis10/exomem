@@ -10,7 +10,7 @@ Q's portable core and adapts its storage to a vault.
 
 ## Goals / non-goals
 
-- **Goal:** diarized transcripts carry enrolled names (`[Hugo]: …`) and stay anonymous
+- **Goal:** diarized transcripts carry enrolled names (`[Fixture Speaker]: …`) and stay anonymous
   (`[Speaker A]: …`) for unknown voices; names are BM25-findable in the transcript + the
   structured `speakers:` field.
 - **Goal:** stay pure-substrate; default-off; soft-fail; zero change when unused.
@@ -23,7 +23,7 @@ ECAPA voice embedding is a frozen, deterministic function audio→vector (same c
 bge/CLIP/Whisper). Attribution is a fixed cosine comparison against an enrolled centroid
 with deterministic thresholds — a *measurement*, not a judgment, and not an LLM. The human
 decides who to enroll (a brain act, done once via CLI); the server only measures "this
-cluster's voiceprint is within τ of the Hugo centroid." In-bounds.
+cluster's voiceprint is within τ of the Fixture Speaker centroid." In-bounds.
 
 ## Architecture (port-from-Q, adapted)
 

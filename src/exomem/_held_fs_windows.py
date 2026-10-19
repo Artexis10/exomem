@@ -10,6 +10,7 @@ import ctypes
 import errno
 import os
 import secrets
+import time
 from collections.abc import Callable, Iterator
 from ctypes import (
     POINTER,
@@ -18,6 +19,7 @@ from ctypes import (
     byref,
     c_byte,
     c_long,
+    c_longlong,
     c_ubyte,
     c_uint32,
     c_ulong,
@@ -34,6 +36,7 @@ from pathlib import Path
 from .held_fs import (
     Capabilities,
     Chunks,
+    FileVersion,
     HeldDirectory,
     HeldFile,
     HeldFilesystem,
@@ -77,6 +80,7 @@ FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 FILE_LINK_INFORMATION = 11
 FILE_DISPOSITION_INFORMATION = 4
 FILE_BOTH_DIRECTORY_INFORMATION = 3
+FILE_BASIC_INFO_CLASS = 0
 FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
 FILE_ID_INFO_CLASS = 18
 INVALID_HANDLE_VALUE = c_void_p(-1).value
@@ -108,6 +112,16 @@ class FILE_ATTRIBUTE_TAG_INFO(Structure):
 
 class FILE_ID_INFO(Structure):
     _fields_ = [("VolumeSerialNumber", c_ulonglong), ("FileId", c_byte * 16)]
+
+
+class FILE_BASIC_INFO(Structure):
+    _fields_ = [
+        ("CreationTime", c_longlong),
+        ("LastAccessTime", c_longlong),
+        ("LastWriteTime", c_longlong),
+        ("ChangeTime", c_longlong),
+        ("FileAttributes", c_ulong),
+    ]
 
 
 class BY_HANDLE_FILE_INFORMATION(Structure):
@@ -562,6 +576,16 @@ class WindowsHeldFile(HeldFile):
         if not _same_object(_identity(_native(self.parent_descriptor)), self.parent_identity):
             raise OSError(errno.ESTALE, "held parent changed")
 
+    def version(self) -> FileVersion:
+        self.check()
+        assert GetFileInformationByHandleEx is not None
+        info = FILE_BASIC_INFO()
+        if not GetFileInformationByHandleEx(_native(self.descriptor), FILE_BASIC_INFO_CLASS, byref(info), sizeof(info)):
+            raise OSError("FileBasicInfo is unavailable")
+        # ChangeTime detects ordinary writes; a hostile host can explicitly alter these timestamps.
+        return FileVersion(self.identity, os.fstat(self.descriptor).st_size,
+                           int(info.LastWriteTime) * 100, int(info.ChangeTime) * 100)
+
     def close(self) -> None:
         if not self.closed:
             os.close(self.descriptor)
@@ -740,12 +764,17 @@ class WindowsHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def read(self, file: HeldFile) -> HeldResult[bytes]:
+    def read(self, file: HeldFile, *, max_bytes: int | None = None) -> HeldResult[bytes]:
         try:
             checked = self._check_file(file)
+            if max_bytes is not None and checked.version().size > max_bytes:
+                return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))
             os.lseek(checked.descriptor, 0, os.SEEK_SET)
-            chunks = []
+            chunks, size = [], 0
             while chunk := os.read(checked.descriptor, 65536):
+                size += len(chunk)
+                if max_bytes is not None and size > max_bytes:
+                    return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))
                 chunks.append(chunk)
             return HeldResult(value=b"".join(chunks))
         except OSError as error:
@@ -943,7 +972,8 @@ class WindowsHeldFilesystem(HeldFilesystem):
             return HeldResult(error=_error(error))
 
     def copy(
-        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str
+        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str,
+        *, max_bytes: int | None = None, deadline: float | None = None,
     ) -> HeldResult[None]:
         temporary = f".exomem-held-{secrets.token_hex(16)}"
         temporary_file: WindowsHeldFile | None = None
@@ -983,7 +1013,17 @@ class WindowsHeldFilesystem(HeldFilesystem):
             temporary_file = created.require()
             temporary_identity = temporary_file.identity
             os.lseek(checked.descriptor, 0, os.SEEK_SET)
-            while chunk := os.read(checked.descriptor, 65536):
+            copied_size = 0
+            while True:
+                # Bounds apply between syscalls; an in-progress filesystem syscall cannot be interrupted here.
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise OSError(errno.ETIMEDOUT, "copy deadline expired")
+                chunk = os.read(checked.descriptor, 65536)
+                if not chunk:
+                    break
+                copied_size += len(chunk)
+                if max_bytes is not None and copied_size > max_bytes:
+                    raise OSError(errno.EFBIG, "copy byte budget exceeded")
                 view = memoryview(chunk)
                 written = 0
                 while written < len(view):
@@ -1009,7 +1049,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
             temporary_file.close()
             temporary_file = None
             return HeldResult(value=None)
-        except OSError as error:
+        except BaseException as error:
             if temporary_file is not None:
                 try:
                     if temporary_file.access == "mutate":
@@ -1026,6 +1066,8 @@ class WindowsHeldFilesystem(HeldFilesystem):
                                 _delete_descriptor(file.descriptor)
                             except OSError:
                                 pass
+            if not isinstance(error, OSError):
+                raise
             return HeldResult(error=_error(error))
 
     def enumerate(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:

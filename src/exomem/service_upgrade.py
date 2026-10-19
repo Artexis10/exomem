@@ -22,6 +22,7 @@ import zipfile
 from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 from .governance.scrubber import NOTICE, scrub_text
 
@@ -90,6 +91,10 @@ def control(runtime_dir: Path, command: dict[str, Any]) -> dict[str, Any]:
 # `declared_descriptor_ids`. Staging it must still work -- that is the rollback
 # path -- so the probe degrades to an empty set exactly as `WorkerRuntime.inspect`
 # does, and an empty declaration makes the supervisor run the migrator.
+# `offline_migrations` are the extra steps the target's own migrator runs at a
+# handoff (collections-migrate-v1); a target that predates them declares none,
+# and the supervisor then never asks its migrator for one. A declaration that
+# raised is None, which the supervisor records apart from declaring none.
 _STATE_DECLARATIONS_PROBE = (
     "try:\n"
     "    from exomem.state_migration import declared_descriptor_ids\n"
@@ -102,6 +107,15 @@ _STATE_DECLARATIONS_PROBE = (
     "    compatibility = []\n"
     "else:\n"
     "    compatibility = list(supported_state_compatibility_ids())\n"
+    "try:\n"
+    "    from exomem.collection_store.capability import offline_migrations\n"
+    "except ImportError:\n"
+    "    migrations = []\n"
+    "else:\n"
+    "    try:\n"
+    "        migrations = list(offline_migrations())\n"
+    "    except Exception:\n"
+    "        migrations = None\n"
 )
 
 _TARGET_PROBE = (
@@ -299,7 +313,8 @@ def _verify_wheel_install(identity: dict[str, object], snapshot: Path, digest: s
     if not isinstance(archive_info, dict) or not isinstance(recorded_url, str):
         raise RuntimeError("staged candidate did not record its wheel source")
     source_url, _, fragment = recorded_url.partition("#")
-    if source_url != snapshot.as_uri():
+    # uv records a local version's '+' raw where as_uri() writes %2B; compare the decoded bytes.
+    if unquote_to_bytes(source_url) != unquote_to_bytes(snapshot.as_uri()):
         raise RuntimeError("staged candidate did not record its wheel source")
     recorded_digests: list[str] = []
     deprecated_hash = archive_info.get("hash")

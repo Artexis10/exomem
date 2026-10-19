@@ -57,8 +57,9 @@ def wait_for(
     timeout: float,
     interval: float = 1.0,
     description: str,
+    retry_exceptions: tuple[type[Exception], ...] = (Exception,),
 ) -> T:
-    """Polls `probe` until it returns a truthy value, which is returned."""
+    """Polls `probe` until it returns a truthy value, retrying selected errors."""
 
     deadline = time.monotonic() + timeout
     last_error: BaseException | None = None
@@ -67,7 +68,7 @@ def wait_for(
             value = probe()
             if value:
                 return value
-        except Exception as error:  # noqa: BLE001 - retried until the deadline, then reported
+        except retry_exceptions as error:  # noqa: BLE001 - retry policy is set by the caller
             last_error = error
         if time.monotonic() >= deadline:
             detail = f" (last error: {type(last_error).__name__}: {last_error})" if last_error else ""

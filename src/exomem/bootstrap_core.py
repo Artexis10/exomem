@@ -88,6 +88,7 @@ _VERBATIM = ("contract_version", "profile", "governance", "workflow", "active_ca
 SESSION_POST_WRITE_KEYS = (
     "due_state",
     "due_state_handling",
+    "relevant_due_handling",
     "due_state_authority",
     "capture_sweep_handling",
     "artifact_role_state_handling",
@@ -103,8 +104,14 @@ SESSION_POST_WRITE_KEYS = (
 _PASSTHROUGH = ("due_state", "latency")
 
 
+#: Sections answered from live state rather than projected from the reference
+#: payload, so the index (a map of reference bytes) does not list them.
+ACTIVITY_SECTION = "activity"
+LIVE_SECTIONS = (ACTIVITY_SECTION,)
+
+
 def accepted_sections() -> tuple[str, ...]:
-    return ("all", "index", *SECTIONS, *SECTION_ALIASES)
+    return ("all", "index", *SECTIONS, *LIVE_SECTIONS, *SECTION_ALIASES)
 
 
 def _size(value: object) -> int:
@@ -246,19 +253,14 @@ def _pointers(reference: dict) -> dict:
 
 
 def _envelope_digest(envelope: dict) -> dict:
-    """The envelope with its four-step protocol reduced to one line, that line keeping
-    the unclassified-action rule and naming the section that holds the full protocol.
+    """Render the served protocol on one line, without a second policy definition.
 
     Everything else is kept as served, including any live `ignored` report of stored
     classes this version does not know: the spec requires every class with its ceiling,
     disposition and provenance, and a stored-config problem must stay visible.
     """
     digest = {key: value for key, value in envelope.items() if key != "protocol"}
-    digest["protocol"] = (
-        "name the action class first; an unclassified action has no authority; "
-        "intent above its ceiling is a proposal, never an act; honour the disposition; "
-        "record the outcome through triage; more: section=envelope"
-    )
+    digest["protocol"] = "; ".join(envelope["protocol"]) + "; more: section=envelope"
     return digest
 
 

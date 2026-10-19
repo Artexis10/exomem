@@ -104,7 +104,7 @@ def _reconcile_held(
             receipt
             for receipt in reconstructed["receipts"]
             if receipt["operation_id"] == operation
-            and receipt["outcome"] in {"committed", "recovered-committed"}
+            and receipt["outcome"] in curation.COMMITTED_OUTCOMES
         ]
         if len(receipts) != 1:
             raise _uncertain("one verified committed receipt is required")
@@ -168,14 +168,21 @@ def _tip_is_live(
     """
     from . import curation
 
-    if after != "absent" and keep is not None and not keep(path):
-        return False
     try:
-        if evidence["step"]["kind"] in curation.RECORDS_STEP_KINDS:
-            # A Records item is current only while its Records receipt agrees.
-            curation._verify_records_receipt(  # noqa: SLF001
+        visible = curation._records_item_visible(vault_root, evidence["binding"], path)  # noqa: SLF001
+        if visible is not None:
+            return visible and curation._verify_records_receipt(  # noqa: SLF001
                 vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]
             )
+        if after != "absent" and keep is not None and not keep(path):
+            return False
+        if evidence["step"]["kind"] in curation.RECORDS_STEP_KINDS:
+            # A Records item is current only while its Records receipt agrees.
+            if curation._verify_records_receipt(  # noqa: SLF001
+                vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]
+            ):
+                # The store's item version is the postimage; the item's file is a generated view.
+                return True
         if after == "absent":
             return curation._guarded_absent(vault_root, path)  # noqa: SLF001
         return curation._read_target(vault_root, path)[1] == after  # noqa: SLF001

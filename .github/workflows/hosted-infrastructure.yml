@@ -180,6 +180,16 @@ jobs:
           SOPS_BIN="$(command -v sops)" \
           AGE_KEYGEN_BIN="$(command -v age-keygen)" \
           infra/scripts/validate.sh
+      - name: Retain admission startup logs after validation failure
+        if: failure()
+        run: |
+          # A pytest thread timeout bypasses the fixture's log capture and cleanup.
+          # The admission fixture owns this fixed container-name prefix.
+          while IFS= read -r container; do
+            echo "Admission container: ${container}"
+            docker inspect --format '{{json .State}}' "${container}"
+            docker logs --timestamps "${container}"
+          done < <(docker ps --all --quiet --filter 'name=^/exomem-admission-')
 
   external-blackbox:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.external_blackbox)

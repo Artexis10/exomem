@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -21,6 +22,7 @@ import sqlite3
 import stat
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -168,6 +170,9 @@ _mutation_logger = logging.getLogger("exomem.calls")
 _ACTIVE_WRITE_FENCE: ContextVar[tuple[Any, int] | None] = ContextVar(
     "exomem_active_write_fence", default=None
 )
+_ACTIVE_COLLECTION_FILE_WRITE: ContextVar[tuple[Any, Any, bytes | None] | None] = ContextVar(
+    "exomem_active_collection_file_write", default=None
+)
 _ACTIVE_MUTATION_TRACE: ContextVar[tuple[str, str, str] | None] = ContextVar(
     "exomem_active_mutation_trace", default=None
 )
@@ -253,6 +258,8 @@ class _FastAcknowledgementBatch:
     #: The route's own sweep inputs, when the leaf declared them for this
     #: batch's advisory target (`declare_write_advisory`).
     advisory_inputs: Any | None = None
+    handoff_outcome: str | None = None
+    handoff_error: _PostCommitOutcomeUncertain | None = None
 
 
 @dataclass(slots=True)
@@ -272,6 +279,7 @@ class _FastAcknowledgementSession:
     advisory_prepared_target: str | None = None
     advisory_prepared_inputs: Any | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
+    handoff_in_progress: bool = False
 
 
 _ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
@@ -699,7 +707,7 @@ def complete_active_derived_batch(
     *,
     canonical_commit_monotonic: float,
 ) -> None:
-    """Retain a successfully committed receipt for the post-authority handoff."""
+    """Retain a committed receipt until the outer vault hold hands it off."""
     if receipt is None:
         return
     session = _ACTIVE_FAST_ACK_SESSION.get()
@@ -815,6 +823,88 @@ def _acknowledgement_component_names() -> tuple[str, ...]:
     )
 
 
+def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
+    """Cache exact custody before releasing canonical writers, without waits.
+
+    A newer hold can move a path whose earlier receipt was already handed off.
+    Re-prove only those overlapping receipts after publishing the newer custody.
+    A failed handoff stays pending and cannot escape into canonical rollback.
+    """
+    if session.handoff_in_progress:
+        return
+    pending = [
+        batch
+        for batch in session.batches
+        if batch.handoff_outcome is None and batch.handoff_error is None
+    ]
+    if not pending:
+        return
+    changed_paths = {path.rel_path for batch in pending for path in batch.receipt.paths}
+    affected = [
+        batch
+        for batch in reversed(session.batches)
+        if any(path.rel_path in changed_paths for path in batch.receipt.paths)
+    ]
+    where: dict[str, str | None] = {"stage": "setup", "component": None, "outcome": None}
+    # Public proof and publication guards reenter consistency_guard, including
+    # on the direct leaf fallback where no enclosing canonical hold exists.
+    session.handoff_in_progress = True
+    try:
+        from . import derived_receipts
+
+        for batch in affected:
+            batch.handoff_outcome = None
+            batch.handoff_error = None
+        # Newer live custody must exist before an older receipt can hand on its
+        # moved paths. Component projection still uses commit order below.
+        for batch in affected:
+            receipt = batch.receipt
+            observed_generation = (
+                _current_canonical_generation(session.vault_root)
+                or receipt.canonical_generation
+            )
+            where.update(stage="receipt_proof", component=None, outcome=None)
+            with call_spans.span("derived.receipt_proof"):
+                proof = derived_receipts.prove_committed(
+                    session.vault_root,
+                    receipt,
+                    current_generation=observed_generation,
+                )
+            where["outcome"] = proof.outcome
+            if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
+                raise RuntimeError("derived receipt proof does not match this batch")
+            if proof.outcome != "superseded":
+                if proof.outcome != "ready":
+                    raise RuntimeError(
+                        "derived receipt did not prove the committed generation"
+                    )
+                where["stage"] = "pending_visibility"
+                with call_spans.span("derived.pending_visibility"):
+                    published = derived_receipts.publish_pending_visibility(
+                        session.vault_root,
+                        receipt,
+                        publisher=_PENDING_VISIBILITY_PUBLISHER,
+                    )
+                if not published:
+                    raise RuntimeError("pending visibility publication was not proven")
+                where["stage"] = "signal"
+                derived_receipts.signal_components(session.vault_root, receipt)
+            batch.handoff_outcome = proof.outcome
+    except Exception as error:
+        logger.warning(
+            "fast acknowledgement failed; the persisted terminal degrades to "
+            "derived_sync=pending (%s)",
+            _content_free_cause(error, **where),
+        )
+        uncertain = _PostCommitOutcomeUncertain()
+        uncertain.advisory_result_ref = _claimed_advisory_ref(session)
+        for batch in affected:
+            if batch.handoff_outcome is None:
+                batch.handoff_error = uncertain
+    finally:
+        session.handoff_in_progress = False
+
+
 def _acknowledge_derived_batches_timed(
     result: Any,
     session: _FastAcknowledgementSession,
@@ -853,57 +943,16 @@ def _acknowledge_derived_batches_timed(
         )
         if budget_deadline is not None:
             deadline = min(deadline, budget_deadline)
-        # Prove and publish newest first. An older batch is superseded only once
-        # the newer batch covering it holds live pending custody, and when both
-        # batches belong to one mutation the newer one is published by this same
-        # loop -- so proving in commit order would ask the store about a
-        # supersession it cannot yet see and fail closed into
-        # committed-uncertain on a write that is entirely sound. The projection
-        # below still runs in commit order, so terminal field order is
-        # unchanged.
-        superseded_batches: set[str] = set()
-        for batch in reversed(session.batches):
-            receipt = batch.receipt
-            observed_generation = (
-                _current_canonical_generation(session.vault_root)
-                or receipt.canonical_generation
-            )
-            where.update(stage="receipt_proof", component=None, outcome=None)
-            with call_spans.span("derived.receipt_proof"):
-                proof = derived_receipts.prove_committed(
-                    session.vault_root,
-                    receipt,
-                    current_generation=observed_generation,
-                )
-            where["outcome"] = proof.outcome
-            if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
-                raise RuntimeError("derived receipt proof does not match this batch")
-            if proof.outcome == "superseded":
-                superseded_batches.add(receipt.batch_id)
-                continue
-            # No generation comparison here: the store echoes
-            # ``current_generation`` straight back into the proof, and its
-            # ``ready`` outcome is what already enforces that the stored
-            # generation matches the observed one.
-            if proof.outcome != "ready":
-                raise RuntimeError(
-                    "derived receipt did not prove the committed generation"
-                )
-            where["stage"] = "pending_visibility"
-            with call_spans.span("derived.pending_visibility"):
-                published = derived_receipts.publish_pending_visibility(
-                    session.vault_root,
-                    receipt,
-                    publisher=_PENDING_VISIBILITY_PUBLISHER,
-                )
-            if not published:
-                raise RuntimeError("pending visibility publication was not proven")
-            where["stage"] = "signal"
-            derived_receipts.signal_components(session.vault_root, receipt)
+        # Direct leaves without a matching vault hold keep the guarded fallback.
+        # Held writes reuse their exact handoff, including a cached failure.
+        _handoff_derived_batches(session)
+        for batch in session.batches:
+            if batch.handoff_error is not None:
+                raise batch.handoff_error
 
         for batch in session.batches:
             receipt = batch.receipt
-            superseded = receipt.batch_id in superseded_batches
+            superseded = batch.handoff_outcome == "superseded"
             # A superseded batch owes nothing: the newer batch that covers it
             # owns its convergence.
             batch_owed = set() if superseded else set(_acknowledgement_component_names())
@@ -1699,6 +1748,38 @@ class LeaseConfig:
     # view of the vault. Pre-v4 clients omit the field entirely; the external
     # coordinator interprets that released wire shape as schema 3.
     schema_version: int = 4
+    # These deployment modes are a closed protocol contract, not vault vocabulary.
+    topology: str = "multi-host"
+
+    def __post_init__(self) -> None:
+        if self.topology not in {"multi-host", "single-host"}:  # nosemgrep: ep-word-set -- Closed deployment modes select implemented auth boundaries.
+            raise ValueError(
+                "WRITER_LEASE_CONFIG: EXOMEM_WRITER_LEASE_TOPOLOGY must be multi-host or single-host"
+            )
+        if self.topology == "single-host":
+            # Local session identities are safe only while authority stays on this host.
+            try:
+                origin = urllib.parse.urlsplit(self.url or "")
+                address = ipaddress.ip_address(origin.hostname or "")
+                origin.port  # Validate the URL parser's port field before using the origin.
+            except ValueError:
+                origin = None
+            if (
+                origin is None
+                or origin.scheme not in ("http", "https")
+                or not address.is_loopback
+                or getattr(address, "scope_id", None) is not None
+                or origin.username is not None
+                or origin.password is not None
+                or origin.path not in ("", "/")
+                or origin.query or origin.fragment
+                or self.url not in (f"{origin.scheme}://{origin.netloc}", f"{origin.scheme}://{origin.netloc}/")
+            ):
+                raise ValueError(
+                    "WRITER_LEASE_CONFIG: single-host requires EXOMEM_WRITER_LEASE_URL "
+                    "to be a credential-free literal loopback HTTP origin"
+                )
+            object.__setattr__(self, "url", f"{origin.scheme}://{origin.netloc}")
 
     @property
     def enabled(self) -> bool:
@@ -1708,6 +1789,7 @@ class LeaseConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> LeaseConfig:
         values = os.environ if env is None else env
         url = values.get("EXOMEM_WRITER_LEASE_URL", "").strip() or None
+        topology = values.get("EXOMEM_WRITER_LEASE_TOPOLOGY", "").strip() or "multi-host"
         state_raw = values.get("EXOMEM_WRITER_LEASE_STATE_DIR", "").strip()
         ttl_seconds = _positive_float(values, "EXOMEM_WRITER_LEASE_TTL", 30.0)
         idle_raw = values.get("EXOMEM_WRITER_LEASE_IDLE_SECONDS", "").strip()
@@ -1725,7 +1807,7 @@ class LeaseConfig:
             # alone can never trip the idle>=ttl validation and brick startup.
             idle_release_seconds = max(60.0, ttl_seconds)
         config = cls(
-            url=url.rstrip("/") if url else None,
+            url=url if topology == "single-host" else (url.rstrip("/") if url else None),
             vault_id=values.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip() or None,
             replica_id=values.get("EXOMEM_WRITER_LEASE_REPLICA_ID", "").strip() or None,
             token=values.get("EXOMEM_WRITER_LEASE_TOKEN", "").strip() or None,
@@ -1735,6 +1817,7 @@ class LeaseConfig:
             state_dir=Path(state_raw).expanduser() if state_raw else _default_state_dir(),
             mutation_timeout_seconds=_positive_float(values, "EXOMEM_MUTATION_TIMEOUT", 5.0),
             idle_release_seconds=idle_release_seconds,
+            topology=topology,
         )
         if config.enabled and (not config.vault_id or not config.replica_id):
             raise ValueError(
@@ -1851,7 +1934,8 @@ class CollectionStoreFenceState:
             _collection_store_uuid(self.store_id)
             if self.generation < 1:
                 raise ValueError("collection store fence generation is invalid")
-        elif self.store_id is not None or self.generation != 0:
+        # An unenrolled fence reports its newest retired generation, or 0 if never enrolled.
+        elif self.store_id is not None:
             raise ValueError("collection store fence metadata is inconsistent")
 
     @classmethod
@@ -1872,6 +1956,36 @@ class CollectionStoreFenceState:
             "store_id": self.store_id,
             "generation": self.generation,
         }
+
+
+@dataclass(frozen=True)
+class RetiredCollectionStoreFence:
+    """The newest retired store fence and the head the coordinator recorded for it.
+
+    Generation 0, with no store and no head, means the vault's fence was never retired.
+    """
+
+    store_id: str | None
+    generation: int
+    collection_store_head: CollectionStoreHead | None
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> RetiredCollectionStoreFence:
+        # nosemgrep: ep-word-set -- the closed field names of the coordinator's retired-fence response.
+        if not isinstance(data, Mapping) or set(data) != {"store_id", "generation", "collection_store_head"}:
+            raise ValueError("retired collection store fence fields are invalid")
+        generation, head = data["generation"], data["collection_store_head"]
+        if type(generation) is not int or generation < 0:
+            raise ValueError("retired collection store fence generation is invalid")
+        if generation == 0:
+            if data["store_id"] is not None or head is not None:
+                raise ValueError("a never-retired fence names no store")
+            return cls(None, 0, None)
+        store_id = _collection_store_uuid(data["store_id"])
+        head = None if head is None else CollectionStoreHead.from_json(head)
+        if head is not None and head.store_id != store_id:
+            raise ValueError("retired collection store head names another store")
+        return cls(store_id, generation, head)
 
 
 @dataclass(frozen=True)
@@ -2091,6 +2205,17 @@ def _contract_absent_error(url: str, route: str, status: int) -> OpError:
     )
 
 
+class _SingleHostRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """A local authority cannot forward its bearer to another coordinator origin."""
+
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        previous = urllib.parse.urlsplit(request.full_url)
+        target = urllib.parse.urlsplit(new_url)
+        if (target.scheme, target.netloc) != (previous.scheme, previous.netloc):
+            raise urllib.error.URLError("single-host coordinator redirected outside its origin")
+        return super().redirect_request(request, response, code, message, headers, new_url)
+
+
 class LeaseCoordinatorClient:
     """Small stdlib HTTP client for the provider-neutral lease contract."""
 
@@ -2164,6 +2289,18 @@ class LeaseCoordinatorClient:
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
 
+    def anonymous_status_code(self) -> int:
+        """Return the native HTTP result without sending the writer credential."""
+        request = urllib.request.Request(f"{self.config.url}{self._lease_route()}")
+        try:
+            with self._open_request(request) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise _coordinator_unavailable_error(error) from None
+
     def collection_store_fence(self) -> CollectionStoreFenceState:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         payload = self._request_json(
@@ -2208,6 +2345,80 @@ class LeaseCoordinatorClient:
             return state
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
+
+    def retire_collection_store_fence(
+        self,
+        *,
+        expected_generation: int,
+        store_id: str,
+    ) -> CollectionStoreFenceState:
+        """Retire the enrolled store fence; the operator credential only, on a vault exported to files."""
+        if type(expected_generation) is not int or expected_generation < 1:
+            raise ValueError("expected_generation must be a positive integer")
+        _collection_store_uuid(store_id)
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "POST",
+            f"/v1/vaults/{vault}/collection-store-fence/retire",
+            {
+                "expected_generation": expected_generation,
+                "store_id": store_id,
+                "capability": COLLECTION_STORE_CAPABILITY,
+            },
+            contract_route="/v1/vaults/<id>/collection-store-fence/retire",
+        )
+        try:
+            state = CollectionStoreFenceState.from_json(payload)
+            if state.enrolled or state.generation != expected_generation:
+                raise ValueError("collection store fence retire result is inconsistent")
+            return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def retired_collection_store_fence(self) -> RetiredCollectionStoreFence:
+        """The newest retired store fence with its recorded head, on a route only this release calls."""
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/collection-store-fence/retired",
+            None,
+            contract_route="/v1/vaults/<id>/collection-store-fence/retired",
+        )
+        try:
+            return RetiredCollectionStoreFence.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def probe_collection_store_fence_retire(self) -> None:
+        """Prove that the coordinator serves the fence retire and accepts this operator credential.
+
+        The probe sends no field: the coordinator checks the operator credential, then
+        answers 400 before it reads any fence, so the probe changes nothing. Only that
+        400 proves both; any other answer refuses.
+        """
+        contract_route = "/v1/vaults/<id>/collection-store-fence/retire"
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        request = self._json_request("POST", f"/v1/vaults/{vault}/collection-store-fence/retire", {})
+        try:
+            with self._open_request(request):
+                pass
+        except urllib.error.HTTPError as exc:
+            if exc.code == 400:
+                return
+            if exc.code in _CONTRACT_ABSENT_STATUSES:
+                raise _contract_absent_error(self.config.url, contract_route, exc.code) from None
+            if exc.code == 401:
+                raise OpError(
+                    "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
+                    "the coordinator rejected the operator credential",
+                    "Set EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN to the coordinator's operator token.",
+                ) from None
+            raise _coordinator_unavailable_error(exc) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise _coordinator_unavailable_error(exc) from None
+        raise _coordinator_unavailable_error(
+            ValueError("the coordinator accepted a fence retire that names no fence")
+        )
 
     def schema_admission(self, schema_version: int) -> SchemaAdmission:
         if isinstance(schema_version, bool) or schema_version not in {3, 4}:
@@ -2282,13 +2493,15 @@ class LeaseCoordinatorClient:
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
 
-    def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
+    def _lease_route(self, operation: str = "") -> str:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         suffix = f"/{operation}" if operation else ""
-        route = f"/v1/vaults/{vault}/lease{suffix}"
+        return f"/v1/vaults/{vault}/lease{suffix}"
+
+    def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
         payload = self._request_json(
             method,
-            route,
+            self._lease_route(operation),
             body,
             contract_route="/v1/vaults/<id>/lease" + (f"/{operation}" if operation else ""),
         )
@@ -2296,6 +2509,26 @@ class LeaseCoordinatorClient:
             return LeaseRecord.from_json(payload)
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
+
+    def _open_request(self, request: urllib.request.Request):
+        open_request = urllib.request.urlopen
+        if self.config.topology == "single-host":
+            # Proxies and cross-origin redirects must not move local authority off-host.
+            open_request = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _SingleHostRedirectHandler()
+            ).open
+        return open_request(request, timeout=self.config.timeout_seconds)
+
+    def _json_request(self, method: str, route: str, body: dict | None) -> urllib.request.Request:
+        url = f"{self.config.url}{route}"
+        headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
+        data = None
+        if body is not None:
+            data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if self.config.token:
+            headers["Authorization"] = f"Bearer {self.config.token}"
+        return urllib.request.Request(url, data=data, headers=headers, method=method)
 
     def _request_json(
         self,
@@ -2305,17 +2538,9 @@ class LeaseCoordinatorClient:
         *,
         contract_route: str,
     ) -> dict[str, Any]:
-        url = f"{self.config.url}{route}"
-        headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
-        data = None
-        if body is not None:
-            data = json.dumps(body, separators=(",", ":")).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        if self.config.token:
-            headers["Authorization"] = f"Bearer {self.config.token}"
-        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        request = self._json_request(method, route, body)
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+            with self._open_request(request) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
@@ -2464,13 +2689,23 @@ def _acquire_own_owner_lock(state_dir: Path, owner: str) -> Any | None:
     (this process, still alive) or, once genuinely gone, lockable — and
     cleans it up itself."""
     path = _owner_lock_path(state_dir, owner)
+    handle = None
     try:
         path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         existed = path.exists()
-        handle = path.open("a+b")
+        if os.name == "nt":
+            handle = path.open("a+b")
+        else:
+            # Create privately without changing configured ancestor-path semantics.
+            handle = open(path, "a+b", opener=lambda name, flags: os.open(name, flags, 0o600))
         if not existed and os.name != "nt":
             os.chmod(path, 0o600)
     except OSError:
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
         return None
     try:
         if _try_owner_lock(handle):
@@ -2491,9 +2726,9 @@ def _probe_owner_liveness(state_dir: Path, owner: str) -> bool:
     """
     path = _owner_lock_path(state_dir, owner)
     try:
-        if not path.exists():
-            return False
-        handle = path.open("a+b")
+        handle = path.open("r+b")
+    except FileNotFoundError:
+        return False
     except OSError:
         return True
     try:
@@ -2759,9 +2994,7 @@ class IdempotencyStore:
         owners_dir = _owner_lock_path(self.state_dir, "bootstrap").parent
         if stat.S_IMODE(owners_dir.stat().st_mode) & 0o077:
             raise RuntimeError("idempotency owner directory is not owner-only")
-        for owner_lock in owners_dir.glob("*.lock"):
-            if stat.S_IMODE(owner_lock.stat().st_mode) & 0o077:
-                raise RuntimeError("idempotency owner lock is not owner-only")
+        # The private directory isolates unrelated lock files; claims must not scan them.
         for item in (
             self.path,
             self.path.with_name(f"{self.path.name}-wal"),
@@ -2967,13 +3200,14 @@ class IdempotencyStore:
                 return _derived_acknowledgement_pending(result, acknowledgement_error)
 
         while True:
-            disposition, stored = self._claim_or_inspect(
-                key,
-                digest,
-                expires_after,
-                commit_evidence=commit_evidence,
-                legacy_graph_pending_proof=legacy_graph_pending_proof,
-            )
+            with call_spans.span("mutation.idempotency_claim"):
+                disposition, stored = self._claim_or_inspect(
+                    key,
+                    digest,
+                    expires_after,
+                    commit_evidence=commit_evidence,
+                    legacy_graph_pending_proof=legacy_graph_pending_proof,
+                )
             if disposition == "owner":
                 break
             if disposition == "pending":
@@ -4037,13 +4271,33 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
     return wait
 
 
+@dataclass(frozen=True)
+class _CapturePreparationRetry:
+    """The invocation's existing allowance and admission for precommit retries."""
+
+    deadline: float
+    admit: Callable[[], bool]
+
+    def available(self) -> bool:
+        return time.monotonic() < self.deadline
+
+
+_ACTIVE_CAPTURE_PREPARATION_RETRY: ContextVar[_CapturePreparationRetry | None] = ContextVar(
+    "exomem_capture_preparation_retry", default=None
+)
+
+
+def _active_capture_preparation_retry() -> _CapturePreparationRetry | None:
+    return _ACTIVE_CAPTURE_PREPARATION_RETRY.get()
+
+
 class _FairCaptureQueue:
     """First-come-first-served order, within one process, for capture writes
     waiting on the boundary.
 
-    Only a write that has already met a busy boundary joins, and a write that
-    arrives while others wait joins behind them instead of racing for the lock,
-    so the waiter who has waited longest attempts next and none starves.
+    A write that meets a busy boundary or invalidated preparation joins. A
+    write that arrives while others wait joins behind them instead of racing
+    for the lock, so the waiter who has waited longest attempts next.
     """
 
     def __init__(self) -> None:
@@ -4129,6 +4383,10 @@ class LeaseManager:
         self._active_mutations = 0
         self._last_activity_monotonic = time.monotonic()
         self._collection_store = None
+        # Set by start_server_lifecycle: generic file writes must protect the store's ownership.
+        self._serves_collection_store = False
+        self._file_store_acquisition = None
+        self._file_store_marker = None
         self._store_bound = False
         self._store_borrowers: dict[int, int] = {}
         self._store_handoff = False
@@ -4175,6 +4433,41 @@ class LeaseManager:
         except Exception:  # noqa: BLE001 - observability must never break the caller
             pass
 
+    def _offers_collection_store_capability(self) -> bool:
+        """Offer the store fence capability for a producer or proved unrelated file writes."""
+        if self._collection_store is not None:
+            return True
+        if self._serves_collection_store:
+            return self._collection_file_marker() is not None
+        try:
+            import sqlite3
+            from contextlib import closing
+
+            from .collection_store import authority, connection
+            from .vault import resolve_vault
+
+            root = resolve_vault()
+            if authority.read_marker(root) is None:
+                return False
+            # Preserve the media child's lightweight admission; it does not serve general file writes.
+            uri = f"{connection.store_path(root).resolve().as_uri()}?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True)) as store:
+                pending = store.execute(
+                    "SELECT 1 FROM store_meta WHERE key=?", (authority.PENDING_CREATE,)
+                ).fetchone()
+            return pending is None
+        except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
+            return False
+
+    def _collection_file_marker(self, acquired=None, *, vault_root=None):
+        try:
+            from .collection_store import replica
+            from .vault import resolve_vault
+
+            return replica.file_writer_marker(resolve_vault() if vault_root is None else Path(vault_root), acquired)
+        except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
+            return None
+
     def _store_refused(self) -> bool:
         """With the lock held: wait out a coalesced publication, then refuse closure or handoff.
 
@@ -4214,7 +4507,7 @@ class LeaseManager:
             try:
                 record = self.client.acquire(**(
                     {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
-                    if self._collection_store is not None else {}
+                    if self._offers_collection_store_capability() else {}
                 ))
             except OpError as error:
                 self._record_coordinator_error(error.code)
@@ -4243,6 +4536,14 @@ class LeaseManager:
                     f"replica is read-only; current writer is {holder_text(record.holder, record.expires_at)}",
                     "Send the mutation to the current writer or retry after its lease expires.",
                 )
+            if (self._serves_collection_store and self._collection_store is None
+                    and record.required_collection_store_capability is not None):
+                marker = self._collection_file_marker(record)
+                if marker is None:
+                    raise OpError("WRITER_LEASE_REQUIRED", "current local store publication is unverified")
+                self._file_store_acquisition, self._file_store_marker = record, marker
+            else:
+                self._file_store_acquisition = self._file_store_marker = None
             self._record_lease_op("acquire", "granted")
             self._fencing_token = record.fencing_token
             self._expires_at = record.expires_at
@@ -4271,12 +4572,20 @@ class LeaseManager:
     ) -> Iterator[VaultMutationCoordinator]:
         """Serialize hosted reads with mutations without requiring writer authority."""
         mutation = self._mutation_coordinator_for(vault_root)
+        outermost = not mutation.current_thread_holds_boundary()
         with mutation.hold(
             request_id=request_id,
             operation=operation,
             holder_kind=holder_kind,
         ):
-            yield mutation
+            try:
+                yield mutation
+            finally:
+                session = _ACTIVE_FAST_ACK_SESSION.get()
+                if outermost and session is not None and active_derived_batch_custody(vault_root):
+                    # _mutation_boundary has bumped the generation. Keep exact
+                    # receipt custody visible before any waiting writer enters.
+                    _handoff_derived_batches(session)
 
     @contextmanager
     def reserved_identity_guard(
@@ -4289,6 +4598,7 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "reserved-state",
+        deadline: float | None = None,
     ) -> Iterator[str]:
         """Coordinate one owner's identities without serializing other owners."""
 
@@ -4299,7 +4609,8 @@ class LeaseManager:
         ):
             raise ValueError("reserved identity domains must be registered labels")
         vault_identity = canonical_mutation_identity(vault_root)
-        deadline = time.monotonic() + self._mutation_timeout_seconds
+        manager_deadline = time.monotonic() + self._mutation_timeout_seconds
+        deadline = manager_deadline if deadline is None else min(deadline, manager_deadline)
         gate = self._mutation_coordinator_for(f"reserved-identity-v1:gate:{vault_identity}")
 
         def enter(
@@ -4364,6 +4675,50 @@ class LeaseManager:
         activation_admission: bool = False,
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the shared vault mutation boundary and revalidate writer authority."""
+        with self._mutation_boundary(
+            vault_root,
+            request_id=request_id,
+            operation=operation,
+            holder_kind=holder_kind,
+            attachment_control=attachment_control,
+            attachment_now=attachment_now,
+            session_open_admission=session_open_admission,
+            activation_admission=activation_admission,
+            advance_generation=True,
+        ) as mutation:
+            yield mutation
+
+    @contextmanager
+    def projection_guard(
+        self, vault_root: os.PathLike[str] | str, *, operation: str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """Hold the vault mutation boundary, with writer authority, to write a projection file.
+
+        Only for a file that a canonical source rebuilds and no canonical read depends
+        on, such as the collection store's derived rows. The holder is background work,
+        and the commit generation does not move, so every captured validity stamp stays
+        current. A writer of canonical content takes `mutation_guard`.
+        """
+        with self._mutation_boundary(
+            vault_root, operation=operation, holder_kind="background", advance_generation=False
+        ) as mutation:
+            yield mutation
+
+    @contextmanager
+    def _mutation_boundary(
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        request_id: str | None = None,
+        operation: str | None = None,
+        holder_kind: str,
+        attachment_control: bool = False,
+        attachment_now: int | None = None,
+        session_open_admission: bool = False,
+        activation_admission: bool = False,
+        advance_generation: bool,
+    ) -> Iterator[VaultMutationCoordinator]:
+        """`mutation_guard`, which advances the commit generation, and `projection_guard`, which does not."""
         direct_boundary: tuple[str, Path] | None = None
         direct_token: Token[tuple[tuple[str, Path], ...]] | None = None
         outer_direct_boundary = False
@@ -4397,10 +4752,11 @@ class LeaseManager:
                 finally:
                     # Bump while the boundary is still held, so the counter is
                     # serialized with the mutations it fingerprints. Every
-                    # governed writer exits through here (wide or narrow), which
-                    # is what lets the validity-stamp comparison skip the
-                    # in-boundary corpus stat-walk.
-                    _bump_commit_generation(self.config.state_dir, vault_root)
+                    # governed writer of canonical content exits through here
+                    # (wide or narrow), which is what lets the validity-stamp
+                    # comparison skip the in-boundary corpus stat-walk.
+                    if advance_generation:
+                        _bump_commit_generation(self.config.state_dir, vault_root)
         finally:
             _ACTIVE_LEASE_MANAGER.reset(manager_token)
             if direct_token is not None:
@@ -4455,6 +4811,7 @@ class LeaseManager:
         provably means no outstanding fence anywhere in this process.
         """
         fence_context: Token[tuple[Any, int] | None] | None = None
+        file_context = None
         counted = False
         admission_now = int(time.time()) if attachment_now is None else attachment_now
         if session_open_admission and activation_admission:
@@ -4495,12 +4852,19 @@ class LeaseManager:
                 lease = self.ensure_writer()
                 if self.config.enabled:
                     fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+                if self._serves_collection_store and self._collection_store is None:
+                    # Keep this mutation's file classification if a producer attaches during staging.
+                    file_context = _ACTIVE_COLLECTION_FILE_WRITE.set((
+                        self, self._file_store_acquisition, self._file_store_marker,
+                    ))
                 self._active_mutations += 1
                 self._last_activity_monotonic = time.monotonic()
             counted = True
         try:
             yield
         finally:
+            if file_context is not None:
+                _ACTIVE_COLLECTION_FILE_WRITE.reset(file_context)
             if fence_context is not None:
                 _ACTIVE_WRITE_FENCE.reset(fence_context)
             if counted:
@@ -4719,11 +5083,6 @@ class LeaseManager:
             from .vocabulary_gate import attach_evidence, operation_context
 
             gate_context = None
-            fast_ack_token = (
-                _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)
-                if fast_ack_session is not None
-                else None
-            )
             post_terminal_token = _ACTIVE_POST_TERMINAL_FANOUT.set(post_terminal_fanout)
             housekeeping_token = _ACTIVE_POST_TERMINAL_HOUSEKEEPING.set(
                 post_terminal_housekeeping
@@ -4742,15 +5101,14 @@ class LeaseManager:
 
                         vocabulary_application.refuse_identity_preparation(leaf_result)
                     if _ACTIVE_MUTATION_COMMITTED.get():
-                        return attach_evidence(
-                            committed_terminal(
-                                leaf_result,
-                                request_id=request_id,
-                                receipt_id=receipt,
-                                idempotency_key=effective_public_idempotency_key,
-                            ),
-                            gate_context,
+                        terminal = committed_terminal(
+                            leaf_result,
+                            request_id=request_id,
+                            receipt_id=receipt,
+                            idempotency_key=effective_public_idempotency_key,
                         )
+                        _note_committed_terminal_targets(terminal)
+                        return attach_evidence(terminal, gate_context)
                     if isinstance(leaf_result, _CanonicalRequestReplay) or ((
                         command.name in {"record_memory", "plan_memory"}
                         and valid_collection_receipt(leaf_result)
@@ -4800,8 +5158,6 @@ class LeaseManager:
                 commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
                 _ACTIVE_POST_TERMINAL_FANOUT.reset(post_terminal_token)
                 _ACTIVE_POST_TERMINAL_HOUSEKEEPING.reset(housekeeping_token)
-                if fast_ack_token is not None:
-                    _ACTIVE_FAST_ACK_SESSION.reset(fast_ack_token)
                 _ACTIVE_LEASE_MANAGER.reset(manager_token)
                 _ACTIVE_MUTATION_COMMITTED.reset(commit_token)
                 _ACTIVE_MUTATION_TRACE.reset(trace_token)
@@ -4819,6 +5175,8 @@ class LeaseManager:
         def graph_failure(checkpoint: Any, error: BaseException | None = None) -> dict[str, str]:
             from . import graph_sync
 
+            if isinstance(error, graph_sync.GraphRepairQueued):
+                return graph_sync.committed_graph_queued(checkpoint)
             if isinstance(error, graph_sync.GraphRebuildInProgress):
                 return graph_sync.committed_graph_pending(checkpoint)
             if isinstance(error, graph_sync.GraphRebuildRegistrationError):
@@ -5405,12 +5763,21 @@ class LeaseManager:
             and kwargs.get("mode") == "tag-variants"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # Only record owns a short guard around fresh admission, revision
+        # selection and ledger binding; the other episode actions still rely
+        # on this command boundary. The action is a closed protocol enum.
+        narrow_episode_record = (
+            command.name == "episode_memory"
+            and kwargs.get("action") == "record"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
             or narrow_tag_variant_commit
+            or narrow_episode_record
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
@@ -5462,6 +5829,31 @@ class LeaseManager:
             return finish_fast_ack_and_graph(result)
 
         try:
+            @contextmanager
+            def operation_guard() -> Iterator[None]:
+                # Wide guards outlive invoke_leaf; retain the session until
+                # their outer hold has handed off its committed receipts.
+                token = _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)
+                try:
+                    guard = (
+                        self.writer_authority_guard(
+                            vault_root=mutation_subject,
+                            session_open_admission=session_open_admission,
+                        )
+                        if narrow_boundary
+                        else self.mutation_guard(
+                            mutation_subject,
+                            request_id=request_id,
+                            operation=command.name,
+                            holder_kind="command",
+                            session_open_admission=session_open_admission,
+                        )
+                    )
+                    with guard:
+                        yield
+                finally:
+                    _ACTIVE_FAST_ACK_SESSION.reset(token)
+
             def run_idempotent() -> Any:
                 return self.idempotency.run(
                     key,
@@ -5469,22 +5861,7 @@ class LeaseManager:
                     invoke_leaf,
                     expires_after=expires_after,
                     on_replay=on_replay,
-                    operation_guard=(
-                        (
-                            lambda: self.writer_authority_guard(
-                                vault_root=mutation_subject,
-                                session_open_admission=session_open_admission,
-                            )
-                        )
-                        if narrow_boundary
-                        else lambda: self.mutation_guard(
-                            mutation_subject,
-                            request_id=request_id,
-                            operation=command.name,
-                            holder_kind="command",
-                            session_open_admission=session_open_admission,
-                        )
-                    ),
+                    operation_guard=operation_guard,
                     commit_observed=lambda: commit_state["observed"],
                     after_canonical_persisted=persist_graph_sync_progress,
                     after_operation_guard=finish_before_terminal_persistence,
@@ -5695,13 +6072,41 @@ class LeaseManager:
         re-run.
         """
         if key is None or not _capture_write_absorbs_contention(command.name, kwargs):
-            return run()
+            # An ineligible nested invocation must not borrow its parent's
+            # allowance or admission callback.
+            token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(None)
+            try:
+                return run()
+            finally:
+                _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
         started = time.monotonic()
         deadline = started + _capture_wait_seconds(self._mutation_timeout_seconds)
         queue = self._capture_queue
         ticket = None
         absorbed = 0
         holds_slot = False
+
+        def wait_turn() -> bool:
+            # A head ticket can return immediately even after its deadline.
+            return (
+                time.monotonic() < deadline
+                and queue.wait_turn(ticket, deadline)
+                and time.monotonic() < deadline
+            )
+
+        def admit_preparation_retry() -> bool:
+            nonlocal ticket, holds_slot
+            if time.monotonic() >= deadline:
+                return False
+            if not holds_slot:
+                if not _take_capture_waiter_slot():
+                    return False
+                holds_slot = True
+            if ticket is None:
+                ticket = queue.enter_line()
+            return wait_turn()
+
+        preparation_retry = _CapturePreparationRetry(deadline, admit_preparation_retry)
 
         def waited_ms() -> float:
             return round((time.monotonic() - started) * 1000, 2)
@@ -5737,15 +6142,19 @@ class LeaseManager:
                 holds_slot = True
                 ticket = queue.enter_line()
             while True:
-                if ticket is not None and not queue.wait_turn(ticket, deadline):
+                if ticket is not None and not wait_turn():
                     raise refuse(
                         uncounted_busy(),
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
                 try:
-                    with mutation_lock.absorbing_busy():
-                        result = run()
+                    token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(preparation_retry)
+                    try:
+                        with mutation_lock.absorbing_busy():
+                            result = run()
+                    finally:
+                        _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
                 except OpError as error:
                     if (
                         error.code != "MUTATION_BUSY"
@@ -6019,7 +6428,7 @@ class LeaseManager:
         return True
 
     def _release_collection_store(self, token, *, deadline, cancelled=None, closing=False,
-                                  release=True):
+                                  release=True, drain_views=True):
         """Quiesce, flush the replica and hand the lease back with the flushed head.
 
         ``release=False`` is the synchronous portability-export flush: the same
@@ -6071,7 +6480,8 @@ class LeaseManager:
                     return False
                 if self.config.enabled:
                     self.validate_fencing_token(token)
-                head = runtime.flush(token, deadline=deadline, cancelled=cancelled)
+                head = runtime.flush(token, deadline=deadline, cancelled=cancelled,
+                                     **({} if drain_views else {"drain_views": False}))
                 if not release:
                     return head
                 with self._report_lock:
@@ -6264,7 +6674,13 @@ class LeaseManager:
                 if self._collection_store is not None:
                     self._renew_collection_store(token)
                     continue
-                record = self.client.renew(token)
+                marker = (self._collection_file_marker(self._file_store_acquisition)
+                          if self._file_store_acquisition is not None else None)
+                record = self.client.renew(token, **(
+                    {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
+                    if (self._file_store_acquisition is not None and marker is not None
+                        and marker == self._file_store_marker) else {}
+                ))
                 with self._lock:
                     if self._fencing_token != token:
                         continue
@@ -6288,7 +6704,7 @@ class LeaseManager:
                 logger.warning("collection store head report unavailable", exc_info=True)
                 self._record_lease_op("renew", "error")
 
-    def close(self, *, deadline=None, cancelled=None) -> None:
+    def close(self, *, deadline=None, cancelled=None, drain_views=True) -> None:
         if self._collection_store is not None:
             with self._lock:
                 if self._store_closed:
@@ -6303,6 +6719,7 @@ class LeaseManager:
                     token, deadline=(time.monotonic() + self._mutation_timeout_seconds
                                      if deadline is None else deadline),
                     cancelled=cancelled, closing=True,
+                    **({} if drain_views else {"drain_views": False}),
                 )
             finally:
                 # Keep custody until flush finishes, then let even a failed handoff's
@@ -6353,6 +6770,25 @@ def validate_active_write_fence() -> None:
         return
     manager, fencing_token = active
     manager.validate_fencing_token(fencing_token)
+
+
+def validate_active_collection_file_paths(vault_root: Path, paths: Iterable[Path]) -> None:
+    """Keep generic file effects outside store ownership while its producer is unavailable."""
+    active = _ACTIVE_COLLECTION_FILE_WRITE.get()
+    if active is None:
+        return
+    from .collection_store import authority
+
+    manager, acquired, marker = active
+    root = Path(vault_root).resolve()
+    if acquired is not None:
+        current = manager._collection_file_marker(acquired, vault_root=root)
+        if current is None or marker is None or current != marker:
+            raise OpError("WRITER_LEASE_REQUIRED", "current local store publication is unverified")
+    authority.refuse_view_paths(
+        root, (path.resolve().relative_to(root).as_posix() for path in paths
+               if path.resolve().is_relative_to(root)), OpError, expected_marker=marker,
+    )
 
 
 _MANAGERS: dict[LeaseConfig, LeaseManager] = {}
@@ -6592,6 +7028,93 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+def _restricted_refusal_floor(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Hold a restricted caller's direct-read refusal to the disclosure floor.
+
+    A missing page refuses before any page is read, while a withheld one is
+    read and decided first. Padding every refusal that a restricted caller
+    receives to one floor removes that difference. A success returns at once,
+    notices included. The restriction is asked only after a refusal, so a
+    success never pays for the question. Behind an MCP or REST surface the
+    surface waits, after its own handling of the refusal; elsewhere this
+    thread waits.
+    """
+
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        if (
+            not getattr(command, "restricted_refusal_floor", False)
+            or not injected
+            or not isinstance(injected[0], (str, os.PathLike))
+        ):
+            return function(command, *injected, **kwargs)
+        from .governance import policy
+
+        started_at = time.perf_counter()
+        # A direct read changes no governance, so it decides under one policy load.
+        with policy.request_policy_snapshot():
+            try:
+                return function(command, *injected, **kwargs)
+            except Exception as error:
+                _complete_restricted_refusal(Path(injected[0]), started_at, error)
+                raise
+
+    return wrapped
+
+
+def _complete_restricted_refusal(
+    vault_root: Path, started_at: float, error: BaseException
+) -> None:
+    from .governance import egress, projection_timing
+
+    try:
+        restricted = egress.caller_restricted(vault_root)
+    except Exception:  # noqa: BLE001 - an undecided caller costs only the floor
+        restricted = True
+    if not restricted:
+        return
+    # The finished frames of a withheld read still hold the page it decided.
+    # Freed after the wait, a large page would make its refusal measurably
+    # later than a missing one, so free them inside the floor.
+    seen: set[int] = set()
+    chained: BaseException | None = error
+    while chained is not None and id(chained) not in seen:
+        seen.add(id(chained))
+        traceback.clear_frames(chained.__traceback__)
+        chained = chained.__cause__ or chained.__context__
+    padding_started = time.perf_counter()
+    work_ms = (padding_started - started_at) * 1000.0
+    deferred = projection_timing.defer_refusal_floor(started_at)
+    if not deferred:
+        projection_timing.pad_to_refusal_floor(started_at)
+    # Owner-only ledger span of fixed labels and counts, never caller or vault data.
+    call_spans.record_span(
+        "command.refusal_floor",
+        (time.perf_counter() - padding_started) * 1000.0,
+        {
+            "work_ms": math.ceil(work_ms),
+            "overrun": int(work_ms > projection_timing.RESTRICTED_REFUSAL_FLOOR_MS),
+            "deferred": int(deferred),
+        },
+    )
+
+
+def _note_committed_terminal_targets(terminal: Mapping[str, Any]) -> None:
+    """Hand the call ledger the pages this write committed, from the terminal's
+    own path projection, so a write whose destination the server derived still
+    reports what it saved. Paths only; the ledger keeps a count where paths are
+    content."""
+    from . import call_ledger
+
+    path = terminal.get("path")
+    paths = terminal.get("paths")
+    call_ledger.note_committed_targets(
+        [path] if isinstance(path, str) else paths if isinstance(paths, list) else []
+    )
+
+
 def _request_prominence_context(func):
     @wraps(func)
     def wrapped(command, *injected, **kwargs):
@@ -6605,6 +7128,18 @@ def _request_prominence_context(func):
     return wrapped
 
 
+def _store_request_is_read_only(command, kwargs):
+    """Whether a store-routed request changes nothing, as `invoke_command` will classify it."""
+    from .commands import invocation_is_read_only
+    from .governance.egress import SelectorCoverageError
+
+    try:
+        return invocation_is_read_only(command, kwargs)
+    except SelectorCoverageError:
+        # `invoke_command` sends this selector down the writer path and refuses it there.
+        return False
+
+
 def _collection_store_thread(func):
     """Run a store-routed collection request on the store thread of the service serving its
     vault, in the caller's context (``collection_store.runtime.route``)."""
@@ -6616,16 +7151,45 @@ def _collection_store_thread(func):
 
             server = store_runtime.route(command.name, injected[0], kwargs)
             if server is not None:
-                return server.call(lambda: func(command, *injected, **kwargs))
+                import_request = kwargs.get("import_request")
+                # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
+                import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
+                                 and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
+                return server.call(
+                    lambda: func(command, *injected, **kwargs),
+                    wake_maintenance=not import_status,
+                    read_only=_store_request_is_read_only(command, kwargs),
+                )
         return func(command, *injected, **kwargs)
+
+    return wrapped
+
+
+def _foreground_priority_request(func):
+    """Run every dispatched command, read or write, ahead of in-process bulk work.
+
+    The one mark for commands (`foreground_priority`). Innermost, so it marks
+    the thread that runs the command -- the collection store's thread for a
+    routed call -- and leaves out the fixed public completion that pads a
+    projected read to its class deadline.
+    """
+
+    @wraps(func)
+    def wrapped(command, *injected, **kwargs):
+        from . import foreground_priority
+
+        with foreground_priority.foreground():
+            return func(command, *injected, **kwargs)
 
     return wrapped
 
 
 @_foreground_command_activity
 @_fixed_projected_command_completion
+@_restricted_refusal_floor
 @_request_prominence_context
 @_collection_store_thread
+@_foreground_priority_request
 def invoke_command(
     command: Any,
     *injected: Any,
@@ -6756,23 +7320,50 @@ def invoke_command(
     # a SystemExit walks straight past is not terminal.
     if not read_only:
         try:
-            return postfilter(command.name, _invoke(), injected[0])
+            # The same fixed phase labels as the read-only path below.
+            with call_spans.span("command.body"):
+                result = _invoke()
+            with call_spans.span("command.terminal_filter"):
+                return postfilter(command.name, result, injected[0])
         except BaseException as error:
-            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+            with call_spans.span("command.terminal_filter"):
+                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
     # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on
     # the way out, so an except-block outside it records credential blocks into
     # a collector that is already gone, and emits no receipt for a governed read
     # that touched withheld items before failing.
-    with disclosure_boundary(injected[0], command.name) as collector:
+    from .collection_store import ownership
+
+    with ownership.read_scope(injected[0]) as ownership_scope, \
+            disclosure_boundary(injected[0], command.name) as collector:
         try:
-            result = postfilter(command.name, _invoke(), injected[0])
+            # Fixed phase labels carry timing only, never caller or vault data.
+            with call_spans.span("command.body"):
+                result = _invoke()
+            with call_spans.span("command.terminal_filter"):
+                result = postfilter(command.name, result, injected[0])
         except BaseException as error:
-            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
-            emit_boundary_receipt(collector)
+            try:
+                with call_spans.span("command.terminal_filter"):
+                    postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+            finally:
+                try:
+                    ownership_scope.finish()
+                finally:
+                    with call_spans.span("command.disclosure_receipt"):
+                        emit_boundary_receipt(collector)
             raise
-        emit_boundary_receipt(collector)
+        try:
+            ownership_scope.finish()
+        finally:
+            with call_spans.span("command.disclosure_receipt"):
+                emit_boundary_receipt(collector)
+        from . import call_ledger
+        from .governance.egress import released_item_count
+
+        call_ledger.note_released_items(released_item_count(collector, result))
         return result
 
 
@@ -6784,6 +7375,7 @@ def coordination_status(
 
 def start_server_lifecycle() -> LeaseManager:
     manager = get_manager()
+    manager._serves_collection_store = True
     if manager.config.enabled and manager.config.preferred_writer:
         try:
             manager.ensure_writer()

@@ -49,47 +49,82 @@ class PageDefinitions:
         return True
 
 
+class DefinitionsSelection:
+    """`page_definitions` for many pages, each subject and instance selected and loaded once.
+
+    A corpus build interprets every page with one selection, so its pages share
+    one snapshot per subject and instance, and `dependency()` names exactly the
+    snapshots that build used. Page membership is still resolved per page.
+    """
+
+    def __init__(self, root: Path, subjects: tuple[str, ...]) -> None:
+        self._root = Path(root)
+        self._subjects = subjects
+        self._selected: dict[tuple[str, str | None], tuple[RegistrySpec, Snapshot] | RegistryError] = {}
+
+    def _select(self, subject: str, scope: str | None) -> tuple[RegistrySpec, Snapshot]:
+        from . import registry, registry_spec
+
+        outcome = self._selected.get((subject, scope))
+        if outcome is None:
+            try:
+                spec = select(self._root, registry_spec(subject), scope)
+                outcome = (spec, registry.load(spec, self._root))
+            except RegistryError as error:
+                outcome = error
+            self._selected[(subject, scope)] = outcome
+        if isinstance(outcome, RegistryError):
+            raise outcome.with_traceback(None)
+        return outcome
+
+    def snapshot(self, subject: str, scope: str | None = None) -> Snapshot:
+        """The one snapshot of `subject` this selection reads for an instance."""
+        return self._select(subject, scope)[1]
+
+    def page_definitions(self, path: str, frontmatter: dict) -> PageDefinitions:
+        """Select once from canonical membership, then admit only the requested subjects."""
+        scope = page_scope(self._root, path, frontmatter)
+        snapshots = {}
+        binding = None
+        for subject in self._subjects:
+            spec, snapshots[subject] = self._select(subject, scope)
+            binding = spec.binding_revision
+        return PageDefinitions(scope or PUBLIC_INSTANCE, binding, snapshots, path, frontmatter)
+
+    def dependency(self) -> tuple:
+        """Everything `page_definitions` reads for these subjects, except the page itself.
+
+        A cache of interpreted pages may reuse a page only while this stays equal.
+        """
+        from ..governance import policy
+
+        try:
+            document = configuration(self._root)
+        except AssignmentRequired:
+            document = None
+        scopes = (None,) if document is None else (None, *sorted(document["private"]))
+        # Page membership selects the instance only in a bound vault.
+        entries: list[object] = [None if document is None else policy.load(self._root).fingerprint]
+        for subject in self._subjects:
+            for scope in scopes:
+                try:
+                    spec, snapshot = self._select(subject, scope)
+                except RegistryError as error:
+                    entries.append((subject, scope, type(error).__name__))
+                else:
+                    entries.append((subject, scope, spec.binding_revision,
+                                    snapshot.content_hash, snapshot.effective_digest))
+        return tuple(entries)
+
+
 def page_definitions(root: Path, path: str, frontmatter: dict, subjects: tuple[str, ...]) -> PageDefinitions:
     """Select once from canonical membership, then admit only requested subjects."""
-    from . import registry, registry_spec
-
-    scope = page_scope(root, path, frontmatter)
-    snapshots = {}
-    binding = None
-    for subject in subjects:
-        spec = select(root, registry_spec(subject), scope)
-        snapshots[subject] = registry.load(spec, root)
-        binding = spec.binding_revision
-    return PageDefinitions(scope or PUBLIC_INSTANCE, binding, snapshots, path, frontmatter)
+    return DefinitionsSelection(root, subjects).page_definitions(path, frontmatter)
 
 
 def definitions_dependency(root: Path, subjects: tuple[str, ...]) -> tuple:
-    """Everything that `page_definitions` reads for `subjects`, except the page itself.
-
-    A cache of interpreted pages may reuse a page only while this stays equal.
-    """
-    from ..governance import policy
-    from . import registry, registry_spec
-
-    root = Path(root)
-    try:
-        document = configuration(root)
-    except AssignmentRequired:
-        document = None
-    scopes = (None,) if document is None else (None, *sorted(document["private"]))
-    # Page membership selects the instance only in a bound vault.
-    entries: list[object] = [None if document is None else policy.load(root).fingerprint]
-    for subject in subjects:
-        for scope in scopes:
-            try:
-                spec = select(root, registry_spec(subject), scope)
-                snapshot = registry.load(spec, root)
-            except RegistryError as error:
-                entries.append((subject, scope, type(error).__name__))
-            else:
-                entries.append((subject, scope, spec.binding_revision,
-                                snapshot.content_hash, snapshot.effective_digest))
-    return tuple(entries)
+    """Everything that `page_definitions` reads for `subjects`, except the page itself."""
+    return DefinitionsSelection(root, subjects).dependency()
 
 
 def _path(value: object) -> str:
@@ -257,6 +292,24 @@ def selected_overlay(root: Path, spec: RegistrySpec, *, authoring: bool = False)
     return select(root, spec, authoring=authoring).overlay(root).relative_to(root).as_posix()
 
 
+def match_overlay(root: Path, spec: RegistrySpec, relative_path: str, *,
+                  authoring: bool = False) -> RegistrySpec | None:
+    """Match one adapter's assigned overlay using metadata only; grant no admission."""
+    root = Path(root)
+    try:
+        document = configuration(root)
+    except AssignmentRequired:
+        if spec.overlay(root).relative_to(root).as_posix() != relative_path:
+            return None
+        return select(root, spec, authoring=authoring)
+    if document is None:
+        return spec if spec.overlay(root).relative_to(root).as_posix() == relative_path else None
+    for scope, binding in ((None, document["public"]), *document["private"].items()):
+        if storage(spec, binding)[0] == relative_path:
+            return select(root, spec, scope, authoring=authoring)
+    return None
+
+
 def bound_scopes(root: Path, path: str, compiled: Any) -> frozenset[str] | None:
     """Supply assigned registry membership without decoding its definitions."""
     from .. import registry_history
@@ -285,7 +338,7 @@ def bound_scopes(root: Path, path: str, compiled: Any) -> frozenset[str] | None:
 def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str | None = None,
                prospective: bool = False) -> str | None:
     """Resolve canonical page membership before looking up any definition or folder."""
-    from .. import find_types
+    from .. import find_types, semantic_contract
     from ..governance import membership, policy
 
     if registry_scope is None:
@@ -303,7 +356,7 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
         return None
     compiled = policy.load(root)
     page = find_types.ParsedPage(path=Path(root) / path, rel_path=path,
-                                frontmatter=frontmatter, body="", title="", mtime=0)
+                                frontmatter=semantic_contract._thaw(frontmatter), body="", title="", mtime=0)
     scopes = membership._evaluate_markdown_scopes(page, compiled)
     candidates = set(scopes).intersection(document["private"])
     destinations = {scope for folder, scope in document["destinations"].items() if _contains(folder, path)}
@@ -326,13 +379,22 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
     return selected
 
 
-def recheck(root: Path, spec: RegistrySpec) -> None:
-    """Recheck the same binding and its current admission at the existing write seam."""
+def recheck_binding(root: Path, spec: RegistrySpec) -> RegistrySpec:
+    """Select fresh storage and require the operation's original binding."""
     from . import registry_spec
-    from .contract import admission_refusal
 
     current = select(root, registry_spec(spec.name),
                      None if spec.instance_id == PUBLIC_INSTANCE else spec.instance_id)
-    if (current.binding_revision != spec.binding_revision or current.stem != spec.stem
-            or current.overlay(root) != spec.overlay(root) or admission_refusal(root, current)):
+    if (current.instance_id != spec.instance_id or current.binding_revision != spec.binding_revision
+            or current.stem != spec.stem or current.overlay(root) != spec.overlay(root)):
+        raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable")
+    return current
+
+
+def recheck(root: Path, spec: RegistrySpec) -> None:
+    """Recheck the same binding and its current admission at the existing write seam."""
+    from .contract import admission_refusal
+
+    current = recheck_binding(root, spec)
+    if admission_refusal(root, current):
         raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable")

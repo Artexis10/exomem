@@ -20,7 +20,7 @@ Evidence for 1.1 to 2.1 is in `tests/test_reclassify_source.py` and `tests/test_
 ## 2. Phase 1 delivery
 
 - [x] 2.1 Run one end-to-end workflow: preview, reclassify and revert a Source cited by an Evidence page by stem and by a mutable Note.
-- [ ] 2.2 Obtain exact independent review, pass full CI and installed proof, merge, and verify the ordinary release.
+- [x] 2.2 Obtain exact independent review, pass full CI and installed proof, merge, and verify the ordinary release.
 
 ## 3. Separately authorized operation
 
@@ -31,3 +31,25 @@ Evidence for 1.1 to 2.1 is in `tests/test_reclassify_source.py` and `tests/test_
 
 - [ ] 4.1 Update this design for history-aware read resolution under the Decision 5 constraints, choose the history store, and obtain review before implementation.
 - [ ] 4.2 Archive this change with shipped evidence, or withdraw Phase 2 with the 3.1 count as its reason.
+
+## Phase 1 released delivery evidence
+
+[PR #1632](https://github.com/Artexis10/exomem/pull/1632) merged as
+`762653a0c0030b65898355983664efcb435ca0a9` with ordinary CI green.
+The [review](https://github.com/Artexis10/exomem/pull/1632#issuecomment-6070111302)
+and [correction recheck](https://github.com/Artexis10/exomem/pull/1632#issuecomment-6072189911)
+approved phase 1.
+The merge is an ancestor of [v0.115.0](https://github.com/Artexis10/exomem/releases/tag/v0.115.0),
+commit `5abed4438ae767af5c89ccd1438c63e35df107d8`.
+
+A fresh isolated CPython 3.13.12 run against the published release passed
+`tests/test_reclassify_source.py::test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_operation`:
+1 passed in 6.00 seconds, with no skips or failures.
+The unchanged maintained test came from the exact release tag.
+The published PyPI wheel has SHA-256
+`b7b9a602d76f056835463edddf8ebc85a0eeb765fd4cc1094f01a1a0f6e6f49d`;
+all 573 package members matched the tag and installed distribution.
+The dispatcher previewed, moved twice and reverted twice while preserving Evidence links and restoring mutable Note bytes.
+The run made no provider calls and removed its private runtime state afterward.
+The historical 288-case claim remains unverified.
+The production drain and phases 3 and 4 remain open; no production Source move occurred.

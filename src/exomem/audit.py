@@ -116,6 +116,7 @@ from . import entity_types as entity_types_module
 from . import find as find_module
 from . import provenance as provenance_module
 from . import vault as vault_module
+from .collection_store import ownership
 from .collection_store.preview import canonical_read, selected_writer
 from .kbdir import kb_dirname, kb_prefix
 from .planning_values import PlanningValues
@@ -163,6 +164,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "collection_candidate",
     "artifact_role_promotion",
     "transient_state_review",
+    "collection_view_corrections",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -492,6 +494,7 @@ def _one_log_parse(function: Callable[..., AuditReport]) -> Callable[..., AuditR
     return wrapped
 
 
+@ownership.reader
 @_one_log_parse
 def audit(
     vault_root: Path,
@@ -630,6 +633,11 @@ def audit(
         findings.extend(_check_duplicated_sidecars(vault_root))
     if "semantic_recall_isolation" in selected:
         findings.extend(_check_semantic_recall_isolation(vault_root))
+    if "collection_view_corrections" in selected:
+        correction_findings, correction_coverage = _check_collection_view_corrections(vault_root)
+        findings.extend(correction_findings)
+        if correction_coverage is not None:
+            metadata.setdefault("coverage", {})["collection_view_corrections"] = correction_coverage
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     if semantic_categories:
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
@@ -657,6 +665,22 @@ def audit(
         role_state=role_state,
         backfill_cursors=backfill_cursors,
     )
+
+
+def _check_collection_view_corrections(vault_root: Path) -> tuple[list[AuditFinding], str | None]:
+    """Held corrections of store collection views (OpenSpec move-structured-collections-to-sqlite §6).
+
+    Each is an owner edit of a view that edit-back could not apply. Complete canonical
+    ownership proves absence; unavailable evidence leaves the queue's coverage unknown.
+    """
+    try:
+        if ownership.current(vault_root).marker is None:
+            return [], None
+    except Exception:  # noqa: BLE001 - unavailable ownership leaves the queue's coverage unknown
+        return [], "unknown"
+    from .collection_store import edit_back
+
+    return edit_back.attention_findings(vault_root)
 
 
 def _check_bridge_review(
@@ -2275,7 +2299,7 @@ def _check_wikilinks(
         full_paths.add(no_ext)
         kb_stripped_paths.add(no_ext.removeprefix(kb_prefix()))
         names_to_paths.setdefault(md_path.stem, []).append(no_ext)
-        # Title fallback: lets `[[North-Led Content Manual]]` resolve to a
+        # Title fallback: lets `[[Test Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
         try:
             text, _guard = vault_module.read_guarded_text(vault_root, md_path)
@@ -2733,8 +2757,8 @@ _TAG_NORMALIZE_PATTERN = re.compile(r"[\s_]+")
 def _normalize_tag(tag: str) -> str:
     """Lowercase + collapse whitespace/underscores to dashes for cluster keying.
 
-    `Warning-Letter-Incident`, `warning_letter_incident`, `warning  letter  incident`
-    all normalize to `warning-letter-incident`.
+    `Move-In-Checklist`, `move_in_checklist`, `move  in  checklist`
+    all normalize to `move-in-checklist`.
     """
     return _TAG_NORMALIZE_PATTERN.sub("-", tag.strip().lower())
 
@@ -2755,8 +2779,8 @@ def _check_tag_inconsistency(
     pages: list[find_module.ParsedPage],
 ) -> list[AuditFinding]:
     """Detect variant clusters: distinct raw tags that normalize to the same
-    key (e.g. `warning_letter_incident` vs `warning-letter-incident` vs
-    `Warning-Letter-Incident`).
+    key (e.g. `move_in_checklist` vs `move-in-checklist` vs
+    `Move-In-Checklist`).
 
     Only mechanical drift (case + separator) is detected. Semantic
     near-duplicates like `workflow` vs `workflows` are NOT flagged — that

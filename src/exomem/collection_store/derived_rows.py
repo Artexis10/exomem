@@ -42,7 +42,16 @@ from typing import Any
 
 from .. import structured_collections as collections
 from ..reserved_paths import _SQLITE_SUFFIXES  # the SQLite file family, defined once there
-from . import index_migrations, rollups, summary, typed_storage
+from . import (
+    index_migrations,
+    native_identity,
+    native_metadata,
+    native_rows,
+    rollups,
+    summary,
+    typed_storage,
+)
+from .native_projections import NativeProjectionPlan
 from .query_indexes import ProjectionPlan
 
 FILENAME = "collections-derived.sqlite"
@@ -50,10 +59,11 @@ COLLECTION_DERIVED = "COLLECTION_DERIVED"
 QUERY_REBUILDING = "QUERY_REBUILDING"
 REBUILD_MISMATCH = "DERIVED_REBUILD_MISMATCH"
 SOURCE_MISSING = "DERIVED_SOURCE_MISSING"
-#: Rows one rebuild step applies in one transaction, so requests are served between steps.
+#: Rows one rebuild step applies in one transaction, so requests are served between steps. A step
+#: also ends after the batch it is applying when its caller asks (``step``).
 REBUILD_STEP_ROWS = 2000
 #: This file's own layout; a file of another one is discarded, and its rows rebuild from the log.
-LAYOUT = 2
+LAYOUT = 3
 
 _DDL = (
     "CREATE TABLE IF NOT EXISTS derived_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT",
@@ -192,7 +202,9 @@ class Target:
     def reads(self, schema: str) -> typed_storage.Layout:
         """The layout a reader joins: the one rows table stands for ``items`` and the current table."""
         table = f"{schema}.{self.table}"
-        return replace(self.layout, items=table, current=table)
+        context = {"database": schema} if self.layout.encoding == typed_storage.TYPED_V2 else {}
+        items = self.projection.read_relation(schema) if context else table
+        return replace(self.layout, items=items, current=table, **context)
 
 
 def target(conn: sqlite3.Connection, collection_id: str) -> Target | None:
@@ -213,6 +225,8 @@ def _rows_ddl(goal: Target) -> tuple[str, ...]:
     engine compiles them. A tag column takes no NOT NULL, which an added column needs a
     default for; ``typed_storage.decode_value`` refuses a NULL tag.
     """
+    if isinstance(goal.projection, NativeProjectionPlan):
+        return goal.projection.create_ddl()
     added = [column for n in range(len(goal.layout.fields)) for column in (f"t{n} INTEGER", f"v{n} ANY", f"k{n} ANY")]
     # The store's items columns a reader filters or reads, computed so they cost no bytes per row.
     added += ["r TEXT", f"collection_id TEXT GENERATED ALWAYS AS ('{goal.collection_id}') VIRTUAL",
@@ -313,6 +327,7 @@ class Store:
         # Opened on the writer handle's thread and closed with the handle (``WriterConnection.close``).
         # ``open_store`` rebinds ``handle`` to each checkout that uses it.
         self.root, self.handle, self.path, self.closed = root, handle, path(handle.path), False
+        self._write_scope, self._owns_transaction = None, False
         self.conn = self._open()
         self.readers: dict[str, Any] = {}  # a rebuild's open member reader per collection
 
@@ -320,6 +335,10 @@ class Store:
         for attempt in (0, 1):
             conn = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
             try:
+                from .native_operands import FileRole, register_native_operands
+
+                register_native_operands(conn, databases={FileRole.DERIVED: "main"})
+                conn.execute("PRAGMA recursive_triggers=ON")
                 conn.execute("PRAGMA journal_mode=WAL")
                 # Every state this file can lose by a power cut is one reconcile repairs.
                 conn.execute("PRAGMA synchronous=NORMAL")
@@ -328,6 +347,7 @@ class Store:
                     raise sqlite3.DatabaseError("the derived file has another layout")
                 for statement in _DDL:
                     conn.execute(statement)
+                native_metadata.install(conn, canonical=False)
                 conn.execute(f"PRAGMA user_version={LAYOUT}")
                 return conn
             except sqlite3.DatabaseError:
@@ -354,16 +374,35 @@ class Store:
         # Inside the vault's mutation boundary with the store's own checks, as every store write is:
         # a writer past a lost lease or a managed handoff must not change rows that the new holder's
         # log counts are built on. The divergence fence guards the store's publication, which this
-        # file never reaches.
-        with active_manager().mutation_guard(self.root, operation="derived_rows"):
+        # file never reaches. The boundary stays: the writer's authority check requires this thread
+        # to hold it, and a release quiesces writers by taking it. This file is a projection of the
+        # store's import log, written only by maintenance (rebuilds, import batches and a new
+        # handle's reconcile), so it takes the projection guard: background work that leaves the
+        # vault commit generation, which no validity stamp of this file depends on, where it is.
+        with active_manager().projection_guard(self.root, operation="derived_rows"):
             self.handle.require_write_authority(allow_diverged=True)
             self.conn.execute("BEGIN IMMEDIATE")
+            self._owns_transaction = True
             try:
                 yield self.conn
                 self.conn.execute("COMMIT")
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
+            finally:
+                self._owns_transaction = False
+                if self._write_scope is not None:
+                    self._write_scope.close()
+                    self._write_scope = None
+
+    @property
+    def write_scope(self) -> native_metadata.WriteScope:
+        """This transaction's native metadata scope, opened on first use and closed when the transaction ends."""
+        if not self._owns_transaction:
+            raise RuntimeError("a native metadata scope belongs to this file's open transaction")
+        if self._write_scope is None:
+            self._write_scope = native_metadata.WriteScope(self.conn)
+        return self._write_scope
 
     def state(self, main: sqlite3.Connection, collection_id: str) -> tuple[State, Target | None]:
         goal = target(main, collection_id)
@@ -542,11 +581,11 @@ def open_store(writer) -> Store:
 # The apply function: one batch of rows into the derived layout
 
 
-def _decoder(goal: Target):
-    width = 3 * len(goal.layout.fields) + 1
+def _decoder(goal: Target, conn):
+    width = len(goal.layout.value_columns) + 1
 
     def decode(columns) -> dict[str, Any]:
-        return typed_storage.decode_row(goal.layout, columns[:width])
+        return typed_storage.decode_row(goal.layout, columns[:width], connection=conn)
 
     return decode
 
@@ -554,19 +593,30 @@ def _decoder(goal: Target):
 def _members(goal: Target):
     """Read a mirror bucket's indexed members from the collection's own rows."""
     columns = ",".join(f"d.{column}" for column in (*goal.layout.value_columns, "r"))
-    decode = _decoder(goal)
-
     def members(conn, rollup_id, bucket, groups):
+        decode = _decoder(goal, conn)
         for row_id, key, *values in conn.execute(
                 f"SELECT d.row_id,d.item_key,{columns} FROM rollup_members m JOIN {goal.table} d "  # noqa: S608
                 "ON d.row_id=m.row_id WHERE m.rollup_id=? AND m.bucket=? AND m.groups=?",
                 (rollup_id, bucket, groups)).fetchall():
+            if goal.layout.encoding == typed_storage.TYPED_V2:
+                key = native_identity.decode(key, goal.layout.identity)
             yield row_id, key, decode(values)
 
     return members
 
 
-def apply(conn: sqlite3.Connection, goal: Target, items) -> list[dict[str, Any]]:
+def _key_rows(conn, goal: Target, keys, columns):
+    native = isinstance(goal.projection, NativeProjectionPlan)
+    for offset in range(0, len(keys), 500):
+        chunk = keys[offset:offset + 500]
+        stored_keys = [native_identity.encode(key, goal.layout.identity) for key in chunk] if native else chunk
+        yield from conn.execute(
+            f"SELECT item_key,{','.join(columns)} FROM {goal.table} "  # noqa: S608
+            f"WHERE item_key IN ({','.join('?' for _ in chunk)})", stored_keys)
+
+
+def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None) -> list[dict[str, Any]]:
     """Upsert ``items`` (``(index, item_key, values)``, in source order) into the collection's rows.
 
     A row's typed columns and its projection keys are one row of the collection's table.
@@ -579,36 +629,56 @@ def apply(conn: sqlite3.Connection, goal: Target, items) -> list[dict[str, Any]]
     if not items:
         return []
     layout, table = goal.layout, goal.table
+    native = isinstance(goal.projection, NativeProjectionPlan)
     columns = (*layout.value_columns, "r")
     found: dict[str, tuple[int, int, tuple]] = {}
     keys = list(dict.fromkeys(key for _, key, _ in items))
-    for offset in range(0, len(keys), 500):
-        chunk = keys[offset:offset + 500]
-        for key, row_id, version, *encoded in conn.execute(
-                f"SELECT item_key,row_id,row_version,{','.join(columns)} FROM {table} "  # noqa: S608
-                f"WHERE item_key IN ({','.join('?' for _ in chunk)})", chunk):
-            found[key] = (row_id, version, tuple(encoded))
-    insert = (f"INSERT INTO {table}(item_key,row_version,keys_json,{','.join(columns)}) "  # noqa: S608
-              f"VALUES (?,?,?,{','.join('?' for _ in columns)})")
-    update = (f"UPDATE {table} SET row_version=?,keys_json=?,"  # noqa: S608
+    for key, row_id, version, *encoded in _key_rows(conn, goal, keys, ("row_id", "row_version", *columns)):
+        if native:
+            key = native_identity.decode(key, layout.identity)
+        found[key] = (row_id, version, tuple(encoded))
+    projection_column = "" if native else ",keys_json"
+    projection_parameter = "" if native else ",?"
+    projection_update = "" if native else "keys_json=?,"
+    insert = (f"INSERT INTO {table}(item_key,row_version{projection_column},{','.join(columns)}) "  # noqa: S608
+              f"VALUES (?,?{projection_parameter},{','.join('?' for _ in columns)})")
+    update = (f"UPDATE {table} SET row_version=?,{projection_update}"  # noqa: S608
               f"{','.join(c + '=?' for c in columns)} WHERE row_id=?")
-    decode, upkeep = _decoder(goal), rollups.Upkeep(conn, members=_members(goal))
+    inserted = None
+    # Only new rows can precede upkeep; updates must see earlier members' current values.
+    if native and not found and len(keys) == len(items):
+        from .native_operands import FileRole, operand_snapshot
+
+        parameters = []
+        for _, key, values in items:
+            encoded = typed_storage.encode_row(layout, values, connection=conn, scope=scope)
+            parameters.append((native_identity.encode(key, layout.identity), 1, *encoded))
+        with operand_snapshot(conn, layout, role=FileRole.DERIVED):
+            conn.executemany(insert, parameters)
+        inserted = {native_identity.decode(key, layout.identity): row_id
+                    for key, row_id in _key_rows(conn, goal, keys, ("row_id",))}
+    decode, upkeep = _decoder(goal, conn), rollups.Upkeep(conn, members=_members(goal))
     flagged: dict[int, int] = {}
     touched: set[tuple[int, str, str]] = set()
     outcomes = []
     for index, key, values in items:
-        encoded = typed_storage.encode_row(layout, values)
-        before = found.get(key)
-        if before is not None and before[2] == encoded:
-            outcomes.append({"index": index, "item_key": key, "outcome": "unchanged"})
-            continue
-        projected = goal.projection.encode(values)
-        if before is None:
-            row_id, version, previous = conn.execute(insert, (key, 1, projected, *encoded)).lastrowid, 1, None
+        if inserted is not None:
+            row_id, previous, before = inserted[key], None, None
         else:
-            row_id, version, previous = before[0], before[1] + 1, decode(before[2])
-            conn.execute(update, (version, projected, *encoded, row_id))
-        found[key] = (row_id, version, encoded)
+            encoded = typed_storage.encode_row(layout, values, connection=conn, scope=scope)
+            before = found.get(key)
+            same = before is not None and (native_rows.encoded_equal(before[2], encoded) if native else before[2] == encoded)
+            if same:
+                outcomes.append({"index": index, "item_key": key, "outcome": "unchanged"})
+                continue
+            projected = () if native else (goal.projection.encode(values),)
+            stored_key = native_identity.encode(key, layout.identity) if native else key
+            if before is None:
+                row_id, version, previous = conn.execute(insert, (stored_key, 1, *projected, *encoded)).lastrowid, 1, None
+            else:
+                row_id, version, previous = before[0], before[1] + 1, decode(before[2])
+                conn.execute(update, (version, *projected, *encoded, row_id))
+            found[key] = (row_id, version, encoded)
         for rollup_id, rollup in goal.rollups:
             change, places = upkeep.move(rollup_id, rollup, row_id, key, values, previous)
             if change:
@@ -690,7 +760,8 @@ def row_source(conn: sqlite3.Connection, collection_id: str, *, attached: bool) 
     applied, progress = conn.execute(
         "SELECT c.applied_seq,p.record_json FROM derived.derived_collections c LEFT JOIN derived.derived_progress p "
         "ON p.collection_id=c.collection_id WHERE c.collection_id=?", (collection_id,)).fetchone()
-    return RowSource(f"derived.{goal.table}", "derived", goal.reads("derived"), _json([applied, progress]))
+    layout = goal.reads("derived")
+    return RowSource(layout.items, "derived", layout, _json([applied, progress]))
 
 
 def rebuilds_pending(store_path: Path) -> bool:
@@ -736,6 +807,10 @@ def snapshot(store_path: Path, destination: Path) -> dict[str, Any] | None:
     staged.unlink(missing_ok=True)
     with closing(sqlite3.connect(f"{found.resolve().as_uri()}?mode=ro", uri=True)) as source, \
             closing(sqlite3.connect(staged)) as copy:
+        from .native_operands import FileRole, register_native_operands
+
+        for conn in (source, copy):
+            register_native_operands(conn, databases={FileRole.DERIVED: "main"})
         source.backup(copy)
         intact = copy.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     if not intact:
@@ -754,8 +829,11 @@ class _Missing(Exception):
     """A source the log names is absent or no longer the bytes it bound; the argument says why."""
 
 
-def step(root: Path, writer) -> str:
+def step(root: Path, writer, *, aside=lambda: False) -> str:
     """Advance one rebuilding derived collection by one bounded step on the store writer's thread.
+
+    The step holds the vault mutation boundary, so after each batch it asks ``aside()`` whether
+    other work waits; then it records where it stopped and ends.
 
     Returns ``advanced``, ``done`` when a rebuild finished, ``stopped`` when every rebuild is
     stopped and one waits on a missing source, ``mismatched`` when every one stopped on a
@@ -768,7 +846,7 @@ def step(root: Path, writer) -> str:
         store.settle(writer.connection, cid)
     waiting = set()
     for cid in store.rebuilding():
-        outcome = _rebuild(Path(root), writer, store, cid)
+        outcome = _rebuild(Path(root), writer, store, cid, aside)
         if outcome not in ("stopped", "mismatched"):
             return outcome
         waiting.add(outcome)
@@ -807,7 +885,7 @@ def _manifest_refusal(root: Path, ref: str, manifest_sha256: str) -> str:
     return "its selector no longer picks the members the import bound"
 
 
-def _rebuild(root: Path, writer, store: Store, collection_id: str) -> str:
+def _rebuild(root: Path, writer, store: Store, collection_id: str, aside) -> str:
     """Replay one bounded step of a collection's import log into its rows, through the importer's apply path."""
     from .. import __version__
     from . import import_time, importer
@@ -856,12 +934,13 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str) -> str:
     shas, taken, ended, stopped = binding["source"]["members"]["sha256"], 0, False, False
     try:
         with store.transaction():
-            while taken < REBUILD_STEP_ROWS and not ended:
+            while taken < REBUILD_STEP_ROWS and not ended and not (taken and aside()):
                 batch = importer._next_batch(reader, plan, reader.pending, order)
                 if batch.stop is not None:
                     stopped = True  # a logged member never stopped its import
                     break
-                applied = importer._derived_apply(store.conn, goal, batch, manifest, binding["source"]["ref"], shas)
+                applied = importer._derived_apply(store.conn, goal, batch, manifest, binding["source"]["ref"], shas,
+                                                  scope=store.write_scope)
                 for _, key, payload in applied.entries:
                     importer._extend(tally, key, payload)
                 rows += sum(outcome["outcome"] == "inserted" for outcome in applied.outcomes)

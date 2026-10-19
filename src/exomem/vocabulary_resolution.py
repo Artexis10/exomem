@@ -11,7 +11,7 @@ import hashlib
 import json
 import os
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -297,8 +297,10 @@ def registry_refusal_reason(vault_root: Path, error: VocabularyResolutionError) 
     """The refusal reason, naming the vault-relative registry for a registry fault."""
     if error.code != "INVALID_DOMAIN_TAXONOMY":
         return error.reason
-    registry = source_taxonomy.registry_path(Path(vault_root)).relative_to(Path(vault_root))
-    return f"{error.reason} ({registry.as_posix()})"
+    from .vocabulary import instances
+
+    registry = instances.selected_overlay(Path(vault_root), source_taxonomy.KIND_SPEC)
+    return f"{error.reason} ({registry})"
 
 
 def _projection_folder(taxonomy: source_taxonomy.SourceTaxonomy, canonical: str, parent: Path) -> str:
@@ -316,13 +318,17 @@ def _projection_folder(taxonomy: source_taxonomy.SourceTaxonomy, canonical: str,
 
 
 def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.PathGuard, str]:
-    path = source_taxonomy.registry_path(root)
+    from .vocabulary import instances
+
+    spec = instances.select(root, source_taxonomy.KIND_SPEC)
+    instances.recheck(root, spec)
+    path = spec.overlay(root)
     relative = path.relative_to(root).as_posix()
     try:
         path.lstat()
     except FileNotFoundError:
         return (
-            source_taxonomy.core_taxonomy(),
+            replace(source_taxonomy.core_taxonomy(), selected_spec=spec),
             vault.PathGuard.capture(root, relative, leaf_policy="absent"),
             _snapshot({"registry": "missing"}),
         )
@@ -337,7 +343,7 @@ def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.
             "INVALID_DOMAIN_TAXONOMY", "domain taxonomy is unreadable"
         ) from error
     taxonomy, snapshot = _strict_registry_text(raw)
-    return taxonomy, guard, snapshot
+    return replace(taxonomy, selected_spec=spec), guard, snapshot
 
 
 def registry_text_snapshot(text: str | None) -> str | None:

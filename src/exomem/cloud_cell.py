@@ -11,6 +11,7 @@ into `os.environ` for these names directly.
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -18,8 +19,35 @@ CLOUD_MODE_ENV = "EXOMEM_CLOUD_CELL"
 CLOUD_READ_ONLY_ENV = "EXOMEM_CLOUD_READ_ONLY"
 RESOURCE_POLICY_ENV = "EXOMEM_CLOUD_RESOURCE_POLICY"
 CLOUD_CELL_ISSUER = "exomem-cloud-cell"
+#: The gateway names the authenticated OAuth client of each request here. A
+#: stateless request from a handshake-protocol client carries no `clientInfo`,
+#: and the gateway forwards no `User-Agent`, so without it every such call looks
+#: like an unknown coding client. Trusted only in cloud mode: there the cell
+#: bearer proves the request came through the gateway, which sets this header
+#: itself and never forwards a caller's copy. It tunes eagerness only.
+GATEWAY_CLIENT_HEADER = "x-exomem-oauth-client"
+#: The gateway names the engagement context (`coding` or `conversation`) of the
+#: authenticated OAuth client here, from the control plane's client registry.
+#: Trusted on the same terms as `GATEWAY_CLIENT_HEADER`; neither name starts
+#: with `mcp-param-`, the one prefix the gateway forwards from a caller.
+GATEWAY_CONTEXT_HEADER = "x-exomem-client-context"
+#: The gateway names the authenticated OAuth grant with its stable UUID here.
+#: Trusted on the same terms as `GATEWAY_CLIENT_HEADER`, never from clientInfo.
+#: This content-free, owner-private actor metadata grants no authority.
+GATEWAY_APP_ID_HEADER = "x-exomem-app-id"
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
+
+
+def canonical_app_id(value: object) -> str | None:
+    """The gateway's canonical UUID, or unknown; never interpret a client name."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    return value if str(parsed) == value else None
 
 
 class CloudConfigError(RuntimeError):

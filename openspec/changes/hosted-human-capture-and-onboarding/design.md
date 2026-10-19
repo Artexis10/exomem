@@ -18,13 +18,13 @@ Two hypotheses were tested and rejected before the real one held:
    walking `__cause__`/`__context__` and, failing that, by parsing `CODE: reason` from
    the message, so the flattening is survivable.
 
-The engine is sound. `capture_source` already accepts ordinary prose repeatedly and the
-result is retrievable:
+The engine is sound. `capture_source` accepts ordinary prose and makes the result
+retrievable. These invented examples show the supported form:
 
 ```
-OK 'Dentist Thursday' -> Knowledge Base/Sources/Other/2026-08-16-dentist-thursday.md
-OK 'Kim train'        -> Knowledge Base/Sources/Other/2026-08-16-kim-train.md
-find 'dentist'        -> the captured source
+OK 'Library pickup' -> Knowledge Base/Sources/Other/2024-06-03-library-pickup.md
+OK 'Mira ferry'     -> Knowledge Base/Sources/Other/2024-06-03-mira-ferry.md
+find 'library'      -> the captured source
 ```
 
 `cli_ops.error_dict` is also sound — it already returns the specific code and the full

@@ -4,6 +4,30 @@ Make ordinary conversation enrich durable knowledge and supply useful context la
 
 ## ADDED Requirements
 
+### Requirement: Epistemic commitments span supported knowledge workflows
+
+The system SHALL preserve distinctions between source material, attributed interpretation, exact structured state and subsequent explanation throughout supported public knowledge workflows. Relevant qualifications, uncertainty, competing explanations and authored revisions SHALL survive those transitions. Registered vocabulary and authored content SHALL determine their representation; these examples SHALL NOT define a closed ontology.
+
+Ordinary interaction MUST NOT require scientific terminology or a prescribed experimental sequence. Evidence, relationships and retained interpretations SHALL remain inspectable on demand through their supported authorized interfaces. A structured collection SHALL retain its declared canonical authority while participating in the same provenance and correction workflow as compiled knowledge.
+
+#### Scenario: An ordinary question benefits from disciplined inquiry
+
+- **WHEN** a user asks about unexpected equipment behaviour without proposing a formal experiment
+- **THEN** the supported workflow can preserve available observations and attributed explanations without requiring methodology education
+- **AND** any proposed test, collection or commitment remains subject to its existing authority and capture rules
+
+#### Scenario: A measurement informs a qualified interpretation
+
+- **WHEN** preserved original material and an exact collection row support a qualified compiled interpretation
+- **THEN** a later authorized answer can recover the relevant measurement, interpretation, qualification and available source binding
+- **AND** an extraction or repeated interpretation is not counted as another independent evidential origin
+
+#### Scenario: Later understanding changes one proposition
+
+- **WHEN** later evidence refines or refutes one unit within a note containing other valid units
+- **THEN** the supported correction workflow preserves unaffected propositions and distinguishes retained revisions from authored epistemic relationships
+- **AND** later context preserves the relevant qualification or refutation without loading every historical revision into ordinary retrieval
+
 ### Requirement: Ordinary use closes the capture and activation loop
 
 The system SHALL support pre-turn activation, active-agent reasoning, episode decomposition before destination selection, canonical resolution and permitted writes, projection publication and subsequent activation. Delivery SHALL demonstrate ordinary-agent initiation without user reminders as well as deterministic tool execution. The active agent SHALL remain the semantic decision maker; server code SHALL validate and execute bounded typed operations without authoring semantic conclusions.
@@ -31,6 +55,8 @@ The active agent SHALL be able to use relevant governed method knowledge alongsi
 ### Requirement: Working continuity preserves temporal meaning
 
 Activation and episode recovery SHALL reconnect a resumed topic with relevant recent changes, supported current state, unresolved work and older dependencies within existing context budgets. They SHALL use the existing continuity and canonical evidence carriers without depending on the later live-activity feed. An unfinished episode SHALL NOT itself establish an unexpressed Planning commitment.
+
+Continuation restoration SHALL inspect relevant episode open items and existing Planning references, then reconcile newer corrections and closure evidence. Recent-context summaries SHALL remain pointers, not complete obligation restoration or completion proof. Acceptance SHALL observe the resumed agent retaining supported unfinished work without creating a new obligation store or inventing commitments.
 
 Where evidence supplies them, event occurrence, knowledge acquisition and claim validity SHALL remain distinguishable. Missing times or validity SHALL remain unknown. Capture time, file modification time, repetition and recent retrieval SHALL NOT independently establish event recency, continuing validity or task relevance. Corrections and supersession SHALL qualify current claims, while an older relevant dependency SHALL remain eligible beside recent developments.
 
@@ -365,6 +391,13 @@ Activation SHALL resolve anchors, apply task-conditioned roles and bounded typed
   neighbourhood page
 - **AND** a project anchor with no declared members still resolves and
   reports no material, rather than fabricating any
+
+#### Scenario: Applicable constraints inform an external artifact
+
+- **WHEN** an agent prepares an external artifact and admitted memory contains an applicable confidentiality constraint
+- **THEN** supported lifecycle context surfaces the constraint with its supported scope
+- **AND** the agent uses the constraint without treating owner recall permission as permission to disclose private facts
+- **AND** acceptance reports useful context, output authority and actual host enforcement separately
 
 ### Requirement: Activation semantic work stays within the anchor catalogue
 
@@ -1395,6 +1428,18 @@ The existing benchmark SHALL retain its thresholds and negative controls while e
 - **WHEN** a hand-built packet passes scoring while the corpus has not produced the expected entities, collections and graph state through the product path
 - **THEN** scorer correctness may pass but compiler and integrated-loop acceptance fail
 
+#### Scenario: Compact context omits a necessary qualification
+
+- **WHEN** a unit-level packet uses fewer tokens than full-note retrieval but omits a reasoning-critical qualification or dependency
+- **THEN** the useful-answer comparison records the omission against its source-authored expectation
+- **AND** token reduction cannot establish a successful context or storage change
+
+#### Scenario: Backend support has no observed client journey
+
+- **WHEN** a public tool proves retained history or a precise relationship but the claimed client or viewer has not exercised it
+- **THEN** acceptance records the supported tool behaviour separately from the unverified client journey
+- **AND** a forced call does not establish ordinary agent initiation
+
 ### Requirement: Cross-client activity is a deferred bounded context input
 
 The programme SHALL retain shared activity awareness as a follow-on after the existing compiler, client acceptance, adaptation and consolidation tranches. Earlier compiler deliveries, candidate iteration and hosted launch SHALL NOT depend on enabling it. Its implementation SHALL first assess reuse of current host/harness activity, session, handoff and continuity mechanisms rather than assume a new channel is necessary. Native clients SHALL retain execution ownership.
@@ -1438,3 +1483,36 @@ Presence and advisory ownership SHALL remain transient operational state. Suppor
 - **WHEN** two attributable activity records claim responsibility for overlapping work
 - **THEN** bounded context exposes the advisory conflict without choosing an exclusive owner or automatically suppressing either task
 - **AND** any actual side effect remains subject to its existing authorization, idempotency and execution boundaries
+
+### Requirement: Reuse the installed contract with bounded live orientation
+
+A client holding the current installed skill or hook contract SHALL reuse its
+instructions. It SHALL obtain missing live state through the existing bounded session
+handshake and capability fingerprint rather than repeatedly requesting the full instruction
+or diagnostic bundle. Live state includes applicable policy, availability and service version.
+
+A missing or stale contract SHALL request an affected section or one compact fallback
+under the agent-bootstrap contract. Full diagnostics SHALL require a diagnostic need.
+A tool-only client without installed instructions SHALL retain instruction-bearing bootstrap
+fallback. Current governed operations SHALL enforce live permission checks regardless of
+the client's cached instructions.
+Implementations SHALL update generated schemas, fingerprints, skill guidance and hook guidance
+together. Acceptance SHALL record the exercised client version and actual lifecycle coverage.
+
+#### Scenario: An installed client continues with the current contract
+
+- **WHEN** a skill-capable client holds the current instruction digest and needs live service state
+- **THEN** it receives bounded session state without another full instruction bundle
+- **AND** later task refresh remains available under the existing context budget
+
+#### Scenario: Instructions change or no skill is installed
+
+- **WHEN** the installed digest is stale or a tool-only client has no instruction contract
+- **THEN** the client can obtain the applicable section or compact fallback without a retry loop
+- **AND** the response states the mismatch and does not infer a permission grant
+
+#### Scenario: Cached instructions outlive a permission change
+
+- **WHEN** live policy removes a permission described by an older installed contract
+- **THEN** the governed operation applies the current policy
+- **AND** reusing instructions does not preserve the removed permission

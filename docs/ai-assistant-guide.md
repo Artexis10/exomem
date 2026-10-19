@@ -5,9 +5,9 @@
 This guide is for agents using Exomem after the MCP server or connector is
 available. It keeps the contract simple:
 
-- Use the assistant's native memory or custom instructions as short-term or
-  behavioural memory: preferences, routing rules, and working context.
-- Use Exomem as long-term governed memory: project context, decisions, sourced
+- Keep temporary working context in the current conversation. Custom instructions
+  can guide one client; native memory is an explicit fallback when Exomem cannot capture.
+- Use Exomem as long-term governed memory: eligible durable preferences, personal baselines, project context, decisions, sourced
   conclusions, failures, experiments, proof-bearing records, and anything that
   should be searchable, citeable, reviewable, or supersedable across clients.
 - Do not make the user choose internal folders or page types unless the choice
@@ -66,8 +66,9 @@ Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
 metrics, and tentative claims stay quiet; this never authorizes creating an Entity,
 collection, or schema. A concise observation or narrow Entity facet follows
-`proactive_capture`; an affiliation relation requires `link_acceptance`; a new Entity follows `proactive_capture`;
-merge or substantial curation requires confirmed `restructure_execution`.
+`proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
+accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
+confirmed `restructure_execution`.
 
 ## Simple actions for agents
 
@@ -224,8 +225,7 @@ envelope maps the caller-authored link, reported-reference, and verification
 fields; it creates no schema and sets no item values. Reported remote identity
 is unverified unless matching platform proof establishes remote byte equality.
 Missing schema may yield a `structural_suggestions` proposal, but creation or
-change remains confirmed `restructure_execution`; a separately accepted
-relation remains `link_acceptance`.
+change remains confirmed `restructure_execution`; an independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Compile evidence
 
@@ -342,20 +342,20 @@ content-read smoke-tested before their new digest is marked verified.
 
 ## Copyable instruction block
 
-For clients that support neither Skills nor hooks — claude.ai custom
-instructions, ChatGPT, generic MCP clients. **Claude Code and Codex do not need
-this**: both load the real skills from disk via `exomem setup`.
+Use this block when a client has no loaded Exomem skill. Claude Chat and ChatGPT
+can load the skills from a plugin. Claude Code and Codex load them through
+`exomem setup`.
 
 Trim the tone line to your preference.
 
 ```text
-Use Exomem for governed knowledge, sources, evidence, decisions, and reusable conclusions; assistant-native memory is short-term/behavioural only.
+Use Exomem for eligible durable preferences, personal baselines, governed knowledge, sources, evidence, decisions, and reusable conclusions. Keep temporary working context in the current conversation.
 
 Without a loaded skill, call bootstrap(profile="compact") once per session and follow it.
 
 Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
-Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation, narrow Entity facet or new Entity: `proactive_capture`; affiliation relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_memory` for small corrections, `replace_memory` for supersession.
+Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_memory` for small corrections, `replace_memory` for supersession.
 ```
 
 ## Codex CLI

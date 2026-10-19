@@ -1,6 +1,11 @@
 ## Context
 
-- **Every Cloud cell already runs the media machinery.** It starts the media supervisor (`server_runtime.py`) and its serialized, disposable child (`media_worker.py`). But the `cloud` image installs only `.[embeddings-onnx]`:
+The following baseline describes the proposal before its first delivery.
+[#1661](https://github.com/Artexis10/exomem/pull/1661) shipped documents, OCR, engine switches and memory brakes.
+[#1798](https://github.com/Artexis10/exomem/pull/1798) added fleet defaults; [#1807](https://github.com/Artexis10/exomem/pull/1807) corrected CJK OCR recall.
+The task checklist preserves remaining engine and acceptance work. No image-search or speech completion is claimed.
+
+- **Every Cloud cell already ran the media machinery.** It starts the media supervisor (`server_runtime.py`) and its serialized, disposable child (`media_worker.py`). But the `cloud` image installs only `.[embeddings-onnx]`:
   - no torch;
   - no Pillow, Tesseract or faster-whisper.
 
@@ -63,7 +68,7 @@ Each engine has two measured budgets: an anonymous-memory budget for admission, 
 - A pressure stop, and an allocation failure under the hard limit (an ORT `bad_alloc`, a native allocation failure), are typed memory stops. The job returns to pending and is never an artifact failure.
 - After a bounded number of consecutive memory stops, the job leaves the cycle in one of two typed states, so it cannot loop:
   - **Exceeds this deployment's processing budget.** Each stop was an allocation failure under the child's own VmData hard limit. That is the only evidence about the file itself: anonymous demand above the engine's budget also raises VmData, so the hard limit catches an oversized file. Examples are a huge panorama, or a corrupt header that asks for a giant buffer. The tenant sees that the file exceeds this deployment's processing budget, with no install and no "corrupt" wording. The job returns to pending only when the cell limit or that engine's budget changes, because nothing else can make it fit.
-  - **Memory-blocked**, in every other case, including every case with a pressure stop. Pressure can come from the whole cell: backfill encoding in the serving process, the sensor child, an import checkpoint at 79% of the limit. Blaming the file for it would park ordinary files with a false reason, and the drain gate would then pass while they wait. So a pressure stop never leads to the over-budget state. The job returns to pending automatically: when a supervisor starts, when the cell limit or an engine budget changes, and periodically with a bounded backoff while pressure is low. No human retry is needed. On Cloud none would be possible anyway, because `process_media` is excluded from the cell's tool surface. A tenant sees the job only as waiting, with no action to take, and the memory reason appears on operator surfaces only.
+  - **Memory-blocked**, in every other case, including every case with a pressure stop. Pressure can come from the whole cell: backfill encoding in the serving process, the sensor child, an import checkpoint at 79% of the limit. Blaming the file for it would park ordinary files with a false reason, and the drain gate would then pass while they wait. So a pressure stop never leads to the over-budget state. The job returns to pending automatically: when a supervisor starts, when the cell limit or an engine budget changes, and periodically with a bounded backoff while pressure is low. No human retry is needed, and a `process_media` retry does not return it; the supervisor does. A tenant sees the job only as waiting, with no action to take, and the memory reason appears on operator surfaces only.
 - **Time verdict.** A watchdog stop of a child that outruns the job timeout counts apart from memory stops, and after the same bound the job takes the over-budget outcome, returning to pending only when the job timeout grows past the one it exceeded.
 - Starvation is caught before rollout: acceptance requires the owner-sized backlog to drain within a bound stated before the run, with no job left memory-blocked. Over-budget jobs are excluded from the drain and listed in the acceptance report with their file size and type.
 
@@ -101,7 +106,7 @@ Reuse wins where it fits.
 
   Orientation and script detection runs first, and then only that script's models run. So installed models cost image size only, never time or memory on an unrelated page.
   - When detection names no script, which happens on images with little text, OCR reads with the deployment's configured default language packs.
-  - Today every install calls Tesseract without a language, so it reads English only (`extract._ocr_image` and `extract._ocr_pdf_page`).
+  - The original implementation called Tesseract without a language. The delivered OCR slice now selects installed models through their script coverage.
   - The installed set is an image build parameter, which makes it deployment data, never a code list.
   - Each installed pack's script coverage is read from the pack's own data: the script property of its unicharset, or Tesseract's documented equivalent. Implementation verifies which one Tesseract exposes. If neither can be read at run time, the image build derives a coverage file from the installed packs; it is never hand-written.
   - A pack belongs to every script its data covers. Kanji-only Japanese may be detected as Han, so the Han route includes the deployment's Japanese packs.
@@ -158,6 +163,13 @@ Each engine (documents, OCR, image search, captions, speech) has a switch.
 
 **Where the switch lives.** cellctl renders each cell's environment. Today it has one chart-level `model_env` map (`CELLCTL_CELL_MODEL_ENV`), which it renders into every cell after `check_model_env` refuses forbidden keys, prefixes and suffixes. A change to that map changes every cell's render digest at once, so it cannot hold a per-cell canary. cellctl selects cells per feature only through cell-ID lists, such as `CELLCTL_ARTIFACT_BROKER_CELL_IDS` and `CELLCTL_DEDICATED_CELL_IDS`. So this change adds a per-engine cell-ID selection to cellctl on that precedent. It renders the engine's switch variable into the selected cells only, and the variable passes the same `check_model_env` rules.
 
+**Fleet default.** The per-cell selection leaves a cell created later with every engine off, so each new cell needs an edit before it reads documents or OCR. Once an engine is on in each existing cell, the operator can make it the fleet default (`cellctl.mediaEngineFleetDefault`, delivered as `CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT`). cellctl renders each cell's engines as the sorted union of the default and the cell's per-cell entries. An engine that is already on in a cell, and that the default then names, leaves that cell's rendered value unchanged, so the cell keeps its pod. An empty default renders as before.
+
+- **Shape.** The default is a plain list of engine names, checked by the same enum as the per-cell selection. A wildcard cell ID in the per-cell map would mix a sentinel into a map of cell IDs, and a second map would repeat the engines. cellctl knows no engine names. The image's `media_engines.ENGINES` is the one list. The chart schema holds one `$defs` enum of those names, used by both values, and a contract test keeps the enum equal to `media_engines.ENGINES`. A misspelt name therefore fails at `helm lint` and deploy, before cellctl renders it. Without the enum, a misspelt name would join every cell's engine set, change every digest and restart the fleet.
+- **Precondition.** The default changes no existing cell's render only when each existing cell already runs the engine through the per-cell selection. A cell that does not would restart and start its own backfill, and several such cells would start backfill together. The runbook carries this check and verifies that no cell restarted. cellctl does not enforce it. It sees the config and the cell rows, and cannot tell a cell that existed before the default from a cell created after it. A refusal would also block every render, and a wrong refusal costs more than the step it guards.
+- **No per-cell opt-out.** A default that a cell can leave is not needed yet: the operator admits every Cloud cell. A cell that must stay off gets a later change that adds the opt-out with a reason. Until then the operator removes the engine from the default and names it per cell; only the cell that loses the engine restarts.
+- **Backfill.** A new cell backfills only its own media, whether it starts empty or an operator import or restore fills it. That is the cell's own load, not a fleet-wide backfill.
+
 The documents switch covers only the formats that need newly shipped dependencies; TXT, EML and ICS stay on (D4).
 
 On Cloud, an engine that the image does not ship is disabled by the deployment's configuration. On a personal install, an enabled engine that is missing keeps today's blocked state with install guidance, and D8 requeues its jobs once it appears.
@@ -174,7 +186,7 @@ Until images ship, the interim is configuration only: `EXOMEM_DISABLE_CLIP=1` in
 
 ### D8. Backfill and recovery
 
-- **Backfill.** When an engine's switch turns on, media already in the cell is queued automatically. Rollout turns engines on one cell at a time, so backfill never runs in every cell at once. On every install, the same backfill is reconciliation: media that waited with a pending sidecar and no job gets its stage once the engine is enabled.
+- **Backfill.** When an engine's switch turns on, media already in the cell is queued automatically. Rollout turns engines on one cell at a time, so backfill never runs in every cell at once. This holds for a fleet default set under the D7 precondition, which starts no backfill in an existing cell, and for a cell created later, which backfills only its own media. On every install, the same backfill is reconciliation: media that waited with a pending sidecar and no job gets its stage once the engine is enabled.
 - **Recovery.** A job blocked with the typed reason "engine unavailable" is requeued when the engine appears. Today that reason is an `ExtractionUnavailable` error (`media_worker`). Other blocked reasons keep today's behaviour.
 
 ## Acceptance (per engine, in the owner's cell, before the switch rolls out)
@@ -214,10 +226,10 @@ Run on the owner-sized cell with that engine's backlog active:
 ## Open Questions
 
 - The speech engine: pending the bake-off (D6).
-- Whether `markitdown` or per-format libraries cover D4 at an acceptable size and licence.
-- The default OCR language packs used when script detection names no script, how many consecutive memory stops end the cycle, and the pressure stall threshold (D2). All are deployment values that acceptance sets.
+- D4 is delivered through MarkItDown, odfdo and striprtf. HEIC decoding remains pending its decoder licence review and format proof.
+- Documents/OCR ship defaults for fallback OCR packs, consecutive memory stops and pressure stalls. Budgets for later engines still need their own acceptance.
 - **Reconcile the memory gate before the first acceptance run.** The service-v1 peak gate counts page cache, and media acceptance reads anonymous plus non-reclaimable memory. The owner of `add-cloud-service-resource-policy` decides how the two measures agree. This change does not edit that change.
 - The agreement bounds for the known-content subsets and the drain-time bound are stated before each run.
-- Whether installing a new OCR pack re-extracts images whose OCR completed without it. The spec keeps completed text unless an explicit reprocessing mode asks, which is today's rule.
-- Whether the `process_media` and `read_media` Cloud exclusions lift when their engines turn on. Their recorded lift condition is "a media-capable cloud image ships" (`commands.CLOUD_SURFACE_EXCLUSIONS`). That requirement lives in the active change `adopt-exomem-cloud-plain-cells`, so an amendment belongs there.
+- Resolved: installing a new OCR pack does not re-extract images whose OCR completed without it. Completed text stays unchanged, and no reprocessing mode exists. A pack or OCR fix that changes the text of real tenant sidecars reopens this (task 2.5).
+- Resolved: Cloud cells serve `process_media` (`adopt-exomem-cloud-plain-cells` task 2.3a). The `read_media` exclusion stays, because the image does not ship video decoding.
 - Zero-shot image tags (`EXOMEM_IMAGE_TAGS`) reuse the loaded image model and score an English tag vocabulary. If D5 selects another image model, the tags follow it, and their threshold needs recalibration.

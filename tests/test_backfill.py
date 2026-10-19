@@ -126,11 +126,11 @@ def _drop_audio_with_plain_transcript(vault, rel=AUDIO_REL, engine="faster-whisp
 
 def _diarized_result(*a, **k):
     return extract.ExtractResult(
-        text="[Hugo]: hello there\n\n[Speaker B]: hi",
+        text="[Fixture Speaker]: hello there\n\n[Speaker B]: hi",
         media_type="audio",
         engine="faster-whisper:large-v3+diarized",
         speakers=[
-            {"speaker": "Hugo", "start": 0.0, "end": 1.5, "text": "hello there"},
+            {"speaker": "Fixture Speaker", "start": 0.0, "end": 1.5, "text": "hello there"},
             {"speaker": "Speaker B", "start": 1.5, "end": 2.0, "text": "hi"},
         ],
     )
@@ -145,8 +145,8 @@ def test_rediarize_reextracts_plain_asr_sidecar(vault, monkeypatch: pytest.Monke
     assert stats.extracted == 0  # counted separately from first-time extraction
     body = sidecar.read_text("utf-8")
     assert "extracted_by: faster-whisper:large-v3+diarized" in body
-    assert "speakers: [Hugo, Speaker B]" in body  # the speakers= kwarg fix
-    assert "[Hugo]: hello there" in body
+    assert "speakers: [Fixture Speaker, Speaker B]" in body  # the speakers= kwarg fix
+    assert "[Fixture Speaker]: hello there" in body
 
 
 def test_rediarize_second_run_is_noop(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,10 +344,10 @@ def test_retime_and_rediarize_share_one_extraction(vault, monkeypatch: pytest.Mo
     def _both(*a, **k):
         calls["n"] += 1
         return extract.ExtractResult(
-            text="[0:05] [Hugo]: hello there",
+            text="[0:05] [Fixture Speaker]: hello there",
             media_type="audio",
             engine="faster-whisper:large-v3+timed+diarized",
-            speakers=[{"speaker": "Hugo", "start": 0.0, "end": 1.5, "text": "hello there"}],
+            speakers=[{"speaker": "Fixture Speaker", "start": 0.0, "end": 1.5, "text": "hello there"}],
         )
 
     monkeypatch.setattr(extract, "extract_text", _both)
@@ -355,7 +355,7 @@ def test_retime_and_rediarize_share_one_extraction(vault, monkeypatch: pytest.Mo
     assert calls["n"] == 1  # ONE extraction served both upgrades
     assert stats.retimed == 1 and stats.rediarized == 1
     body = sidecar.read_text("utf-8")
-    assert "+timed+diarized" in body and "[0:05] [Hugo]:" in body
+    assert "+timed+diarized" in body and "[0:05] [Fixture Speaker]:" in body
 
 
 def test_retime_partial_win_writes_timed_disables_rediarize(
@@ -381,9 +381,9 @@ def test_needs_retime_skips_diarized_when_diarize_off(vault, monkeypatch: pytest
     sidecar, _ = preserve.ensure_media_sidecar(vault, p)
     # A completed diarized-but-untimed transcript.
     preserve.update_sidecar_extraction(
-        vault, sidecar, text="[Hugo]: hi", engine="faster-whisper:large-v3+diarized"
+        vault, sidecar, text="[Fixture Speaker]: hi", engine="faster-whisper:large-v3+diarized"
     )
-    # Diarize OFF → refuse (retiming would strip the [Hugo] label).
+    # Diarize OFF → refuse (retiming would strip the [Fixture Speaker] label).
     assert backfill._needs_retime(sidecar, "audio") is False
     # Diarize ON → allowed (re-extraction regenerates labels + timestamps).
     monkeypatch.setenv("EXOMEM_DIARIZE", "1")

@@ -2,17 +2,15 @@
 
 ## Why
 
-A real creative batch-production session on 2026-08-22 (KB:
-`Notes/Research/Exomem/tu-reel-dogfood-planning-and-records-should-disappear-behind-ordinary-work`)
-showed Planning and Records working well once they existed — and every lifecycle
-consequence still waiting for the user to say "use Planning", "write the record",
-"close that one". The ordinary language already carried the information: "let's do
-the next one" (intent: the next queued deliverable is active), "this one turned out
-really well" (outcome: a usable take was produced), "three done" (three work items
-completed), "I'll do the others next time" (the rest stay queued), "Kim posted it"
-(a publication event). An expert user would have turned each of those into a
-structured-collection mutation without being asked. The agent did not, and nothing in
-the substrate noticed.
+A 2026-08-22 incident showed that lifecycle consequences waited for explicit
+store instructions even when the conversation carried the required information.
+These invented batch-production examples express the same contract:
+"Start the next batch item" states intent; "The recording passed review" reports
+an outcome; "Four finished" reports completion; "Defer the remaining items"
+keeps work queued; "Mira published the clip" reports a publication event.
+The agent should route those consequences through Planning and Records without
+requiring the user to name either store. The substrate must also expose missed
+consequences when durable state already proves them.
 
 The no-nudge programme's attribution test says where a required nudge belongs: it is
 a **runtime gap** when the evidence already existed in durable state, an
@@ -57,8 +55,7 @@ first two, verified against the current tree:
    are excluded from it by spec. That is a separate signal family and a separate
    change; this proposal names it and stops.
 
-The note proposes "a post-turn advisory that detects conversation-implied
-transitions". That mechanism is not universally buildable: only the CLI hooks see the
+A post-turn advisory for conversation-implied transitions cannot reach every client: only the CLI hooks see the
 conversation, and only bootstrap, the response carriers and the attention surface reach
 hookless clients (hosted, claude.ai, ChatGPT). No seam is both. So the deterministic
 layer must key on **authored state** — a record landed, a plan item is still open —

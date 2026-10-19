@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 def _constructor_map():
     """descriptor id -> the path constructors this suite pins for it.
@@ -110,6 +112,7 @@ _FOLLOWS_ITS_TARGET = {
     "collection-publication": "staged and displaced view leaves under the retained target parent",
     "collection-snapshot": "consistent store copy beside the caller's eventual target",
     "collection-audit-spool": "disposable migration audit census in the caller's private directory",
+    "collection-migration": "retained migration staging beside the live store it becomes",
 }
 
 
@@ -149,9 +152,11 @@ _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {
     "collection-publication",
     "collection-snapshot",
     "collection-audit-spool",
+    "collection-migration",
 }
 
 _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
+    "compiled-history",
     "connector-boundary",
     "collection-replica",
     "consolidation-tree",

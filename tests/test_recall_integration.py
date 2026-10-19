@@ -31,6 +31,7 @@ measuring that would measure the wrong path.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -41,10 +42,9 @@ from typing import Any
 
 import pytest
 
-from exomem.governance.principal import library_scope
-
 from exomem import bm25, commands, find_corpus, semantic_writes
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 from exomem.vault import kb_dirname
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -953,14 +953,12 @@ def test_the_index_served_browse_returns_the_same_answer_as_the_walk(
 
 
 def test_every_request_shape_attributes_its_time(
-    vault: Path, warm_managed_cell
+    vault: Path, warm_managed_cell,
 ) -> None:
-    """Lane 1's attribution bounds, held across the other lanes' shapes.
+    """Keep attribution bounds across public request shapes with the real clock.
 
-    One node over all six shapes rather than six parametrized ones, because the
-    useful failure message is the whole table: a single breaching ratio means
-    nothing without the others beside it to say whether the instrument grew a
-    blind spot or the request simply got small.
+    A clock observer can charge its own delay to uncovered product time.
+    Keep the ordinary timing payloads so a breach still names its stages.
     """
     _seed_outside(vault, "integration-attrib.md")
     rel = f"{kb_dirname()}/Notes/Integration/integration-attrib-kb.md"
@@ -968,9 +966,11 @@ def test_every_request_shape_attributes_its_time(
     _warm(vault, warm_managed_cell)
 
     measured: dict[str, tuple[float, float]] = {}
+    diagnostics: dict[str, Any] = {}
     for shape, kwargs in sorted(_SHAPES.items()):
         timings = _recall(vault, **kwargs)["timings"]
         measured[shape] = (float(timings["total_ms"]), float(timings["unattributed_ms"]))
+        diagnostics[shape] = timings
 
     table = ", ".join(
         f"{shape} unattributed={unattributed:.1f}/total={total:.1f}"
@@ -983,7 +983,10 @@ def test_every_request_shape_attributes_its_time(
         for shape, (total, unattributed) in measured.items()
         if unattributed > _attribution_allowance(total) + 1e-6
     )
-    assert not breaching, f"shapes over the attribution bound: {breaching} ({table})"
+    assert not breaching, (
+        f"shapes over the attribution bound: {breaching} ({table}); diagnostics="
+        + json.dumps({shape: diagnostics[shape] for shape in breaching}, sort_keys=True)
+    )
 
     # The regime each shape actually reaches, measured rather than asserted.
     # Most of them take the fallback, so the fallback is what this file's bound
@@ -999,7 +1002,8 @@ def test_every_request_shape_attributes_its_time(
     }
     assert not over_cap, (
         f"shapes over the absolute attribution cap of {_FLAT_ATTRIBUTION_ALLOWANCE_MS} ms: "
-        f"{over_cap} ({table})"
+        f"{over_cap} ({table}); diagnostics="
+        + json.dumps({shape: diagnostics[shape] for shape in over_cap}, sort_keys=True)
     )
 
 

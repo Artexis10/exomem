@@ -403,7 +403,7 @@ def removed(mechanism: str) -> Iterator[None]:
     if mechanism == "soundness":
         ignored = working_set_resolve.TIE_BREAK_KINDS | working_set_resolve.PRIOR_CONTACT_KINDS
 
-        def any_contact_resolves(evidence, *, recency_resolves=False):
+        def any_contact_resolves(evidence, *, recency_resolves=False, partial_name=False):
             return "resolved" if evidence - ignored else "unresolved"
 
         with mock.patch.object(working_set_resolve, "_status_for_evidence", any_contact_resolves):

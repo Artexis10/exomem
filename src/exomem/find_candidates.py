@@ -21,6 +21,116 @@ _mark_source = find_types.timing_mark_source
 PageOf = Callable[[str], ParsedPage | None]
 
 
+@dataclass(frozen=True)
+class PreparedQuery:
+    """An encoder result or failure retained only for its current request."""
+
+    index: Any = None
+    identity: Any = None
+    vector: Any = None
+    error: Exception | None = None
+
+    def encoded(self) -> tuple[Any, Any]:
+        if self.error is not None:
+            raise self.error
+        if self.vector is None:
+            from . import recall_space
+
+            raise recall_space.ServingEncoderCold("query input was deferred before selection")
+        return self.identity, self.vector
+
+
+@dataclass
+class PreparedQueryInputs:
+    """The serving, building, and image inputs needed before SQL selection."""
+
+    unit: PreparedQuery | None = None
+    page: PreparedQuery | None = None
+    clip: PreparedQuery | None = None
+    serving: Any = None
+    building: Any = None
+    embeddings_deferred: bool = False
+    clip_deferred: bool = False
+
+    def require_current_serving(self, vault_root: Path) -> None:
+        """Keep prepared rankings out of a cache for another serving sidecar."""
+        from . import index_paths, recall_space
+
+        path = getattr(self.serving, "path", None)
+        if path is not None and path != index_paths.sidecar_path(vault_root):
+            raise recall_space.VectorSpaceMismatch("serving sidecar changed after preparation")
+
+
+def prepare_query_inputs(
+    vault_root: Path, query: str, *, unit: bool, page: bool, timings: Any = None,
+) -> PreparedQueryInputs:
+    """Run encoders before retaining catalogue rows; replay failures in their lanes."""
+    from . import embeddings, readiness, recall_migration, recall_space, runtime_resources
+
+    prepared = PreparedQueryInputs()
+
+    def encode(index: Any) -> PreparedQuery:
+        identity = getattr(index, "identity", None)
+        try:
+            with recall_space.encoding_for(index):
+                vector = embeddings.embed_texts([query], is_query=True)[0]
+            return PreparedQuery(index, identity, vector)
+        except Exception as error:  # noqa: BLE001 - the existing lane classifies this failure.
+            return PreparedQuery(index, identity, error=error)
+
+    with _span(timings, "query_prepare"):
+        prepared.embeddings_deferred = readiness.should_defer("embeddings")
+        if (
+            (unit or page) and query.strip()
+            and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
+            and not prepared.embeddings_deferred
+        ):
+            try:
+                prepared.serving = embeddings.get_embedding_index(vault_root)
+            except Exception as error:  # noqa: BLE001 - each existing lane replays its own failure.
+                if unit:
+                    prepared.unit = PreparedQuery(error=error)
+                if page:
+                    prepared.page = PreparedQuery(error=error)
+            else:
+                if unit:
+                    prepared.unit = encode(prepared.serving)
+                    if isinstance(prepared.unit.error, runtime_resources.ModelBusyError):
+                        return prepared
+                if page:
+                    try:
+                        prepared.building = recall_migration.building_sidecar(vault_root)
+                        selected = (
+                            embeddings.get_building_index(vault_root, prepared.building)
+                            if prepared.building is not None else prepared.serving
+                        )
+                        shared = prepared.unit
+                        if (
+                            shared is not None and shared.error is None
+                            and (
+                                prepared.building is None
+                                or prepared.serving.identity in (None, selected.identity)
+                            )
+                        ):
+                            prepared.page = PreparedQuery(selected, shared.identity, shared.vector)
+                        else:
+                            prepared.page = encode(selected)
+                    except Exception as error:  # noqa: BLE001 - replay inside the page lane.
+                        prepared.page = PreparedQuery(error=error)
+            dense = prepared.page if page else prepared.unit
+            if dense is not None and isinstance(dense.error, runtime_resources.ModelBusyError):
+                return prepared
+        if page and query.strip() and embeddings.clip_enabled():
+            prepared.clip_deferred = readiness.should_defer("clip")
+            if not prepared.clip_deferred:
+                try:
+                    index = embeddings.get_clip_index(vault_root)
+                    prepared.clip = PreparedQuery(index, vector=embeddings.embed_clip_text(query))
+                except Exception as error:  # noqa: BLE001 - replay inside the image lane.
+                    prepared.clip = PreparedQuery(error=error)
+    return prepared
+
+
 @dataclass
 class CandidateBundle:
     """All candidate-lane state needed to build semantic find hits."""
@@ -208,6 +318,7 @@ def collect_candidates(
     admitted_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
+    prepared_queries: PreparedQueryInputs | None = None,
     shadow: Callable[[list[str]], list[str]] | None = None,
     status_basis: Any = None,
     type_basis: Any = None,
@@ -273,7 +384,9 @@ def collect_candidates(
             }
         if timings is not None:
             timings.skipped("vector")
-    elif readiness.should_defer("embeddings"):
+    elif readiness.should_defer("embeddings") or (
+        prepared_queries is not None and prepared_queries.embeddings_deferred
+    ):
         if capture_trace:
             lane_statuses["vector"] = {
                 "status": "warming",
@@ -287,25 +400,38 @@ def collect_candidates(
     else:
         try:
             with _span(timings, "vector"):
-                with _span(timings, "vector.index", source=find_types.SOURCE_INDEX):
-                    idx = serving = embeddings.get_embedding_index(vault_root)
-                    building = recall_migration.building_sidecar(vault_root)
-                    if building is not None:
-                        # The recall encoder cannot answer from the serving
-                        # sidecar yet: read the build's sidecar, in its space.
-                        idx = embeddings.get_building_index(vault_root, building)
-                with _span(timings, "vector.embed"):
-                    # The shared vector is encoded for the serving sidecar; it
-                    # fits the build only when that sidecar is in the build's
-                    # space or empty (a refused one would refuse it unencoded).
-                    if query_vector_provider is not None and (
-                        building is None or serving.identity in (None, idx.identity)
-                    ):
-                        encoded_for, query_vec = query_vector_provider()
-                    else:
-                        encoded_for = getattr(idx, "identity", None)
-                        with recall_space.encoding_for(idx):
-                            query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                if prepared_queries is not None:
+                    prepared = prepared_queries.page
+                    if prepared is None:
+                        raise recall_space.ServingEncoderCold("page query was not prepared")
+                    encoded_for, query_vec = prepared.encoded()
+                    prepared_queries.require_current_serving(vault_root)
+                    idx, serving, building = (
+                        prepared.index, prepared_queries.serving, prepared_queries.building
+                    )
+                    if recall_migration.building_sidecar(vault_root) != building:
+                        raise recall_space.VectorSpaceMismatch(
+                            "building sidecar changed after preparation"
+                        )
+                    if timings is not None:
+                        timings.skipped("vector.index")
+                        timings.skipped("vector.embed")
+                else:
+                    with _span(timings, "vector.index", source=find_types.SOURCE_INDEX):
+                        idx = serving = embeddings.get_embedding_index(vault_root)
+                        building = recall_migration.building_sidecar(vault_root)
+                        if building is not None:
+                            # A building sidecar may use another encoder space.
+                            idx = embeddings.get_building_index(vault_root, building)
+                    with _span(timings, "vector.embed"):
+                        if query_vector_provider is not None and (
+                            building is None or serving.identity in (None, idx.identity)
+                        ):
+                            encoded_for, query_vec = query_vector_provider()
+                        else:
+                            encoded_for = getattr(idx, "identity", None)
+                            with recall_space.encoding_for(idx):
+                                query_vec = embeddings.embed_texts([query], is_query=True)[0]
                 recall_space.require_same_space(idx, encoded_for, query_vec)
                 sources = [idx]
                 if building is not None:
@@ -411,7 +537,10 @@ def collect_candidates(
     clip_ranking: list[str] = []
     clip_score_by_path: dict[str, float] = {}
     clip_frame_ts_by_path: dict[str, float | None] = {}
-    if embeddings.clip_enabled() and query.strip() and readiness.should_defer("clip"):
+    if embeddings.clip_enabled() and query.strip() and (
+        readiness.should_defer("clip")
+        or (prepared_queries is not None and prepared_queries.clip_deferred)
+    ):
         if capture_trace:
             lane_statuses["clip"] = {
                 "status": "warming",
@@ -425,8 +554,15 @@ def collect_candidates(
     elif embeddings.clip_enabled() and query.strip():
         try:
             with _span(timings, "clip"):
-                clip_idx = embeddings.get_clip_index(vault_root)
-                clip_qvec = embeddings.embed_clip_text(query)
+                if prepared_queries is not None:
+                    prepared = prepared_queries.clip
+                    if prepared is None:
+                        raise embeddings.ClipUnavailable("image query was not prepared")
+                    _identity, clip_qvec = prepared.encoded()
+                    clip_idx = prepared.index
+                else:
+                    clip_idx = embeddings.get_clip_index(vault_root)
+                    clip_qvec = embeddings.embed_clip_text(query)
                 allowed_images = {
                     path.removesuffix(".md")
                     for path in semantic_paths
@@ -616,13 +752,18 @@ def collect_candidates(
     parent_hints: Mapping[str, str | None] | None = None
     if admitted_raw_paths:
         recall_checkpoint = snapshot.recall_checkpoint(scope)
-        hint_result = lexstore.emitted_parent_hints_result(
-            vault_root,
-            admitted_raw_paths,
-            scope=scope,
-            freshness=snapshot.for_scope(scope),
-            recall_checkpoint=recall_checkpoint,
-        )
+        with _span(timings, "parent_hints"):
+            hint_result = lexstore.emitted_parent_hints_result(
+                vault_root,
+                admitted_raw_paths,
+                scope=scope,
+                freshness=snapshot.for_scope(scope),
+                recall_checkpoint=recall_checkpoint,
+            )
+            _mark_source(
+                timings, "parent_hints",
+                find_types.SOURCE_INDEX if hint_result.readiness.complete else find_types.SOURCE_DECLINED,
+            )
         if hint_result.readiness.complete:
             parent_hints = hint_result.value
 

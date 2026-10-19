@@ -24,11 +24,9 @@ projection of exactly those rows:
 
 Three properties are deliberate and load-bearing:
 
-**Fail closed.**  ``overflow``, an unprovable snapshot, a corrupt or unsafe row,
-a hash/generation mismatch, or a fence that moved under a hydration attempt all
-produce a non-ready coverage.  Recall then returns its existing typed
-warming/temporarily-unavailable outcome; it never serves the last published
-catalogue as if no pending mutation existed.
+**Scoped suppression.** A trustworthy custody footprint suppresses every pending
+identity, even when content hydration is incomplete. Corrupt or unreadable
+custody remains unavailable because it cannot prove that footprint.
 
 **Custody is not release.**  A row enters the overlay because a receipt covers
 it, not because anyone decided it may be disclosed.  Every consumer applies the
@@ -52,18 +50,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from . import derived_receipts
+from . import call_spans, derived_receipts
 from .find_types import ParsedPage
 
-#: How many outstanding pending-visibility rows one process may hydrate.
-#:
-#: The overlay is a delta over unfinished receipts, never a corpus copy, so the
-#: bound is sized for a burst of governed writes rather than for a vault. Past
-#: it the snapshot reports ``overflow`` and recall fails closed to warming until
-#: the component drains catch up. Deliberately a module constant: reading it
-#: from the environment would let a deployment widen an unbounded in-memory
-#: projection, and the fail-closed outcome is the safe direction anyway.
+#: Bound content hydration, while the complete custody footprint stays available.
 PENDING_HYDRATION_LIMIT: Final = 512
+# Targeted worker snapshots load receipt metadata, never page bodies.
+_TARGETED_SNAPSHOT_LIMIT: Final = 2**63 - 1
 
 #: Persistent lanes ordinary recall reads through, keyed by the derived
 #: component that publishes each one. A batch retires only once every lane it
@@ -88,17 +81,12 @@ _OMITTABLE_COMPONENTS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Bounded re-attempts when the store's pending generation moves under a
-#: hydration pass, or when a pass retires custody and must re-snapshot. A
-#: concurrent publisher invalidates the fence rather than corrupting it, so a
-#: small fixed budget converges or fails closed.
-_HYDRATION_ATTEMPTS: Final = 4
-
 #: An identity that could not be observed at all. Never a retirement target.
 _UNREADABLE: Final = object()
 
 _STATE_LOCK = threading.RLock()
 _STATES: dict[str, _VaultState] = {}
+_OBSERVED_CUSTODY: set[str] = set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,15 +109,23 @@ class PendingRow:
 class PendingOverlay:
     """The bounded pending projection one request may serve from.
 
-    ``outcome`` is ``ready`` when complete coverage was proven and ``warming``
-    otherwise; a non-ready overlay carries no rows, so nothing can be served
-    from a partial hydration.
+    Complete coverage is ``ready``. Known paths with incomplete content are
+    ``degraded`` and servable; unknown custody remains ``warming``.
     """
 
     outcome: str
     failure_code: str | None
     snapshot_generation: int
     rows: Mapping[str, PendingRow]
+    paths: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paths", self.paths | self.rows.keys())
+
+    @property
+    def servable(self) -> bool:
+        # Closed coverage outcomes: only known custody can suppress stale rows.
+        return self.outcome in {"ready", "degraded"}
 
     @property
     def ready(self) -> bool:
@@ -137,11 +133,11 @@ class PendingOverlay:
 
     @property
     def empty(self) -> bool:
-        return not self.rows
+        return not self.paths
 
     def covers(self, rel_path: str) -> bool:
         """Whether pending custody owns this canonical identity."""
-        return rel_path in self.rows
+        return rel_path in self.paths
 
     def shadow(self, rel_paths: Iterable[str]) -> list[str]:
         """Drop every persistent identity a pending update or tombstone shadows.
@@ -152,7 +148,7 @@ class PendingOverlay:
         overlay's own. Applied before scoring, rank fusion, top-k caps, excerpts
         and cache insertion.
         """
-        shadowed = self.rows
+        shadowed = self.paths
         return [rel_path for rel_path in rel_paths if rel_path not in shadowed]
 
     def page(self, rel_path: str) -> ParsedPage | None:
@@ -185,6 +181,7 @@ class ReferenceProjection:
     paths_by_id: Mapping[str, tuple[str, ...]]
     absent_paths: frozenset[str]
     refs_by_path: Mapping[str, str | None]
+    blocked_paths: frozenset[str] = frozenset()
 
     @property
     def empty(self) -> bool:
@@ -196,7 +193,9 @@ class _VaultState:
     """One fenced hydration of a vault's durable pending custody."""
 
     snapshot_generation: int
+    outcome: str
     rows: Mapping[str, PendingRow]
+    paths: frozenset[str]
     batches: tuple[object, ...]
     hydrated_at: float
 
@@ -211,6 +210,16 @@ def _key(vault_root: Path) -> str:
         return str(Path(vault_root).resolve())
     except OSError:
         return str(Path(vault_root))
+
+
+def _accept_custody_snapshot(
+    key: str, snapshot: derived_receipts.PendingVisibilitySnapshot,
+) -> bool:
+    """Initial absence is compatible; lost observed custody remains unknown."""
+    with _STATE_LOCK:
+        if snapshot.snapshot_generation or snapshot.paths:
+            _OBSERVED_CUSTODY.add(key)
+        return bool(snapshot.snapshot_generation or snapshot.paths) or key not in _OBSERVED_CUSTODY
 
 
 def vault_rel_path(vault_root: Path, path: Path | str) -> str | None:
@@ -254,7 +263,7 @@ def _prove_row(
 
     Reading and parsing happen only after the exact intended hash or tombstone
     is proven, so no unproven generation ever enters the projection. Returns
-    None when the path cannot be proven, which fails the whole hydration closed.
+    None when the path cannot be proven; its custody still suppresses old rows.
     """
     target = Path(vault_root).joinpath(*rel_path.split("/"))
     if after_hash is None:
@@ -322,11 +331,8 @@ def _project_batches(vault_root: Path, batches: Sequence[object]) -> _Projection
     one converges. Only the generation whose after state the canonical bytes
     actually prove is current; the older row is superseded and cannot publish.
 
-    A path no batch can prove is reported rather than raised. Overlay-wide
-    fail-closed is still what a caller gets -- that is the spec sentence -- but
-    the retirement pass first gets a chance to clear an out-of-band supersession
-    the persistent lanes have already published, so one hand edit cannot deny
-    every unrelated query forever.
+    A path no batch can prove stays suppressed while other proven rows remain
+    servable. Only the worker and publication callbacks can retire its custody.
     """
     proven: dict[str, PendingRow] = {}
     wanted: set[str] = set()
@@ -351,53 +357,6 @@ def _project_batches(vault_root: Path, batches: Sequence[object]) -> _Projection
             if candidate is not None:
                 proven[row.rel_path] = candidate
     return _Projection(rows=proven, unprovable=frozenset(wanted - set(proven)))
-
-
-def _reproject_named(
-    vault_root: Path,
-    batches: Sequence[object],
-    cached: Mapping[str, PendingRow],
-    named: set[str],
-) -> _Projection:
-    """Re-prove only the identities a publication named; reuse the rest.
-
-    A lane publishing one path says nothing about any other pending identity, so
-    re-deriving the whole projection to account for it makes one publication
-    cost a parse of every outstanding row -- quadratic across a burst, and a
-    walk of paths the publication never touched. The named rows are re-proven
-    because their canonical bytes are exactly what may have moved; every other
-    row in the same batch is reused from the fenced projection, which is still
-    current by construction because the caller checked the fence first.
-    """
-    rows: dict[str, PendingRow] = {}
-    wanted: set[str] = set()
-    for batch in batches:
-        receipt = batch.receipt
-        by_path = {path.rel_path: path for path in receipt.paths}
-        for row in batch.rows:
-            rel = row.rel_path
-            wanted.add(rel)
-            if rel in rows:
-                continue
-            if rel not in named:
-                existing = cached.get(rel)
-                if existing is not None:
-                    rows[rel] = existing
-                continue
-            path = by_path.get(rel)
-            if path is None or row.canonical_generation != receipt.canonical_generation:
-                continue
-            proved = _prove_row(
-                vault_root,
-                rel,
-                after_hash=path.after_hash,
-                canonical_generation=row.canonical_generation,
-                batch_id=receipt.batch_id,
-                stable_memory_ref=path.stable_memory_ref,
-            )
-            if proved is not None:
-                rows[rel] = proved
-    return _Projection(rows=rows, unprovable=frozenset(wanted - set(rows)))
 
 
 def _canonical_identity(vault_root: Path, rel_path: str) -> str | None | object:
@@ -532,12 +491,11 @@ def _settled_batches(
 
 
 def readonly_visibility(vault_root: Path) -> tuple[str, str | None]:
-    """The overlay outcome a managed reader would get, without retiring anything.
+    """Strict pending-publication readiness, without retiring anything.
 
-    Doctor runs out of process and must not mutate custody. This hydrates and
-    proves the durable rows exactly as :func:`overlay` does, and treats a batch
-    the overlay's retirement pass would clear as cleared, but never runs that
-    pass. Returns ``("ready", None)`` or ``("warming", <closed code>)``.
+    Doctor runs out of process and cannot mutate custody. Exact body and
+    persistent-lane proofs can establish strict readiness; degraded recall
+    does not promote it. Returns ``("ready", None)`` or a closed warming code.
     """
     root = Path(vault_root)
     try:
@@ -545,6 +503,8 @@ def readonly_visibility(vault_root: Path) -> tuple[str, str | None]:
             root, limit=PENDING_HYDRATION_LIMIT
         )
     except (OSError, RuntimeError, TypeError, ValueError):
+        return "warming", "pending_visibility_unprovable"
+    if not _accept_custody_snapshot(_key(root), snapshot):
         return "warming", "pending_visibility_unprovable"
     if snapshot.outcome != "complete":
         return "warming", snapshot.failure_code or f"pending_visibility_{snapshot.outcome}"
@@ -604,6 +564,7 @@ def publish(vault_root: Path, receipt: object) -> bool:
         # durable custody. Nothing else is remembered here: whether a persistent
         # lane holds an identity is asked of that lane, never cached.
         _STATES.pop(_key(root), None)
+        _OBSERVED_CUSTODY.add(_key(root))
     return True
 
 
@@ -613,17 +574,10 @@ def publish(vault_root: Path, receipt: object) -> bool:
 
 
 def overlay(vault_root: Path) -> PendingOverlay:
-    """Return the bounded pending projection, hydrating from custody as needed.
+    """Hydrate once; lost body proof falls back to a fresh path-only snapshot.
 
-    A cached projection is reused only while the store's opaque pending
-    generation still fences it; any concurrent pending-row mutation forces
-    another bounded hydration attempt. Every incomplete outcome is typed,
-    carries a closed failure code, and carries no rows.
-
-    Each attempt first retires whatever both recall lanes have published. That
-    is what converges a restart which lost its in-process lane bookkeeping, and
-    what heals a row an out-of-band write made unprovable once the lanes publish
-    the current canonical bytes.
+    Readers never retire custody. Publication callbacks and the bounded service
+    worker prove retirement independently of this cache or its hydration cap.
     """
     root = Path(vault_root)
     key = _key(root)
@@ -633,56 +587,52 @@ def overlay(vault_root: Path) -> PendingOverlay:
         root, state.snapshot_generation
     ):
         return PendingOverlay(
-            outcome="ready",
-            failure_code=None,
+            outcome=state.outcome,
+            failure_code=None if state.outcome == "ready" else "pending_visibility_incomplete",
             snapshot_generation=state.snapshot_generation,
-            rows=dict(state.rows),
+            rows=dict(state.rows), paths=state.paths,
         )
-
-    for _attempt in range(_HYDRATION_ATTEMPTS):
-        try:
-            snapshot = derived_receipts.snapshot_pending_visibility(
-                root, limit=PENDING_HYDRATION_LIMIT
-            )
-        except (OSError, RuntimeError, TypeError, ValueError):
+    try:
+        snapshot = derived_receipts.snapshot_pending_visibility(
+            root, limit=PENDING_HYDRATION_LIMIT
+        )
+        if not _accept_custody_snapshot(key, snapshot) or snapshot.outcome == "unprovable":
             _forget(key)
-            return _warming("pending_visibility_unprovable")
-        if snapshot.outcome != "complete":
-            _forget(key)
-            return _warming(
-                snapshot.failure_code or f"pending_visibility_{snapshot.outcome}",
-                snapshot.snapshot_generation,
-            )
+            return _warming("pending_visibility_unprovable", snapshot.snapshot_generation)
         projection = _project_batches(root, snapshot.batches)
-        if _retire_settled(root, snapshot.batches, projection):
-            # Custody converged during this pass; re-snapshot so the projection
-            # and its fence describe the same state.
-            _forget(key)
-            continue
-        if projection.unprovable:
-            _forget(key)
-            return _warming(
-                "pending_visibility_unprovable", snapshot.snapshot_generation
-            )
         if not derived_receipts.pending_visibility_snapshot_is_current(
             root, snapshot.snapshot_generation
         ):
-            continue
-        with _STATE_LOCK:
-            _STATES[key] = _VaultState(
-                snapshot_generation=snapshot.snapshot_generation,
-                rows=projection.rows,
-                batches=tuple(snapshot.batches),
-                hydrated_at=time.monotonic(),
+            # One fresh metadata transaction replaces all body proof. Repeating
+            # hydration under sustained writes charges the same bodies again.
+            snapshot = derived_receipts.snapshot_pending_visibility(
+                root, limit=PENDING_HYDRATION_LIMIT, footprint_only=True
             )
-        return PendingOverlay(
-            outcome="ready",
-            failure_code=None,
+            if not _accept_custody_snapshot(key, snapshot) or snapshot.outcome == "unprovable":
+                _forget(key)
+                return _warming("pending_visibility_unprovable", snapshot.snapshot_generation)
+            projection = _Projection(rows={}, unprovable=snapshot.paths)
+            degraded = True
+        else:
+            degraded = snapshot.outcome == "overflow" or bool(projection.unprovable)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _forget(key)
+        return _warming("pending_visibility_unprovable")
+    # Cache parsed coverage under its custody fence, never a result list. A
+    # degraded projection still disables every consumer's shared result cache.
+    with _STATE_LOCK:
+        _STATES[key] = _VaultState(
             snapshot_generation=snapshot.snapshot_generation,
-            rows=dict(projection.rows),
+            outcome="degraded" if degraded else "ready",
+            rows=projection.rows, paths=snapshot.paths,
+            batches=tuple(snapshot.batches), hydrated_at=time.monotonic(),
         )
-    _forget(key)
-    return _warming("pending_visibility_unprovable")
+    return PendingOverlay(
+        outcome="degraded" if degraded else "ready",
+        failure_code="pending_visibility_incomplete" if degraded else None,
+        snapshot_generation=snapshot.snapshot_generation,
+        rows=dict(projection.rows), paths=snapshot.paths,
+    )
 
 
 def _forget(key: str) -> None:
@@ -693,10 +643,15 @@ def _forget(key: str) -> None:
 def reference_projection(vault_root: Path) -> ReferenceProjection | None:
     """Pending stable-ref/path resolution, or None when nothing is pending."""
     current = overlay(Path(vault_root))
-    if not current.ready or current.empty:
+    if not current.servable:
+        from .find import RetrievalIndexWarming
+
+        call_spans.measure("pending_custody_unknown")
+        raise RetrievalIndexWarming(site="pending_visibility_incomplete", status="temporarily_unavailable")
+    if current.empty:
         return None
     paths_by_id: dict[str, list[str]] = {}
-    refs_by_path: dict[str, str | None] = {}
+    refs_by_path: dict[str, str | None] = dict.fromkeys(current.paths)
     absent: set[str] = set()
     for row in current.rows.values():
         refs_by_path[row.rel_path] = None if row.page is None else row.stable_memory_ref
@@ -709,6 +664,7 @@ def reference_projection(vault_root: Path) -> ReferenceProjection | None:
         paths_by_id={ref: tuple(sorted(paths)) for ref, paths in paths_by_id.items()},
         absent_paths=frozenset(absent),
         refs_by_path=refs_by_path,
+        blocked_paths=current.paths - current.rows.keys(),
     )
 
 
@@ -728,11 +684,8 @@ def note_persistent_publication(
     generation before the file moved cannot retire custody the store does not
     hold, and a restart between two lane publications does not strand a row.
 
-    The re-derivation is scoped to the batches the reported paths belong to.
-    Publishing one changed path therefore costs that batch, not the whole
-    outstanding set: the fenced projection already describes every row the
-    publication did not name, and reusing it is what keeps a burst of
-    publications linear instead of quadratic.
+    The proof reads only the named paths' batches. It never needs a hydrated
+    reader cache, so overflow and restart cannot prevent retirement.
     """
     if lane not in set(_RETIREMENT_LANES.values()):
         raise ValueError(f"unknown persistent recall lane: {lane!r}")
@@ -740,29 +693,13 @@ def note_persistent_publication(
     if not named:
         return
     root = Path(vault_root)
-    key = _key(root)
-    with _STATE_LOCK:
-        state = _STATES.get(key)
-    if state is None or not derived_receipts.pending_visibility_snapshot_is_current(
-        root, state.snapshot_generation
-    ):
-        # Nothing this process may reuse: the ordinary bounded hydration owns
-        # the pass, and retires whatever has converged as part of it.
-        _forget(key)
-        overlay(root)
-        return
-    batches = tuple(
-        batch
-        for batch in state.batches
-        if any(row.rel_path in named for row in batch.rows)
+    snapshot = derived_receipts.snapshot_pending_visibility(
+        root, limit=_TARGETED_SNAPSHOT_LIMIT, rel_paths=named,
     )
-    if not batches:
+    if snapshot.outcome != "complete":
         return
-    projection = _reproject_named(root, batches, state.rows, named)
-    if _retire_settled(root, batches, projection):
-        # Custody converged, so the store's pending generation has moved and
-        # this projection is fenced out; the next request re-hydrates.
-        _forget(key)
+    if _retire_settled(root, snapshot.batches, _Projection({}, frozenset())):
+        _forget(_key(root))
 
 
 def note_components_completed(vault_root: Path, batch_ids: Iterable[str]) -> None:
@@ -781,25 +718,13 @@ def note_components_completed(vault_root: Path, batch_ids: Iterable[str]) -> Non
     if not named:
         return
     root = Path(vault_root)
-    key = _key(root)
-    with _STATE_LOCK:
-        state = _STATES.get(key)
-    if state is None or not derived_receipts.pending_visibility_snapshot_is_current(
-        root, state.snapshot_generation
-    ):
-        # The ordinary bounded hydration retires whatever has converged.
-        _forget(key)
-        overlay(root)
-        return
-    batches = tuple(
-        batch for batch in state.batches if batch.receipt.batch_id in named
+    snapshot = derived_receipts.snapshot_pending_visibility(
+        root, limit=_TARGETED_SNAPSHOT_LIMIT, batch_ids=named,
     )
-    if not batches:
+    if snapshot.outcome != "complete":
         return
-    # Nothing canonical moved, only component state: the fenced rows are reused.
-    projection = _reproject_named(root, batches, state.rows, set())
-    if _retire_settled(root, batches, projection):
-        _forget(key)
+    if _retire_settled(root, snapshot.batches, _Projection({}, frozenset())):
+        _forget(_key(root))
 
 
 # --------------------------------------------------------------------------- #
@@ -824,9 +749,9 @@ def status(vault_root: Path) -> dict[str, object]:
         "state": current.outcome,
         "failure_code": current.failure_code,
         "snapshot_generation": current.snapshot_generation,
-        "pending_batches": batches,
-        "pending_paths": len(current.rows),
-        "tombstones": sum(1 for row in current.rows.values() if row.page is None),
+        "pending_batches": batches if current.ready else None,
+        "pending_paths": len(current.paths) if current.servable else None,
+        "tombstones": sum(1 for row in current.rows.values() if row.page is None) if current.ready else None,
         "hydration_limit": PENDING_HYDRATION_LIMIT,
         "hydration_age_seconds": age,
     }
@@ -842,5 +767,8 @@ def reset(vault_root: Path | None = None) -> None:
     with _STATE_LOCK:
         if vault_root is None:
             _STATES.clear()
+            _OBSERVED_CUSTODY.clear()
         else:
-            _STATES.pop(_key(Path(vault_root)), None)
+            key = _key(Path(vault_root))
+            _STATES.pop(key, None)
+            _OBSERVED_CUSTODY.discard(key)

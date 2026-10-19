@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -344,10 +345,14 @@ def _cache_key(vault_root: Path, spec: RegistrySpec) -> tuple[str, str, str, str
 
 
 def _stat_key(path: Path) -> tuple[int, ...] | None:
+    from ..vault import PathGuardError
+
     try:
-        info = os.stat(path)
+        info = os.lstat(path)
     except (FileNotFoundError, NotADirectoryError):
         return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise PathGuardError("PATH_GUARD_UNSAFE", "registry override is not an unaliased regular file")
     return (info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_ino)
 
 
@@ -373,34 +378,47 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
     """The current snapshot of one registry for one vault (pack only without a vault)."""
     if vault_root is None:
         return _pack_only(spec)
+    from .. import registry_history, vault
     from . import instances
 
     if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
         spec = instances.select(Path(vault_root), spec)
     if spec.binding_revision is not None:
         instances.recheck(Path(vault_root), spec)
-    path = spec.overlay(Path(vault_root))
+    root = Path(vault_root)
+    path = spec.overlay(root)
     key = _cache_key(vault_root, spec)
     stat = _stat_key(path)
+    if stat is None:
+        # A fresh leaf miss reads no override bytes; only shipped data may return.
+        snapshot = _pack_only(spec)
+        with _CACHE_LOCK:
+            _CACHE[key] = _Cached(None, snapshot)
+        return snapshot
+    try:
+        root.lstat()
+    except FileNotFoundError:
+        return _pack_only(spec)
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
-    if cached is not None and stat is not None and cached.stat == stat:
-        return cached.snapshot
-    if stat is None:
-        snapshot = _pack_only(spec)
+    # A matching leaf fingerprint cannot admit a replaced or aliased ancestor.
+    guard = vault.PathGuard.capture(
+        root, path.relative_to(root).as_posix(), leaf_policy="stable"
+    )
+    if cached is not None and cached.stat == stat:
+        guard.recheck(root)
+        if _stat_key(path) == stat:
+            return cached.snapshot
+    text, _ = registry_history.read_previous(root, path)
+    if cached is not None and cached.snapshot.overlay_text == text:
+        snapshot = cached.snapshot
     else:
-        try:
-            text: str | None = path.read_bytes().decode("utf-8")
-        except (FileNotFoundError, NotADirectoryError):
-            text = None
-        if cached is not None and cached.snapshot.overlay_text == text:
-            snapshot = cached.snapshot
-        else:
-            snapshot = _build(spec, text)
-        # A write between the two stats leaves no stat key, so the next load
-        # reads the file again instead of trusting bytes it may have missed.
-        after = _stat_key(path) if text is not None else None
-        stat = after if after == stat else None
+        snapshot = _build(spec, text)
+    # A write between the two stats leaves no stat key, so the next load
+    # reads the file again instead of trusting bytes it may have missed.
+    after = _stat_key(path) if text is not None else None
+    stat = after if after == stat else None
+    guard.recheck(root)
     with _CACHE_LOCK:
         _CACHE[key] = _Cached(stat, snapshot)
     return snapshot
@@ -739,13 +757,18 @@ def commit(
     added: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Write one overlay with its snapshot and `log.md` entry as one batch."""
-    from .. import registry_history
-    from . import instances
+    from .. import registry_history, vault
+    from . import contract, instances
 
     root = Path(vault_root)
     if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
         spec = instances.select(root, spec, authoring=True)
     path = spec.overlay(root)
+    # Preserve the history writer's held bootstrap before binding an absent root.
+    vault._create_parent_dirs_held(root, root, [])
+    admission = contract.capture_admission(
+        root, spec, previous.encode("utf-8") if previous is not None else None,
+    )
     try:
         history = registry_history.commit(
             root,
@@ -759,8 +782,7 @@ def commit(
             after_hash=content_hash(rendered),
             added={spec.name: added},
             private=spec.instance_id != PUBLIC_INSTANCE,
-            validate_bindings=(lambda: instances.recheck(root, spec))
-            if spec.binding_revision is not None else None,
+            validate_bindings=admission.recheck,
         )
     finally:
         invalidate(root, path=path)

@@ -71,6 +71,10 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "unreflected_observations",
     "artifact_role_promotion",
     "transient_state_review",
+    # An owner edit of a store collection view that edit-back held instead of applying. It
+    # is authored work waiting on its author, so it is in the default union; a vault with
+    # no store collection never sees it.
+    "collection_view_corrections",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large

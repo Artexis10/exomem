@@ -5,11 +5,12 @@ to.** Everything else is downstream.
 
 ## Memory boundary
 
-Built-in assistant memory and custom instructions are short-term or behavioural
-memory for small preferences, style rules, identity facts, working context, and
-reminders to use Exomem. Exomem is long-term governed memory for durable
-knowledge: sourced conclusions, project context, decisions, failures,
-experiments, proof-bearing records, review, and supersession.
+Keep temporary working context in the current conversation. Exomem holds durable
+preferences, feedback, personal baselines, project context, decisions, failures,
+experiments, and proof-bearing records, subject to the live capture policy.
+Custom instructions can guide one client; they do not replace this durable home.
+Use native memory only as an explicit fallback when Exomem cannot capture.
+Move durable results to Exomem when capture becomes available.
 
 Do not turn transient scratch, reminders, tasks, credentials, or every passing
 chat remark into KB material. Capture only raw material worth preserving or a
@@ -81,12 +82,11 @@ per-operation rules:
 
 `observe_memory` only mutates a writable compiled page. A page with no compiled
 `type`, or no frontmatter at all, refuses with a remediation and a structured
-`resolution` naming the safe next step instead of leaving you to improvise: if
-the surface has body edits, append in place with `edit_memory`; otherwise
-create the suggested dated child page linked `part_of` the legacy page (its
-directory when the legacy page is under the Knowledge Base, else
-`Notes/Research/<scope>/`) and let it stand beside the original rather than
-rewriting it. Migrate the legacy page into a compiled type only on request
+`resolution` naming the existing edit owner. Use that authorized owner for an
+in-place correction and verify the current page and retained interpretation.
+If the surface lacks that writer, report the unavailable operation and retain
+the intended correction for a capable surface. Do not create a dated child.
+Migrate the legacy page into a compiled type only on request
 (`adoption_studio`) — nothing here does that automatically.
 
 ## Read-only paths (rest of the vault)

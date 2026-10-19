@@ -9,7 +9,6 @@ import os
 import pickle
 import sqlite3
 import threading
-import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -182,6 +181,7 @@ def test_noncanonical_platform_and_reference_spellings_are_refused(raw: str) -> 
 def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> None:
     from exomem import (
         claims,
+        compiled_history,
         deferred_index,
         due_state,
         epistemic_graph,
@@ -207,6 +207,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "collection-publication",
         "collection-snapshot",
         "collection-audit-spool",
+        "collection-migration",
+        "compiled-history",
         "connector-boundary",
         "consolidation-tree",
         "deferred-index-store",
@@ -245,6 +247,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     lexical_live = lexstore.lexical_path(root)
     token32 = "1" * 32
     claims_from_owners = [
+        (root / compiled_history.history_root(), "compiled-history"),
         (governance_policy.governance_root(root), "governance-tree"),
         (root / connector_boundary.requirement_relative_path(), "connector-boundary"),
         (index_paths.governance_sidecar_path(root), "governance-store"),
@@ -3656,10 +3659,27 @@ def test_contending_graph_writer_does_not_hold_global_identity_coordination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A graph publication blocked on SQLite must not keep the identity domain.
+
+    The publisher deliberately holds identity coordination while it prepares
+    and publishes the live WAL family, and that preparation takes seconds on a
+    loaded NTFS runner. The claim is narrower: once it waits for the SQLite
+    lock, identity coordination is free. So the test proves an ordering, not a
+    duration. The blocker keeps the lock for the whole observation and the
+    publication's lock deadline outlasts the identity wait, so identity can be
+    acquired while the worker is still alive only if the wait does not hold it.
+    """
     from exomem import epistemic_graph
 
+    # Both bounds exist so a regression fails by name instead of hanging. The
+    # identity wait must expire before the publication's lock deadline, so a
+    # publisher that held identity through its SQLite wait is still alive when
+    # the identity wait gives up.
+    observe_seconds = 15.0
+    publication_lock_seconds = 25.0
     manager = writer_lease.LeaseManager(
-        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=observe_seconds,
     )
     monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
     graph = epistemic_graph.EpistemicGraphIndex(
@@ -3694,7 +3714,7 @@ def test_contending_graph_writer_does_not_hold_global_identity_coordination(
                 tmp_path,
                 temporary,
                 graph.path,
-                timeout=0.2,
+                timeout=publication_lock_seconds,
             )
         except BaseException as error:  # noqa: BLE001 - asserted below
             errors.append(error)
@@ -3707,26 +3727,19 @@ def test_contending_graph_writer_does_not_hold_global_identity_coordination(
     worker = threading.Thread(target=publish)
     worker.start()
     try:
-        assert prepare_entered.wait(timeout=2.0)
-        started = time.monotonic()
+        assert prepare_entered.wait(timeout=observe_seconds)
         with reserved_paths._identity_coordination_scope(tmp_path):
-            pass
-        identity_wait = time.monotonic() - started
+            # The blocker still holds the SQLite lock, so the publication
+            # cannot have completed; it can only still be waiting for it.
+            publisher_waiting_on_sqlite = worker.is_alive() and errors == []
     finally:
         blocker.rollback()
         blocker.close()
-        worker.join(timeout=2.0)
+        worker.join(timeout=publication_lock_seconds)
 
+    assert publisher_waiting_on_sqlite
     assert not worker.is_alive()
-    # Identity coordination may finish after the backup's short lock deadline,
-    # especially on NTFS. A bounded publication refusal is valid here; this
-    # regression checks that SQLite contention does not retain the global lock.
-    assert errors == [] or (
-        len(errors) == 1
-        and isinstance(errors[0], sqlite3.OperationalError)
-        and str(errors[0]) == "graph publication lock wait expired"
-    )
-    assert identity_wait < 1.0
+    assert errors == []
 
 
 def test_sqlite_owner_target_scope_rejects_symlink_and_hardlink_aliases(

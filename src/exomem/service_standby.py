@@ -5,9 +5,9 @@ needs — the lexical catalog, the embedding model when preload is allowed, and 
 read-only proof of the current graph snapshot — while the previous worker keeps
 serving.  Until the supervisor promotes it, the standby owns nothing: it takes
 no writer lease, publishes no index or graph state, schedules no drain, media or
-watcher work, and starts no descendants.  Where the live lexical catalogue is an
-earlier release's, the standby builds its own into a rebuild temp it holds, and
-only promotion publishes it.
+watcher work, and starts no descendants. Where the live lexical catalogue is
+proven incompatible or compatible but stale, the standby builds a private temp.
+Only promotion publishes it; runtime admission still needs the subsequent proof.
 
 Promotion is the only place ownership changes hands.  It runs after the previous
 worker and its descendants have provably exited, re-validates the checkpoint the
@@ -41,7 +41,9 @@ STANDBY_ENV = "EXOMEM_MANAGED_STANDBY"
 #: (task 1.14) and it is a read-only, process-local build -- so a standby that
 #: has not built it is a standby whose promotion cannot admit a write, however
 #: short the cutover was.
-CUTOVER_COMPONENTS = ("lexical", "embeddings", "graph_snapshot", "semantic_corpus")
+CUTOVER_COMPONENTS = (
+    "lexical", "embeddings", "graph_snapshot", "semantic_corpus", "collections_migration",
+)
 
 #: Readiness components this standby completed AND promotion either re-verified
 #: or cannot invalidate. Written at promotion, read by the promoted worker's own
@@ -58,10 +60,15 @@ _activation: Any = None
 _corpus_built = False
 #: Whether the corpus build RAN, however it ended. See `cutover_components`.
 _corpus_attempted = False
-#: This release's lexical catalogue, built beside a live one an earlier release
-#: published, held until promotion adopts it or a stop discards it.
+#: Whether the collections pre-import RAN, however it ended. See `cutover_components`.
+_collections_settled = False
+#: What a collections pre-import leaves of the warm budget, so that it settles before the
+#: supervisor discards a standby that never reported cutover readiness.
+COLLECTIONS_PREIMPORT_MARGIN_SECONDS = 10.0
+#: This release's lexical catalogue, built beside the serving worker's live one,
+#: held until promotion adopts it or a stop discards it.
 _detached_catalog: Any = None
-#: Whether that catalogue was built; `lexical` is cutover-ready once it was.
+#: Preparation only; the promoted worker still proves runtime retrieval.
 _detached_built = False
 #: Set once an unpromoted standby is being stopped; a build that finishes
 #: afterwards discards what it built instead of holding it.
@@ -133,6 +140,55 @@ def graph_cleanup_attempted() -> bool:
         return bool(getattr(_activation, "graph_cleanup_attempted", False))
 
 
+def _collections_migration_released() -> bool:
+    try:
+        from .collection_store import capability
+
+        return capability.collections_migrate_enabled()
+    except Exception:  # noqa: BLE001 - readiness must stay structured
+        return False
+
+
+def prepare_collections_migration(vault_root: Path, *, deadline: float | None = None) -> None:
+    """Pre-import the vault's file collections into the migration's private staging (design §10).
+
+    The last step of a standby's warm, beside the serving worker. It reads vault files,
+    copies a live store with the backup API, takes no lease and writes only its staging
+    under the state directory; the handoff's migrator finishes or abandons that staging.
+    ``deadline`` (absolute monotonic) bounds it inside the warm budget. Never raises: a
+    pre-import that fails, runs out of time or finds nothing to migrate leaves no staging,
+    and the handoff then runs no collections step.
+
+    It runs only when the supervisor says this handoff could run the step. Otherwise it
+    removes staging an earlier warm left, which no handoff would use and which would make
+    a later one run a step this warm never prepared. A wrong removal costs the owner one
+    ``collections migrate --prepare`` before an offline apply.
+    """
+    global _collections_settled
+    try:
+        if _collections_migration_released():
+            from .collection_store import migration
+            from .governance.principal import library_scope
+            from .service_manager import STANDBY_COLLECTIONS_ENV
+
+            if os.environ.get(STANDBY_COLLECTIONS_ENV) != "1":
+                with library_scope():
+                    removed = migration.discard_staging(Path(vault_root))
+                log.info("standby collections pre-import: skipped, no collections step; removed=%d", removed)
+                return
+            with library_scope():
+                report = migration.prepare(Path(vault_root), deadline=deadline)
+            log.info(
+                "standby collections pre-import: verdict=%s staging=%s",
+                report.get("verdict"), report.get("staging"),
+            )
+    except Exception:  # noqa: BLE001 - a standby warm must never die loudly
+        log.warning("standby collections pre-import failed", exc_info=True)
+    finally:
+        with _lock:
+            _collections_settled = True
+
+
 def _preload_allowed() -> bool:
     try:
         return bool(warmup.model_preload_allowed())
@@ -148,6 +204,7 @@ def cutover_components() -> dict[str, str]:
         snapshot_ready = _proved_token is not None
         corpus_settled = _corpus_attempted
         catalogue_built = _detached_built
+        collections_settled = _collections_settled
     components: dict[str, str] = {}
     for component in CUTOVER_COMPONENTS:
         if component == "graph_snapshot":
@@ -169,10 +226,15 @@ def cutover_components() -> dict[str, str]:
         elif component == "embeddings":
             if _preload_allowed():
                 components[component] = "ready" if readiness.is_ready("embeddings") else "waiting"
+        elif component == "collections_migration":
+            # Settled, not prepared, for the reason `semantic_corpus` is: a pre-import that
+            # failed or found nothing to migrate leaves no staging, and the handoff then runs
+            # no collections step. Reported only while this release runs the migration.
+            if _collections_migration_released():
+                components[component] = "ready" if collections_settled else "waiting"
         elif component == "lexical":
-            # A catalogue built detached is what promotion adopts, so it is as
-            # ready as a live one proved current. Its caches are the promoted
-            # worker's to warm (`lexical` is not carried in that case).
+            # A complete detached build permits cutover preparation, not runtime
+            # admission. Promotion still owes watcher seed, heal and proof.
             ready = catalogue_built or readiness.is_ready(component)
             components[component] = "ready" if ready else "waiting"
         else:
@@ -350,16 +412,17 @@ def _durable_generation(vault_root: Path) -> Any:
     return None if checkpoint is None else int(checkpoint.generation)
 
 
+def _file_stat(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def _graph_stat(vault_root: Path) -> tuple[Any, ...]:
     """Stat signatures of the durable checkpoint and the sidecar. Opens nothing."""
     from . import epistemic_graph, graph_sync
-
-    def signature(path: Path) -> Any:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            return None
-        return stat.st_ino, stat.st_size, stat.st_mtime_ns
 
     try:
         sidecar = epistemic_graph.sidecar_path(Path(vault_root))
@@ -370,7 +433,7 @@ def _graph_stat(vault_root: Path) -> tuple[Any, ...]:
         )
     except Exception:  # noqa: BLE001 - an unresolvable state root never matches
         return (object(),)
-    return tuple(signature(path) for path in paths)
+    return tuple(_file_stat(path) for path in paths)
 
 
 def _graph_snapshot_signal(vault_root: Path) -> tuple[Any, Any]:
@@ -390,6 +453,36 @@ def _observe_full_marker(vault_root: Path) -> tuple[int, int] | None:
         return deferred_index.graph_full_rebuild_observation(Path(vault_root))
     except Exception:  # noqa: BLE001 - an unread marker is simply not retired
         return None
+
+
+def _invalidate_graph_proof() -> bool:
+    """Withdraw the graph proof before replacing its adopted recall lineage."""
+    global _proved_token, _adoption, _proof_signal, _proof_marker
+    from . import runtime_readiness
+
+    with _lock:
+        if not _standby or _promoting or _promoted or _discarded:
+            return False
+        _proved_token = None
+        _adoption = None
+        _proof_signal = None
+        _proof_marker = None
+        runtime_readiness.invalidate_cached_readiness()
+    return True
+
+
+def _prove_reseeded_graph_snapshot(vault_root: Path) -> bool:
+    """Prime the resolver at this registry's checkpoint, then restore its proof."""
+    from . import find
+
+    try:
+        # Equal source projections can still cache the invalidated lineage's
+        # resolver checkpoint. Prime this registry's own before graph adoption.
+        find.evict_resolver_caches(vault_root)
+        warmup.prime_recall_resolver(vault_root)
+    except Exception:  # noqa: BLE001 - an unprimed resolver only costs adoption
+        log.warning("standby recall resolver prime failed", exc_info=True)
+    return prove_graph_snapshot(vault_root)
 
 
 def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
@@ -424,13 +517,15 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
         _attempt_stat = stat
     if signal == last_signal:
         return False
+    if not _invalidate_graph_proof():
+        return False
     # This process has no watcher, so its recall registry is as old as the
     # last seed; the adoption's origin is judged against it.
     try:
         freshness.rebaseline(vault_root)
     except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
         log.warning("standby recall registry reseed failed", exc_info=True)
-    proved = prove_graph_snapshot(vault_root)
+    proved = _prove_reseeded_graph_snapshot(vault_root)
     log.info("standby graph snapshot re-proof adopted=%s", proved)
     return proved
 
@@ -438,21 +533,56 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
 def reprove_until_promoted(
     vault_root: Path, *, poll_seconds: float | None = None
 ) -> bool:
-    """Keep the graph proof current until promotion or discard.
+    """Keep cutover proofs current until promotion or discard.
 
-    Returns whether a proof is held when it stops. Reads only, like the proof;
-    the supervisor's warm budget still bounds how long a standby may wait.
+    Returns whether a graph proof is held when it stops. Catalogue preparation
+    may write a private temp; the supervisor's warm budget still bounds waiting.
     """
+    from . import freshness, readiness
+
     interval = REPROVE_POLL_SECONDS if poll_seconds is None else poll_seconds
+    catalogue_reseeded_at = None
     while True:
         with _lock:
             if not _standby or _promoting or _promoted or _discarded:
                 return _proved_token is not None
             stop = _discard_requested
+            catalogue_built = _detached_built
         try:
             reprove_graph_snapshot_if_due(vault_root)
         except Exception:  # noqa: BLE001 - a failed re-proof leaves the held proof
             log.warning("standby graph snapshot re-proof failed", exc_info=True)
+        if not catalogue_built and not readiness.is_ready("lexical"):
+            now = _clock()
+            prepare_due = (
+                catalogue_reseeded_at is None
+                or now - catalogue_reseeded_at >= REPROVE_INTERVAL_SECONDS
+            )
+            if prepare_due:
+                # This standby has no watcher. Sample current source even when
+                # the old owner never publishes, at the existing proof interval.
+                if not _invalidate_graph_proof():
+                    return proved_checkpoint() is not None
+                try:
+                    freshness.rebaseline(vault_root)
+                except Exception:  # noqa: BLE001 - an unseeded scope stays waiting
+                    log.warning("standby recall registry reseed failed", exc_info=True)
+                    prepare_due = False
+                catalogue_reseeded_at = _clock()
+            if prove_retrieval_catalog(vault_root):
+                _warm_proven_catalogue(vault_root)
+            elif prepare_due:
+                # Retry preparation at the existing reseed interval, even when
+                # a transient read recovered without a new live publication.
+                if prepare_detached_catalog(vault_root):
+                    # As in initial warm, graph adoption starts after the build's
+                    # last source edits, with a fresh registry and resolver.
+                    try:
+                        freshness.rebaseline(vault_root)
+                    except Exception:  # noqa: BLE001 - the graph proof stays unready
+                        log.warning("standby recall registry reseed failed", exc_info=True)
+            if prepare_due:
+                _prove_reseeded_graph_snapshot(vault_root)
         if stop.wait(interval):
             with _lock:
                 return _proved_token is not None
@@ -481,9 +611,8 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
     publication barrier, and ``request_repair`` schedules a publication — both
     belong to the worker that is still serving, which is the single repair owner
     for this vault. The standby therefore only asks whether the catalog is
-    already current, with repair scheduling explicitly off. An uncurrent catalog
-    leaves ``lexical`` waiting; the serving worker's own repair owner is the only
-    thing allowed to fix it, and the warm budget covers the wait.
+    already current, with repair scheduling explicitly off. A failed proof may
+    permit isolated preparation, but never a publication by the standby.
     """
     from . import freshness, lexstore
 
@@ -501,31 +630,50 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
         return False
 
 
-def prepare_detached_catalog(vault_root: Path) -> bool:
-    """Build this release's lexical catalogue beside an incompatible live one.
+def _warm_proven_catalogue(vault_root: Path) -> None:
+    """Prime the same local caches after either initial or repeated proof."""
+    from . import mode, readiness
 
-    Called only when the read-only proof failed. A live catalogue at this
-    release's schema and semantic identity that merely lags the corpus is the
-    serving worker's repair owner's to catch up, and so is a missing one; the
-    standby leaves both alone and `lexical` stays waiting, as before. A live
-    catalogue an earlier release published can never become current for this
-    one while that release serves, so the standby builds its own into a rebuild
-    temp. The build takes no publication barrier and touches no live file; the
-    temp is published only by promotion, after the serving worker has exited.
+    readiness.mark_ready("retrieval_catalog")
+    try:
+        warmup.warm_caches(
+            vault_root,
+            preload_models=_preload_allowed(),
+            preload_cpu_caches=mode.preload_cpu_caches(),
+        )
+    except Exception:  # noqa: BLE001 - caches are rebuildable on demand
+        log.warning("standby cache warm-up failed", exc_info=True)
+    readiness.mark_ready("lexical")
+
+
+def prepare_detached_catalog(vault_root: Path) -> bool:
+    """Prepare beside a proven incompatible or compatible stale live catalogue.
+
+    A failed readiness proof alone establishes neither case. Missing, busy and
+    unknown observations leave the standby waiting. A complete private build
+    survives ordinary source edits; promotion owns adoption and the subsequent
+    watcher seed, heal and strict runtime proof. Preparation never publishes.
     """
     global _detached_catalog, _detached_built
-    from . import lexstore
+    from . import freshness, lexstore
 
     try:
         if not lexstore.maintained_content_index_enabled():
             return False
         vault_root = Path(vault_root)
-        if not lexstore.lexical_path(vault_root).exists():
-            return False
-        if lexstore.live_catalog_compatible(vault_root):
+        assessment = lexstore.assess_live_catalog(
+            vault_root, require_live_projection=freshness.event_indexes_enabled()
+        )
+        if not (
+            assessment.compatibility == "incompatible"
+            or (
+                assessment.compatibility == "compatible"
+                and any(not scope.complete for scope in assessment.scopes.values())
+            )
+        ):
             return False
         with _lock:
-            if _discarded or _promoted:
+            if _discarded or _promoted or _detached_built:
                 return False
         started = time.monotonic()
         detached = lexstore.build_detached_catalog(vault_root, cancel=_discard_requested)
@@ -717,14 +865,16 @@ def warm(vault_root: Path) -> None:
     make while another worker owns the vault. Everything here reads: the catalog
     is proved, the rebuildable caches are populated in memory, the models are
     loaded, and the graph snapshot is proved against disk. The one write is a
-    catalogue built detached, beside a live one an earlier release published,
+    catalogue built detached, beside the serving worker's live one,
     which nothing reads until promotion adopts it. Never raises; an unready
     component stays ``waiting`` and the supervisor's warm budget decides what
     happens next.
     """
-    from . import freshness, mode, readiness
+    from . import freshness, readiness
+    from .service_manager import standby_warm_budget
 
     vault_root = Path(vault_root)
+    started = time.monotonic()
     readiness.begin_warm()
     try:
         # Seed this process's recall registry before anything reads it. The
@@ -737,16 +887,7 @@ def warm(vault_root: Path) -> None:
         except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
             log.warning("standby recall registry seed failed", exc_info=True)
         if prove_retrieval_catalog(vault_root):
-            readiness.mark_ready("retrieval_catalog")
-            try:
-                warmup.warm_caches(
-                    vault_root,
-                    preload_models=_preload_allowed(),
-                    preload_cpu_caches=mode.preload_cpu_caches(),
-                )
-            except Exception:  # noqa: BLE001 - caches are rebuildable on demand
-                log.warning("standby cache warm-up failed", exc_info=True)
-            readiness.mark_ready("lexical")
+            _warm_proven_catalogue(vault_root)
         elif prepare_detached_catalog(vault_root):
             # No caches are warmed over rows promotion replaces. The build took
             # up to a minute, during which this unwatched registry went stale;
@@ -757,18 +898,14 @@ def warm(vault_root: Path) -> None:
                 log.warning("standby recall registry reseed failed", exc_info=True)
         else:
             log.info(
-                "standby retrieval catalog is not current; the serving worker's "
-                "repair owner has to publish one before this candidate can cut over"
+                "standby retrieval catalog is not current; awaiting a current "
+                "publication or a proven catalogue for isolated preparation"
             )
         # After the seed and after the resolver, which is primed here rather
         # than left to `warm_caches`: that gate is closed in every resource mode
         # that does not preload CPU caches, and the ordering is what makes the
         # adoption's origin acceptable.
-        try:
-            warmup.prime_recall_resolver(vault_root)
-        except Exception:  # noqa: BLE001 - an unprimed resolver only costs adoption
-            log.warning("standby recall resolver prime failed", exc_info=True)
-        prove_graph_snapshot(vault_root)
+        _prove_reseeded_graph_snapshot(vault_root)
         # After the graph step, for the same reason `warm_all` puts the handoff
         # first: adoption is what the first governed write depends on, and the
         # corpus is what the gate that admits it waits for.
@@ -777,7 +914,15 @@ def warm(vault_root: Path) -> None:
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly
         log.warning("standby warm-up crashed", exc_info=True)
     finally:
-        readiness.finish_warm()
+        try:
+            # Last, so its staging is as close to the handoff as the warm allows, and after
+            # a crashed warm too, so that its own component always settles.
+            prepare_collections_migration(
+                vault_root,
+                deadline=started + standby_warm_budget() - COLLECTIONS_PREIMPORT_MARGIN_SECONDS,
+            )
+        finally:
+            readiness.finish_warm()
 
 
 def start_warm(vault_root: Path) -> threading.Thread:
@@ -1048,7 +1193,7 @@ def _promote_owned(
 def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
     global _standby, _promoted, _proved_token, _adoption, _activation
-    global _carried, _corpus_built, _corpus_attempted
+    global _carried, _corpus_built, _corpus_attempted, _collections_settled
     global _detached_catalog, _detached_built, _discarded, _discard_requested
     global _promoting, _proof_signal, _proof_marker
     global _attempt_signal, _attempt_stat, _attempt_ended_at
@@ -1070,4 +1215,5 @@ def reset_for_tests() -> None:
         _carried = frozenset()
         _corpus_built = False
         _corpus_attempted = False
+        _collections_settled = False
         _activation = None

@@ -131,7 +131,7 @@ def _plan_payload(tmp_path: Path, *, fresh_runtime: bool = True) -> dict[str, An
         "dataset_path": str(dataset),
         "provider_checkout": {
             "root": str(provider_checkout),
-            "repository": "https://github.com/hugoa/exomem",
+            "repository": "https://github.com/example-owner/example-repository",
             "commit": "a" * 40,
             "tree": "b" * 40,
             "lock_sha256": "c" * 64,
@@ -2032,8 +2032,9 @@ def test_real_foreground_second_signal_cannot_kill_isolated_cleanup_group(
             ) -> dict[str, Any]:
                 assert start_new_session is True
                 script = (
-                    "import os,sys,time; "
-                    "open(sys.argv[1],'w').write(str(os.getpid())); "
+                    "import os,sys,time; from pathlib import Path; "
+                    "ready=Path(sys.argv[1]); pending=ready.with_suffix('.tmp'); "
+                    "pending.write_text(str(os.getpid())); pending.replace(ready); "
                     "time.sleep(0.35); open(sys.argv[2],'w').write('complete')"
                 )
                 helper = subprocess.Popen(
@@ -2050,10 +2051,12 @@ def test_real_foreground_second_signal_cannot_kill_isolated_cleanup_group(
                 stage_runner=BlockingStage(),
                 cleanup_runner=isolated_cleanup,
             )
-            result_path.write_text(
+            pending_result = result_path.with_suffix(".tmp")
+            pending_result.write_text(
                 json.dumps({"status": result.status, "exit_code": result.exit_code}) + "\n",
                 encoding="utf-8",
             )
+            pending_result.replace(result_path)
             os._exit(0)
         except BaseException:
             os._exit(90)

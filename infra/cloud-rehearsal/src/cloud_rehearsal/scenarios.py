@@ -133,6 +133,7 @@ class Context:
     resolver: Resolver
     report: Report
     cli_image: str | None = None
+    operator_restore_abort: bool = False
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -262,10 +263,7 @@ class Context:
         return _json_or_text(probe.stdout)
 
     def pod_ready(self, cell_id: str) -> bool:
-        pod = self.runtime_pod(cell_id)
-        return bool(pod) and any(
-            c["type"] == "Ready" and c["status"] == "True" for c in pod["status"].get("conditions", [])  # type: ignore[index]
-        )
+        return _is_ready_pod(self.runtime_pod(cell_id))
 
     async def stays_ready(self, cell_id: str, *, seconds: float) -> dict[str, Any] | None:
         """None when the cell's pod stayed Ready throughout, else what it reported."""
@@ -305,6 +303,14 @@ class Context:
         )
         self.kubectl("set", "env", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, f"CELLCTL_BACKUP_WINDOW={window}")
         self.kubectl("rollout", "status", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, "--timeout=180s")
+
+
+def _is_ready_pod(pod: dict[str, Any] | None) -> bool:
+    # Kubernetes fixes the readiness condition type and status tokens.
+    return bool(pod) and any(
+        condition["type"] == "Ready" and condition["status"] == "True"
+        for condition in pod.get("status", {}).get("conditions", [])
+    )
 
 
 def cell_summary(row: dict[str, Any]) -> dict[str, Any]:
@@ -698,15 +704,63 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
     started = time.monotonic()
     snapshot_logs(ctx)
     await ctx.admin_release({"cellImage": ctx.images.cell_broken})
+    deadline = started + 2400
+
+    def canary_applied(row: dict[str, Any]) -> bool:
+        if row.get("hold_kind") != "upgrade":
+            return False
+        pod = ctx.runtime_pod(ctx.a.cell_id)
+        return bool(pod) and any(container["image"] == ctx.images.cell_broken for container in pod["spec"]["containers"])
+
+    interrupted = await ctx.wait_cell(
+        ctx.a.cell_id, canary_applied,
+        timeout=max(0, deadline - time.monotonic()),
+        description="the never-ready target to apply under its upgrade hold",
+    )
+    hold_started = interrupted["hold_started_at"]
+    deployment = ctx.kube_json("get", "deployment", "cellctl", "--namespace", CLOUD_NAMESPACE)
+    selector = ",".join(f"{key}={value}" for key, value in deployment["spec"]["selector"]["matchLabels"].items())
+
+    def controller_pods() -> list[dict[str, Any]]:
+        return ctx.kube_json("get", "pods", "--namespace", CLOUD_NAMESPACE, "--selector", selector)["items"]
+
+    original = next((pod for pod in controller_pods() if _is_ready_pod(pod)), None)
+    if original is None:
+        raise StepFailure("no Ready controller was available to interrupt the upgrade")
+    snapshot_logs(ctx)
+    ctx.kubectl(
+        "delete", "pod", original["metadata"]["name"], "--namespace", CLOUD_NAMESPACE,
+        "--grace-period=0", "--wait=true", "--timeout=60s",
+    )
+
+    def controller_restarted() -> dict[str, Any] | None:
+        return next(
+            (pod for pod in controller_pods()
+             if pod["metadata"]["uid"] != original["metadata"]["uid"] and _is_ready_pod(pod)),
+            None,
+        )
+
+    replacement = wait_for(
+        controller_restarted, timeout=min(180, max(0, deadline - time.monotonic())), interval=1,
+        description="a new controller Pod to become Ready during the upgrade",
+    )
+    record.evidence["controller_restart"] = {
+        "old_pod_uid": original["metadata"]["uid"],
+        "new_pod_uid": replacement["metadata"]["uid"],
+        "hold_started_at": hold_started,
+    }
     seen: set[str] = set()
 
     def returned(row: dict[str, Any]) -> bool:
+        if row.get("hold_kind") == "upgrade" and row.get("hold_started_at") != hold_started:
+            raise StepFailure("the controller restart reset the active upgrade hold")
         if row.get("hold_kind"):
             seen.add(row["hold_kind"])
         return "restore" in seen and _running_ready(previous)(row)
 
-    # D6: 15-minute backup deadline, 10-minute readiness deadline, restore.
-    row = await ctx.wait_cell(ctx.a.cell_id, returned, timeout=2400, interval=2, description="the forced canary failure to restore tenant A onto its previous image")
+    # D6: 15-minute backup deadline, readiness deadline (10 minutes here, platform.cellctl_values), restore.
+    row = await ctx.wait_cell(ctx.a.cell_id, returned, timeout=max(0, deadline - time.monotonic()), interval=2, description="the forced canary failure to restore tenant A onto its previous image")
+    record.evidence["controller_restart"]["upgrade_hold_preserved"] = True
     rollout = await ctx.rollout()
     async with ctx.a.client.mcp() as session:
         readback = await session.call("ask_memory", {"query": marker})
@@ -1104,11 +1158,19 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
         snapshot_logs(ctx)
         detail = "" if record.status == PASSED else f" -- {record.failure.get('message', '')[:300]}"  # type: ignore[union-attr]
         print(f"[rehearsal] step {number} {name}: {record.status.upper()} in {record.seconds}s{detail}", flush=True)
+        if number == 2 and ctx.operator_restore_abort:
+            from .operator_restore_abort import run_abort
+
+            with stage(ctx.report, "operator_restore_abort"):
+                await run_abort(ctx)
         if number == 2 and ctx.cli_image:
             from .native_import import import_folder
 
             with stage(ctx.report, "cloud_import"):
                 ctx.report.stages["cloud_import"]["evidence"] = await import_folder(ctx, ctx.cli_image)
+    if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
+        with stage(ctx.report, "operator_restore_abort"):
+            raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
 
 
 async def close_clients(ctx: Context) -> None:

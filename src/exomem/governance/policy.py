@@ -31,7 +31,9 @@ import re
 import sqlite3
 import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -948,10 +950,33 @@ def _finding(code: str, path: str, detail: str, *, severity: str = "error") -> d
     return {"code": code, "path": path, "span": path, "severity": severity, "detail": detail}
 
 
-def _iter_all_files(root: Path):
+#: Top-level `_Governance` directories that hold evidence of governed work, never policy.
+# nosemgrep: ep-word-set -- These are directory names the governance writers fix in the tree layout, not a vocabulary.
+_OPERATIONAL_DIRECTORIES = frozenset({"events", "deletion-tombstones", "archives"})
+#: Run and episode records written by `curation` and `episode_store`. Nothing compiles them
+#: as policy; only the runtime load leaves them out (see `_iter_all_files`).
+_CURATION_DIRECTORY = "curation"
+
+
+def _iter_all_files(root: Path, *, policy_inputs: bool = False):
+    """Files under `root` in path order, without operational state.
+
+    Operational directories are pruned, never entered, so the walk costs what the
+    policy documents cost. `policy_inputs` also prunes `curation`: the runtime load
+    stat'ed one file per curation record on every call to prove the policy unchanged.
+    The authoring gate (`has_conflict_copy`) and the authoring snapshot keep the records,
+    so a conflict copy there still stops authoring and stored snapshots stay valid.
+    """
     if not root.is_dir():
         return
-    for p in sorted(root.rglob("*")):
+    pruned = _OPERATIONAL_DIRECTORIES | ({_CURATION_DIRECTORY} if policy_inputs else frozenset())
+    found: list[Path] = []
+    for current, directories, names in os.walk(root):
+        if Path(current) == root:
+            directories[:] = [name for name in directories if name not in pruned]
+            names = [name for name in names if name not in pruned]
+        found.extend(Path(current, name) for name in names)
+    for p in sorted(found):
         if p.is_file() and not _is_operational_state(root, p):
             yield p
 
@@ -979,7 +1004,7 @@ def _is_operational_state(root: Path, path: Path) -> bool:
 def _is_operational_relative(relative: str) -> bool:
     parts = tuple(part for part in relative.replace("\\", "/").split("/") if part)
     return bool(parts) and (
-        parts[0] in {"events", "deletion-tombstones", "archives"}
+        parts[0] in _OPERATIONAL_DIRECTORIES
         or parts == (".policy-mutation.pending.json",)
     )
 
@@ -1143,7 +1168,7 @@ def _iter_policy_files(root: Path) -> list[tuple[str, Path]]:
 
 def _signature(root: Path) -> _Signature:
     entries = []
-    for p in _iter_all_files(root):
+    for p in _iter_all_files(root, policy_inputs=True):
         try:
             stat = p.stat()
         except OSError:
@@ -1208,7 +1233,7 @@ def _load_unguarded(vault_root: Path) -> Policy:
         return cached[1]
 
     files = _iter_policy_files(root)
-    conflicts = [p for p in _iter_all_files(root) if is_conflict_copy(p.name)]
+    conflicts = [p for p in _iter_all_files(root, policy_inputs=True) if is_conflict_copy(p.name)]
 
     if not files and not conflicts:
         _CACHE.pop(key, None)
@@ -1294,8 +1319,44 @@ def _guarded_policy(vault_root: Path, code: str, detail: str) -> Policy:
     return dataclasses.replace(last_good, findings=(*last_good.findings, finding))
 
 
+#: The policy each vault answered with, for the rest of one read request.
+_REQUEST_POLICIES: ContextVar[dict[str, Policy] | None] = ContextVar(
+    "exomem_request_policies", default=None
+)
+
+
+@contextmanager
+def request_policy_snapshot() -> Iterator[None]:
+    """Answer every `load` inside one read request from its first `load`.
+
+    One read takes several release decisions, and each one used to load and
+    re-validate the policy. The request decides against one policy instead,
+    as if it had been served a moment earlier. Only a read may open this
+    scope: a request that changes governance must see its own change.
+    """
+    if _REQUEST_POLICIES.get() is not None:
+        yield
+        return
+    token = _REQUEST_POLICIES.set({})
+    try:
+        yield
+    finally:
+        _REQUEST_POLICIES.reset(token)
+
+
 def load(vault_root: Path) -> Policy:
     """Load policy behind a non-creating seqlock-style authoring guard."""
+    snapshot = _REQUEST_POLICIES.get()
+    if snapshot is None:
+        return _load_guarded(vault_root)
+    key = str(governance_root(Path(vault_root)))
+    policy = snapshot.get(key)
+    if policy is None:
+        policy = snapshot[key] = _load_guarded(vault_root)
+    return policy
+
+
+def _load_guarded(vault_root: Path) -> Policy:
     vault_root = Path(vault_root)
     key = str(governance_root(vault_root))
     for _attempt in range(3):
@@ -1382,7 +1443,7 @@ def _compile(
 ]:
     documents: dict[str, bytes] = {}
     findings: list[dict[str, str]] = []
-    for path in _iter_all_files(root):
+    for path in _iter_all_files(root, policy_inputs=True):
         relative = path.relative_to(root).as_posix()
         try:
             documents[relative] = path.read_bytes()

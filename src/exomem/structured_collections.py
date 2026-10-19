@@ -8,12 +8,10 @@ import itertools
 import json
 import math
 import re
-import sqlite3
 import stat
 import unicodedata
 import uuid
 from collections.abc import Callable, Container, Iterable, Mapping
-from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -25,6 +23,8 @@ from .collection_profiles import profile_for
 from .planning_values import PlanningValues, Unavailable
 
 COLLECTION_VERSION = 1
+#: The file that defines a Records collection: structure, not a saved record.
+MANIFEST_FILENAME = "_collection.md"
 STORAGE_FORMAT_VERSION = 1
 RECORDS_READER_VERSION = 2
 RECORD_REF_PREFIX = "exomem://record/"
@@ -262,7 +262,7 @@ def manifest_authoring_contract() -> dict[str, Any]:
     }
     return {
         "contract_version": COLLECTION_VERSION,
-        "manifest_filename": "_collection.md",
+        "manifest_filename": MANIFEST_FILENAME,
         "records_path": f"{vault.kb_dirname()}/Records/",
         "records_action_constraint": {"semantic_profile": "records"},
         "closed_values": {
@@ -1030,7 +1030,7 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         with writer.read_collection(path) as manifest:
             return manifest
     manifest_path, rel = _safe_existing_path(root, path)
-    if manifest_path.name != "_collection.md":
+    if manifest_path.name != MANIFEST_FILENAME:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "manifest must be named _collection.md"
         )
@@ -1111,7 +1111,7 @@ def parse_manifest_bytes(
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
         )
-    if manifest_path.name != "_collection.md":
+    if manifest_path.name != MANIFEST_FILENAME:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "manifest must be named _collection.md"
         )
@@ -1178,6 +1178,7 @@ def discover_collections_with_errors(
     max_candidates: int = _MAX_DISCOVERY_CANDIDATES,
     max_raw_candidates: int = _MAX_DISCOVERY_CANDIDATES,
     reject_duplicates: bool = True,
+    ownership_proof=None,
 ) -> tuple[tuple[CollectionManifest, ...], tuple[UnreadableManifest, ...]]:
     """Discover releasable manifests AND the ones this sweep could not read.
 
@@ -1210,85 +1211,45 @@ def discover_collections_with_errors(
             "INVALID_DISCOVERY_LIMIT", "discovery limit is outside supported bounds"
         )
     root = Path(vault_root)
-    from .collection_store import authority, connection
-    from .collection_store.connection import CollectionStoreError
-    from .collection_store.preview import bound_writer
+    from .collection_store import ownership
+    from .collection_store.preview import UNSERVED, bound_writer, production_bound, store_notice
+    from .list_trash import TRASH_SUBPATH
 
     writer = bound_writer(root)
-    marker_error = None
-    store_error = None
-    profiles_verified = False
-    if writer is not None:
-        marker = authority.routing_marker(writer)
-        stored, store_errors = writer.discover_collections(
-            authorize_path=authorize_path, max_candidates=max_candidates,
-            max_raw_candidates=max_raw_candidates,
-        )
-        if marker is None:
-            return stored, store_errors
-    else:
-        try:
-            raw = authority.read_marker(root)
-            marker = None if raw is None else authority.parse_marker(root, raw)
-        except CollectionStoreError as error:
-            # Which collections the store owns is unknown, so none can be read as a file.
-            marker, marker_error = None, error
-        if marker is not None and connection.store_path(root).exists():
-            try:
-                with closing(connection.open_reader(connection.store_path(root))) as reader:
-                    reader.execute("BEGIN")
-                    for entry in marker["collections"]:
-                        authority.require_selected(reader, marker, entry, root=root)
-                    profiles_verified = True
-            except CollectionStoreError as error:
-                store_error = error
-            except (sqlite3.Error, OSError, CollectionError):
-                store_error = CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "canonical collection store is unreadable")
-        stored, store_errors = (), ()
+    proof = ownership_proof
+    if proof is None:
+        proof = ownership.current(root, conn=None if writer is None else writer.connection,
+                                  private=writer is not None and not production_bound(root))
+    stored, store_errors = ((), ()) if writer is None else writer.discover_collections(
+        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates)
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return stored, store_errors
+    trash_root = kb / TRASH_SUBPATH
     authorize = authorize_path or (lambda _path: True)
-    notice_owner = False
-    if writer is None and (marker is not None or marker_error is not None):
-        from .governance import raw_protection
-        from .governance.principal import effective_principal
-
-        who = effective_principal()
-        # An unavailable C must remain visible in its owner's inventory; this grants a notice, never view bytes.
-        notice_owner = raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(root, who)
+    notice = store_notice(root, authorize)
     manifests: list[CollectionManifest] = list(stored)
     unreadable: list[UnreadableManifest] = list(store_errors)
+    visible = {manifest.collection_id for manifest in stored}
+    reported = {error.path for error in store_errors}
+    for entry in proof.entries:
+        if entry["collection_id"] in visible or entry["manifest_path"] in reported:
+            continue
+        if writer is not None and entry["collection_id"] in proof.admitted:
+            continue  # The writer already assessed release; an omitted manifest is withheld, not unreadable.
+        if notice(entry["manifest_path"]):
+            unreadable.append(UnreadableManifest(entry["manifest_path"], "COLLECTION_STORE_UNAVAILABLE",
+                                                 UNSERVED, entry["semantic_profile"]))
+    if len(stored) + len(unreadable) > max_raw_candidates:
+        raise CollectionError("COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect")
     candidates = []
-    for candidate in kb.rglob("_collection.md"):
+    for candidate in kb.rglob(MANIFEST_FILENAME):
         safe = _safe_candidate_rel(root, candidate)
-        if safe is None:
+        # Recoverable trash retains bytes but declares no live collection ownership.
+        if safe is None or safe[0].is_relative_to(trash_root):
             continue
-        entry = None if marker is None else authority.selected_entry(root, marker, safe[1])
-        if marker_error is not None or entry is not None:
-            if writer is None and (notice_owner or authorize(safe[1])):
-                # A routed manifest is the store's generated view, never a file collection,
-                # and only the service that serves the store can read it. Its profile comes
-                # from a marker checked against canon, never from that editable view.
-                # Without canon, an unknown profile keeps every affected sweep partial.
-                if marker_error is None and store_error is None:
-                    code, message = "COLLECTION_STORE_UNAVAILABLE", (
-                        "this collection lives in the collection store, which only the running Exomem service serves")
-                elif marker_error is None:
-                    # A valid marker still separates A/B from C when C's canonical state is unavailable.
-                    code, message = store_error.code, str(store_error)
-                else:
-                    code, message = marker_error.code, (
-                        "the collection store's authority marker is unreadable, so no collection here can be "
-                        "told apart from one the store owns")
-                unreadable.append(UnreadableManifest(
-                    safe[1], code, message,
-                    entry.get("semantic_profile") if entry is not None and profiles_verified else None))
-                if len(stored) + len(unreadable) > max_raw_candidates:
-                    raise CollectionError(
-                        "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
-                    )
-            continue
+        if proof.selected(root, safe[1]) is not None:
+            continue  # A physical declaration cannot replace canonical ownership, including an unpublished view.
         if not authorize(safe[1]):
             continue
         candidates.append(candidate)
@@ -1378,14 +1339,17 @@ def resolve_collection(
     authorize = authorize_path or (lambda _path: True)
     identity = memory_refs.parse_memory_ref(raw) or memory_refs.normalize_id(raw)
     if identity is not None:
-        from .collection_store import authority
-        from .collection_store.preview import bound_writer
+        from .collection_store import ownership
+        from .collection_store.preview import bound_writer, production_bound
 
         binding = bound_writer(vault_root)
-        marker = authority.routing_marker(binding) if binding is not None else None
-        if marker is not None:
+        proof = (ownership.current(vault_root, conn=binding.connection, private=not production_bound(vault_root))
+                 if binding is not None else None)
+        if proof is not None:
             allowed = authorize
-            authorize = lambda path: authority.selected_entry(vault_root, marker, path) is None and allowed(path)
+
+            def authorize(path):
+                return proof.selected(vault_root, path) is None and allowed(path)
         matches = [
             manifest
             for manifest in discover_collections(
@@ -1663,21 +1627,22 @@ def inspect_legacy_tracker(
 ) -> LegacyCollection:
     """Inspect a manifest-less tracker without making it queryable or mutable."""
     root = Path(vault_root)
+    raw = str(path).strip()
     authorize = authorize_path or (lambda _path: True)
     # `record_memory` routes every non-manifest `.md` spelling here instead of
     # to `resolve_collection`, so this route has to make the same
     # withheld-before-stat decision or the two surfaces disagree about the same
     # path -- and the pair of answers is itself the leak.
-    key = _reference_key(root, str(path))
+    key = _reference_key(root, raw)
     if key is None:
-        raise _spelling_reference_error(str(path))
+        raise _spelling_reference_error(raw)
     if not authorize(key):
         # A tracker is not a manifest, so "pass the `_collection.md` path" would
         # be wrong advice here; "no such tracker" is the honest refusal, and it
         # is what an absent one answers below.
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     try:
-        tracker, rel = _safe_existing_path(root, path)
+        tracker, rel = _safe_existing_path(root, raw)
     except CollectionError as error:
         if _absent_leaf(root, key):
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error

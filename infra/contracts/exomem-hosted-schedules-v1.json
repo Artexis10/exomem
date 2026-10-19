@@ -14,7 +14,9 @@
     "redirect": "error",
     "connectTimeoutSeconds": 5,
     "totalTimeoutSeconds": 20,
-    "successStatusCodes": [200]
+    "successStatusCodes": [
+      200
+    ]
   },
   "kubernetesJobPolicy": {
     "concurrencyPolicy": "Forbid",
@@ -39,12 +41,26 @@
     {
       "name": "exomem-access-delivery",
       "path": "/api/cron/exomem-access-delivery",
-      "schedule": "*/5 * * * *"
+      "schedule": "*/5 * * * *",
+      "cadenceSeconds": 300
     },
     {
       "name": "exomem-reconcile",
       "path": "/api/cron/exomem-reconcile",
-      "schedule": "*/5 * * * *"
+      "schedule": "*/5 * * * *",
+      "cadenceSeconds": 300
+    },
+    {
+      "name": "exomem-health-control",
+      "path": "/api/cron/exomem-health-control",
+      "schedule": "* * * * *",
+      "cadenceSeconds": 60
+    },
+    {
+      "name": "exomem-health-email",
+      "path": "/api/cron/exomem-health-email",
+      "schedule": "*/30 * * * *",
+      "cadenceSeconds": 1800
     }
   ]
 }

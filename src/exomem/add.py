@@ -47,6 +47,7 @@ from .vault import (
     content_hash,
     kb_root,
     parse_frontmatter,
+    read_guarded_text,
     render_wikilink_target,
     resolve_filename_slug,
     unique_path,
@@ -625,9 +626,11 @@ def add(
                 required_guards=required_guards,
                 post_commit_fanout=False,
                 publication_intents_out=publication_intents,
+                _validate_prepared_bindings=lambda: taxonomy_plan.recheck_bindings(vault_root),
             )
         else:
-            batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards)
+            batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
+                               _validate_prepared_bindings=lambda: taxonomy_plan.recheck_bindings(vault_root))
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
@@ -1116,7 +1119,7 @@ def _supersede_writes(
     link = render_wikilink_target(rel_new, vault_root)
     writes: list[PlannedWrite] = []
     for target, expected in targets:
-        text = target.read_text(encoding="utf-8")
+        text, guard = read_guarded_text(vault_root, target)
         actual = content_hash(text)
         if actual != expected:
             raise ContentHashMismatchError(target, expected, actual)
@@ -1126,7 +1129,7 @@ def _supersede_writes(
             continue
         updated = _mark_superseded(text, link, stamp_iso)
         if updated != text:
-            writes.append(PlannedWrite(path=target, content=updated, expected_hash=expected))
+            writes.append(PlannedWrite(path=target, content=updated, expected_hash=expected, guard=guard))
     return writes
 
 

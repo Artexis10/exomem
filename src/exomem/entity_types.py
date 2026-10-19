@@ -374,7 +374,7 @@ def _parse_overlay_text(raw: str | None, digest: str) -> EntityTypeRegistry:
     if raw is None:
         return core
     try:
-        data = yaml.safe_load(raw)
+        data = vault.yaml_safe_load(raw)
     except yaml.YAMLError as exc:
         return _registry(
             core.core_version,
@@ -985,7 +985,7 @@ class _Adapter:
         if text is None:
             return empty_proposal()
         try:
-            data = yaml.safe_load(text)
+            data = vault.yaml_safe_load(text)
         except yaml.YAMLError as exc:
             raise vocabulary_registry.RegistryError(
                 "INVALID_REGISTRY_OVERLAY: entity-types.yaml does not parse; fix it or "

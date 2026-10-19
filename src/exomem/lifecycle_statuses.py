@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -192,7 +192,14 @@ class Basis:
     def classify(
         self, value: object, *, path: str | None = None,
         frontmatter: Mapping[str, Any] | None = None,
+        released: Callable[[str], bool] | None = None,
     ) -> Classification:
+        """Classify one label, through the instance `path` selects when the label is not canonical.
+
+        `released` is a caller's `egress.page_release_filter`: a caller that classifies many
+        pages in one request builds it once, so the policy is read once instead of once per
+        page. It answers what `egress.quick_page_visible` answers; without it that is asked.
+        """
         if value is None or (isinstance(value, str) and not value.strip()):
             return Classification("live")
         if not isinstance(value, str):
@@ -213,7 +220,8 @@ class Basis:
                 from . import find_corpus
                 from .governance import egress
 
-                if not egress.quick_page_visible(self.root, path):
+                if not (released(path) if released is not None
+                        else egress.quick_page_visible(self.root, path)):
                     raise registry.RegistryError("REGISTRY_UNAVAILABLE")
                 page = find_corpus.parse_page(self.root / path, 0, self.root)
                 if page is None:

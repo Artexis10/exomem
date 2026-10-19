@@ -699,11 +699,19 @@ def test_class_c_marking_is_narrowed_to_a_moved_projection(
     index = epistemic_graph.EpistemicGraphIndex(root)
 
     # A projection that provably moved under the in-flight proof: the supplied
-    # freshness identity does not name the resolver bytes.
+    # freshness identity does not name the resolver bytes, and the registry
+    # cannot explain the difference. The patched proof leaves nothing
+    # unexplained on disk, so the classifier is told the evidence exists; the
+    # classifier itself is pinned in `test_graph_behind_publication.py`.
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex,
         "_resolver_source_versions",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_classify_movement",
+        lambda *_args, **_kwargs: ("unrecorded", None),
     )
     with pytest.raises(epistemic_graph.GraphProjectionMoved, match="did not stabilize"):
         index._rebuild_all_locked()
@@ -1025,6 +1033,63 @@ def test_watcher_drain_still_marks_unclassified_graph_incompleteness(
     clock_after = freshness.mark_external_pending(epoch_probe)
     # One watchdog observation, one mark from the drain site, one probe.
     assert clock_after == clock_before + 3
+
+
+@pytest.mark.parametrize("admission", ["own_publication", "outside_edit"])
+def test_a_watcher_rearm_widens_to_the_vault_only_for_an_outside_edit(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch, admission: str
+) -> None:
+    """The fan-out re-arm under a queued whole-vault repair.
+
+    A whole-vault repair on the queue makes an unattributed batch's scope
+    unknown, so its re-arm still fences the vault. A batch the watcher admitted
+    only because the writer's own publication failed names its paths exactly.
+    An unscoped mark there turned every later write into another whole-vault
+    rebuild.
+    """
+    from exomem import deferred_index, file_watcher
+    from exomem.file_watcher import FileWatcher
+
+    root = contract_vault
+    target = root / INSIGHT_A
+    watcher = FileWatcher(root)
+    monkeypatch.setattr(
+        epistemic_graph,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: epistemic_graph.GraphDispatchResult(
+            "failed", "graph_dispatch_failed"
+        ),
+    )
+    content = _page("Contract A", "A claims against [[contract-b]] -- rewritten.")
+    if admission == "own_publication":
+        real_published = vault_module._after_batch_destination_published
+
+        def observe(path: Path) -> None:
+            real_published(path)
+            if path == target:
+                watcher._record(path, deleted=False)
+
+        # The writer's registry publication fails, so its fan-out hands the
+        # held path back to the watcher instead of claiming success.
+        monkeypatch.setattr(vault_module, "_after_batch_destination_published", observe)
+        monkeypatch.setattr(
+            file_watcher, "_publish_registry_change", lambda *_args, **_kwargs: False
+        )
+        _governed_write(root, INSIGHT_A, content)
+    else:
+        target.write_text(content, encoding="utf-8")
+        watcher._record(target, deleted=False)
+    assert freshness.external_pending(root) is True
+    deferred_index.mark_graph_full_rebuild(root, generation=1)
+
+    watcher._flush()
+
+    assert freshness.external_pending(root) is True, "the re-arm did not fire"
+    if admission == "own_publication":
+        assert freshness.external_pending_unscoped(root) is False
+        assert freshness.external_pending_paths(root) == {str(target.resolve())}
+    else:
+        assert freshness.external_pending_unscoped(root) is True
 
 
 def test_a_busy_boundary_does_not_latch_the_external_pending_epoch(

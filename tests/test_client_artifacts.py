@@ -1182,7 +1182,7 @@ def test_preserve_evidence_refuses_a_reserved_character_in_category(vault: Path)
             scope="case",
             category="letters:2026",
             filename="letter.txt",
-            content="Dear Mr. Kivi,",
+            content="Dear Ms. Vale,",
         )
 
     assert refused.value.code == "INVALID_PRESERVE"
@@ -1281,7 +1281,7 @@ def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     command = _command("preserve_evidence")
-    content = "Dear Mr. Kivi, please cease and desist."
+    content = "Dear Ms. Vale, please withdraw the notice."
 
     stored = writer_lease.invoke_command(
         command,
@@ -1543,7 +1543,7 @@ def test_preserve_evidence_reports_a_duplicate_instead_of_a_second_copy(
         scope="case",
         category="letters",
         filename="2026-09-10-letter.txt",
-        content="Dear Mr. Kivi, please cease and desist.",
+        content="Dear Ms. Vale, please withdraw the notice.",
     )
     assert first["state"] == "stored"
 
@@ -1552,7 +1552,7 @@ def test_preserve_evidence_reports_a_duplicate_instead_of_a_second_copy(
         scope="case",
         category="letters",
         filename="2026-09-10-letter-copy.txt",
-        content="Dear Mr. Kivi, please cease and desist.",
+        content="Dear Ms. Vale, please withdraw the notice.",
     )
     assert again["state"] == "already_stored"
     assert again["duplicate_of"] == {"path": first["path"], "ref": first["ref"]}

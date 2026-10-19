@@ -10,7 +10,7 @@ import stat
 import sys
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +18,7 @@ import yaml
 
 from . import freshness, privacy_log
 from .find_types import ParsedPage
+from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,6 @@ EXCLUDED_DIR_NAMES = frozenset(
 )
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
-FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 _DEFAULT_PAGE_CACHE_SIZE = 4096
 
@@ -337,7 +337,12 @@ def walk_freshness_key(paths) -> tuple[int, int, str]:
     return freshness.triple_from_entries(entries)
 
 
-def _walk_md_entry(anchor: Path, child: Path, reserved_paths) -> str | None:
+def _walk_md_entry(
+    anchor: Path,
+    child: Path,
+    reserved_paths,
+    on_error: Callable[[OSError], None] | None = None,
+) -> str | None:
     """How `walk_md` treats one directory entry: "dir" to descend, "md" to yield.
 
     None skips it. The walk's whole per-entry rule lives here so `walk_md_admits`
@@ -352,7 +357,9 @@ def _walk_md_entry(anchor: Path, child: Path, reserved_paths) -> str | None:
         return None
     try:
         info = child.lstat()
-    except OSError:
+    except OSError as error:
+        if on_error is not None:
+            on_error(error)
         return None
     if stat.S_ISLNK(info.st_mode) or bool(
         getattr(os.path, "isjunction", lambda _path: False)(child)
@@ -372,11 +379,14 @@ def _walk_md_entry(anchor: Path, child: Path, reserved_paths) -> str | None:
     return None
 
 
-def walk_md(root: Path):
+def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):
     """Yield every .md path under root, skipping excluded subtrees.
 
     Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
     duplicates that would otherwise pollute the index and search results.
+    `on_error` receives every directory or entry the walk could not read, so a
+    caller can tell an incomplete walk from a whole one; without it the walk
+    stays best-effort.
     """
     from . import foreground_priority, reserved_paths
 
@@ -386,11 +396,13 @@ def walk_md(root: Path):
         foreground_priority.check_cancelled()
         try:
             children = tuple(current.iterdir())
-        except OSError:
+        except OSError as error:
+            if on_error is not None:
+                on_error(error)
             return
         for child in children:
             foreground_priority.check_cancelled()
-            kind = _walk_md_entry(anchor, child, reserved_paths)
+            kind = _walk_md_entry(anchor, child, reserved_paths, on_error)
             if kind == "dir":
                 yield from walk(child)
             elif kind == "md":
@@ -473,6 +485,14 @@ def _read_page_bytes(path: Path, vault_root: Path) -> bytes | None:
     return snapshot.data if snapshot is not None else None
 
 
+def page_relative_path(path: Path, vault_root: Path) -> str:
+    """The canonical path identity used by the page parser."""
+    try:
+        return path.resolve().relative_to(vault_root.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def parse_page(
     path: Path,
     mtime: float,
@@ -484,6 +504,20 @@ def parse_page(
     from .foreground_activity import checkpoint
 
     checkpoint(vault_root)
+    return _parse_page_after_checkpoint(
+        path, mtime, vault_root, content=content, resolved_relative=resolved_relative
+    )
+
+
+def _parse_page_after_checkpoint(
+    path: Path,
+    mtime: float,
+    vault_root: Path,
+    *,
+    content: bytes | None = None,
+    resolved_relative: str | None = None,
+) -> ParsedPage | None:
+    """Parse one representation after the caller's foreground checkpoint."""
     if content is None:
         content = _read_page_bytes(path, vault_root)
         if content is None:
@@ -531,7 +565,7 @@ def parse_page(
     else:
         frontmatter = {}
         body = text
-        if text.startswith("---\n"):
+        if text.removeprefix("\ufeff").startswith("---\n"):
             # An opening fence without the complete frontmatter grammar is
             # ambiguous metadata, not proof that the page has no metadata.
             frontmatter_valid = False
@@ -539,10 +573,7 @@ def parse_page(
     if resolved_relative is not None:
         rel_path = resolved_relative
     else:
-        try:
-            rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
-        except ValueError:
-            rel_path = path.as_posix()
+        rel_path = page_relative_path(path, vault_root)
 
     from . import provenance
     from .vault import resolve_display_title

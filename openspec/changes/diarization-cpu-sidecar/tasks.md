@@ -45,9 +45,9 @@
 - [x] 4.2 `ruff check` clean on the changed files.
 - [x] 4.3 Gated worker smoke passes on the dev box (sidecar built, no token → graceful-failure
       branch verified).
-- [ ] 4.4 Deploy-box end-to-end (Hugo runs — needs the sidecar venv + `HUGGINGFACE_TOKEN` + accepted
+- [ ] 4.4 Deploy-box end-to-end (the operator runs — needs the sidecar venv + `HUGGINGFACE_TOKEN` + accepted
       gates): `setup-diarizer.ps1 -Prewarm` → `EXOMEM_DIARIZE=1` → restart → diarize a real
-      2-speaker recording → confirm `[Hugo]: …` + `[Speaker B]: …` render (sidecar turns flow through
+      2-speaker recording → confirm `[Fixture Speaker]: …` + `[Speaker B]: …` render (sidecar turns flow through
       the unchanged ECAPA naming). Then confirm the embedding stack is intact (a `find` + a fresh
       image/PDF upload still index — no torchcodec/cuDNN regression).
 - [x] 4.5 `openspec validate diarization-cpu-sidecar --strict` passes.

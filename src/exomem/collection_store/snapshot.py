@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, reserved_paths
-from . import connection, schema, tokens
+from . import authority, connection, schema, tokens
 
 _PREFIX = ".exomem-collection-snapshot-"
 _TOKEN = re.compile(r"[0-9a-f]{32}", re.ASCII)
@@ -53,7 +53,35 @@ def _head(commit_seq: int, head: str | None) -> None:
         tokens._hex64(head, "store head")
 
 
-def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[str, str]:
+def validated_lineage(metadata, check: Callable[[], None] = lambda: None):
+    """Read the maintained lineage wire without scanning stored payloads."""
+    sequence = int(metadata[schema.META_COMMIT_SEQ])
+    lineage = json.loads(metadata[schema.META_LINEAGE])
+    if not isinstance(lineage, list) or not lineage:
+        raise ValueError("invalid lineage")
+    current_found = False
+    for entry in lineage:
+        check()
+        _uuid(entry["instance_id"])
+        if entry["adopted_from"] is not None:
+            _uuid(entry["adopted_from"])
+        _head(entry["adopted_at_commit_seq"], entry["head_hash"])
+        if entry["adopted_at_commit_seq"] > sequence:
+            raise ValueError("lineage is ahead of the store")
+        current_found |= entry["instance_id"] == metadata[schema.META_INSTANCE_ID]
+    if not current_found:
+        raise ValueError("current instance is absent from lineage")
+    return lineage
+
+
+def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None], *,
+              version: int | None = None) -> dict[str, str]:
+    """The copy's ``store_meta``, once its bytes, head and lineage check out at ``version``.
+
+    ``version`` is the current schema unless ``migrate_copy`` checks an earlier copy first.
+    """
+    from .native_operands import FileRole, register_native_operands
+
     # An error from the caller's own check (custody, fencing, a transient read) is re-raised
     # as itself: only the copy's own validation may call the copy invalid.
     stopped: list[BaseException] = []
@@ -67,6 +95,8 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[s
 
     try:
         check()
+        # Standalone copies bind persisted index operands to their own metadata file.
+        register_native_operands(conn, databases={FileRole.STORE: "main"})
         if conn.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
             raise ValueError("standalone journaling unavailable")
         check()
@@ -77,7 +107,7 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[s
             raise ValueError("foreign key check failed")
         check()
         metadata = dict(conn.execute("SELECT key,value FROM store_meta"))
-        if schema.schema_version(conn) != schema.SCHEMA_VERSION:
+        if schema.schema_version(conn) != (schema.SCHEMA_VERSION if version is None else version):
             raise ValueError("unsupported schema")
         _uuid(metadata[schema.META_STORE_ID])
         _uuid(metadata[schema.META_INSTANCE_ID])
@@ -97,27 +127,52 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[s
             if tail is None or tail[:2] != (sequence, head):
                 raise ValueError("metadata disagrees with transaction tail")
             tokens._hex64(tail[2], "transaction event hash")
-        lineage = json.loads(metadata[schema.META_LINEAGE])
-        if not isinstance(lineage, list) or not lineage:
-            raise ValueError("invalid lineage")
-        current_found = False
-        for entry in lineage:
-            check()
-            _uuid(entry["instance_id"])
-            if entry["adopted_from"] is not None:
-                _uuid(entry["adopted_from"])
-            _head(entry["adopted_at_commit_seq"], entry["head_hash"])
-            if entry["adopted_at_commit_seq"] > sequence:
-                raise ValueError("lineage is ahead of the store")
-            current_found |= entry["instance_id"] == metadata[schema.META_INSTANCE_ID]
-        if not current_found:
-            raise ValueError("current instance is absent from lineage")
+        validated_lineage(metadata, check)
         return metadata
     except (KeyError, TypeError, ValueError, AttributeError, sqlite3.DatabaseError) as error:
         if stopped and error is stopped[-1]:
             raise
         raise connection.CollectionStoreError(
             "COLLECTION_SNAPSHOT_INVALID", "copied store failed snapshot validation"
+        ) from error
+
+
+def migrate_copy(path: Path, check: Callable[[], None] = lambda: None) -> None:
+    """Bring a private copy of a store that an earlier release wrote to the current schema.
+
+    The copy first passes ``_validate`` at its own schema, so a damaged copy refuses as
+    invalid before anything migrates it. A copy at the current schema stays as it is, and the
+    caller's own validation refuses a newer or unreadable one as before. The migration takes
+    no writer lease and rewrites the file in place, so only a private copy may pass here.
+    """
+    stopped = []
+
+    def checked():
+        try:
+            check()
+        except BaseException as error:
+            stopped.append(error)
+            raise
+
+    with closing(sqlite3.connect(path, isolation_level=None)) as conn:
+        try:
+            with connection.checked_sql(conn, checked):
+                found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
+                if not 0 < found < schema.SCHEMA_VERSION:
+                    return
+                _validate(conn, checked, version=found)
+        except (sqlite3.DatabaseError, schema.SchemaMetadataError, schema.SchemaVersionError) as error:
+            if stopped and error is stopped[-1]:
+                raise
+            return
+    try:
+        with connection.staging_store(path, check=checked):
+            pass  # The staging writer migrates the copy in one transaction.
+    except Exception as error:  # noqa: BLE001 - a copy that cannot migrate is as unusable as a damaged one
+        if stopped and error is stopped[-1]:
+            raise
+        raise connection.CollectionStoreError(
+            "COLLECTION_SNAPSHOT_INVALID", "copied store failed its schema migration"
         ) from error
 
 
@@ -133,6 +188,7 @@ class SnapshotArtifact:
     head_hash: str | None
     lineage_json: str
     lease_epoch: str | None
+    pending_create_raw: str | None
 
 
 @contextmanager
@@ -143,6 +199,26 @@ def staged_snapshot(
     deadline: float,
     cancelled: Callable[[], bool] | None = None,
     scratch_token: str | None = None,
+    cleanup: bool = True,
+) -> Iterator[SnapshotArtifact]:
+    """Stage the live vault store, requiring its current schema as before."""
+    with staged_store_snapshot(
+        connection.store_path(vault_root), directory=directory, deadline=deadline,
+        cancelled=cancelled, scratch_token=scratch_token, cleanup=cleanup,
+    ) as artifact:
+        yield artifact
+
+
+@contextmanager
+def staged_store_snapshot(
+    source_path: Path,
+    *,
+    directory: Path,
+    deadline: float,
+    cancelled: Callable[[], bool] | None = None,
+    scratch_token: str | None = None,
+    preserve_schema: bool = False,
+    cleanup: bool = True,
 ) -> Iterator[SnapshotArtifact]:
     """Yield a closed, fsynced copy in the caller's existing private directory.
 
@@ -154,6 +230,8 @@ def staged_snapshot(
     phase. A passed deadline raises ``TimeoutError`` (COLLECTION_SNAPSHOT_DEADLINE),
     never COLLECTION_SNAPSHOT_INVALID.
     The calling worker thread owns the source reader and closes it after backup.
+    Publication passes ``cleanup=False`` because its durable intent owns scratch;
+    context exit then closes handles and leaves retirement to witnessed recovery.
     """
     checked_at = 0.0
 
@@ -210,11 +288,10 @@ def staged_snapshot(
                     sqlite3.connect(path, isolation_level=None, timeout=_BUSY_TIMEOUT_MS / 1000)
                 ) as destination:
                     check()
-                    with closing(
-                        connection.open_reader(
-                            connection.store_path(vault_root), busy_timeout_ms=_BUSY_TIMEOUT_MS
-                        )
-                    ) as source:
+                    source = (connection._open_read_only(source_path, _BUSY_TIMEOUT_MS)[0]
+                              if preserve_schema else connection.open_reader(
+                                  source_path, busy_timeout_ms=_BUSY_TIMEOUT_MS))
+                    with closing(source):
                         check()
                         source.execute("BEGIN")
                         source.execute("SELECT key,value FROM store_meta").fetchall()
@@ -242,7 +319,8 @@ def staged_snapshot(
 
                     destination.set_progress_handler(validation_progress, 1000)
                     try:
-                        metadata = _validate(destination, check)
+                        version = schema.schema_version(destination) if preserve_schema else None
+                        metadata = _validate(destination, check, version=version)
                     except connection.CollectionStoreError as error:
                         if interruption is not None:
                             raise interruption from error.__cause__
@@ -278,10 +356,11 @@ def staged_snapshot(
                     head_hash=metadata.get(schema.META_STORE_HEAD_HASH),
                     lineage_json=metadata[schema.META_LINEAGE],
                     lease_epoch=metadata.get(schema.META_LEASE_EPOCH),
+                    pending_create_raw=metadata.get(authority.PENDING_CREATE),
                 )
             finally:
                 try:
-                    if owned_file is not None:
+                    if owned_file is not None and cleanup:
                         for suffix in ("", *(_COMPANIONS if owns_companions else ())):
                             current = filesystem.file(parent, path.name + suffix, access="mutate")
                             if current.error is not None and current.error.code == "MISSING":

@@ -25,6 +25,18 @@ def _module():
     return importlib.import_module("exomem.held_fs")
 
 
+@_requires_native_route
+def test_bounded_read_rejects_oversized_input_without_returning_truncated_bytes(tmp_path):
+    """A growing candidate must not become a truncated held correction or an unbounded allocation."""
+    held_fs = _module()
+    (tmp_path / "candidate.md").write_bytes(b"abc")
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        with fs.file(parent, "candidate.md").require() as candidate:
+            assert fs.read(candidate, max_bytes=3).require() == b"abc"
+            refused = fs.read(candidate, max_bytes=2)
+            assert not refused.ok and refused.error.code == "INPUT_TOO_LARGE"
+
+
 def test_windows_ffi_structures_construct_on_every_supported_interpreter() -> None:
     backend = importlib.import_module("exomem._held_fs_windows")
     string, buffer = backend._unicode("leaf.txt")

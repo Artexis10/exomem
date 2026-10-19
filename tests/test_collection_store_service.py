@@ -11,12 +11,13 @@ state, as the release would.
 
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import json
 import os
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,9 +39,18 @@ from test_collection_store_s1_gate import (
 )
 from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, manifest_path, manifest_text
+from test_typed_history_generations import previous_release
 
 from exomem import __main__ as cli
-from exomem import commands, record_governance, records, state_migration, writer_lease
+from exomem import (
+    commands,
+    record_governance,
+    records,
+    reserved_paths,
+    state_migration,
+    vault,
+    writer_lease,
+)
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
@@ -50,11 +60,14 @@ from exomem.collection_store import (
     connection,
     custody,
     importer,
+    replica,
     runtime,
+    schema,
 )
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.lease_coordinator import SQLiteLeaseStore
 
 OWNER = owner_principal(surface="mcp")
 DAILY = "66666666-6666-4666-8666-666666666666"
@@ -91,6 +104,30 @@ def refused(work, code=capability.UNAVAILABLE):
     assert error.value.code == code, error.value
 
 
+def test_a_withheld_selection_without_a_service_is_indistinguishable_from_missing(service):
+    """Routing must not disclose marker ownership before collection visibility is checked."""
+    from test_collection_field_admission import GUEST
+    from test_governance_egress import write_rule, write_scope
+
+    root = service.root
+    service.stop()
+    write_scope(root, paths="Records/**")
+    write_rule(root, ceiling=0)
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "record_memory")
+    before = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.md")}
+    errors = []
+    with request_scope(GUEST):
+        for selector in (CID, "99999999-9999-4999-8999-999999999999"):
+            with pytest.raises((OpError, collections.CollectionError, CollectionStoreError)) as error:
+                writer_lease.invoke_command(command, root, action="append", collection=selector,
+                                            item={"title": "Proposal"}, why="capture")
+            errors.append((error.value.code, error.value.message if isinstance(error.value, OpError) else error.value.reason))
+    assert errors[0] == errors[1] and errors[0][0] == "COLLECTION_NOT_FOUND"
+    refused(lambda: call(root, "record_memory", action="append", collection=CID,
+                         item={"title": "Proposal"}, why="capture"), "COLLECTION_STORE_UNAVAILABLE")
+    assert {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.md")} == before
+
+
 @dataclass
 class Service:
     root: Path
@@ -114,10 +151,8 @@ def offline_create(root, manifest_file, path, *, why):
                                       "--manifest-file", str(manifest_file), "--why", why])
 
 
-@pytest.fixture
-def service(tmp_path, monkeypatch):
-    """A/B in files, summary C enrolled offline by the owner, then the service started without the operator
-    credential, all under a release that enables records-summary-v1."""
+def _served_vault(tmp_path, monkeypatch):
+    """A/B in files and the service's environment, before the owner enrols summary C."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
@@ -142,6 +177,14 @@ def service(tmp_path, monkeypatch):
     (tmp_path / "c.md").write_text(summary_text())
     # Only a release that enables the slice enrols a vault and serves its summary collection C.
     monkeypatch.setattr(capability, "RELEASED", ON)
+    return root
+
+
+@pytest.fixture
+def service(tmp_path, monkeypatch):
+    """A/B in files, summary C enrolled offline by the owner, then the service started without the operator
+    credential, all under a release that enables records-summary-v1."""
+    root = _served_vault(tmp_path, monkeypatch)
     with coordinator(tmp_path / "coordinator.sqlite"):
         assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
         started = Service(root, writer_lease.start_server_lifecycle())
@@ -153,6 +196,120 @@ def service(tmp_path, monkeypatch):
         finally:
             if not started.manager._stop.is_set():
                 started.stop()
+
+
+def test_an_upgraded_service_migrates_its_fenced_store_from_the_previous_schema_and_stays_writable(
+        tmp_path, monkeypatch):
+    """A release that bumps the store schema must let its writer migrate a store the previous release fenced.
+
+    Readers refuse a store below the current schema until its writer migrates it, so a writer that
+    needs a reader to attach the store never acquires the fenced lease, and every write refuses.
+    """
+    root = _served_vault(tmp_path, monkeypatch)
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        with monkeypatch.context() as previous:
+            previous_release(previous)
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
+        with closing(sqlite3.connect(connection.store_path(root))) as raw:
+            assert schema.schema_version(raw) == 10
+        # The previous release's worker still holds the lease while the upgraded one starts, as in a handoff.
+        previous_worker = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env(
+            {**os.environ, "EXOMEM_WRITER_LEASE_REPLICA_ID": "previous-worker"}))
+        held = previous_worker.acquire(collection_store_capability=writer_lease.COLLECTION_STORE_CAPABILITY)
+        assert held.granted
+        started = Service(root, writer_lease.start_server_lifecycle())
+        try:
+            _until(lambda: runtime.served(root))
+            refused(lambda: call(root, "record_memory", action="append", collection=CID,
+                                 item={"title": "During handoff"}, why="the previous worker still writes"),
+                    "WRITER_LEASE_REQUIRED")
+            with closing(sqlite3.connect(connection.store_path(root))) as raw:
+                assert schema.schema_version(raw) == 10  # only the lease holder migrates
+            previous_worker.release(held.fencing_token)
+            assert call(root, "record_memory", action="append", collection=CID, item={"title": "After upgrade"},
+                        item_key=ROW, why="first row after the upgrade")["outcome"] == "committed"
+            assert titles(root, CID) == ["After upgrade"]
+            assert call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
+                        why="file collection after the upgrade")["outcome"] == "committed"
+        finally:
+            started.stop()
+    with closing(sqlite3.connect(connection.store_path(root))) as raw:
+        assert schema.schema_version(raw) == schema.SCHEMA_VERSION
+
+
+def test_first_offline_collection_creation_preserves_trashed_declarations(tmp_path, monkeypatch):
+    """A recoverable declaration in trash cannot block enrollment of a new store."""
+    root = tmp_path / "vault"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
+    monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
+    (root / "Knowledge Base/_Schema").mkdir(parents=True)
+    (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")
+    state_migration.require_vault_state_ready(root)
+    trashed = root / "Knowledge Base/_trash/2026-01-01/removed/_collection.md"
+    trashed.parent.mkdir(parents=True)
+    original = summary_text().encode()
+    trashed.write_bytes(original)
+    source = tmp_path / "manifest.md"
+    source.write_bytes(original)
+    for name, value in {
+        "EXOMEM_VAULT_PATH": str(root), "EXOMEM_WRITER_LEASE_URL": "http://localhost",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "gate", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
+        "EXOMEM_WRITER_LEASE_TOKEN": "lease", "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        assert offline_create(root, source, manifest_path(), why="first store collection") == 0
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    assert [entry["collection_id"] for entry in marker["collections"]] == [CID]
+    assert trashed.read_bytes() == original
+
+
+def test_an_offline_create_after_a_retire_enrols_the_next_fence_generation(tmp_path, monkeypatch):
+    """Defect: a vault whose earlier store fence was retired can never move to the store again,
+    because its first create cuts from generation 0 and refuses the retired generation."""
+    root = tmp_path / "vault"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
+    monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
+    (root / "Knowledge Base/_Schema").mkdir(parents=True)
+    (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")
+    state_migration.require_vault_state_ready(root)
+    source = tmp_path / "manifest.md"
+    source.write_text(summary_text())
+    for name, value in {
+        "EXOMEM_VAULT_PATH": str(root), "EXOMEM_WRITER_LEASE_URL": "http://localhost",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "gate", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
+        "EXOMEM_WRITER_LEASE_TOKEN": "lease", "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    # The vault's earlier store was enrolled at generation 1, then retired when it went back to files.
+    leases = SQLiteLeaseStore(tmp_path / "coordinator.sqlite")
+    earlier = {"capability": "collections-store-v1", "store_id": "77777777-7777-4777-8777-777777777777"}
+    leases.transition_collection_store_fence("gate", expected_generation=0, **earlier)
+    leases.retire_collection_store_fence("gate", expected_generation=1, **earlier)
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        assert offline_create(root, source, manifest_path(), why="back to the store") == 0
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    assert marker["collection_store_fence"]["generation"] == 2
+    assert leases.collection_store_fence("gate") == {
+        "capability": "collections-store-v1", "enrolled": True, "store_id": marker["store_id"], "generation": 2}
+
+
+def test_nested_archive_declarations_retain_file_source_ownership(tmp_path):
+    """A live declaration in a nested archive still owns its source outside that directory."""
+    root = tmp_path / "vault"
+    path = "Knowledge Base/Records/_archive/Declared/_collection.md"
+    source = "Knowledge Base/Records/Work/Items"
+    manifest = root / path
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(manifest_text().replace("source: Items", "source: " + source))
+    assert collections.load_manifest(root, path).storage.source == source
+    proposed = {"manifest_path": DAILY_PATH, "source_path": source, "layout": "markdown-items"}
+    refused(lambda: authority.require_new_file_ownership(root, None, proposed),
+            "COLLECTION_STORE_MARKER_CONFLICT")
 
 
 def test_the_service_startup_gate_admits_the_mixed_vault(service):
@@ -257,6 +414,83 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
     assert (DAILY_PATH, capability.UNAVAILABLE) in {
         (row["path"], row["error_code"]) for row in inventory["unreadable_manifests"]}
     assert titles(root, KEY) == ["File row"]
+
+
+def test_global_inspection_rechecks_canonical_support_and_permissions_without_a_projection_refresh(service):
+    """Shared inspection work must not retain a prior request's row or audience decisions."""
+    from test_collection_claims import _write_observation
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem import due_state
+
+    root = service.root
+    observed = "77777777-7777-4777-8777-777777777777"
+    observed_path = manifest_path().replace("Work", "Observed")
+    observed_text = summary_text(manifest_text().replace(CID, observed).replace("title: Work", "title: Observed")
+                                 .replace("    count: {type: integer}\n",
+                                          "    count: {type: integer}\n    category: {type: string}\n"))
+    call(root, "record_memory", action="create", manifest_path=observed_path,
+         manifest_text=observed_text, why="observed routing")
+    for key, title in ((ROW, "First"), (OTHER, "Second")):
+        appended = call(root, "record_memory", action="append", collection=observed,
+                        item_key=key, item={"title": title, "category": "account subscriptions"}, why="support")
+    daily_text = DAILY_TEXT.replace("lifecycle: active\n",
+                                    "lifecycle: active\nclaims:\n  terms: [device, inventory]\n")
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+         manifest_text=daily_text, why="declared routing")
+    call(root, "record_memory", action="append", collection=KEY,
+         item={"title": "File row"}, item_key=ROW, why="coexisting file collection")
+    observation, observation_ref = _write_observation(root)
+    other_observation = observation.replace("account-observation", "device-observation")
+    (root / other_observation).write_text((root / observation).read_text()
+        .replace("44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555")
+        .replace("account", "device").replace("Account", "Device")
+        .replace("subscription", "inventory").replace("Subscription", "Inventory"))
+    server = runtime._SERVERS[root]
+    with request_scope(OWNER):
+        server.call(lambda: due_state.reconcile(root, now=dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)))
+    projection = due_state.state_path(root)
+    original_projection = projection.read_bytes()
+
+    inventory = call(root, "record_memory", action="inspect")
+    rows = {row["collection_id"]: row for row in inventory["collections"]}
+    assert set(rows) == {KEY, CID, DAILY, observed}
+    assert {key: (row["committed"], row["unreflected"]) for key, row in rows.items()} == {
+        KEY: (1, 0), CID: (1, 0), DAILY: (0, 1), observed: (2, 1),
+    }
+    coverage = call(root, "record_memory", action="inspect", collection=observed)["coverage"]
+    assert coverage["unreflected_refs"] == [observation_ref]
+
+    write_scope(root, paths="Unrelated/**")
+    scope = root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f"refs: [exomem://record/{observed}/{OTHER}]\n")
+    write_rule(root, ceiling=0)
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "record_memory")
+    with request_scope(_external()):
+        hidden = writer_lease.invoke_command(command, root, action="inspect")
+    hidden_row = next(row for row in hidden["collections"] if row["collection_id"] == observed)
+    assert (hidden_row["committed"], hidden_row["unreflected"]) == (1, 0)
+    write_rule(root, ceiling=6)
+    with request_scope(_external()):
+        released = writer_lease.invoke_command(command, root, action="inspect")
+    released_row = next(row for row in released["collections"] if row["collection_id"] == observed)
+    assert (released_row["committed"], released_row["unreflected"]) == (2, 1)
+    assert projection.read_bytes() == original_projection
+
+    call(root, "record_memory", action="update", collection=observed, item_key=OTHER,
+         changes={"category": "different material"}, why="remove recurring support",
+         expected_container_hash=appended["after_container_hash"],
+         expected_item_version=appended["after_item_hash"])
+    current = call(root, "record_memory", action="inspect")
+    assert next(row for row in current["collections"] if row["collection_id"] == observed)["unreflected"] == 0
+    assert projection.read_bytes() == original_projection
+
+    (root / other_observation).unlink()
+    with request_scope(OWNER):
+        server.call(lambda: due_state.reconcile(root))
+    assert projection.read_bytes() != original_projection
+    replaced = call(root, "record_memory", action="inspect")
+    assert next(row for row in replaced["collections"] if row["collection_id"] == DAILY)["unreflected"] == 0
 
 
 def test_the_service_builds_a_revised_rollup_and_publishes_the_summary_page(service, monkeypatch):
@@ -451,9 +685,8 @@ def test_a_served_create_that_misses_its_publication_deadline_recovers_without_a
     service.stop()  # the handoff publishes; a pending create would refuse it as FLUSH_PENDING
 
 
-def test_file_collections_stay_writable_while_an_unreadable_store_is_unopened(service, tmp_path):
-    """Defect: while the store is unopened, an unreadable pending create in it refuses the
-    file collections too, though they never depend on the store."""
+def test_unresolved_ownership_withholds_ambiguous_records_but_keeps_disjoint_notes_usable(service, tmp_path):
+    """An unreadable intent cannot supply a complete negative for a collection-layer path."""
     root = service.root
     service.stop()
     with closing(sqlite3.connect(connection.store_path(root))) as conn:
@@ -466,18 +699,335 @@ def test_file_collections_stay_writable_while_an_unreadable_store_is_unopened(se
         try:
             _until(lambda: getattr(runtime._SERVERS.get(root), "refusal", None) is not None)
 
-            def written():
-                try:
-                    return call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
-                                item_key=ROW, why="file write")["outcome"] == "committed"
-                except OpError as error:
-                    assert error.code == "WRITER_LEASE_REQUIRED", error  # the new writer is still starting
-                    return False
-
-            _until(written)
-            assert titles(root, KEY) == ["File row"]
+            before = ab_bytes(root)
+            with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+                call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
+                     item_key=ROW, why="file write")
+            assert ab_bytes(root) == before
+            note = "Knowledge Base/Notes/Independent.md"
+            (root / note).parent.mkdir(parents=True, exist_ok=True)
+            (root / note).write_text("Ordinary note.\n")
+            assert "Ordinary note" in call(root, "read_memory", path=note)["body"]
         finally:
             replaced.stop()
+
+
+def test_lost_store_custody_keeps_file_writes_and_renewal_available(service, monkeypatch):
+    """A store custody refusal must not disable knowledge and file collections behind its enrolled fence."""
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before_marker = marker.read_bytes()
+    protected = {path: path.read_bytes() for path in (root / manifest_path()).parent.rglob("*") if path.is_file()}
+    before_head = service.manager.client.status().collection_store_head
+    (root / "Knowledge Base/.stfolder").mkdir()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TTL", "3")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_IDLE_SECONDS", "0")
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        assert call(root, "record_memory", action="append", collection=KEY,
+                    item={"title": "File row after custody loss"}, item_key=LATER,
+                    why="file authority remains available")["outcome"] == "committed"
+        assert titles(root, KEY) == ["File row after custody loss"]
+
+        note = {
+            "content": "# Restart observation\n\n- [review state] File knowledge remains available.\n",
+            "title": "Restart observation", "slug": "restart-observation", "suggestions": False,
+        }
+        draft = call(root, "remember", validate_only=True, **note)
+        saved = call(root, "remember", draft_id=draft["draft_id"], draft_hash=draft["draft_hash"],
+                     draft_token=draft["draft_token"], **note)
+        assert "File knowledge remains available." in call(root, "read_memory", path=saved["path"], include_raw=True)["content"]
+
+        acquired = restarted.manager.client.status()
+        _until(lambda: restarted.manager.status()["last_renew_age_seconds"] is not None)
+        renewed = restarted.manager.client.status()
+        assert renewed.holder == acquired.holder == restarted.manager.config.replica_id
+        assert renewed.fencing_token == acquired.fencing_token
+        assert renewed.collection_store_head == before_head
+        assert replica.file_writer_marker(root, renewed) is None  # GET is not an acquisition receipt.
+        refused(lambda: call(root, "record_memory", action="append", collection=CID,
+                             item={"title": "Must remain uncommitted"}, why="store custody is unavailable"),
+                "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        summary = manifest_path().replace("_collection.md", "Items/_summary.md")
+        with pytest.raises((OpError, ValueError), match="COLLECTION_VIEW_PATH"):
+            call(root, "manage_memory_file", operation="create", path=summary, overwrite=True,
+                 content="# Generic overwrite\n\nDirect changes stay refused.\n")
+        with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
+            refused(lambda: vault.batch_atomic_write([
+                vault.PlannedWrite(root / "Knowledge Base/unowned.md", "Unowned.\n",
+                                   ensure_directories=((root / summary).parent / "nested",)),
+            ], vault_root=root, post_commit_fanout=False), "COLLECTION_VIEW_PATH")
+            refused(lambda: reserved_paths.move_generic_path(
+                root, "Knowledge Base/Records", "Knowledge Base/Archived", source_kind="directory",
+            ), "COLLECTION_VIEW_PATH")
+        assert not ((root / summary).parent / "nested").exists()
+        assert not (root / "Knowledge Base/Archived").exists()
+        assert {path: path.read_bytes() for path in protected} == protected
+        assert marker.read_bytes() == before_marker
+        with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
+            refuse_paths = authority.refuse_view_paths
+
+            def removed_before_validation(*args, **kwargs):
+                # Withdraw after the file proof without changing the renewal thread's marker reader.
+                marker.unlink()
+                return refuse_paths(*args, **kwargs)
+
+            with monkeypatch.context() as gap:
+                gap.setattr(authority, "refuse_view_paths", removed_before_validation)
+                refused(lambda: vault.batch_atomic_write([
+                    vault.PlannedWrite(root / "Knowledge Base/unowned.md", "Unpublished.\n"),
+                ], vault_root=root, post_commit_fanout=False), "COLLECTION_STORE_MARKER_CONFLICT")
+        marker.write_bytes(before_marker)
+        assert not (root / "Knowledge Base/unowned.md").exists()
+        (root / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Records/Work/Items\n")
+        with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
+            with pytest.raises(ValueError, match="WRITE_REFUSED.*excluded"):
+                vault.batch_atomic_write([vault.PlannedWrite(root / summary, "Unpublished.\n")],
+                                         vault_root=root, post_commit_fanout=False)
+    finally:
+        marker.write_bytes(before_marker)
+        restarted.stop()
+    assert restarted.manager.client.status().collection_store_head == before_head
+
+
+@pytest.mark.parametrize("withdrawal", ["removed", "malformed", "legacy", "changed"])
+def test_a_file_publication_rechecks_its_acquired_marker_after_staging(service, monkeypatch, withdrawal):
+    """A fallback granted before staging cannot survive a withdrawn or changed routing basis."""
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    validate = vault._validate_batch_write_access
+    staged = []
+
+    def withdraw(*args, **kwargs):
+        validate(*args, **kwargs)
+        if not staged:
+            staged.append(True)
+            if withdrawal == "removed":
+                marker.unlink()
+            elif withdrawal == "malformed":
+                marker.write_bytes(b"{")
+            elif withdrawal == "legacy":
+                marker.write_text(json.dumps({**json.loads(before), "version": 1}))
+            else:
+                marker.write_bytes(before + b"\n")
+
+    target = root / "Knowledge Base/unpublished.md"
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
+            monkeypatch.setattr(vault, "_validate_batch_write_access", withdraw)
+            with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
+                vault.batch_atomic_write([vault.PlannedWrite(target, "Unpublished.\n")],
+                                         vault_root=root, post_commit_fanout=False)
+        assert staged and not target.exists()
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
+
+
+def test_no_runtime_file_authority_requires_current_replica_bytes_and_intent_at_the_same_head(service, monkeypatch):
+    """Unpublished export metadata and replaced replicas do not change the business head but withdraw file authority."""
+    root = service.root
+    service.stop()
+    marker = authority.read_marker(root)
+    original = store_meta(root)
+    installed = replica.replica_path(root)
+    before_replica = installed.read_bytes()
+    before_head = service.manager.client.status().collection_store_head
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+
+    def append():
+        return call(root, "record_memory", action="append", collection=KEY,
+                    item={"title": "Unrelated file row"}, item_key=LATER, why="file authority")
+
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        assert restarted.manager.ensure_writer().granted
+        intent = {"version": 2, "kind": authority.EXPORT, "request_id": "export:interrupted",
+                  "plan_id": "unpublished-export", "expected_marker": marker.decode(), "why": "return to files",
+                  "exported_at": "20261018T000000Z",
+                  "collections": [{name: entry[name] for name in ("collection_id", "manifest_path", "source_path")}
+                                  for entry in json.loads(marker)["collections"]]}
+        with closing(sqlite3.connect(connection.store_path(root))) as store:
+            store.execute("INSERT INTO store_meta(key,value) VALUES (?,?)", (authority.PENDING_CREATE, json.dumps(intent)))
+            store.commit()
+        assert store_meta(root)[schema.META_COMMIT_SEQ] == original[schema.META_COMMIT_SEQ]
+        assert replica._intent_digest(store_meta(root)) != original.get(schema.META_PUBLISHED_INTENT_SHA256)
+        refused(append, "WRITER_LEASE_REQUIRED")
+        with closing(sqlite3.connect(connection.store_path(root))) as store:
+            store.execute("DELETE FROM store_meta WHERE key=?", (authority.PENDING_CREATE,))
+            store.commit()
+        installed.write_bytes(before_replica + b"unpublished")
+        refused(append, "WRITER_LEASE_REQUIRED")
+        installed.write_bytes(before_replica)
+        assert append()["outcome"] == "committed"
+        assert restarted.manager.client.status().collection_store_head == before_head
+    finally:
+        installed.write_bytes(before_replica)
+        restarted.stop()
+
+
+def test_no_runtime_file_authority_requires_every_canonical_collection_and_its_actual_source(service):
+    """A syntactically valid marker cannot omit canonical ownership or move it away from the actual source."""
+    root = service.root
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+         why="a second canonical collection")
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    complete = json.loads(before)
+    before_files = {path: path.read_bytes() for path in (root / A_PATH).parent.rglob("*") if path.is_file()}
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        omitted = {**complete, "collections": [entry for entry in complete["collections"] if entry["collection_id"] != CID]}
+        changed = json.loads(before)
+        changed["collections"][0]["source_path"] = "Knowledge Base/Records/OtherSource"
+        for invalid in (omitted, changed):
+            raw = json.dumps(invalid).encode()
+            assert authority.parse_marker(root, raw)["version"] == 2
+            marker.write_bytes(raw)
+            refused(lambda: call(root, "record_memory", action="append", collection=KEY,
+                                 item={"title": "Must stay uncommitted"}, item_key=LATER,
+                                 why="ownership is unverified"), "WRITER_LEASE_REQUIRED")
+        assert {path: path.read_bytes() for path in (root / A_PATH).parent.rglob("*") if path.is_file()} == before_files
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
+
+
+def test_the_file_ownership_reader_exposes_declarations_and_head_without_item_payloads(service):
+    """The fallback metadata reader must not turn custody refusal into general canonical row access."""
+    root = service.root
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    with closing(connection.open_ownership_reader(connection.store_path(root))) as reader:
+        reader.execute("BEGIN")
+        assert {row[0] for row in reader.execute("SELECT collection_id FROM collections")} == {CID}
+        for entry in marker["collections"]:
+            authority.require_selected(reader, marker, entry, root=root)
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("SELECT body FROM items").fetchall()
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("SELECT created_txn FROM collections").fetchall()
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("UPDATE store_meta SET value='changed' WHERE key='store_id'")
+    with closing(connection.open_head_reader(connection.store_path(root))) as reader:
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("SELECT collection_id FROM collections").fetchall()
+
+
+def test_a_direct_file_move_rechecks_fallback_authority_after_its_plan(service, monkeypatch):
+    """A binary move has no later Markdown batch to notice a marker withdrawn after its plan."""
+    from exomem import move_file
+
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    source, destination = "Knowledge Base/ordinary.bin", "Knowledge Base/moved.bin"
+    (root / source).write_bytes(b"ordinary bytes")
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    rename = move_file._held_rename
+
+    def withdraw(*args, **kwargs):
+        marker.unlink()
+        return rename(*args, **kwargs)
+
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        monkeypatch.setattr(move_file, "_held_rename", withdraw)
+        with pytest.raises((OpError, ValueError), match="WRITER_LEASE_REQUIRED"):
+            call(root, "manage_memory_file", operation="move", old_path=source,
+                 new_path=destination, update_wikilinks=False)
+        assert (root / source).read_bytes() == b"ordinary bytes" and not (root / destination).exists()
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
+
+
+def test_a_failed_delete_restores_its_bytes_after_the_fallback_marker_is_withdrawn(service, monkeypatch):
+    """A checkpoint failure after the trash rename must not strand bytes when the forward grant disappears."""
+    from exomem import graph_sync
+
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    source = "Knowledge Base/ordinary.bin"
+    (root / source).write_bytes(b"original bytes")
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+
+    def fail_after_rename(transition):
+        assert transition.renamed and not (root / source).exists()
+        marker.unlink()
+        raise PermissionError("checkpoint unavailable")
+
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        monkeypatch.setattr(graph_sync.GraphLifecycleTransition, "publish_checkpoint", fail_after_rename)
+        with pytest.raises(ValueError, match="GRAPH_SYNC_CHECKPOINT_FAILED"):
+            call(root, "manage_memory_file", operation="delete", path=source, confirm=True)
+        assert (root / source).read_bytes() == b"original bytes"
+        assert not list((root / "Knowledge Base/_trash").rglob("ordinary.bin"))
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
+
+
+def test_a_failed_move_restores_its_bytes_after_the_fallback_marker_is_withdrawn(service, monkeypatch):
+    """A failed link publication must still undo its completed rename after fallback authority disappears."""
+    from exomem import move_file
+
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    source, destination = "Knowledge Base/ordinary.md", "Knowledge Base/moved.md"
+    original = "# Original\n\nOrdinary content.\n"
+    (root / source).write_text(original)
+    (root / "Knowledge Base/referrer.md").write_text("# Referrer\n\n[[ordinary]]\n")
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+
+    def fail_after_rename(*args, **kwargs):
+        assert not (root / source).exists() and (root / destination).read_text() == original
+        marker.unlink()
+        raise PermissionError("link publication unavailable")
+
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        monkeypatch.setattr(move_file, "batch_atomic_write", fail_after_rename)
+        with pytest.raises(PermissionError, match="link publication unavailable"):
+            call(root, "manage_memory_file", operation="move", old_path=source, new_path=destination)
+        assert (root / source).read_text() == original and not (root / destination).exists()
+        assert (root / "Knowledge Base/referrer.md").read_text() == "# Referrer\n\n[[ordinary]]\n"
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
 
 
 def test_a_revise_cannot_turn_an_empty_summary_collection_into_an_items_mode_one(service):
@@ -531,6 +1081,25 @@ def test_a_coordinator_that_never_enrolled_the_store_names_adopt_local_which_ser
             adopted.stop()
 
 
+def test_a_host_whose_marker_predates_a_retire_refuses_as_retired_not_adopt_local(service, tmp_path):
+    """Defect: a host still holding the store marker after the coordinator retired the fence says
+    the coordinator never enrolled the store and names adopt-local, which refuses that marker."""
+    root = service.root
+    service.stop()
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    SQLiteLeaseStore(tmp_path / "coordinator.sqlite").retire_collection_store_fence(
+        "gate", expected_generation=marker["collection_store_fence"]["generation"],
+        capability="collections-store-v1", store_id=marker["store_id"])
+    stale = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        with pytest.raises(OpError) as refusal:
+            titles(root, CID)
+    finally:
+        stale.stop()
+    assert refusal.value.code == "COLLECTION_STORE_RETIRED"
+    assert "adopt-local" not in refusal.value.message
+
+
 def _finish_after_restart(found, continuation):
     """The restarted service, in a fresh interpreter: nothing here calls run_jobs."""
     capability.RELEASED = ON
@@ -561,6 +1130,84 @@ def test_an_import_started_before_a_restart_completes_on_the_restarted_service(s
     restarted = functools.partial(_finish_after_restart, continuation=job["continuation"])
     assert run_host(tmp_path, tmp_path / "state", "restart", restarted, root=root,
                     database=tmp_path / "coordinator.sqlite") == ("complete", 60)
+
+
+def test_import_status_polling_does_not_restart_blocked_summary_publication(service, monkeypatch):
+    """Progress checks must not make the store actor repeatedly wait on a busy vault."""
+    import threading
+
+    root = service.root
+    write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(1001)), SOURCE)
+    job = imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+
+    def complete():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT state FROM import_jobs").fetchone()[0] == "complete"
+
+    _until(complete)
+    initial = imported(root, mode="status", continuation=job["continuation"])
+    assert initial["rows"]["imported"] == 1001
+    appended, resume = threading.Event(), threading.Event()
+    serve = runtime.StoreServer._serve
+
+    def pending_before_maintenance(server, request):
+        serve(server, request)
+        if isinstance(request.result, dict) and request.result.get("item_key") == LATER:
+            appended.set()
+            assert resume.wait(5), "the test did not release the store actor"
+
+    monkeypatch.setattr(runtime.StoreServer, "_serve", pending_before_maintenance)
+    boundary = service.manager._mutation_coordinator_for(root)
+    ordinary_timeout = service.manager._mutation_timeout_seconds
+    guard = service.manager.consistency_guard
+    rejected_operations = []
+
+    @contextmanager
+    def observed_guard(*args, **kwargs):
+        entered = False
+        try:
+            with guard(*args, **kwargs) as held:
+                entered = True
+                yield held
+        except OpError as error:
+            if not entered and error.code == "MUTATION_BUSY":
+                rejected_operations.append(kwargs.get("operation"))
+            raise
+
+    monkeypatch.setattr(service.manager, "consistency_guard", observed_guard)
+
+    def refusals():
+        # These two operation labels belong to the complete ownership proof protocol.
+        return [operation for operation in rejected_operations
+                if operation not in ("collection_ownership_read", "collection_ownership_release")]
+
+    try:
+        assert call(root, "record_memory", action="append", collection=CID, item_key=LATER,
+                    item={"title": "Pending summary"}, why="pending summary")["outcome"] == "committed"
+        assert appended.wait(2)
+        # The independent replica publisher can still own the boundary during setup.
+        with boundary.hold(timeout_seconds=ordinary_timeout, operation="test-summary-holder", holder_kind="foreground"):
+            with monkeypatch.context() as held_timeout:
+                # Keep only the deliberate refusal inside the normal maintenance backoff window.
+                held_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+                resume.set()
+                _until(lambda: bool(refusals()))
+                with pytest.raises(OpError) as busy:
+                    imported(root, mode="status", continuation=job["continuation"])
+                assert busy.value.code == "MUTATION_BUSY"
+                assert len(refusals()) == 1
+        for _ in range(3):
+            status = imported(root, mode="status", continuation=job["continuation"])
+            assert status["state"] == "complete" and status["rows"] == initial["rows"]
+            time.sleep(0.15)
+        assert len(refusals()) == 1
+    finally:
+        resume.set()
+    page = root / manifest_path().replace("_collection.md", "Items/_summary.md")
+    # An ordinary mutation still wakes publication after the held boundary clears.
+    call(root, "record_memory", action="append", collection=CID,
+         item={"title": "Publication resumed"}, why="resume publication")
+    _until(lambda: page.exists() and "1004 committed rows" in page.read_text())
 
 
 def test_served_field_release_and_summary_use_canonical_authority_without_preview_binding(service):
@@ -617,8 +1264,8 @@ def test_served_field_release_and_summary_use_canonical_authority_without_previe
     refused(lambda: recipient("read_memory", path=path), "COLLECTION_STORE_UNAVAILABLE")
 
 
-def test_marker_ownership_keeps_file_reads_available_when_the_store_is_corrupt(service, tmp_path):
-    """A missing store or edited projection header that either discloses C bytes or disables unrelated A/B pages."""
+def test_unavailable_canonical_ownership_keeps_disjoint_notes_available(service, tmp_path):
+    """Corrupt canonical state cannot turn ambiguous collection-layer paths into ordinary files."""
     from test_collection_field_admission import GUEST
 
     root = service.root
@@ -637,16 +1284,18 @@ def test_marker_ownership_keeps_file_reads_available_when_the_store_is_corrupt(s
         (root / path).write_text("# Edited view\n\nprivate-projection-content\n")
     ordinary = "Knowledge Base/Records/Daily/Notes.md"
     (root / ordinary).write_text("# Independent knowledge\n\nordinary-content\n")
+    note = root / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Independent knowledge\n\nordinary-content\n")
     connection.store_path(root).write_bytes(b"unreadable sqlite fixture")
     restarted = Service(root, writer_lease.start_server_lifecycle())
     try:
         _until(lambda: runtime._SERVERS.get(root) is not None and runtime._SERVERS[root].runtime is None)
-        for path in (A_PATH, B_PATH, ordinary):
-            assert call(root, "read_memory", path=path)["path"] == path
+        assert "ordinary-content" in call(root, "read_memory", path=note.relative_to(root).as_posix())["body"]
         command = next(command for command in commands.product_commands_for("mcp") if command.name == "read_memory")
         for who in (OWNER, GUEST):
             with request_scope(who):
-                for path in protected:
+                for path in [*protected, A_PATH, B_PATH, ordinary]:
                     try:
                         result = writer_lease.invoke_command(command, root, path=path)
                     except (OpError, CollectionStoreError, ValueError) as error:
@@ -890,13 +1539,17 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     from exomem import request_budget
     from exomem.collection_store.writer import CollectionWriter
 
-    entered, release = threading.Event(), threading.Event()
+    release, completed = threading.Event(), threading.Event()
+    leaf_calls = 0
     append = CollectionWriter.append_record
 
     def delayed(writer, *args, **kwargs):
-        entered.set()
+        nonlocal leaf_calls
+        leaf_calls += 1
         assert release.wait(5), "test did not release the accepted mutation"
-        return append(writer, *args, **kwargs)
+        result = append(writer, *args, **kwargs)
+        completed.set()
+        return result
 
     monkeypatch.setattr(CollectionWriter, "append_record", delayed)
     arguments = dict(action="append", collection=CID, item={"title": "Late committed"},
@@ -906,7 +1559,6 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     try:
         with pytest.raises(OpError) as pending:
             call(service.root, "record_memory", **arguments)
-        assert entered.is_set()
         assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
         assert pending.value.as_public_dict()["status"] == "uncertain"
         assert pending.value.as_public_dict()["committed"] is None
@@ -914,9 +1566,20 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     finally:
         request_budget.reset_current(token)
         release.set()
+    assert completed.wait(5), "the accepted mutation did not complete without a retry"
+    summary = service.root / manifest_path().replace("_collection.md", "Items/_summary.md")
+
+    def summary_is_current():
+        try:
+            return "2 committed rows" in summary.read_text()
+        except FileNotFoundError:
+            return False
+
+    _until(summary_is_current)
     first = call(service.root, "record_memory", **arguments)
     assert first["outcome"] == "committed"
     assert call(service.root, "record_memory", **arguments) == first
+    assert leaf_calls == 1
     assert titles(service.root, CID) == ["Canonical", "Late committed"]
 
 
@@ -1013,10 +1676,8 @@ def test_projection_admission_accepts_the_served_vault_through_a_root_alias(serv
 
 
 @pytest.mark.parametrize("boundary", ["marker", "collections", "knowledge", "unreadable"])
-def test_unreadable_marker_ownership_never_admits_a_physical_projection(service, tmp_path, boundary):
-    """Unreadable or symlinked ownership must not turn a C projection into an ordinary file."""
-    from exomem import held_fs
-
+def test_an_unreadable_hint_never_admits_a_canonical_projection_as_an_ordinary_file(service, tmp_path, boundary):
+    """The canonical subject stays withheld without its serving writer, regardless of hint accessibility."""
     service.stop()
     root = service.root
     marker = authority.marker_path(root)
@@ -1031,8 +1692,8 @@ def test_unreadable_marker_ownership_never_admits_a_physical_projection(service,
         target.rename(outside)
         target.symlink_to(outside, target_is_directory=outside.is_dir())
     try:
-        with request_scope(OWNER), pytest.raises(held_fs.HeldFsError):
-            egress.release_level_for_path_only(root, "Knowledge Base/Records/Work/Items/_summary.md")
+        with request_scope(OWNER):
+            assert egress.release_level_for_path_only(root, "Knowledge Base/Records/Work/Items/_summary.md") == egress.DISCLOSURE_MIN
     finally:
         if boundary == "unreadable":
             target.chmod(0o600)

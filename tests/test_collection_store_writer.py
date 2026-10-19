@@ -81,9 +81,11 @@ def store(tmp_path, monkeypatch):
 
 
 def create(store, profile="records"):
-    return store.create_collection(
+    receipt = store.create_collection(
         manifest_path(profile), manifest_text(profile), why="capture", scaffold=False
     )
+    store.reconcile_views()
+    return receipt
 
 
 @pytest.mark.parametrize("profile", ["records", "planning"])
@@ -190,6 +192,29 @@ def test_revise_is_guarded_and_keeps_manifest_history(store, profile):
         )
 
 
+def test_store_manifest_changes_refresh_the_shared_claims_projection(store):
+    from exomem import due_state
+
+    due_state.reconcile(store.root)
+    made = create(store)
+    first = due_state.load(store.root)["claims"][manifest_path()]
+    assert first["title"] == "Work"
+    proposed = manifest_text().replace("title: Work", "title: Revised")
+
+    receipt = store.revise_collection(
+        CID,
+        manifest_text=proposed,
+        expected_manifest_hash=tokens.manifest_hash(manifest_text()),
+        expected_container_hash=made["after_container_hash"],
+        why="clarify collection title",
+    )
+
+    revised = due_state.load(store.root)["claims"][manifest_path()]
+    assert receipt["outcome"] == "committed"
+    assert revised["title"] == "Revised"
+    assert revised["manifest_hash"] != first["manifest_hash"]
+
+
 def test_held_resume_discard_do_not_advance_generation_or_audit(store):
     made = create(store)
     with pytest.raises(collections.CollectionError, match="SCHEMA_FIELD_TYPE") as error:
@@ -292,6 +317,9 @@ def test_acknowledged_item_is_readable_with_sources_and_exact_body(store, profil
         and len(digest) == 64
         and state == "pending"
     )
+    with store.read_snapshot():
+        assert store._item(CID, store.connection.execute("SELECT item_key FROM items").fetchone()[0])["body"] == body
+    store.reconcile_views()
     page = get_page.get_page(store.root, path=path)
     assert page.frontmatter["title"] == "One"
     assert page.body == body
@@ -362,10 +390,9 @@ def test_builtin_store_writer_is_available():
     )
 
 
-def test_log_pending_hash_is_the_actual_rendered_container(store):
-    import hashlib
-
-    text = (
+def log_manifest_text():
+    """A small store-created log: one title heading per block, with field/value child rows."""
+    return (
         manifest_text()
         .replace(
             "strategy: markdown-items\n  source: Items",
@@ -390,26 +417,25 @@ def test_log_pending_hash_is_the_actual_rendered_container(store):
         )
         .replace("    count: {type: integer}", "    details: {type: array, items: {type: object}}")
     )
-    store.create_collection(manifest_path(), text, why="create")
-    values = {"title": "One", "details": []}
-    receipt = store.append_record(CID, item=values, item_key=KEY, why="capture")
-    manifest = collections.parse_manifest_bytes(store.root, manifest_path(), text.encode())
-    from exomem import record_formats
-    from exomem.collection_store import views
 
-    version, payload = store.connection.execute("SELECT row_version,payload_hash FROM items").fetchone()
-    expected = "## Entries\n" + record_formats.render_markdown_log_item(
-        manifest, values, KEY, "\n", view_stamp=views.stamp(views.store_identity(store.connection), version, payload)
-    )
-    digest = store.connection.execute(
-        "SELECT pending_sha256 FROM projection_state WHERE kind = 'log'"
-    ).fetchone()[0]
-    assert digest == hashlib.sha256(expected.encode()).hexdigest()
-    assert receipt["affected_paths"] == [manifest.storage.source]
-    assert (
-        store.connection.execute("SELECT view_path FROM items").fetchone()[0]
-        == f"{manifest.storage.source}#{KEY}"
-    )
+
+def test_a_log_append_records_only_its_pending_basis(store):
+    """Defect: every log append renders the whole log inside its transaction, so the acknowledgement
+    costs grow with the log; the asynchronous projector renders it instead.
+
+    It pins the stored basis because that basis is what keeps a full render off the acknowledgement path.
+    """
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    generation = store.connection.execute("SELECT generation FROM collections").fetchone()[0]
+    assert store.connection.execute(
+        "SELECT pending_row_version,pending_sha256,state FROM projection_state WHERE kind='log'"
+    ).fetchall() == [(generation, None, "pending")]
+    log = "Knowledge Base/Records/Work/Log.md"
+    assert receipt["affected_paths"] == [log]
+    assert store.connection.execute("SELECT view_path FROM items").fetchone()[0] == f"{log}#{KEY}"
+    store.reconcile_views()
+    assert "### One" in (store.root / log).read_text()
 
 
 def test_hold_pending_hash_matches_rendered_held_bytes(store):

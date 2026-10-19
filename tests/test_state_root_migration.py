@@ -33,6 +33,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 
 import pytest
+from test_collection_store_s1_gate import ab as ab
+from test_collection_store_s1_gate import abc as abc
 
 
 def _reset_resolution_cache() -> None:
@@ -790,6 +792,38 @@ def test_ready_gate_refuses_a_stale_complete_manifest_without_resuming_it(
     assert "--migrate-state --offline" in (check.remediation or "")
 
 
+def test_doctor_passes_a_complete_manifest_that_records_store_compatibility(
+    tmp_path: Path,
+) -> None:
+    """A collections store adds optional compatibility IDs beside the physical families.
+
+    Startup admits that manifest. Doctor compared the whole descriptor list with the
+    physical families, reported it as stale, and told the operator to stop every
+    writer and run an offline migration that the state does not need.
+    """
+    from exomem import doctor, state_migration, state_paths
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    state_dir = state_paths.ensure_vault_state_dir(vault)
+    descriptor_ids = state_migration._descriptor_ids()
+    manifest = state_migration._new_manifest(
+        vault, tuple(sorted({*descriptor_ids, "collections-store-v1"}))
+    )
+    manifest["families"] = {
+        descriptor_id: {"status": "complete"} for descriptor_id in descriptor_ids
+    }
+    manifest["state"] = "complete"
+    state_migration._write_manifest(state_dir, manifest)
+    _reset_resolution_cache()
+
+    assert state_migration.migration_status(vault) == "complete"
+    check = doctor._check_state_placement(vault)
+    assert check.status == "pass"
+    assert check.details is not None
+    assert check.details["migration_status"] == "complete"
+
+
 @pytest.mark.parametrize("manifest_state", ("absent", "in-progress"))
 def test_doctor_refuses_state_that_ordinary_startup_cannot_admit(
     tmp_path: Path,
@@ -1263,7 +1297,8 @@ def test_collection_compatibility_enrollment_requires_live_authority_and_replays
     replay = path.read_bytes()
     enroll(vault, authority_check=lambda: True)
     assert path.read_bytes() == replay
-    assert "collections-store-v1" in state_migration.supported_state_compatibility_ids()
+    supported = state_migration.supported_state_compatibility_ids()
+    assert "collections-store-v1" in supported
     monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ())
     assert state_migration.migration_status(vault) == "unsupported"
     with pytest.raises(state_migration.StateMigrationOfflineRequired, match="compatible runtime"):
@@ -1279,7 +1314,7 @@ def test_collection_compatibility_enrollment_requires_live_authority_and_replays
     # A supported runtime admits the same state without rewriting its descriptor.
     monkeypatch.setattr(
         state_migration, "supported_state_compatibility_ids",
-        lambda: ("collections-store-v1", state_migration.COLLECTION_MARKER_COMPATIBILITY_ID),
+        lambda: supported,
     )
     assert state_migration.require_vault_state_ready(vault).state_dir == ready.state_dir
     assert state_migration.migration_status(vault) == "complete"
@@ -1346,8 +1381,6 @@ def test_optional_compatibility_survives_family_upgrade_interruption_and_adoptio
     manifest = json.loads(path.read_text())
     manifest["descriptors"] = sorted([*manifest["descriptors"], "collections-store-v1"])
     path.write_text(json.dumps(manifest))
-    # Conditional contract, not a claim that the current runtime has an adapter.
-    monkeypatch.setattr(state_migration, "supported_state_compatibility_ids", lambda: ("collections-store-v1",))
     legacy = vault / kb_dirname() / ".claims.sqlite"
     legacy.write_bytes(b"new-family")
     write = state_migration._write_manifest
@@ -1951,27 +1984,18 @@ def test_fresh_deployment_admits_without_offline_migration(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("existing_state", [False, True])
 def test_mixed_marker_requires_support_before_bootstrap_or_cached_admission(
-    tmp_path: Path, existing_state: bool, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, existing_state: bool, monkeypatch: pytest.MonkeyPatch, abc,
 ) -> None:
     from exomem import state_migration, state_paths
     from exomem.collection_store import authority
 
-    vault = tmp_path / "vault"
-    vault.mkdir()
+    abc.release()
+    vault = tmp_path / "copied-vault"
+    shutil.copytree(abc.root, vault)
     state_dir = state_paths.vault_state_dir(vault)
     if existing_state:
         state_migration.require_vault_state_ready(vault)
-    sid = "123e4567-e89b-42d3-a456-426614174000"
     marker = authority.marker_path(vault)
-    marker.parent.mkdir(parents=True)
-    marker.write_text(json.dumps({
-        "version": 1, "mode": "store", "default_authority": "file", "store_id": sid,
-        "authority_epoch": 1,
-        "collections": [{"collection_id": "123e4567-e89b-42d3-a456-426614174001",
-                         "manifest_path": "Knowledge Base/Records/Work/_collection.md",
-                         "authority": "store", "store_id": sid}],
-        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
-    }))
     class WindowsMarker(PureWindowsPath):
         def relative_to(self, other):
             return super().relative_to(PureWindowsPath(other))

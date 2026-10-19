@@ -9,6 +9,7 @@ from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
 from exomem.collection_store import governance
 from exomem.collection_store.preview import preview_store
 from exomem.governance import membership
@@ -138,7 +139,7 @@ def test_rebound_canonical_manifest_cannot_supply_another_collections_identity(s
                 (text, hashlib.sha256(text.encode()).hexdigest(), CID),
             )
             conn.execute("UPDATE collections SET manifest_version=2 WHERE collection_id=?", (CID,))
-        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+        with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
             collections.load_manifest(store.root, manifest_path())
 
 
@@ -194,6 +195,8 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, monkeypat
 
 def test_unexplained_transaction_rollback_does_not_leave_released_subject_metadata(store):
     """Joining trusted SQL must not retain its proposed release after rollback."""
+    from exomem.collection_store import history
+
     text = manifest_text().replace("    count:", "    tags: {type: array, items: {type: string}}\n    count:")
     store.create_collection(manifest_path(), text, why="create")
     store.append_record(CID, item={"title": "One", "tags": ["secret"]}, item_key=KEY, why="capture")
@@ -202,16 +205,25 @@ def test_unexplained_transaction_rollback_does_not_leave_released_subject_metada
     path = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     path.write_text(path.read_text() + "tags: [secret]\n")
     write_rule(store.root, ceiling=0)
+    manifest = store._projection_manifest(CID)
+    path = history.main_path(manifest)
+
+    def rendered():
+        return history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]
+
     with request_scope(_external()), preview_store(store.root, store.handle):
         assert record_memory(store.root, "query", collection=CID)["total_matched"] == 1
+        assert KEY not in rendered()
         store.connection.execute("BEGIN")
         try:
             store.connection.execute("UPDATE items SET governance_json=? WHERE item_key=?",
                                      ('{"classes":[],"projects":[],"tags":[]}', KEY))
             assert record_memory(store.root, "query", collection=CID)["total_matched"] == 2
+            assert KEY in rendered()
         finally:
             store.connection.execute("ROLLBACK")
         assert record_memory(store.root, "query", collection=CID)["total_matched"] == 1
+        assert KEY not in rendered()
 
 
 def test_warm_complete_release_rechecks_lifecycle_even_without_a_row_change(store, monkeypatch):
@@ -378,6 +390,45 @@ def test_inspection_overflow_and_unreported_sql_keep_full_public_data(store):
     cache.clear()
     cache.maximum_bytes = 1
     assert store.inspect_collection(CID) == current
+
+
+def test_audience_churn_keeps_fitting_inspection_contributions_incremental(store, monkeypatch):
+    """A narrower audience must not strand a fitting collection on the full-scan path."""
+    from test_collection_store_bulk import _evidence, bulk
+
+    from exomem import record_formats
+
+    _create_filename_collection(store)
+    _evidence(store.root)
+    for start in (0, 300):
+        bulk(store, [{"item": {"title": f"Row {index}", "count": index}}
+                     for index in range(start, start + 300)])
+    hidden = [row[0] for row in store.connection.execute("SELECT item_key FROM items ORDER BY row_id LIMIT 100")]
+    write_scope(store.root, paths="Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + "refs: " + json.dumps([collections.record_ref(CID, key) for key in hidden]) + "\n")
+    write_rule(store.root, ceiling=0)
+    complete = store.inspect_collection(CID)
+    cache = store.handle.release_cache.inspections
+    # Fit the initial collection closely, independent of this interpreter's container sizes.
+    cache.maximum_bytes = cache._bytes + 1024
+    with request_scope(_external()):
+        partial = store.inspect_collection(CID)
+    assert partial["coverage"]["committed"] == 500
+
+    decoded = []
+    contribution = record_formats.inspection_contribution
+
+    def counted(manifest, record, *args, **kwargs):
+        decoded.append(record.identity.key)
+        return contribution(manifest, record, *args, **kwargs)
+
+    monkeypatch.setattr(record_formats, "inspection_contribution", counted)
+    assert store.inspect_collection(CID) == complete
+    assert set(decoded) == set(hidden) and len(decoded) == len(hidden)
+    decoded.clear()
+    assert store.inspect_collection(CID) == complete
+    assert decoded == []
 
 
 def test_grant_only_release_change_refreshes_a_warm_filename_group(store, monkeypatch):

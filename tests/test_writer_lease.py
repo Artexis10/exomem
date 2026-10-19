@@ -12,6 +12,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -153,6 +154,32 @@ def test_idempotency_secret_runtime_artifacts_are_owner_only(tmp_path: Path) -> 
     ):
         if path.exists():
             assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_unrelated_owner_mode_does_not_block_private_claim_or_replay(tmp_path: Path) -> None:
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+    owners = store.state_dir / "idempotency-owners"
+    unrelated = owners / "other-runtime.lock"
+    unrelated.write_bytes(b"")
+    unrelated.chmod(0o644)
+    original_entries = set(owners.iterdir())
+    calls = 0
+
+    def leaf():
+        nonlocal calls
+        calls += 1
+        return {"ok": True, "value": "saved"}
+
+    first = store.run("fresh", "digest", leaf)
+    replay = store.run("fresh", "digest", lambda: pytest.fail("replay ran the leaf"))
+
+    assert first == replay == {"ok": True, "value": "saved"}
+    assert calls == 1
+    assert set(owners.iterdir()) == original_entries
+    assert stat.S_IMODE(unrelated.stat().st_mode) == 0o644
+    for path in (store.state_dir, owners, store.path):
+        assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
@@ -514,9 +541,98 @@ def _row(manager: LeaseManager, public_key: str) -> tuple[str, str, bytes | None
 
 def test_config_is_default_off_and_requires_identities() -> None:
     assert LeaseConfig.from_env({}).enabled is False
+    assert LeaseConfig.from_env({}).topology == "multi-host"
     assert LeaseConfig.from_env({}).schema_version == 4
     with pytest.raises(ValueError, match="WRITER_LEASE_CONFIG"):
         LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_URL": "https://lease.example"})
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8766", "https://127.2.3.4/", "http://[::1]:8766"])
+def test_single_host_coordination_accepts_literal_loopback_origins(url: str) -> None:
+    config = LeaseConfig.from_env({
+        "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+        "EXOMEM_WRITER_LEASE_URL": url,
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+    })
+    assert config.enabled and config.topology == "single-host"
+
+
+@pytest.mark.parametrize("url", [
+    "", "http://localhost:8766", "https://lease.example", "http://192.0.2.1",
+    "http://operator:secret@127.0.0.1", "http://127.0.0.1/coordinator",
+    "http://127.0.0.1?key=value", "http://127.0.0.1#fragment", "file://127.0.0.1",
+    "http://127.0.0.1:invalid", "http://[::1", "http://[::1%25eth0]",
+])
+def test_single_host_coordination_refuses_origins_that_cannot_prove_locality(url: str) -> None:
+    with pytest.raises(ValueError, match="WRITER_LEASE_CONFIG"):
+        LeaseConfig.from_env({
+            "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+            "EXOMEM_WRITER_LEASE_URL": url,
+            "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+            "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+        })
+
+
+def test_unknown_writer_topology_refuses_even_without_a_coordinator() -> None:
+    with pytest.raises(ValueError, match="EXOMEM_WRITER_LEASE_TOPOLOGY"):
+        LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_TOPOLOGY": "unrecognized"})
+
+
+def test_constructed_single_host_configuration_cannot_bypass_loopback_validation() -> None:
+    with pytest.raises(ValueError, match="literal loopback"):
+        LeaseConfig(topology="single-host", url="https://lease.example",
+                    vault_id="main", replica_id="local")
+
+
+@pytest.mark.parametrize("same_origin", [False, True])
+def test_single_host_coordinator_redirect_cannot_forward_authority_to_another_origin(same_origin, monkeypatch):
+    """A local coordinator redirect must not send the writer bearer to another authority."""
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/redirected":
+                port = self.server.server_port if same_origin else target.server_port
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port}/redirected")
+                self.end_headers()
+                return
+            received.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"holder":null,"expires_at":null,"fencing_token":0}')
+
+        def log_message(self, *_args):
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    origin = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (target, origin)]
+    for thread in threads:
+        thread.start()
+    try:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{target.server_port}")
+        monkeypatch.setenv("no_proxy", "")
+        config = LeaseConfig.from_env({
+            "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+            "EXOMEM_WRITER_LEASE_URL": f"http://127.0.0.1:{origin.server_port}",
+            "EXOMEM_WRITER_LEASE_VAULT_ID": "main", "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+            "EXOMEM_WRITER_LEASE_TOKEN": "writer-secret",
+        })
+        client = writer_lease_module.LeaseCoordinatorClient(config)
+        if same_origin:
+            assert client.status().holder is None
+            assert received == ["Bearer writer-secret"]
+        else:
+            with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+                client.status()
+            assert received == []
+    finally:
+        for server, thread in zip((target, origin), threads, strict=True):
+            server.shutdown()
+            thread.join()
+            server.server_close()
 
 
 def test_record_replay_receipt_has_a_noop_terminal(tmp_path: Path) -> None:
@@ -913,6 +1029,54 @@ def test_store_client_round_trips_heads_and_keeps_operator_release_headless(
         assert client.status().collection_store_head == head
 
 
+def test_store_client_retires_a_fence_and_re_enrols_at_the_next_generation(
+    monkeypatch, tmp_path
+) -> None:
+    """A retired fence reads as unenrolled at its generation, and re-enrolment builds on it.
+
+    A client that reads every unenrolled fence as generation 0 refuses a retired one as
+    an outage, and can never re-enrol the vault.
+    """
+    from io import BytesIO
+
+    from starlette.testclient import TestClient
+
+    from exomem.lease_coordinator import create_app
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    app = create_app(
+        database=tmp_path / "coordinator.sqlite", bearer_token="lease", operator_token="operator"
+    )
+    with TestClient(app) as transport:
+
+        def urlopen(request, timeout):
+            response = transport.request(
+                request.method,
+                request.full_url,
+                content=request.data,
+                headers=dict(request.header_items()),
+            )
+            assert response.status_code == 200, response.text
+            return BytesIO(response.content)
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        operator = LeaseCoordinatorClient(
+            LeaseConfig(
+                url="https://lease.example", vault_id="main", replica_id="desktop", token="operator"
+            )
+        )
+        first = "a9d3d366-2509-46ca-bc29-3f318ef9d78d"
+        operator.transition_collection_store_fence(expected_generation=0, store_id=first)
+        retired = operator.retire_collection_store_fence(expected_generation=1, store_id=first)
+        assert (retired.enrolled, retired.store_id, retired.generation) == (False, None, 1)
+        assert operator.collection_store_fence() == retired
+        second = "6044a9ed-b2d4-4c50-b65f-af08c7504dbb"
+        enrolled = operator.transition_collection_store_fence(
+            expected_generation=1, store_id=second
+        )
+        assert (enrolled.enrolled, enrolled.store_id, enrolled.generation) == (True, second, 2)
+
+
 @pytest.mark.parametrize(
     "changed",
     [
@@ -987,7 +1151,7 @@ def test_lease_record_rejects_inconsistent_store_metadata(payload) -> None:
         {
             "capability": "collections-store-v1",
             "enrolled": False,
-            "store_id": None,
+            "store_id": "a9d3d366-2509-46ca-bc29-3f318ef9d78d",
             "generation": 1,
         },
         {"capability": "collections-store-v1", "enrolled": True, "store_id": None, "generation": 1},
@@ -4294,8 +4458,9 @@ def _fast_ack_derived_batch(
     return manager, command, root, target, calls
 
 
+@pytest.mark.parametrize("command_name", ["remember", "governed_batch"])
 def test_lost_derived_acknowledgement_persists_a_pending_success_terminal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_name: str
 ) -> None:
     """A committed batch whose derived acknowledgement fails stays a success.
 
@@ -4309,6 +4474,7 @@ def test_lost_derived_acknowledgement_persists_a_pending_success_terminal(
         tmp_path,
         monkeypatch,
         seam_failure=("publish_pending_visibility", RuntimeError("registration failed")),
+        command_name=command_name,
     )
 
     first = manager.invoke(

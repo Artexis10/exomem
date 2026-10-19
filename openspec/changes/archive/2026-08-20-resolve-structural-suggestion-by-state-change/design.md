@@ -16,7 +16,7 @@ Three properties keep that bit safe:
 
 **Dismissal, snooze, or per-page suggestion history.** Rejected outright, and not merely as scope. `f25 restructure_lifecycle` is explicit: "A product that quietly records a dismissal to clear its own suggestion fails here even though the queue looks identical." A `promoted_to` frontmatter field is the same thing wearing a hat, and would additionally be a nudge to record a nudge.
 
-**Intra-page routing evidence — the origin page's own outbound wikilinks.** The attractive option, because link text is on the page the caller wrote and leaks nothing. It fails on the real data. The dogfooded origin page links exactly one destination, `Notes/Research/France Farm/france-family-farm-rural-holding-hub`, whose tokens are `france, farm, rural, holding, hub`. The fired cluster is `agriculture, cattle, champagne, financing, mortgage, property`. The overlap is **zero**, because a good hub name is a generalisation and cluster terms are specifics. Any lexical rule over link targets fails the same way. Rejected on evidence, not taste.
+**Intra-page routing evidence — the origin page's own outbound wikilinks.** Link text is visible on the written page, but its terms need not describe the routed material. An incident on 2026-08-15 exposed that gap. In an invented example, the origin links to `Notes/Research/Workshop/workshop-materials-and-tools-hub`. Its title terms are `workshop, materials, tools, hub`; the reported cluster is `ceramics, kiln, glazing, budget, storage, scheduling`. The overlap is **zero**. A general hub name does not establish coverage of specific cluster terms.
 
 **Requiring the origin units to be removed.** This is current behaviour and is what makes the defect. Deleting durable units to silence an advisory destroys anchors, inbound relation targets and history; the advisory must not push the user toward that.
 
@@ -31,29 +31,29 @@ After the existing gates produce a cluster with recurring seed terms:
 
 Re-running the existing gate rather than adding a new threshold keeps one definition of "enough material to justify a child note", and means partial routing behaves correctly: routing half a cluster leaves the other half loud, which is the honest answer.
 
-## Validation against the real case
+## Invented example of partial coverage
 
-Measured, not projected. The cluster the origin page carries has **21** recurring seed terms; the six in the payload are only the most recurrent, truncated by `MAX_CLUSTER_TERMS`. Resolution is evaluated against the full seed set, so the payload is a misleading thing to reason from — an earlier draft of this document did exactly that and got the answer wrong.
+This invented example preserves the partial-coverage mechanism exposed on 2026-08-15. The origin carries **21** recurring seed terms. The payload shows only six, truncated by `MAX_CLUSTER_TERMS`. Resolution evaluates the full seed set, so the payload alone cannot prove that every term has a destination.
 
-Against the six destinations the user created on 2026-08-15:
+The example has six destinations:
 
 | Destination | Seed terms covered | Contributes |
 |---|---|---|
-| `france-family-farm-rural-holding-hub` | 8 | yes |
-| `property-financing-and-land-strategy` | 7 | yes |
-| `livestock-husbandry-breeds-and-products` | 5 | yes |
-| `agricultural-qualification-grants-and-regulatory-path` | 5 | yes |
-| `meat-milk-quality-and-future-research-agenda` | 3 | yes |
-| `hospitality-family-business-and-diversification` | 1 (`farm`) | refused |
+| `workshop-materials-and-tools-hub` | 8 | yes |
+| `kiln-budget-and-space-plan` | 7 | yes |
+| `clay-techniques-and-glaze-catalog` | 5 | yes |
+| `shared-equipment-training-and-access` | 5 | yes |
+| `finished-pieces-and-exhibition-plan` | 3 | yes |
+| `community-event-refreshments` | 1 (`workshop`) | refused |
 
-Routed: 16 of 21. Remainder: `countryside, income, ptz, rita, savings` — 5 terms against `CLUSTER_MIN_TERMS = 4`, so the page **still speaks**, and that is the honest outcome rather than a shortfall to tune away. The farm material that was promoted stops being reported. What remains is the household-financing thread — first-time-buyer scheme, income, savings — which the 2026-08-15 split genuinely did not route anywhere, plus two low-value terms (a person, and a generic locality word).
+Routed: 16 of 21. The remainder is `registration, delivery, insurance, permits, transport`: five terms against `CLUSTER_MIN_TERMS = 4`. The page **still speaks** because those terms have no qualifying destination. Routed workshop material stops being reported; the remaining logistics material still needs a home.
 
 So this change converts a permanently stale signal into a smaller true one. It does not promise silence, and it should not: silence would require suppressing material that really has no home.
 
-Two design consequences follow from the measurement:
+Two design consequences follow:
 
-- **Do not add a "mostly routed" ratio.** Clearing at, say, 75% coverage would have silenced this page and buried the unrouted financing thread. Re-applying the existing mass gate to the remainder is what keeps the answer honest.
-- **The two-term rule earns its place.** It correctly refuses the hospitality note, which matches only on the generic `farm`, while every genuine destination clears it comfortably.
+- **Do not add a "mostly routed" ratio.** Clearing at 75% coverage would silence the example and bury its unrouted logistics material. Re-apply the existing mass gate to the remainder.
+- **The two-term rule earns its place.** It refuses the refreshments note, which matches only on `workshop`, while the qualifying destinations cover multiple terms.
 
 ## Cost
 
@@ -65,7 +65,7 @@ That is a real, if small, addition on the loud path rather than the "inside run-
 
 `ExistingPreflight` already carries `after_corpus`, so `edit_memory` and `observe_memory` need no new work.
 
-`CreationPreflight` carries none, but `_evaluate_structural` already builds a corpus context during creation preflight and discards it. Retaining it is free — no second build, no extra walk — and avoids shipping a resolution that reaches two writers in four, the failure recorded in `exomem-write-feedback-never-reaches-the-default-mutation-response`.
+`CreationPreflight` carries none, but `_evaluate_structural` already builds a corpus context during creation preflight and discards it. Retain that context without another build or walk, so all four writers can resolve a suggestion.
 
 For creation the retained context is the *before* corpus, which does not contain the page being created. That is correct: the written page is excluded from the destination set anyway.
 

@@ -2,6 +2,8 @@
 
 ### Requirement: Persistent machine-local state lives outside the vault
 
+The current collection-store GA deployment SHALL use one hosting node with consistent backups and explicit restore. Its single-host/no-sync custody proof SHALL remain required. Multi-endpoint sync adapters and fleet custody acceptance below SHALL be deferred beyond that GA. No file-sync product SHALL be required to deploy the single-host store. This scope SHALL NOT weaken canonical-state placement, local publication custody or supported-reader compatibility.
+
 Every persistent vault-scoped machine-local family SHALL be classified as
 `external-state` and live under a per-user, per-vault state root outside the
 vault directory. That root SHALL resolve through a single code seam: an
@@ -21,8 +23,10 @@ preserved sources. Its in-vault
 replica SHALL be a single-file consistent snapshot, published by atomic
 rename and never written in place. It SHALL be classified `vault-canonical`
 and SHALL NOT count as persistent machine-local state under the vault. The
-vault-side collection mode marker beside it SHALL likewise be `vault-canonical`,
-and SHALL be the only authority for whether a replica may be adopted.
+vault-side collection mode marker beside it SHALL likewise be `vault-canonical`.
+It SHALL remain a compatibility hint and transition preimage. Adoption SHALL
+require trusted production enrollment, the current fence and a verified snapshot
+binding. Missing or older marker membership SHALL NOT override canonical ownership.
 
 `collections-store-v1` SHALL be an optional compatibility descriptor, not a
 physical migratable state family. Complete manifests SHALL contain exactly
@@ -48,10 +52,24 @@ The keep-vault state-adoption remedy SHALL refuse an enrolled optional
 collection-store contract before deleting external state or its compatibility
 fence; that remedy SHALL not substitute for validated collection export.
 
+Supported launchers SHALL refuse a candidate whose newest readable store schema
+is below the live store's schema, before the serving worker stops, when trusted production enrollment or a
+verified restore requires that store. Missing marker membership SHALL NOT skip
+that check. A dark preview or failed preparation SHALL NOT enroll a file-only
+vault. Unreadable required state SHALL remain unresolved rather than prove absence. Each live store schema from 12 on SHALL also have one optional
+compatibility ID, `collections-store-schema-<N>`; schema 11 has none, because
+releases since 0.114.0 treat an unknown ID alike, so an ID would also refuse the
+releases that read schema 11. A release SHALL support the IDs up to its own
+store schema. A writer SHALL record the current schema's IDs before it migrates
+a store or installs a migrated copy. A migration that rolls back SHALL record
+the earlier schema's IDs again. A reverse export that retires the marker SHALL
+remove the schema IDs together with the store's own IDs.
+
 Supported Exomem launchers SHALL derive required store compatibility from the
-existing vault-side authority marker before fresh external-state bootstrap,
-candidate admission and copied/restored-vault activation, even when the
-external manifest is absent. They SHALL reuse the candidate-bound support
+trusted production enrollment and verified store or restore metadata before
+fresh external-state bootstrap, candidate admission and restored-vault activation,
+even when the marker or external manifest is absent. Completed export and a
+verified retired fence SHALL override residual prior enrollment. They SHALL reuse the candidate-bound support
 probe and ordinary supervisor handoff; an unsupported candidate SHALL refuse
 before vault access or serving-worker retirement. This guarantee SHALL cover
 supported entrypoints, not arbitrary historical executables launched manually.
@@ -98,10 +116,37 @@ store activation/publication unavailable without disabling unrelated file
 collections or knowledge access. Arbitrary unmanaged sync programs SHALL NOT
 be presented as covered by that supported deployment guarantee.
 
+A built-in sync plugin's enabled bit SHALL NOT establish a sync connection or
+root overlap. The shipped adapter SHALL verify configured supported roots,
+root metadata, platform paths, and vault/state separation. It SHALL read
+core-plugin configuration only when the registry declares core-plugin evidence.
+Explicit owner overlays SHALL retain their conservative evidence checks.
+No plugin bit, declaration, or boolean override SHALL grant custody.
+
+#### Scenario: Enabled built-in capability has no overlapping sync root
+
+- **WHEN** the built-in sync plugin is enabled and the adapter verifies no overlapping supported root evidence
+- **THEN** production store creation, marker readmission, restart, and replica publication remain available
+- **AND** actual-root overlap or custody loss still preserves pending intent and bytes while refusing activation or publication
+
+#### Scenario: Unused application configuration is malformed
+
+- **WHEN** core-plugin configuration is unreadable or malformed and the registry declares no core-plugin evidence
+- **THEN** that unused configuration does not prevent otherwise verified custody
+- **AND** an explicit core-plugin evidence overlay still requires its configured evidence to be readable and safe
+
 #### Scenario: A copied store vault rejects an unsupported managed candidate
 
 - **WHEN** a mixed/store vault is copied or restored with a fresh external state root and a supported launcher is asked to start an actual interpreter without its required store capability
-- **THEN** the launcher derives that requirement from the authority marker and refuses before vault access or retiring the current serving worker, without relying on a previously enrolled external manifest
+- **THEN** the launcher derives that requirement from trusted enrollment and verified restore metadata, then refuses before vault access or retiring the current serving worker, without relying on a previously enrolled external manifest
+
+#### Scenario: A store at a newer schema refuses an earlier release
+
+- **WHEN** a writer has migrated a vault's live store to a schema that an earlier release cannot read
+- **THEN** a supported launcher refuses that release as a candidate before the serving worker stops
+- **AND** it still accepts a release that reads the live store's schema
+- **AND** it accepts the earlier release once an export to files has retired the vault's marker
+- **AND** from schema 12 on, the state manifest records the schema's ID before the migration commits, and a migration that rolls back records the earlier schema's IDs again
 
 #### Scenario: Unknown replication custody does not disable file knowledge
 

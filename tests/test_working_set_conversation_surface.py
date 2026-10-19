@@ -1,16 +1,10 @@
-"""What remote agents are told about `conversation` (task 2.9).
-
-The server instructions carry one pinned sentence and keep asking for the
-user's message verbatim; the tool description states the bounds, the
-attachment cues, what `origin` means and that activation reads no attachment;
-the shipped scaffold line matches, generically.
-"""
+"""Remote activation instructions and the portable conversation reference."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from exomem import commands, server
+from exomem import server
 
 SCAFFOLD_SKILL = Path(__file__).resolve().parents[1] / "src/exomem/_scaffold/_Schema/SKILL.md"
 
@@ -38,47 +32,23 @@ def test_the_instructions_still_say_what_the_server_is() -> None:
     assert len(text) <= 900, len(text)
 
 
-def test_remote_activation_guidance_requires_live_policy_before_sending_context() -> None:
+def test_initialize_requires_live_policy_before_sending_context() -> None:
     """Connection alone must not override an explicit-only engagement setting."""
-    for text in (server.SERVER_INSTRUCTIONS, commands.op_activate_context.__doc__ or ""):
-        assert "bootstrap" in text and "live" in text
-        assert "policy" in text
+    text = server.SERVER_INSTRUCTIONS
+    assert "bootstrap" in text and "live" in text
+    assert "policy" in text
     assert "proactive_capture" in server.SERVER_INSTRUCTIONS
     assert "requested" in server.SERVER_INSTRUCTIONS
 
 
-def test_optional_conversation_is_relevant_context_not_full_history() -> None:
+def test_initialize_limits_conversation_to_relevant_excerpts() -> None:
     """The compiler's input bounds are not consent to send unrelated earlier turns."""
-    doc = commands.op_activate_context.__doc__ or ""
-    assert "only relevant" in doc
-    assert "never full history" in doc
     # Clients may review initialize instructions without expanding the tool.
     assert "relevant excerpts" in server.SERVER_INSTRUCTIONS
     assert "never full history" in server.SERVER_INSTRUCTIONS
 
 
 ENGAGEMENT = SCAFFOLD_SKILL.parent / "references" / "engagement.md"
-#: Ruling BYTES on #1463: the conversation guidance in the tool description is
-#: a short pointer; the full guidance lives in the engagement reference.
-CONVERSATION_PARAGRAPH_MAX_BYTES = 300
-
-
-def _conversation_paragraph(doc: str) -> str:
-    start = doc.index("also pass `conversation`")
-    start = doc.rindex("\n\n", 0, start) + 2
-    end = doc.index("\n\n", start)
-    return " ".join(doc[start:end].split())
-
-
-def test_the_tool_description_carries_a_short_conversation_pointer() -> None:
-    doc = commands.op_activate_context.__doc__ or ""
-    paragraph = _conversation_paragraph(doc)
-    assert len(paragraph.encode("utf-8")) <= CONVERSATION_PARAGRAPH_MAX_BYTES, len(paragraph.encode())
-    for required in ("`conversation`", "optional", "attachment", "`focus`", "`refs`", "`recent`", "`origin`", "engagement reference"):
-        assert required in paragraph, required
-    assert "verbatim" in doc
-
-
 def test_the_engagement_reference_states_bounds_attachments_origin_and_no_attachment_reads() -> None:
     text = ENGAGEMENT.read_text(encoding="utf-8")
     section = text[text.index("## Passing the conversation to activation") :]
@@ -107,7 +77,3 @@ def test_the_scaffold_line_names_conversation_and_attachments_generically() -> N
     assert "focus" in line and "attachment" in line and "never rewrite the turn" in line
     # The carrier line itself is untouched: it is pinned byte for byte elsewhere.
     assert "call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`." in text
-
-
-def test_the_tool_allows_focus_when_a_hook_missed_the_subject() -> None:
-    assert "`conversation.focus`" in (commands.op_activate_context.__doc__ or "")

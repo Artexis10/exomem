@@ -32,9 +32,12 @@ Re-record the report after a deliberate change::
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import os
 import re
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -49,9 +52,10 @@ from epistemic.corpora.context_activation import (
 from membench.utility import context_activation as audit
 from membench.utility import context_activation_product as product
 
+from exomem import activation_result
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
-pytestmark = pytest.mark.timeout(1800)
+pytestmark = [pytest.mark.timeout(1800), pytest.mark.reads_repository_docs]
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 #: Corpus v5's report. The v3 and v4 reports beside it are kept as history.
@@ -326,13 +330,173 @@ def _compute(workdir: Path) -> Run:
     )
 
 
+def _waited_children_cpu_ms() -> float | None:
+    """CPU of all waited-for children; unavailable on platforms without resource."""
+
+    try:
+        import resource
+        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    except (ImportError, OSError):
+        return None
+    return 1000 * (usage.ru_utime + usage.ru_stime)
+
+
+def _observe_fixture_phase(
+    phase: str, function: Callable[..., Any], record_property: Callable[..., None]
+) -> Callable[..., Any]:
+    @functools.wraps(function)
+    def observed(*args: Any, **kwargs: Any) -> Any:
+        try:
+            wall = time.monotonic()
+            thread_cpu = time.thread_time()
+            process_cpu = time.process_time()
+            child_cpu = _waited_children_cpu_ms()
+        except Exception:  # noqa: BLE001 - instrumentation must never prevent fixture execution
+            return function(*args, **kwargs)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            try:
+                children_after = _waited_children_cpu_ms()
+                record_property(
+                    "context_fixture_phase",
+                    json.dumps({
+                        "phase": phase,
+                        "elapsed_ms": 1000 * (time.monotonic() - wall),
+                        "thread_cpu_ms": 1000 * (time.thread_time() - thread_cpu),
+                        "process_cpu_ms": 1000 * (time.process_time() - process_cpu),
+                        "waited_children_cpu_ms": (
+                            children_after - child_cpu
+                            if children_after is not None and child_cpu is not None
+                            else None
+                        ),
+                    }),
+                )
+            except Exception:  # noqa: BLE001 - a missing observation cannot replace the outcome
+                pass
+
+    return observed
+
+
 @pytest.fixture
-def run(tmp_path_factory: pytest.TempPathFactory) -> Run:
+def run(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureRequest) -> Run:
     """Every packet of the product run, compiled once for the module."""
 
     if "run" not in _RUNS:
-        _RUNS["run"] = _compute(tmp_path_factory.mktemp("context-activation-real-compiler"))
+        # Pytest's public node properties reach the existing JUnit artifact.
+        def record_property(name: str, value: str) -> None:
+            request.node.user_properties.append((name, value))
+
+        with pytest.MonkeyPatch.context() as patches:
+            # These are fixed fixture API seams, not categories inferred from content.
+            for name in ("build_corpus", "publish", "activate_tree"):
+                patches.setattr(
+                    product, name, _observe_fixture_phase(name, getattr(product, name), record_property)
+                )
+            _RUNS["run"] = _compute(tmp_path_factory.mktemp("context-activation-real-compiler"))
     return _RUNS["run"]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_fixture_phase_survives_success_or_failure_without_content(
+    monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    """A partial shard needs setup timing even when construction fails."""
+
+    from types import SimpleNamespace
+
+    wall = iter((1.0, 1.04))
+    thread = iter((2.0, 2.005))
+    process = iter((3.0, 3.012))
+    children = iter((20.0, 35.0))
+    monkeypatch.setitem(globals(), "time", SimpleNamespace(
+        monotonic=lambda: next(wall),
+        thread_time=lambda: next(thread),
+        process_time=lambda: next(process),
+    ))
+    monkeypatch.setitem(globals(), "_waited_children_cpu_ms", lambda: next(children))
+    properties = []
+    error = ValueError("fixture refused")
+    result = object()
+
+    def build(secret: str) -> object:
+        assert secret == "unlogged fixture body"
+        if fails:
+            raise error
+        return result
+
+    observed = _observe_fixture_phase("build_corpus", build, lambda *row: properties.append(row))
+    if fails:
+        with pytest.raises(ValueError) as caught:
+            observed("unlogged fixture body")
+        assert caught.value is error
+    else:
+        assert observed("unlogged fixture body") is result
+    name, encoded = properties[0]
+    assert name == "context_fixture_phase"
+    assert "unlogged fixture body" not in encoded
+    values = json.loads(encoded)
+    assert values["phase"] == "build_corpus"
+    assert values["elapsed_ms"] == pytest.approx(40)
+    assert values["thread_cpu_ms"] == pytest.approx(5)
+    assert values["process_cpu_ms"] == pytest.approx(12)
+    assert values["waited_children_cpu_ms"] == pytest.approx(15)
+
+
+def test_fixture_phase_reports_unavailable_child_cpu_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    properties = []
+    monkeypatch.setitem(globals(), "_waited_children_cpu_ms", lambda: None)
+    _observe_fixture_phase("publish", lambda: None, lambda *row: properties.append(row))()
+    assert json.loads(properties[0][1])["waited_children_cpu_ms"] is None
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("observation_failure", ["before", "after", "record"])
+def test_fixture_phase_failure_keeps_the_original_outcome(
+    monkeypatch: pytest.MonkeyPatch, fails: bool, observation_failure: str
+) -> None:
+    """Diagnostic clocks and JUnit storage must not break a valid fixture."""
+
+    from types import SimpleNamespace
+
+    reads = 0
+
+    def clock() -> float:
+        nonlocal reads
+        reads += 1
+        if reads == (1 if observation_failure == "before" else 2):
+            raise OSError("clock unavailable")
+        return 1.0
+
+    if observation_failure != "record":
+        monkeypatch.setitem(globals(), "time", SimpleNamespace(
+            monotonic=clock, thread_time=lambda: 0.0, process_time=lambda: 0.0,
+        ))
+
+    def record(*_args: object) -> None:
+        if observation_failure == "record":
+            raise OSError("JUnit unavailable")
+
+    calls = []
+    result = object()
+    error = ValueError("fixture refused")
+
+    def build() -> object:
+        calls.append(True)
+        if fails:
+            raise error
+        return result
+
+    observed = _observe_fixture_phase("build_corpus", build, record)
+    if fails:
+        with pytest.raises(ValueError) as caught:
+            observed()
+        assert caught.value is error
+    else:
+        assert observed() is result
+    assert calls == [True]
 
 
 # --------------------------------------------------------------------------- #
@@ -684,6 +848,9 @@ def test_mechanism_removal_the_kill_switch_fails_every_positive_case(run: Run) -
 
 def test_every_mechanism_removal_changes_what_the_compiler_serves(run: Run) -> None:
     for mechanism, packets in run.removals.items():
+        # A failed compiler does not establish the effect of removing its mechanism.
+        for case, packet in packets.items():
+            assert packet.get("abstention", {}).get("reason") != activation_result.UNAVAILABLE, (mechanism, case)
         changed = {case for case in packets if _shape(packets[case]) != _shape(run.raw[case])}
         assert changed, (
             f"removing {mechanism} changed no packet: the patch did not reach the compiler"

@@ -26,12 +26,14 @@ from . import find as find_module
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .vault import (
+    PathGuardError,
     PlannedWrite,
     VaultLockError,
     VaultLockTimeout,
     batch_atomic_write,
     content_hash,
     parse_frontmatter,
+    read_guarded_text,
     vault_creation_lock,
 )
 
@@ -130,6 +132,29 @@ class ActivationCensus:
     @classmethod
     def from_candidates(cls, candidates: Iterable[ActivationCandidate]) -> ActivationCensus:
         return cls(tuple(candidates))
+
+    def _with_replaced_candidate(self, candidate: ActivationCandidate) -> ActivationCensus | None:
+        """Replace validated data only when immutable path and UUID ownership stay fixed."""
+        if type(self) is not ActivationCensus or type(candidate) is not ActivationCandidate:
+            return None
+        if type(candidate.rel_path) is not str:
+            return None
+        previous = self.by_path.get(candidate.rel_path)
+        if previous is None or previous.normalized_id != candidate.normalized_id:
+            return None
+        if any(type(item) is not ActivationCandidate for item in self.candidates):
+            return None
+        index = self.candidates.index(previous)
+        _validate_candidate(candidate, index=index)
+        candidates = self.candidates[:index] + (candidate,) + self.candidates[index + 1:]
+        by_path = dict(self.by_path)
+        by_path[candidate.rel_path] = candidate
+        # Only the replacement changed; constructor-validated ownership remains immutable.
+        census = object.__new__(ActivationCensus)
+        object.__setattr__(census, "candidates", candidates)
+        object.__setattr__(census, "by_path", MappingProxyType(by_path))
+        object.__setattr__(census, "paths_by_id", self.paths_by_id)
+        return census
 
     def unique_path_for_id(self, normalized_id: str) -> str | None:
         paths = self.paths_by_id.get(normalized_id, ())
@@ -359,8 +384,8 @@ def is_grandfathered(
             normalized_id = census_candidate.normalized_id
     if current_hash is None or (not id_supplied and census_candidate is None):
         try:
-            raw = absolute.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            raw, _guard = read_guarded_text(vault_root, absolute)
+        except (OSError, UnicodeDecodeError, PathGuardError):
             return False
         if current_hash is None:
             current_hash = content_hash(raw)
@@ -550,8 +575,8 @@ def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
             if access.access_tier(vault_root, rel_path) != access.TIER_READ_WRITE:
                 continue
             try:
-                raw = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as error:
+                raw, _guard = read_guarded_text(vault_root, path)
+            except (OSError, UnicodeDecodeError, PathGuardError) as error:
                 raise ActivationManifestError(
                     "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
                     f"could not read activation candidate {path}: {error}",

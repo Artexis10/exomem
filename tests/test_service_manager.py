@@ -4,12 +4,16 @@ import asyncio
 import importlib
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_collection_store_s1_gate import ab as ab
+from test_collection_store_s1_gate import abc as abc
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Managed lifecycle is Linux-only")
 
@@ -445,6 +449,107 @@ def test_real_older_reader_refused_for_copied_raw_orphan_before_worker_stop(tmp_
     asyncio.run(scenario())
 
 
+def _store_reader(tmp_path, ceiling):
+    """This interpreter, posing as a release whose newest collection store schema is ``ceiling``.
+
+    The supervisor runs its probe with ``-I``, so the override rides in a wrapper, not on PYTHONPATH.
+    """
+    prelude = f"import sys, exomem.collection_store.schema as s; s.SCHEMA_VERSION = {ceiling}; exec(sys.argv[1])"
+    wrapper = tmp_path / f"python-store-schema-{ceiling}"
+    wrapper.write_text(f'#!/bin/sh\nshift 2\nexec {shlex.quote(sys.executable)} -I -c {shlex.quote(prelude)} "$1"\n')
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
+def _release_of(python):
+    return subprocess.run(
+        [python, "-I", "-c", "from importlib.metadata import version; print(version('exomem'))"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("candidate", ["earlier-release", "older-store-schema", "first-enrolment"])
+def test_a_candidate_older_than_the_live_store_schema_is_refused_before_worker_stop(tmp_path, monkeypatch, candidate):
+    """Defect: the supervisor hands a store at schema 11 to a release that reads only schema 10. Its reader
+    refuses the store, so on a fenced vault its writer gets no lease and every write on the host refuses."""
+    import sqlite3
+    from contextlib import closing
+
+    interpreter = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON")
+    if candidate == "earlier-release" and not interpreter:
+        pytest.skip("requires an installed earlier reader")
+    from exomem import state_migration
+    from exomem.collection_store import authority, connection, schema
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    state_migration.record_collection_store_schema(vault, authority_check=lambda: True)
+    state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+    if candidate != "first-enrolment":
+        _mixed_marker(vault)
+    # The live store, as this release migrated it: at the current schema.
+    connection.open_writer(connection.store_path(vault), lease_check=lambda: True).close()
+    if candidate == "first-enrolment":
+        # A first enrolment cut the fence and stopped before it installed the marker.
+        with closing(sqlite3.connect(connection.store_path(vault))) as conn, conn:
+            conn.execute("INSERT INTO store_meta(key, value) VALUES (?, ?)", (authority.PENDING_CREATE, "{}"))
+    python = interpreter if candidate == "earlier-release" else _store_reader(tmp_path, schema.SCHEMA_VERSION - 1)
+
+    async def scenario():
+        runtime = module.WorkerRuntime(tmp_path / "candidate.sock", host="127.0.0.1", port=8765)
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        serving.inspect = runtime.inspect
+        serving.migration_required = runtime.migration_required
+        result = await manager.upgrade(await runtime.inspect({"python": python, "version": _release_of(python)}))
+        assert not result["ok"], result
+        assert "current admission unchanged" in result["error"], result
+        assert serving.pid == 100
+        assert serving.events == ingress.events == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("routed", "recorded", "ceiling"), [
+    pytest.param(True, None, 0, id="same-schema"),
+    # After an export to files the host keeps its store until --retire-local, and an earlier release is the way back.
+    pytest.param(False, None, -1, id="exported-vault"),
+    # A schema the supervisor cannot read refuses nothing, or it would also refuse the release that repairs it.
+    pytest.param(True, "eleven", 0, id="unreadable-schema-compatible-reader"),
+])
+def test_the_live_store_schema_leaves_a_candidate_a_target_when_the_store_does_not_need_it(
+    tmp_path, monkeypatch, routed, recorded, ceiling,
+):
+    import sqlite3
+    from contextlib import closing
+
+    from exomem import state_migration
+    from exomem.collection_store import connection, schema
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    if routed:
+        state_migration.record_collection_store_schema(vault, authority_check=lambda: True)
+        state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+        _mixed_marker(vault)
+    store = connection.store_path(vault)
+    connection.open_writer(store, lease_check=lambda: True).close()
+    if recorded is not None:
+        with closing(sqlite3.connect(store)) as conn, conn:
+            conn.execute("UPDATE store_meta SET value=? WHERE key=?", (recorded, schema.META_SCHEMA_VERSION))
+    python = _store_reader(tmp_path, schema.SCHEMA_VERSION + ceiling)
+    runtime = module.WorkerRuntime(tmp_path / "candidate.sock", host="127.0.0.1", port=8765)
+    target = asyncio.run(runtime.inspect({"python": python, "version": _release_of(python)}))
+    runtime.migration_required(target)  # The supervisor refuses a candidate with ValueError.
+
+
 def _mixed_marker(vault):
     from exomem.collection_store import authority
 
@@ -576,12 +681,13 @@ def test_conditionally_supporting_candidate_skips_unchanged_physical_families(
 
 @pytest.mark.parametrize("invalidate", ["changed-target", "failed-target", "failed-probe"])
 def test_optional_support_cannot_outlive_its_verified_candidate(
-    tmp_path, monkeypatch, candidate_runtime, invalidate,
+    tmp_path, monkeypatch, candidate_runtime, invalidate, abc,
 ):
     from exomem import state_migration
 
-    vault = tmp_path / "vault"
-    _mixed_marker(vault)
+    abc.release()
+    vault = tmp_path / "copied-vault"
+    shutil.copytree(abc.root, vault)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     assert state_migration.recorded_descriptor_ids(vault) is None
 
@@ -712,7 +818,7 @@ class _StandbyRuntime(_Runtime):
     async def start_standby(self, target, timeout):
         self.events.append("start-standby")
         assert self.pid, "the standby must warm while the old worker still serves"
-        if self.standby_failure == "budget":
+        if self.standby_failure in {"budget", "cleanup"}:
             raise TimeoutError("standby warm budget expired")
         if self.standby_failure == "spawn":
             raise RuntimeError("standby could not be spawned")
@@ -720,6 +826,8 @@ class _StandbyRuntime(_Runtime):
 
     async def discard_standby(self, timeout=10):
         self.events.append("discard-standby")
+        if self.standby_failure == "cleanup":
+            raise TimeoutError("candidate exit was not proven")
 
     def migration_required(self, target):
         return self.migration
@@ -837,24 +945,31 @@ def test_a_declared_migration_runs_with_no_worker_owning_state(tmp_path):
     asyncio.run(scenario())
 
 
-def test_a_standby_that_misses_its_warm_budget_leaves_the_old_worker_serving(tmp_path):
+@pytest.mark.parametrize(
+    ("failure", "reason", "standby"),
+    [
+        ("budget", "warm budget expired", "discarded"),
+        ("spawn", "candidate could not warm", "discarded"),
+        ("cleanup", "warm budget expired", "discard_failed"),
+    ],
+)
+def test_a_rejected_standby_leaves_the_old_worker_serving(tmp_path, failure, reason, standby):
     async def scenario():
         manager, ingress, runtime, target = _standby_supervisor(tmp_path)
-        runtime.standby_failure = "budget"
+        serving = runtime.pid
+        active = manager.status()["active"]
+        runtime.standby_failure = failure
         result = await manager.upgrade(target)
-        assert result["ok"] is True
-        # The candidate is discarded with the component it waited on recorded,
-        # and the upgrade falls back to the one-worker sequence.
-        assert runtime.events == [
-            "inspect",
-            "start-standby",
-            "discard-standby",
-            "stop",
-            "start",
-        ]
-        assert result["handoff"]["standby"] == "discarded"
+        assert result["ok"] is False
+        assert runtime.pid == serving
+        assert runtime.events == ["inspect", "start-standby", "discard-standby"]
+        assert ingress.events == []
+        assert manager.phase == "ready"
+        assert manager.status()["active"] == active
+        assert manager.records.pending() is None
+        assert result["handoff"]["standby"] == standby
         assert result["handoff"]["waiting"] == "graph_snapshot"
-        assert result["handoff"]["reason"] == "warm budget expired"
+        assert result["handoff"]["reason"] == reason
 
     asyncio.run(scenario())
 
@@ -1205,9 +1320,8 @@ def test_environment_warnings_reach_a_discarded_handoff_record(tmp_path):
         runtime.standby_failure = "budget"
         runtime.environment_warnings = ["unreadable: service.env"]
         result = await manager.upgrade(target)
-        assert result["ok"] is True
-        # A stale inherited environment is exactly what the fallback path has to
-        # report; it must not be visible only on the path that promoted.
+        assert result["ok"] is False
+        # A rejected candidate must report its environment warning as well.
         assert result["handoff"]["standby"] == "discarded"
         assert result["handoff"]["environment"] == ["unreadable: service.env"]
 
@@ -1305,17 +1419,16 @@ class _NeverReadyClient(_PromotingClient):
         return _FakeResponse(503, {"status": "not_ready"})
 
 
-def test_a_promotion_accepted_before_a_readiness_timeout_is_not_thrown_away(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "failure", ["timeout", "exit", "cancel", "post_timeout", "post_cancel", "invalid_response"]
+)
+def test_a_replacement_remains_owned_when_promotion_or_readiness_fails(
+    tmp_path, monkeypatch, failure
 ):
-    """A promoted worker that has not answered yet is not a spare candidate.
+    """An interrupted promotion can leave the replacement owning state and children.
 
-    On the migrated path the promote POST can consume most of the cutover
-    budget, leaving the readiness wait almost none. The process on the other end
-    already holds the writer lease by then, so the failure has to say the
-    handover happened and the runtime has to track it as the serving worker --
-    otherwise recovery stops the wrong tree and the record loses the one fact
-    that distinguishes a restart from a rollback.
+    Recovery must track that tree even when no promotion receipt arrives.
+    Otherwise cleanup treats the new owner as a childless spare candidate.
     """
     module = _manager()
     monkeypatch.setattr(module, "_descendants", lambda **kwargs: {})
@@ -1324,12 +1437,45 @@ def test_a_promotion_accepted_before_a_readiness_timeout_is_not_thrown_away(
         runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
         runtime.standby = _FakeChild()
         runtime.standby_client = _NeverReadyClient()
+        if failure == "exit":
+            runtime.standby.returncode = 1
+        elif failure == "cancel":
+            async def cancelled_readiness(path):
+                raise asyncio.CancelledError
+
+            runtime.standby_client.get = cancelled_readiness
+        elif failure.startswith("post_"):
+            async def interrupted_post(path, json=None):
+                if failure == "post_cancel":
+                    raise asyncio.CancelledError
+                raise TimeoutError
+
+            runtime.standby_client.post = interrupted_post
+        elif failure == "invalid_response":
+            async def invalid_response(path, json=None):
+                response = _FakeResponse(200, None)
+
+                def invalid_json():
+                    raise ValueError("invalid promotion response")
+
+                response.json = invalid_json
+                return response
+
+            runtime.standby_client.post = invalid_response
         original_socket = runtime.socket_path
-        with pytest.raises(RuntimeError, match="readiness"):
+        expected_error = (
+            asyncio.CancelledError if failure in {"cancel", "post_cancel"}
+            else TimeoutError if failure == "post_timeout"
+            else ValueError if failure == "invalid_response"
+            else RuntimeError
+        )
+        with pytest.raises(expected_error):
             await runtime.promote_standby(migrated=True, timeout=0.3)
-        # Promotion was accepted, and is retained for the handoff record.
-        assert runtime.promotion_record["snapshot"] == "current"
-        # Ownership moved: this is the serving worker now, not a standby.
+        if failure in {"post_timeout", "post_cancel", "invalid_response"}:
+            assert runtime.promotion_record is None
+        else:
+            assert runtime.promotion_record["snapshot"] == "current"
+        # Process cleanup owns the replacement even when state ownership is unknown.
         assert runtime.standby is None
         assert runtime.child is not None
         assert runtime.socket_path != original_socket
@@ -1537,7 +1683,7 @@ def test_resume_awaits_the_same_slow_replacement_under_the_cold_start_budget(tmp
         manager.records.begin(target, worker_pid=0)
         manager.records.phase("failed", worker_pid=0)
         result = await manager.upgrade(None, resume=True)
-        assert result["ok"] is True
+        assert result["ok"] is True, result
         assert result["handoff"]["standby"] == "unsupported"
         assert manager.records.pending() is None
         assert manager.records.active() == target
@@ -1597,15 +1743,10 @@ def test_a_failed_handoff_records_the_window_it_burned_and_what_it_waited_on(
     asyncio.run(scenario())
 
 
-def test_a_discarded_standby_and_a_failed_replacement_each_keep_their_own_field(
+def test_a_discarded_standby_never_enters_the_replacement_window(
     tmp_path, replacement_timeout_clock
 ):
-    """The incident shape: a candidate discarded, then its replacement stuck.
-
-    Both facts are needed to read the record -- which component the discarded
-    candidate was warming, and what the cold replacement could not finish -- so
-    neither is allowed to overwrite the other.
-    """
+    """A slow cold replacement cannot take down a worker after candidate rejection."""
 
     async def scenario():
         manager, ingress, runtime, target = _slow_supervisor(
@@ -1614,22 +1755,17 @@ def test_a_discarded_standby_and_a_failed_replacement_each_keep_their_own_field(
         runtime.standby_failure = "budget"
         result = await manager.upgrade(target)
         assert result["ok"] is False
-        assert runtime.replacement_timeouts == [0.6]
+        assert runtime.replacement_timeouts == []
         handoff = result["handoff"]
-        # The candidate was discarded for missing its warm budget...
         assert handoff["standby"] == "discarded"
         assert handoff["reason"] == "warm budget expired"
         assert handoff["waiting"] == "graph_snapshot"
-        # ...and the one-worker replacement it fell back to never came up.
-        assert handoff["replacement_waiting"] == "retrieval_unavailable (repair: rebuilding)"
-        assert runtime.events == [
-            "inspect",
-            "start-standby",
-            "discard-standby",
-            "stop",
-            "start",
-            "stop",
-        ]
+        assert "replacement_waiting" not in handoff
+        assert "ready_after_ms" not in handoff
+        assert "unavailable_ms" not in handoff
+        assert runtime.events == ["inspect", "start-standby", "discard-standby"]
+        assert manager.phase == "ready"
+        assert manager.records.pending() is None
 
     asyncio.run(scenario())
 
@@ -1752,6 +1888,8 @@ def test_the_real_cold_readiness_loop_records_what_the_worker_is_waiting_on(
 
     module = _manager()
     monkeypatch.setattr(httpx, "AsyncClient", _WarmingClient)
+    # The fake client ignores its transport; keep SSL setup outside the loop budget.
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **kwargs: None)
 
     async def scenario():
         runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)

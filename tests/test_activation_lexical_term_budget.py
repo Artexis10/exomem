@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import lexstore, working_set_runtime
+from exomem import call_spans, lexstore, working_set_runtime
 
 #: Everyday words for the filler corpus and the long turns. None is a
 #: stopword, so every one reaches the query as a content word.
@@ -418,35 +418,45 @@ def test_a_very_long_turn_counts_at_most_the_stem_budget_toward_corroboration(
 
     assert state == "available"
     assert hits and hits[0].path == ANCHOR_PATH, [hit.path for hit in hits]
-    bounded = [sql for sql in statements if ") AS c JOIN fts" in sql]
-    assert len(bounded) == 1, statements
-    counted = json.loads(re.search(r"json_each\('(\[\[.*?\]\])'\)", bounded[0]).group(1))
+    # The corroboration test runs on batches of ranked rows; every batch
+    # counts the same bounded unit list. The pattern only lifts the JSON
+    # literal the store bound into its own traced statement; it reads no
+    # meaning from the SQL, and json.loads parses what it lifts.
+    checks = [sql for sql in statements if "fts.rowid IN (SELECT value FROM json_each(" in sql]
+    assert checks, statements
+    lists = {re.search(r"json_each\('(\[\[.*?\]\])'\)", sql).group(1) for sql in checks}
+    assert len(lists) == 1, lists
+    counted = json.loads(lists.pop())
     assert {"kelvan", "throughput"} <= {stem for stem, _unit, _needed in counted}
     assert 2 < len(counted) <= working_set_runtime.ACTIVATION_LEXICAL_MAX_STEMS, len(counted)
 
 
 def test_the_bounded_query_corroborates_in_rank_order_and_stops_at_k(
-    long_turn_vault: Path, statements: list[str]
+    long_turn_vault: Path,
 ) -> None:
     """A short turn of twelve everyday words matches almost every page. The
-    ranked rows must reach the corroboration test already in bm25 order, so
-    it can stop once `k` rows qualify. A flattened plan runs the test on
-    every matched row and sorts afterwards: 86-105 ms against 15-17 ms for
-    such a turn on the 2000-page latency harness."""
+    corroboration test must take the ranked rows in bm25 order and stop once
+    `k` rows qualify. Run on every matched row and sorted afterwards, it cost
+    86-105 ms against 15-17 ms for such a turn on the 2000-page latency
+    harness."""
     turn = " ".join(COMMON_WORDS[40:52])
+    rows = _rows(long_turn_vault)
+    matched = lexstore.search_bm25_result(
+        long_turn_vault,
+        working_set_runtime.content_words(turn),
+        len(rows),
+        scope="kb",
+        allowed_paths={row.path for row in rows},
+        allow_delta=False,
+    ).value
 
-    working_set_runtime.lexical_evidence(long_turn_vault, turn, _rows(long_turn_vault), limit=8)
+    with call_spans.meter(call_spans.CANDIDATES) as measured:
+        hits, state = working_set_runtime.lexical_evidence(long_turn_vault, turn, rows, limit=8)
 
-    bounded = [sql for sql in statements if ") AS c JOIN fts" in sql]
-    assert len(bounded) == 1, statements
-    conn = lexstore.get_store(long_turn_vault)._connect()
-    try:
-        plan = conn.execute("EXPLAIN QUERY PLAN " + bounded[0]).fetchall()
-    finally:
-        conn.close()
-    top = [detail for _id, parent, _unused, detail in plan if parent == 0]
-    assert any(detail.startswith("CO-ROUTINE") for detail in top), plan
-    assert "USE TEMP B-TREE FOR ORDER BY" not in top, plan
+    assert state == "available"
+    assert [hit.path for hit in hits] == _unbounded_paths(long_turn_vault, turn, rows)[:8]
+    examined = int(measured[call_spans.CANDIDATES])
+    assert 0 < examined < len(matched) // 2, (examined, len(matched))
 
 
 def test_a_corroborated_page_below_many_single_unit_pages_is_still_found(vault: Path) -> None:

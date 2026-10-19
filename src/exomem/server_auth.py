@@ -30,6 +30,7 @@ from .governance.principal import remote_owner_binding_state
 from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
 from .session_oauth import OAUTH_AUTHORIZATION_SCOPES, ExomemSessionOAuthProxy
 from .session_validation_cache import SessionValidationCache
+from .writer_lease import LeaseConfig
 
 log = logging.getLogger(__name__)
 
@@ -169,9 +170,13 @@ def _required_signing_root() -> str:
 
 
 def _shared_storage_settings() -> tuple[str, str, str, float] | None:
+    try:
+        lease = LeaseConfig.from_env()
+    except ValueError as error:
+        raise RuntimeError(str(error)) from None
     storage_url = os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip()
     if not storage_url:
-        if os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip():
+        if lease.enabled and lease.topology == "multi-host":
             raise RuntimeError(
                 "EXOMEM_OAUTH_STORAGE_URL is required when "
                 "EXOMEM_WRITER_LEASE_URL enables HA coordination"

@@ -16,20 +16,26 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import add as add_module
 from . import (
+    call_spans,
     curation,
     episode_capture,
     episode_nudge,
+    freshness,
     memory_refs,
     query_log,
+    request_budget,
     source_taxonomy,
     working_set_heat,
+    writer_lease,
 )
+from .cli_ops import OpError
 from .episode_model import EpisodeError
 from .episode_recovery import EpisodeInputOwner
 from .governance import egress
@@ -40,9 +46,30 @@ from .vault import (
     content_hash,
     kb_root,
     parse_frontmatter,
+    read_guarded_text,
 )
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ReferencePreparation:
+    owners: memory_refs._ReferenceOwners
+    generation: int
+    checkpoint: freshness.FreshnessCheckpoint
+    live: bool
+    external_pending_epoch: int | None
+
+    def current(self, root: Path) -> bool:
+        # A non-live checkpoint seals a fresh scan; it never proves an empty
+        # or current cached corpus. Only borrowed snapshots require live proof.
+        return (
+            writer_lease.read_commit_generation(root) == self.generation
+            and freshness.consumer_checkpoint(root, "vault") == self.checkpoint
+            and freshness.is_live(root, "vault") == self.live
+            and freshness.external_pending_epoch(root) == self.external_pending_epoch
+            and self.owners.snapshot_is_current()
+        )
 
 
 @dataclass(frozen=True)
@@ -89,7 +116,7 @@ def _revisions(vault_root: Path, key: str, audience: str) -> list[_Revision]:
     for order, name in matched:
         path = folder / name
         try:
-            text = path.read_text(encoding="utf-8")
+            text, _guard = read_guarded_text(vault_root, path)
             frontmatter, _body, _raw = parse_frontmatter(text)
         except (OSError, UnicodeDecodeError, ValueError):
             continue
@@ -193,46 +220,118 @@ def record(
         "said": said,
         "client": client,
     }
-    recap = episode_capture.prepare(
+    original_recap = episode_capture.prepare(
         episode=episode, about=about, when=when, audience=audience, **fields
     )
-    about_skipped = 0
-    about_paths: dict[str, str] = {}
-    if recap.about:
-        about_paths = egress.visible_memory_ref_paths(
-            vault_root, recap.about, principal=effective_principal()
-        )
-        kept = [ref for ref in recap.about if ref in about_paths]
-        about_skipped = len(recap.about) - len(kept)
-        if about_skipped:
-            recap = episode_capture.prepare(
-                episode=recap.key, about=kept, when=when, audience=audience, **fields
-            )
+    request_id = writer_lease.active_mutation_request_id()
+    retry = writer_lease._active_capture_preparation_retry() if request_id is not None else None
 
-    source, idempotent = _write(vault_root, source_schema, recap, when, audience)
-    revision: int | None
-    try:
-        bound = owner.bind_committed_input(
-            recap.key, path=source["path"], reference=source["ref"], about=recap.about
+    def retry_available() -> bool:
+        return request_budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS) and (
+            retry is None or retry.available()
         )
-    except (EpisodeError, curation.CurationError, OSError) as error:
-        if getattr(error, "code", None) == "EPISODE_OWNER_UNRESOLVED":
-            raise
-        # The recap is committed and stays readable; only this caller's ledger
-        # missed it -- a refused or corrupt journal, or an unwritable one. An
-        # error here would invite a retry of a write that already happened; a
-        # retry is idempotent anyway and binds it.
-        log.warning(
-            "episode ledger bind failed after a committed recap: %s",
-            getattr(error, "code", type(error).__name__),
+
+    source = None
+    # These causes name the two closed preparation failures, never user meaning.
+    cause = "preparation_changed"
+    attempt = 0
+    while True:
+        if attempt:
+            if not retry_available() or (retry is None and attempt >= 2):
+                break
+            # Every invalidation reaches this seam after releasing its guard.
+            # The invocation retains one existing FIFO ticket and waiter slot.
+            if retry is not None and not retry.admit():
+                break
+        attempt += 1
+        recap = original_recap
+        preparation = None
+        if request_id is not None and recap.about:
+            generation = writer_lease.read_commit_generation(vault_root)
+            if generation is None:
+                # An unreadable counter cannot seal a census. Avoid an
+                # expensive walk that no later check could admit.
+                cause = "generation_unavailable"
+                break
+            checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
+            live = freshness.is_live(vault_root, "vault")
+            external_pending_epoch = freshness.external_pending_epoch(vault_root)
+            if attempt > 1 and not retry_available():
+                break
+            owners = memory_refs._reference_owners_read_only(
+                vault_root, (memory_refs.parse_memory_ref(ref) for ref in recap.about)
+            )
+            preparation = _ReferencePreparation(
+                owners, generation, checkpoint, live, external_pending_epoch
+            )
+            if not preparation.current(vault_root):
+                continue
+        # A census cannot be interrupted; its completion may spend the
+        # allowance before this additional guarded attempt can start.
+        if attempt > 1 and not retry_available():
+            break
+        # Direct add callers run fanout inline. Preserve their existing path
+        # instead of pulling that derived work into a new outer guard.
+        guard = (
+            writer_lease.active_manager().mutation_guard(
+                vault_root, request_id=request_id, operation="episode_memory", holder_kind="command"
+            )
+            if request_id is not None else nullcontext()
         )
-        ledger, recovery, revision = "unbound", "unavailable", None
-    else:
-        ledger, recovery, revision = bound["ledger"], bound["recovery"], bound["input_revision"]
+        with guard:
+            if preparation is not None and not preparation.current(vault_root):
+                continue
+            about_skipped = 0
+            about_paths: dict[str, str] = {}
+            if recap.about:
+                about_paths = egress.visible_memory_ref_paths(
+                    vault_root, recap.about, principal=effective_principal(),
+                    _prepared_owners=preparation.owners if preparation is not None else None,
+                )
+                kept = [ref for ref in recap.about if ref in about_paths]
+                about_skipped = len(recap.about) - len(kept)
+                if about_skipped:
+                    recap = episode_capture.prepare(
+                        episode=recap.key, about=kept, when=when, audience=audience, **fields
+                    )
+            # Pending and policy reads can observe another external event.
+            # Reject before the first revision read or any canonical effect.
+            if preparation is not None and not preparation.current(vault_root):
+                continue
+            source, idempotent = _write(vault_root, source_schema, recap, when, audience)
+            revision: int | None
+            try:
+                bound = owner.bind_committed_input(
+                    recap.key, path=source["path"], reference=source["ref"], about=recap.about
+                )
+            except (EpisodeError, curation.CurationError, OSError) as error:
+                if getattr(error, "code", None) == "EPISODE_OWNER_UNRESOLVED":
+                    raise
+                # The recap is committed and stays readable; only this caller's ledger
+                # missed it -- a refused or corrupt journal, or an unwritable one. An
+                # error here would invite a retry of a write that already happened; a
+                # retry is idempotent anyway and binds it.
+                log.warning(
+                    "episode ledger bind failed after a committed recap: %s",
+                    getattr(error, "code", type(error).__name__),
+                )
+                ledger, recovery, revision = "unbound", "unavailable", None
+            else:
+                ledger, recovery, revision = bound["ledger"], bound["recovery"], bound["input_revision"]
+        break
+    if source is None:
+        raise OpError(
+            "REFERENCE_PREPARATION_UNAVAILABLE",
+            "Reference ownership could not be validated; nothing was written.",
+            "Retry the unchanged request with the same idempotency key.",
+            details={"status": "retryable", "committed": False, "cause": cause},
+        )
     from .writer_lease import defer_housekeeping_until_terminal_persisted
 
     about_heat_paths = [about_paths[ref] for ref in recap.about if ref in about_paths]
 
+    # Measure this callback separately from the acknowledgement interval.
+    @call_spans.timed("episode.housekeeping")
     def record_housekeeping() -> None:
         if not idempotent:
             # A retry wrote nothing and records no new heat.

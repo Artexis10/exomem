@@ -55,6 +55,9 @@ def declare(conn, collection_id, paths) -> None:
 
 def maintain(conn, collection_id, values, *, previous=None) -> None:
     """Record exact value/presence changes, including unindexed selected fields."""
+    if previous is None:
+        advance_all(conn, collection_id)
+        return
     if not conn.in_transaction:
         raise RuntimeError("cursor basis maintenance requires a writer transaction")
     row = conn.execute("SELECT membership_revision,fields_json FROM query_cursor_state WHERE collection_id=?",
@@ -62,17 +65,17 @@ def maintain(conn, collection_id, values, *, previous=None) -> None:
     if row is None:
         return  # Older declarations have no covered cursor capability.
     membership, fields = row[0], json.loads(row[1])
-    changed = previous is None
+    changed = False
     for spec in fields.values():
-        if previous is None or _value(previous, spec[0]) != _value(values, spec[0]):
+        if _value(previous, spec[0]) != _value(values, spec[0]):
             spec[1] += 1
             changed = True
     if changed:
         conn.execute("UPDATE query_cursor_state SET membership_revision=?,fields_json=? WHERE collection_id=?",
-                     (membership + (previous is None), _json(fields), collection_id))
+                     (membership, _json(fields), collection_id))
 
 
-def advance_all(conn, collection_id) -> None:
+def advance_all(conn, collection_id, *, count=1) -> None:
     """Count a change to every covered field at once, for writes that do not compare values.
 
     A derived collection's import commits a member's rows outside the store, so the
@@ -86,9 +89,9 @@ def advance_all(conn, collection_id) -> None:
         return
     fields = json.loads(row[1])
     for spec in fields.values():
-        spec[1] += 1
+        spec[1] += count
     conn.execute("UPDATE query_cursor_state SET membership_revision=?,fields_json=? WHERE collection_id=?",
-                 (row[0] + 1, _json(fields), collection_id))
+                 (row[0] + count, _json(fields), collection_id))
 
 
 def uniform_basis(conn, collection_id, dependencies) -> UniformBasis | None:

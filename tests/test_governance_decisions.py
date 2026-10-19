@@ -28,6 +28,8 @@ from exomem.governance.policy import (
 )
 from exomem.governance.principal import OWNER_AUDIENCE
 
+pytestmark = pytest.mark.reads_repository_docs
+
 SCOPE = "scope-1"
 OTHER_SCOPE = "scope-2"
 

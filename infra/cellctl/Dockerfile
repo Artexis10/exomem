@@ -12,7 +12,7 @@ ARG PYTHON_IMAGE=python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a8
 
 FROM ${PYTHON_IMAGE} AS build
 # The pinned uv writer (infra/tool-versions.env), hash-checked from PyPI.
-RUN printf '%s\n' 'uv==0.11.28 --hash=sha256:49fe42df9f42056037473f3876adec1615709b57d3470ed39178ff420f3afb9f' > /tmp/uv.txt \
+RUN printf '%s\n' 'uv==0.11.28 --hash=sha256:49fe42df9f42056037473f3876adec1615709b57d3470ed39178ff420f3afb9f --hash=sha256:fab3c31007a611866475824a666f5a721bf0c9335db806355a97fcfba2a6bbb7 --hash=sha256:041e4b80bebc58d7142ac9394370cacd73185fd8d066d6675d14707d83408f6d' > /tmp/uv.txt \
     && pip install --no-cache-dir --require-hashes -r /tmp/uv.txt
 WORKDIR /src
 COPY pyproject.toml uv.lock ./

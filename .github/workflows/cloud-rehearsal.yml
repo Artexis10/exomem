@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - "infra/cloud-rehearsal/**"
+      - "infra/cellctl/src/cellctl/control_test_contract.py"
+      - "infra/cellctl/tests/fixtures/substrate-contract.json"
+      - ".github/actions/substrate-test-contract/**"
       - ".github/workflows/cloud-rehearsal.yml"
   # The live rehearsal (P3) is the node gate; run it by hand before P4 and
   # after any change to cellctl, the platform chart, the cell image or the
@@ -11,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM installed and the Hetzner domain selected. local-storage-drill: node-loss recovery on TopoLVM."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. operator-restore-abort: interrupted in-place recovery after steps 1-2. local-storage-drill: node-loss recovery."
         type: choice
-        options: [full, full-coexistence, local-storage-drill]
+        options: [full, full-coexistence, operator-restore-abort, local-storage-drill]
         default: full
 
 permissions:
@@ -89,8 +92,9 @@ jobs:
           REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/rehearsal-diagnostics
           HARNESS_CHECK: ${{ github.event_name == 'pull_request' && '--harness-check' || '' }}
           COEXISTENCE: ${{ inputs.mode == 'full-coexistence' && '--local-storage-coexistence' || '' }}
+          RESTORE_ABORT: ${{ inputs.mode == 'operator-restore-abort' && '--operator-restore-abort --steps 1,2 --harness-check' || '' }}
         run: |
-          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
+          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
       - name: Summarize the report
         if: always()
         run: |
@@ -122,6 +126,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+      - uses: ./.github/actions/substrate-test-contract
       - name: Load the pinned tool versions
         run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5

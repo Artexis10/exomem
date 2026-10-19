@@ -223,9 +223,5 @@ providers strictly sequentially; benchmarks only on a quiesced machine;
   sandboxed workers (no network/subprocess); it passes in full envs.
 - bm-bench fork rework left untracked `.omc/` dirs in the fork — do not
   let them near the upstream PR.
-- KB notes for this programme (project `exomem`, Insights/Failures):
-  `competitive-benchmark-guest-lane-supersession`,
-  `first-guest-lane-seat-accepted-bm-bench`,
-  `leakage-scanners-partition-harness-vs-dataset-text`,
-  `status-only-validators-false-green`,
-  `file-canonical-memory-commoditized-epistemic-contract-open`.
+- Public programme contracts live in `openspec/specs/benchmark-protocol/spec.md`.
+  This handoff records the historical verification facts and unresolved work.

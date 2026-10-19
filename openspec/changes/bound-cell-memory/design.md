@@ -66,7 +66,7 @@ Alternative: jemalloc via `LD_PRELOAD`. Kept as the fallback if D1 shows trimmin
 
 **D7. Builds stream.**
 - The matrix load preallocates from the row count and fills from the cursor.
-- A bulk drain drops the matrix cache and reloads once, rather than splicing per file.
+- A bulk drain publishes once per group without per-file matrix splices. A compatible warm matrix uses bounded catch-up on the next read.
 - `rebuild_all` embeds in batches.
 - The identity census streams page text.
 
@@ -74,7 +74,11 @@ Alternative: jemalloc via `LD_PRELOAD`. Kept as the fallback if D1 shows trimmin
 
 Matrix reads take the serving token, stored vector-space identity, row count and ordered cursor from one explicit SQLite read transaction. Allocate one float32 matrix at the stored width, copy each row directly into it, and validate every blob and the final count before publishing the cache. Keep the historical empty result and zero-argument load seam. This reduces transient copies; it does not remove the resident matrix.
 
-Bulk embedding publication commits each bounded group of prepared parent replacements in one transaction, including its chunk rows, supplied semantic-unit rows, vec0 mirror, path log and generation advancement. It performs no per-file matrix splice. After commit, invalidate older matrix and eligibility-mask caches without discarding a cache already loaded at the committed token or a later one. Never hold the Python cache lock across SQLite writes. In-memory serving identity and cache invalidation are fenced together by the full observed token, including semantic-unit generation: a delayed older completion cannot relabel newer rows, even when the matrix is cold. One lazy reload belongs to each committed batch; concurrent readers can legitimately observe different completed batches.
+Bulk embedding publication commits each bounded group of prepared parents in one transaction. That transaction includes chunk rows, supplied semantic-unit rows, vec0, the path log and generation advancement. It performs no per-file matrix splice and holds no Python cache lock across SQLite writes.
+
+After commit, retain an older immutable chunk matrix from the same epoch and instance for the existing bounded journal catch-up. Invalidate its eligibility mask. Preserve a matrix already loaded at the committed token or a later one. An incompatible epoch or instance requires a correct full reload. Catch-up retains its existing policy, journal, generation, path-count and row-count checks.
+
+Both matrix-serving returns check the index's existing observed publication token after the sidecar probe. A snapshot known to precede publication cannot use the token-unavailable fallback. This includes publication that completes during the probe. Semantic-unit generation alone does not stale the chunk matrix. In-memory identity remains fenced by the full observed token; a delayed older completion cannot relabel newer rows. Consumers that hold an older matrix keep its unchanged contents. The service resource policy retains its transient matrix and disk-scoring boundaries.
 
 Prepared vectors carry the actual producing encoder's `SpaceIdentity`, validated against the stored identity inside publication even when both spaces have the same width. Rebuild staging fixes one producing identity for the run and checks every encoding batch against it. Refuse incompatible publication; do not infer a replacement identity from mutable process state at the end. Encoding and producer capture use one pinned encoder reference, including the previous-resident encoder path.
 

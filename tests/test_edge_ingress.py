@@ -280,6 +280,20 @@ def test_valid_stamp_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sent == []
 
 
+def test_single_host_coordination_does_not_require_an_ha_edge_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_lease_env(monkeypatch)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOPOLOGY", "single-host")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://127.0.0.1:8770")
+    scope = _scope(headers={"cf-ray": "abc123"})
+
+    sent, app_called = _run_middleware(scope)
+
+    assert app_called is True
+    assert sent == []
+
+
 def test_no_cf_ray_is_exempt(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_lease_env(monkeypatch)
     scope = _scope(headers={})

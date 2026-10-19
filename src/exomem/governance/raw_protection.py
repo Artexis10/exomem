@@ -82,13 +82,18 @@ def protect(page: str, *, artifact_path: str, digest: str) -> str:
     return page.replace("---\n", "---\n" + yaml.safe_dump({"raw_protection": block}, sort_keys=False), 1)
 
 
-def binding(root: Path, path: str) -> tuple[dict, str, str] | None:
-    """Resolve only the named pair; an orphan never acquires a release."""
-    candidates = [path] if path.endswith(".md") else []
+def _binding_candidates(path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> list[str]:
+    """The companion locations fixed by the RAW protection format."""
+    candidates = [path] if path.endswith(".md") and artifact_copy is None else []
     candidates.append(path + ".md")
     if path.endswith(".md"):
         candidates.append(path[:-3] + "-notes.md")
-    for candidate in candidates:
+    return candidates
+
+
+def binding(root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[dict, str, str] | None:
+    """Resolve only the named pair; an orphan never acquires a release."""
+    for candidate in _binding_candidates(path, artifact_copy=artifact_copy):
         try:
             raw = reserved_paths.read_generic_bytes(root, candidate).data
             fm, _, _ = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
@@ -153,13 +158,19 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
 def permits(
     root: Path, path: str, who: RequestPrincipal, *,
     snapshot: bytes | None = None, derived: bool = False,
-) -> bool:
-    """Meet with ordinary policy; never let a caller-declared purpose widen RAW."""
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+    resolve_bytes: bool = True,
+) -> bool | None:
+    """Meet with ordinary policy; never let a caller-declared purpose widen RAW.
+
+    No-byte admission returns None when authority or candidate release bytes
+    remain unproved. Only False proves hiding to a pending identity consumer.
+    """
     if not marked(path):
         return True
     valid, trusted_purpose = _authority(root, who)
     if not valid:
-        return False
+        return False if resolve_bytes else None
     if is_owner(who):
         return True
     # An original's release never approves newly extracted pixels or aliases.
@@ -169,12 +180,18 @@ def permits(
 
     current = policy.load(root)
     if current.blocked or current.conflicted:
-        return False
+        return False if resolve_bytes else None
     grants = [grant for grant in current.release_grants
-              if grant.raw_protection is not None and grant.to_audience == who.audience_id]
+              if grant.raw_protection is not None and grant.to_audience == who.audience_id
+              and grant.raw_protection["surface"] == who.surface
+              and grant.raw_protection["issuer_family"] == who.issuer_family
+              and grant.raw_protection["purpose"] == trusted_purpose]
     if not grants:
         return False
-    found = binding(root, path)
+    if not resolve_bytes:
+        candidates = _binding_candidates(path, artifact_copy=artifact_copy)
+        return None if any(grant.path in candidates for grant in grants) else False
+    found = binding(root, path, artifact_copy=artifact_copy)
     if found is None:
         return False
     block, companion, companion_hash = found
@@ -183,14 +200,17 @@ def permits(
         if (grant.ref != block["original_ref"] or grant.path != companion
                 or grant.content_hash != companion_hash
                 or spec["artifact_sha256"] != block["artifact_sha256"]
-                or spec["revision"] != block["revision"]
-                or spec["surface"] != who.surface or spec["issuer_family"] != who.issuer_family
-                or spec["purpose"] != trusted_purpose):
+                or spec["revision"] != block["revision"]):
             continue
         try:
-            original = reserved_paths.read_generic_bytes(root, block["artifact_path"]).data
-            if hashlib.sha256(original).hexdigest() != block["artifact_sha256"]:
-                return False
+            if artifact_copy is not None:
+                if (artifact_copy.vault_root != root or artifact_copy.relative_path != block["artifact_path"]
+                        or artifact_copy.sha256 != block["artifact_sha256"]):
+                    return False
+            else:
+                original = reserved_paths.read_generic_bytes(root, block["artifact_path"]).data
+                if hashlib.sha256(original).hexdigest() != block["artifact_sha256"]:
+                    return False
             if snapshot is not None:
                 expected = block["artifact_sha256"] if path == block["artifact_path"] else companion_hash
                 if hashlib.sha256(snapshot).hexdigest() != expected:

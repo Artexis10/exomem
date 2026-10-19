@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 import exomem
 from exomem import semantic_authoring, workflow_skills
 from exomem.public_artifact_privacy import (
@@ -17,6 +19,8 @@ from exomem.public_artifact_privacy import (
     repository_input_paths,
     scan_repository_inputs,
 )
+
+pytestmark = pytest.mark.reads_repository_docs
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE = Path(exomem.__file__).resolve().parent

@@ -252,17 +252,23 @@ class ReadSession:
             self._failure = QueryError("QUERY_UNAVAILABLE")
             raise self._failure from error
 
+    def _selected_fields(self, collection_id, fields):
+        """Release only the requested dependencies from the admitted field plan."""
+        plan = self._field_plans[collection_id]
+        fields = frozenset(fields)
+        selection = {name: tree for name, tree in plan.fields.items() if name in fields}
+        if set(fields) - set(selection):
+            raise QueryError("QUERY_FIELD_UNAVAILABLE")
+        return selection
+
     def selected_values(self, row_id, layout, fields, *, max_bytes, check):
         """Selected top-level values of one admitted row under either encoding."""
         from .selected_values import read_selected_tree
 
         cid = layout.collection_id if layout is not None else self.connection.execute(
             "SELECT collection_id FROM items WHERE row_id=?", (row_id,)).fetchone()[0]
-        plan = self._field_plans[cid]
         fields = frozenset(fields)
-        selection = {name: tree for name, tree in plan.fields.items() if name in fields}
-        if set(fields) - set(selection):
-            raise QueryError("QUERY_FIELD_UNAVAILABLE")
+        selection = self._selected_fields(cid, fields)
 
         if layout is None:
             with self.connection.blobopen("items", "values_json", row_id, readonly=True) as blob:

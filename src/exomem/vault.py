@@ -357,7 +357,8 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
 
 # `[[Target]]` or `[[Target|Alias]]`.
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
-_FM_PATTERN = re.compile(r"^---\r?\n(.*?)\r?\n---(?:\r?\n)?(.*)", re.DOTALL)
+# Markdown fences delimit YAML; the optional UTF-8 BOM stays outside the YAML block.
+_FM_PATTERN = re.compile(r"^\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)(.*)", re.DOTALL)
 _LOCK_NAMESPACES = frozenset(
     {"activation-manifest", "semantic-creation", "lexical-catalog-publication"}
 )
@@ -440,7 +441,7 @@ def kb_root(vault: Path) -> Path:
 
 
 def content_hash(content: str) -> str:
-    """sha256 hex of a file's full raw text — the drift-guard token.
+    """SHA-256 of the exact UTF-8 text; readers must preserve stored newlines.
 
     Hashing the WHOLE content (frontmatter + body) means a concurrent
     `tags:`/`status:` change trips the guard too, not just body edits.
@@ -1219,16 +1220,10 @@ class PathGuard:
             expected_generation=self.expected_generation,
         )
 
-    def recheck(
+    def recheck_ancestors(
         self, vault_root: Path, verified_ancestors: set[PathIdentity] | None = None
     ) -> None:
-        """Re-prove the guard.
-
-        `verified_ancestors` lets a caller that rechecks many guards in one round
-        (`recheck_path_guards`) prove each distinct ancestor directory once: they
-        share almost all of their chain, and re-stat'ing it per guard was six
-        probes per item file on every round.
-        """
+        """Re-prove retained ancestry without testing the destination leaf."""
         root = Path(vault_root)
         # Plain string joins: a round rechecks thousands of leaves and pathlib
         # construction was most of each one.
@@ -1254,6 +1249,14 @@ class PathGuard:
                 raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed")
             if verified_ancestors is not None:
                 verified_ancestors.add(expected)
+
+    def recheck(
+        self, vault_root: Path, verified_ancestors: set[PathIdentity] | None = None
+    ) -> None:
+        """Re-prove the guard, sharing ancestor proofs within one round."""
+        root = Path(vault_root)
+        root_text = os.fspath(root)
+        self.recheck_ancestors(root, verified_ancestors)
         for relative in self.missing_parents:
             if os.path.lexists(os.path.join(root_text, relative)):
                 raise PathGuardError("PATH_GUARD_CHANGED", "missing guard ancestor appeared")
@@ -1517,6 +1520,8 @@ class _BatchReplaceContext:
     vault_root: Path | None
     expected_destination: PathIdentity | None
     published_metadata: _BatchSnapshot | None = None
+    inverse_recheck: Callable[[], None] | None = None
+    expected_content_hash: str | None = None
 
 
 _BATCH_REPLACE_CONTEXT: ContextVar[_BatchReplaceContext | None] = ContextVar(
@@ -1529,11 +1534,17 @@ def _batch_replace_context(
     vault_root: Path | None,
     expected_destination: PathIdentity | None,
     published_metadata: _BatchSnapshot | None = None,
+    *,
+    inverse_recheck: Callable[[], None] | None = None,
+    expected_content_hash: str | None = None,
 ) -> Iterator[None]:
     """Carry held-publication inputs without widening the legacy test seam."""
 
     token = _BATCH_REPLACE_CONTEXT.set(
-        _BatchReplaceContext(vault_root, expected_destination, published_metadata)
+        _BatchReplaceContext(
+            vault_root, expected_destination, published_metadata,
+            inverse_recheck, expected_content_hash,
+        )
     )
     try:
         yield
@@ -2282,6 +2293,8 @@ class _BatchWorkspace:
         published_metadata: _BatchSnapshot | None = None,
     ) -> PathIdentity:
         context = _BATCH_REPLACE_CONTEXT.get()
+        inverse_recheck = context.inverse_recheck if context is not None else None
+        expected_content_hash = context.expected_content_hash if context is not None else None
         if context is not None:
             if vault_root is None:
                 vault_root = context.vault_root
@@ -2289,6 +2302,8 @@ class _BatchWorkspace:
                 expected_destination = context.expected_destination
             if published_metadata is None:
                 published_metadata = context.published_metadata
+        if inverse_recheck is not None:
+            inverse_recheck()
         self.recheck()
         artifact.recheck()
         if vault_root is not None:
@@ -2351,6 +2366,8 @@ class _BatchWorkspace:
                     published: held_fs.HeldResult[held_fs.StableIdentity] | None = None
 
                     def recheck_publish_precondition() -> None:
+                        if inverse_recheck is not None:
+                            inverse_recheck()
                         self.recheck()
                         artifact.recheck()
                         current = filesystem.file(parent, relative.name)
@@ -2380,6 +2397,8 @@ class _BatchWorkspace:
 
                     def publish_once() -> None:
                         nonlocal published
+                        if inverse_recheck is not None:
+                            inverse_recheck()
 
                         def prepare_published(file: held_fs.HeldFile) -> None:
                             if published_metadata is not None:
@@ -2388,12 +2407,15 @@ class _BatchWorkspace:
                         _before_batch_destination_published(
                             final, restoring=published_metadata is not None
                         )
+                        if inverse_recheck is not None:
+                            inverse_recheck()
                         published = held_fs.publish_bytes(
                             filesystem,
                             parent,
                             relative.name,
                             content,
                             expected_identity=expected_stable,
+                            expected_sha256=expected_content_hash,
                             prepare=prepare_published,
                         )
                         if (
@@ -2457,8 +2479,18 @@ class _BatchWorkspace:
         # already closed on Windows and its identity was proved immediately
         # above, and the mutation boundary is held throughout, so no other
         # governed writer can intervene.
+        def replace_once() -> None:
+            if inverse_recheck is not None:
+                inverse_recheck()
+            self._replace_once(artifact, final)
+
+        def recheck_replace_precondition() -> None:
+            if inverse_recheck is not None:
+                inverse_recheck()
+            self.recheck()
+
         replace_tolerating_transient_sharing(
-            lambda: self._replace_once(artifact, final), recheck=self.recheck
+            replace_once, recheck=recheck_replace_precondition
         )
         artifact.close()
         self.artifacts.pop(artifact.name)
@@ -2565,10 +2597,12 @@ class _BatchWorkspace:
         except (OSError, PathGuardError):
             return None
 
-    def unlink_installed(self, final: Path, expected: PathIdentity) -> None:
+    def unlink_installed(
+        self, final: Path, expected: _BatchArtifactGuard, *, inverse_recheck: Callable[[], None]
+    ) -> None:
         """Remove one exact batch-created destination through its held parent."""
 
-        self.recheck()
+        inverse_recheck()
         absolute_final = Path(os.path.abspath(final))
         if absolute_final.parent != self.parent:
             raise PathGuardError(
@@ -2588,11 +2622,20 @@ class _BatchWorkspace:
                 descriptor = getattr(installed, "descriptor", None)
                 if (
                     not isinstance(descriptor, int)
-                    or not _same_identity(expected, os.fstat(descriptor))
+                    or not _same_identity(expected.identity, os.fstat(descriptor))
                     or installed.identity.link_count != 1
                 ):
                     raise PathGuardError(
                         "PATH_GUARD_CHANGED", "batch rollback target changed"
+                    )
+                inverse_recheck()
+                observed = self.held_filesystem.read(installed)
+                if (
+                    not observed.ok
+                    or hashlib.sha256(observed.require()).hexdigest() != expected.content_hash
+                ):
+                    raise PathGuardError(
+                        "PATH_GUARD_CONTENT", "batch rollback content changed"
                     )
                 removed = self.held_filesystem.unlink(installed)
                 if not removed.ok:
@@ -2611,6 +2654,7 @@ class _BatchWorkspace:
                 )
             self.recheck()
             return
+        inverse_recheck()
         if os.unlink in getattr(os, "supports_dir_fd", set()):
             os.unlink(absolute_final.name, dir_fd=self.parent_descriptor)
         else:  # pragma: no cover - legacy rootless Windows route
@@ -3067,15 +3111,13 @@ def _recheck_rollback_directory_guards(
     guards: Iterable[DirectoryCensusGuard],
     vault_root: Path,
     final: Path,
-    *,
-    allowed_changes: Iterable[Path],
 ) -> None:
-    """Recheck censuses whose guarded namespace contains this direct child."""
+    """Recheck retained identities without observing unrelated sibling state."""
     final_parent = os.path.abspath(final.parent)
     for guard in guards:
         guarded_directory = Path(vault_root) / guard.target
         if final_parent == os.path.abspath(guarded_directory):
-            guard.recheck(vault_root, allowed_changes=allowed_changes)
+            guard.recheck_identity(vault_root)
 
 
 #: Windows refuses `os.replace` onto a target another handle holds open without
@@ -3447,6 +3489,7 @@ def _bounded_directory_entries(
     expected: PathIdentity,
     max_entries: int,
     ignored_names: frozenset[str] = frozenset(),
+    admission: Callable[[str], bool] | None = None,
 ) -> tuple[PathIdentity, ...]:
     """Capture a bounded descriptor-relative directory census."""
     try:
@@ -3465,6 +3508,9 @@ def _bounded_directory_entries(
         ordinary_names: list[str] = []
         for entry in iterator:
             name = entry.name
+            entry_relative = f"{relative}/{name}" if relative else name
+            if admission is not None and not admission(entry_relative):
+                continue
             if name in ignored_names:
                 continue
             if name.startswith(_BATCH_RESIDUE_PREFIX):
@@ -3472,7 +3518,6 @@ def _bounded_directory_entries(
                 if len(residue_names) > _BATCH_RESIDUE_WORKSPACE_LIMIT:
                     raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
                 continue
-            entry_relative = f"{relative}/{name}" if relative else name
             if _is_registered_internal_state_artifact(entry_relative):
                 continue
             if len(ordinary_names) <= max_entries:
@@ -3481,12 +3526,16 @@ def _bounded_directory_entries(
         iterator = None
 
         for name in sorted(residue_names):
+            if admission is not None and not admission(f"{relative}/{name}"):
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory admission changed")
             _classify_batch_residue(path, descriptor, name)
         if len(ordinary_names) > max_entries:
             raise PathGuardError("PATH_GUARD_LIMIT", "guarded directory exceeds its entry limit")
 
         entries: list[PathIdentity] = []
         for name in sorted(ordinary_names):
+            if admission is not None and not admission(f"{relative}/{name}"):
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory admission changed")
             try:
                 encoded = name.encode("utf-8")
             except UnicodeEncodeError as error:
@@ -3544,6 +3593,7 @@ class DirectoryCensusGuard:
     directory_identity: PathIdentity | None
     entries: tuple[PathIdentity, ...]
     max_entries: int
+    admission: Callable[[str], bool] | None = None
 
     @classmethod
     def capture(
@@ -3552,6 +3602,7 @@ class DirectoryCensusGuard:
         target: str,
         *,
         max_entries: int,
+        admission: Callable[[str], bool] | None = None,
     ) -> DirectoryCensusGuard:
         parts = _safe_guard_target(target)
         if type(max_entries) is not int or max_entries < 0:
@@ -3594,6 +3645,7 @@ class DirectoryCensusGuard:
                 relative=relative,
                 expected=directory_identity,
                 max_entries=max_entries,
+                admission=admission,
             )
             guard = cls(
                 target,
@@ -3602,19 +3654,16 @@ class DirectoryCensusGuard:
                 directory_identity,
                 entries,
                 max_entries,
+                admission,
             )
             guard.recheck(root)
             return guard
-        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries)
+        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries, admission)
         guard.recheck(root)
         return guard
 
-    def recheck(
-        self,
-        vault_root: Path,
-        *,
-        allowed_changes: Iterable[Path] = (),
-    ) -> None:
+    def recheck_identity(self, vault_root: Path) -> None:
+        """Re-prove retained directories without admission or child enumeration."""
         root = Path(vault_root)
         for expected in self.ancestors:
             path = root if expected.relative_path == "." else root / expected.relative_path
@@ -3629,6 +3678,28 @@ class DirectoryCensusGuard:
                 or _is_reparse(info)
             ):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed")
+        if self.directory_identity is None:
+            return
+        try:
+            info = (root / self.target).lstat()
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed") from error
+        if (
+            not _same_identity(self.directory_identity, info)
+            or not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or _is_reparse(info)
+        ):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
+
+    def recheck(
+        self,
+        vault_root: Path,
+        *,
+        allowed_changes: Iterable[Path] = (),
+    ) -> None:
+        root = Path(vault_root)
+        self.recheck_identity(root)
         if self.directory_identity is None:
             for relative in self.missing_paths[:-1]:
                 path = root / relative
@@ -3669,22 +3740,12 @@ class DirectoryCensusGuard:
                     expected=_identity(self.target, info),
                     max_entries=self.max_entries,
                     ignored_names=allowed_names,
+                    admission=self.admission,
                 )
                 if current:
                     raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
             return
         directory = root / self.target
-        try:
-            info = directory.lstat()
-        except OSError as error:
-            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed") from error
-        if (
-            not _same_identity(self.directory_identity, info)
-            or not stat.S_ISDIR(info.st_mode)
-            or stat.S_ISLNK(info.st_mode)
-            or _is_reparse(info)
-        ):
-            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
         allowed_names = _allowed_census_names(directory, allowed_changes)
         current = _bounded_directory_entries(
             directory,
@@ -3692,6 +3753,7 @@ class DirectoryCensusGuard:
             expected=self.directory_identity,
             max_entries=self.max_entries,
             ignored_names=allowed_names,
+            admission=self.admission,
         )
         expected_entries = tuple(
             entry for entry in self.entries if Path(entry.relative_path).name not in allowed_names
@@ -3943,15 +4005,21 @@ def read_bounded_guarded_bytes(
 
 
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
-    """Read UTF-8 text once and bind a guard to those exact source bytes."""
-    root = Path(vault_root)
-    absolute = Path(path)
+    """Read exact UTF-8 text; the returned guard binds the resolved vault root."""
+    configured_root = Path(vault_root).absolute()
+    root = configured_root.resolve()
+    absolute = Path(path).absolute()
+    # Resolve only the configured root; inner aliases remain visible to guards.
     try:
-        relative = absolute.relative_to(root).as_posix()
-    except ValueError as error:
-        raise PathGuardError(
-            "PATH_GUARD_INVALID", "guarded read target is outside the vault"
-        ) from error
+        relative = absolute.relative_to(configured_root)
+    except ValueError:
+        try:
+            relative = absolute.relative_to(root)
+        except ValueError as error:
+            raise PathGuardError(
+                "PATH_GUARD_INVALID", "guarded read target is outside the vault"
+            ) from error
+    absolute = root / relative
     try:
         limit = absolute.lstat().st_size
     except FileNotFoundError:
@@ -3960,7 +4028,7 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    raw, guard = read_bounded_guarded_bytes(root, relative, limit=limit)
+    raw, guard = read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
     return raw.decode("utf-8"), guard
 
 
@@ -4465,9 +4533,18 @@ def post_commit_batch_fanout(
         if not complete:
             with call_spans.span("index.full_refresh_store", {"paths": len(replaced)}):
                 index_sync.record_failed_refresh(vault_root, replaced)
+            # Component and outcome are closed values. Keep paths and report
+            # codes out of logs because codes are only length-bounded.
+            component_outcomes = (
+                ",".join(
+                    f"{item.component}:{item.outcome}" for item in getattr(report, "components", ())
+                )
+                or "none"
+            )
             logging.getLogger(__name__).warning(
                 "index upsert incomplete after batch_atomic_write; "
-                "durable full-index refresh recorded"
+                "durable full-index refresh recorded; components=%s",
+                component_outcomes,
             )
             return False
         return True
@@ -4947,11 +5024,11 @@ def _batch_atomic_write_locked(
             continue
         if write.expected_hash is not None:
             try:
-                current = write.path.read_text(encoding="utf-8")
+                current = write.path.read_bytes()
             except FileNotFoundError:
                 actual_hash = None
             else:
-                actual_hash = content_hash(current)
+                actual_hash = hashlib.sha256(current).hexdigest()
             expected_missing = write.expected_hash == MISSING_CONTENT_HASH
             if (
                 not (expected_missing and actual_hash is None)
@@ -4984,7 +5061,7 @@ def _batch_atomic_write_locked(
     # every destination replace so a live `_access.yaml` change cannot race a
     # long staging interval.
     if vault_root is not None:
-        _validate_batch_write_access(Path(vault_root), writes)
+        _validate_batch_write_access(Path(vault_root), writes, auxiliary_manifest=_vocabulary_auxiliaries)
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
         read_only_guards
@@ -5059,6 +5136,7 @@ def _batch_atomic_write_locked(
 
     workspace_by_parent: dict[Path, _BatchWorkspace] = {}
     staged: list[tuple[Path, _BatchWorkspace, _WorkspaceArtifact]] = []
+    rollback_ancestry: list[tuple[Path, PathGuard]] = []
     snapshots: list[_BatchSnapshot | None] = []
     source_guards: list[_BatchArtifactGuard | None] = []
     fast_receipt: Any | None = None
@@ -5099,6 +5177,22 @@ def _batch_atomic_write_locked(
                 )
         for index, write in enumerate(writes):
             workspace = workspace_by_parent[Path(os.path.abspath(write.path.parent))]
+            ancestry_root = (
+                Path(os.path.abspath(vault_root))
+                if vault_root is not None else workspace.parent
+            )
+            if vault_root is not None and _batch_state_target(Path(vault_root), write.path):
+                from . import state_paths
+
+                ancestry_root = Path(os.path.abspath(state_paths.vault_state_dir(vault_root)))
+            ancestry_guard = bound_guards[index]
+            if ancestry_guard is None:
+                ancestry_guard = PathGuard.capture(
+                    ancestry_root,
+                    Path(os.path.abspath(write.path)).relative_to(ancestry_root).as_posix(),
+                    leaf_policy="stable" if os.path.lexists(write.path) else "absent",
+                )
+            rollback_ancestry.append((ancestry_root, ancestry_guard))
             if isinstance(write.content, str):
                 artifact = workspace.create_artifact(
                     f"stage-{index}.tmp", write.content.encode("utf-8")
@@ -5176,9 +5270,7 @@ def _batch_atomic_write_locked(
             if not (
                 write.create_only and write.expected_hash == MISSING_CONTENT_HASH
             ) and write.expected_hash is not None:
-                actual_hash = content_hash(
-                    snapshot.content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-                )
+                actual_hash = snapshot.content_hash
                 if (
                     write.expected_hash == MISSING_CONTENT_HASH
                     or actual_hash != write.expected_hash
@@ -5322,6 +5414,8 @@ def _batch_atomic_write_locked(
         for index, (final, workspace, artifact) in enumerate(staged):
             if index == 0 and _validate_prepared_bindings is not None:
                 _validate_prepared_bindings()
+            if index == 0 and additive_guard is not None:
+                additive_guard.before_publication()
             for candidate_workspace in workspace_by_parent.values():
                 candidate_workspace.recheck()
             for _pending_final, _pending_workspace, pending_artifact in staged[index:]:
@@ -5347,7 +5441,9 @@ def _batch_atomic_write_locked(
                 guard.recheck()
             if vault_root is not None:
                 root = Path(vault_root)
-                _validate_batch_write_access(root, writes[index:], proposed=writes)
+                _validate_batch_write_access(
+                    root, writes[index:], proposed=writes, auxiliary_manifest=_vocabulary_auxiliaries,
+                )
                 recheck_path_guards(
                     root,
                     (
@@ -5459,28 +5555,38 @@ def _batch_atomic_write_locked(
                     raise PathGuardError(
                         "PATH_GUARD_CHANGED", "committed batch artifact is unbound"
                     )
-                final_guard.recheck()
-                workspace.recheck()
-                if vault_root is not None:
-                    _recheck_rollback_directory_guards(
-                        directory_guards,
-                        Path(vault_root),
-                        final,
-                        allowed_changes=allowed_census_changes,
-                    )
+                def recheck_inverse(
+                    ancestry: tuple[Path, PathGuard] = rollback_ancestry[replaced_index],
+                    destination: Path = final,
+                    installed: _BatchArtifactGuard = final_guard,
+                    owner: _BatchWorkspace = workspace,
+                ) -> None:
+                    # Inverse custody survives caller revocation; forward admission stays live.
+                    ancestry_root, ancestry_guard = ancestry
+                    ancestry_guard.recheck_ancestors(ancestry_root)
+                    if vault_root is not None:
+                        _recheck_rollback_directory_guards(
+                            directory_guards, Path(vault_root), destination
+                        )
+                    installed.recheck()
+                    owner.recheck()
+
+                recheck_inverse()
                 if snapshot is None:
-                    workspace.unlink_installed(final, final_guard.identity)
+                    workspace.unlink_installed(final, final_guard, inverse_recheck=recheck_inverse)
                 else:
                     restore = workspace.create_artifact(
                         f"restore-{replaced_index}.tmp", snapshot.content
                     )
                     _apply_snapshot_metadata(restore, snapshot)
                     restore.recheck(verify_content=False)
-                    final_guard.recheck()
+                    recheck_inverse()
                     with _batch_replace_context(
                         Path(vault_root) if vault_root is not None else None,
                         final_guard.identity,
                         snapshot,
+                        inverse_recheck=recheck_inverse,
+                        expected_content_hash=final_guard.content_hash,
                     ):
                         restored_identity = workspace.replace_artifact(restore, final)
                     _BatchArtifactGuard.capture(
@@ -5648,15 +5754,37 @@ def _validate_batch_write_access(
     writes: Iterable[PlannedWrite],
     *,
     proposed: Iterable[PlannedWrite] | None = None,
+    auxiliary_manifest: Any | None = None,
 ) -> None:
     """Fail closed when any planned target is outside or newly write-protected."""
-    from . import access
+    from . import access, vocabulary_auxiliaries, writer_lease
     from .governance import connector_boundary
 
     vault_resolved = vault_root.resolve()
     writes = tuple(writes)
+    full_plan = writes if proposed is None else tuple(proposed)
+    roles = vocabulary_auxiliaries.validate(
+        vault_root, vocabulary_auxiliaries.planned_images(vault_root, full_plan), auxiliary_manifest,
+    )
+    # The sealed manifest schema fixes the two primary-bound auxiliary roles.
+    primary_bound_paths = {
+        path for path, role in roles.items()
+        if role == "lifecycle-review" or role == "compiled-history"
+    }
+    primary_admission = None
+    if primary_bound_paths:
+        primary = next(
+            write for write in full_plan
+            if Path(os.path.abspath(write.path)) == vault_resolved / auxiliary_manifest.primary_path
+        )
+        primary_admission = vocabulary_auxiliaries.primary_admission(
+            vault_root, primary_path=auxiliary_manifest.primary_path,
+            current_source=auxiliary_manifest.primary_before_source,
+            proposed_source=primary.content, primary_guard=auxiliary_manifest.primary_guard,
+            require_identity="lifecycle-review" in roles.values(),
+        )
     proposed_by_path = {}
-    for write in (writes if proposed is None else proposed):
+    for write in full_plan:
         try:
             proposed_by_path[write.path.resolve().relative_to(vault_resolved).as_posix()] = write
         except (ValueError, OSError):
@@ -5674,14 +5802,27 @@ def _validate_batch_write_access(
                     f"WRITE_REFUSED: {target} resolves outside the vault root"
                 ) from error
             if target == write.path:
-                connector_boundary.require_write(
-                    vault_root, rel,
-                    content=write.content.encode("utf-8") if isinstance(write.content, str) else None,
-                    proposed=proposed_by_path,
-                )
+                if roles.get(rel) == "compiled-history":
+                    from . import compiled_history
+
+                    compiled_history.validate_new_write(write, path=rel)
+                # Only owner-validated exact leaves inherit their bound primary's admission.
+                if rel in primary_bound_paths and primary_admission is not None:
+                    if not primary_admission(rel):
+                        raise ValueError("WRITE_REFUSED: target is unavailable")
+                else:
+                    connector_boundary.require_write(
+                        vault_root, rel,
+                        content=write.content.encode("utf-8") if isinstance(write.content, str) else None,
+                        proposed=proposed_by_path,
+                    )
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
+    # Decide access before ownership so refused paths reveal no store routing information.
+    writer_lease.validate_active_collection_file_paths(
+        vault_root, (target for write in writes for target in (write.path, *write.ensure_directories)),
+    )
 
 
 @contextmanager
@@ -5804,8 +5945,8 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     """Return `rel` re-spelled with the real on-disk casing under `vault_root`.
 
     On a case-insensitive filesystem (Windows NTFS, macOS APFS by default) a
-    caller may address `Notes/Polly/x.md` while the directory on disk is
-    `POLLY`. Both open the same file, but identity comparisons keyed on the
+    caller may address `Notes/Acme/x.md` while the directory on disk is
+    `ACME`. Both open the same file, but identity comparisons keyed on the
     path string then see two owners for one physical page. Non-strict
     `Path.resolve()` returns the real casing for the components that exist and
     preserves a not-yet-existing tail verbatim, so this handles both an edit
@@ -6418,6 +6559,26 @@ class _InboundIndexData:
     # counted toward stem_counts — lets
     # on_files_changed() tell a rename's
     # "new" side from an in-place edit.
+    checkpoint: freshness.FreshnessCheckpoint | None = None
+    stem_paths: dict[str, set[str]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.stem_paths = {}
+        for rel in self.known_rels:
+            self.stem_paths.setdefault(PurePosixPath(rel).stem, set()).add(rel)
+
+    def _forget(self, rel: str) -> None:
+        if rel not in self.known_rels:
+            return
+        self.known_rels.remove(rel)
+        stem = PurePosixPath(rel).stem
+        paths = self.stem_paths[stem]
+        paths.remove(rel)
+        if paths:
+            self.stem_counts[stem] = len(paths)
+        else:
+            self.stem_paths.pop(stem)
+            self.stem_counts.pop(stem)
 
     def on_files_changed(
         self,
@@ -6476,14 +6637,7 @@ class _InboundIndexData:
 
         # 3. Drop the stem-count contribution for every path that is now gone.
         for rel in deleted:
-            if rel in self.known_rels:
-                stem = Path(rel).stem
-                count = self.stem_counts.get(stem, 0) - 1
-                if count > 0:
-                    self.stem_counts[stem] = count
-                else:
-                    self.stem_counts.pop(stem, None)
-                self.known_rels.discard(rel)
+            self._forget(rel)
 
         # 4. Re-read each still-existing changed file and re-add its edges +
         #    stem-count contribution (only if it's a path we didn't already
@@ -6497,19 +6651,13 @@ class _InboundIndexData:
             try:
                 text, _guard = read_guarded_text(vault_root, abs_path)
             except (OSError, UnicodeDecodeError, PathGuardError):
-                if rel in self.known_rels:
-                    stem = Path(rel).stem
-                    count = self.stem_counts.get(stem, 0) - 1
-                    if count > 0:
-                        self.stem_counts[stem] = count
-                    else:
-                        self.stem_counts.pop(stem, None)
-                    self.known_rels.discard(rel)
+                self._forget(rel)
                 continue
             if rel not in self.known_rels:
                 stem = Path(rel).stem
                 self.stem_counts[stem] = self.stem_counts.get(stem, 0) + 1
                 self.known_rels.add(rel)
+                self.stem_paths.setdefault(stem, set()).add(rel)
             for lineno, context, raw in _scan_wikilinks(text):
                 normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
                 self.buckets.setdefault(normalized, []).append(
@@ -6524,9 +6672,22 @@ class _InboundIndexData:
                 next_seq += 1
 
 
+@dataclass
+class _InboundGeneration:
+    generation: int = 0
+    demanded: threading.Event = field(default_factory=threading.Event)
+
+
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
-_INBOUND_INDEX_GENERATIONS: dict[str, int] = {}
+_INBOUND_INDEX_GENERATIONS: dict[str, _InboundGeneration] = {}
 _INBOUND_INDEX_LOCK = threading.Lock()
+
+
+def register_inbound_index(vault_root: Path) -> None:
+    """Prepare a stable demand signal before the existing watcher serves a vault."""
+    root = str(vault_root.resolve())
+    with _INBOUND_INDEX_LOCK:
+        _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
 
 
 def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
@@ -6548,11 +6709,13 @@ def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
 
 
 def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
+    from . import foreground_priority
+
     buckets: dict[str, list[_InboundEntry]] = {}
     stem_counts: dict[str, int] = {}
     known_rels: set[str] = set()
     seq = 0
-    for md in walk_vault_md(vault_root):
+    for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root)):
         try:
             md_rel = md.relative_to(vault_root).as_posix()
             text, _guard = read_guarded_text(vault_root, md)
@@ -6590,20 +6753,60 @@ def _vault_freshness_key(vault_root: Path):
     return find_module._walk_freshness_key(walk_vault_md(vault_root))
 
 
-def _inbound_index(vault_root: Path) -> _InboundIndexData:
+def _inbound_index(vault_root: Path, *, require_current: bool = False) -> _InboundIndexData:
     """The cached index, rebuilt when the vault's freshness key moves."""
     key = _vault_freshness_key(vault_root)
+    checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
-        generation = _INBOUND_INDEX_GENERATIONS.setdefault(root, 0)
+        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+        state.demanded.set()
+        generation = state.generation
         cached = _INBOUND_INDEX.get(root)
-        if cached and cached[0] == key:
+        if (
+            cached and cached[0] == key
+            and (not require_current or cached[1].checkpoint == checkpoint)
+        ):
             return cached[1]
     data = _build_inbound_index(vault_root)
+    data.checkpoint = _inbound_checkpoint(vault_root, data, key, checkpoint)
     with _INBOUND_INDEX_LOCK:
-        if _INBOUND_INDEX_GENERATIONS.get(root) == generation:
+        if state.generation == generation:
             _INBOUND_INDEX[root] = (key, data)
     return data
+
+
+def _inbound_checkpoint(
+    vault_root: Path,
+    data: _InboundIndexData,
+    key: tuple[int, int, str],
+    checkpoint: freshness.FreshnessCheckpoint,
+) -> freshness.FreshnessCheckpoint | None:
+    # A skipped unreadable page cannot establish a complete link census.
+    if (
+        checkpoint.triple is not None
+        and checkpoint.triple == key
+        and len(data.known_rels) == key[0]
+        and freshness.consumer_checkpoint(vault_root, "vault") == checkpoint
+        and not freshness.external_pending(vault_root)
+    ):
+        return checkpoint
+    return None
+
+
+def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
+    """Rebuild requested link metadata on the existing background owner."""
+    root = str(vault_root.resolve())
+    with _INBOUND_INDEX_LOCK:
+        state = _INBOUND_INDEX_GENERATIONS.get(root)
+        if not eager and (state is None or not state.demanded.is_set()):
+            return False
+    if freshness.generation(vault_root, "vault") is None or freshness.external_pending(vault_root):
+        return False
+    data = _inbound_index(vault_root, require_current=True)
+    with _INBOUND_INDEX_LOCK:
+        cached = _INBOUND_INDEX.get(root)
+        return cached is not None and cached[1] is data and data.checkpoint is not None
 
 
 def on_inbound_files_changed(
@@ -6628,42 +6831,60 @@ def on_inbound_files_changed(
     """
     if not freshness.event_indexes_enabled():
         return
-    root = str(vault_root.resolve())
-    with _INBOUND_INDEX_LOCK:
-        generation = _INBOUND_INDEX_GENERATIONS.setdefault(root, 0)
-        cached = _INBOUND_INDEX.get(root)
-        if cached is None:
-            return
     changed_list = list(changed_rels)
     deleted_list = list(deleted_rels)
     if not (changed_list or deleted_list):
         return
+    root = str(vault_root.resolve())
+    with _INBOUND_INDEX_LOCK:
+        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+        state.generation += 1
+        generation = state.generation
+        cached = _INBOUND_INDEX.pop(root, None)
+        if cached is None:
+            return
     _, data = cached
+    checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
+    bridge = (
+        freshness.delta_since(vault_root, "vault", data.checkpoint)
+        if data.checkpoint is not None else None
+    )
+    # A later patch proves the whole index only when it covers the retained suffix.
+    covered = {str(Path(root) / rel) for rel in changed_list + deleted_list}
+    complete = (
+        bridge is not None
+        and bridge.complete
+        and bridge.to == checkpoint
+        and (bridge.changed | bridge.deleted).issubset(covered)
+    )
     data.on_files_changed(vault_root, changed_list, deleted_list)
     key = _vault_freshness_key(vault_root)
+    data.checkpoint = (
+        _inbound_checkpoint(vault_root, data, key, checkpoint) if complete else None
+    )
     with _INBOUND_INDEX_LOCK:
         if (
-            _INBOUND_INDEX_GENERATIONS.get(root) == generation
-            and _INBOUND_INDEX.get(root) is cached
+            state.generation == generation
+            and _INBOUND_INDEX.get(root) is None
+            and data.checkpoint is not None
         ):
             _INBOUND_INDEX[root] = (key, data)
 
 
 def clear_inbound_index() -> None:
-    """Test hook: drop every cached inbound-link index (patch state included —
-    `known_rels`/`buckets`/`stem_counts` all live inside the cached
-    `_InboundIndexData`, so clearing the outer dict resets everything)."""
+    """Withdraw all inbound data while preserving requested background recovery."""
     with _INBOUND_INDEX_LOCK:
         _INBOUND_INDEX.clear()
-        for root in _INBOUND_INDEX_GENERATIONS:
-            _INBOUND_INDEX_GENERATIONS[root] += 1
+        for state in _INBOUND_INDEX_GENERATIONS.values():
+            state.generation += 1
 
 
 def evict_inbound_index(vault_root: Path) -> bool:
     """Withdraw one vault's rebuildable inbound-link projection."""
     root = str(Path(vault_root).resolve())
     with _INBOUND_INDEX_LOCK:
-        _INBOUND_INDEX_GENERATIONS[root] = _INBOUND_INDEX_GENERATIONS.get(root, 0) + 1
+        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+        state.generation += 1
         return _INBOUND_INDEX.pop(root, None) is not None
 
 
@@ -6692,18 +6913,90 @@ def find_inbound_wikilinks(
     for the owner): uniqueness is then counted over the pages it admits, as
     in a vault without the others. Only a basename that is shared is decided.
     """
+    return _select_inbound_wikilinks(_inbound_index(vault_root), target_rel_path, visible)
+
+
+def cached_inbound_wikilinks(
+    vault_root: Path,
+    target_rel_path: str,
+    *,
+    visible: Callable[[str], bool] | None = None,
+) -> list[InboundLink] | None:
+    """Borrow complete current evidence without a walk, build or cache wait."""
+    root = str(vault_root.resolve())
+    state = _INBOUND_INDEX_GENERATIONS.get(root)
+    if state is None:
+        return None
+    # Owner registration makes this signal stable even while evidence is contended.
+    state.demanded.set()
+    instance = freshness.consumer_checkpoint_instance()
+    generation = freshness.generation(vault_root, "vault")
+    if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
+        return None
+    try:
+        cached = _INBOUND_INDEX.get(root)
+        if cached is None:
+            return None
+        checkpoint = cached[1].checkpoint
+        if (
+            generation is None
+            or checkpoint is None
+            or (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
+        ):
+            return None
+        cache_generation = state.generation
+        data = cached[1]
+        target = target_rel_path.replace("\\", "/").removesuffix(".md")
+        full = target if target.startswith(kb_prefix()) else kb_prefix() + target
+        basename = target.rsplit("/", 1)[-1]
+        # Copy only this target's evidence; visibility never holds the cache lock.
+        snapshot = _InboundIndexData(
+            buckets={
+                key: list(data.buckets.get(key, ()))
+                for key in (full, full.removeprefix(kb_prefix()), basename)
+            },
+            stem_counts={basename: data.stem_counts.get(basename, 0)},
+            known_rels=set(data.stem_paths.get(basename, ())),
+        )
+    finally:
+        _INBOUND_INDEX_LOCK.release()
+    if freshness.external_pending(vault_root):
+        return None
+    result = _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+    if (
+        freshness.consumer_checkpoint_instance() != instance
+        or freshness.generation(vault_root, "vault") != generation
+        or freshness.external_pending(vault_root)
+        or not _INBOUND_INDEX_LOCK.acquire(blocking=False)
+    ):
+        return None
+    try:
+        if (
+            state.generation != cache_generation
+            or _INBOUND_INDEX.get(root) is not cached
+        ):
+            return None
+    finally:
+        _INBOUND_INDEX_LOCK.release()
+    return result
+
+
+def _select_inbound_wikilinks(
+    data: _InboundIndexData,
+    target_rel_path: str,
+    visible: Callable[[str], bool] | None,
+) -> list[InboundLink]:
     target = target_rel_path.replace("\\", "/").removesuffix(".md")
     target_full = target if target.startswith(kb_prefix()) else kb_prefix() + target
     target_stripped = target_full.removeprefix(kb_prefix())
     target_basename = target.rsplit("/", 1)[-1]
 
-    data = _inbound_index(vault_root)
     stem_count = data.stem_counts.get(target_basename, 0)
     if visible is not None and stem_count > 1:
         stem_count = sum(
             1
-            for rel in data.known_rels
-            if PurePosixPath(rel).stem == target_basename and visible(rel)
+            for rel in data.stem_paths.get(target_basename, ())
+            if visible(rel)
         )
     basename_unique = stem_count == 1
 
@@ -6780,8 +7073,8 @@ class WikilinkResolver:
     - `stems`: filename stem (no path) → list of full paths (multi-match if
       the basename collides across folders).
     - `titles`: frontmatter `title:` lower-cased → list of full paths. This
-      lets `[[North-Led Content Manual]]` resolve to a source file whose
-      stem is date-prefixed (`2026-05-15-tu-north-led-content-manual`) but
+      lets `[[Test Content Manual]]` resolve to a source file whose
+      stem is date-prefixed (`2026-05-15-tu-test-manual`) but
       whose title matches.
     """
 
@@ -7157,18 +7450,22 @@ def normalize_wikilink(
     return fallback + anchor, (f"wikilink {target!r} does not resolve to any file in the vault")
 
 
-def _mask_code_spans(text: str) -> str:
+def _mask_code_spans(text: str, *, check: Callable[[], None] | None = None) -> str:
     """Replace code-block and inline-code regions with spaces, preserving offsets.
 
     Result is the same length as input; positions of non-code characters are
     unchanged. Used so wikilink scanners can ignore `[[X]]` inside code while
     still reporting accurate offsets into the original text.
     """
+    if check is not None:
+        check()
     out = list(text)
     # Fenced code blocks (``` or ~~~), allowing up to 3 leading spaces per CommonMark.
     fence_open = re.compile(r"^( {0,3})(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
     pos = 0
     while True:
+        if check is not None:
+            check()
         m = fence_open.search(text, pos)
         if not m:
             break
@@ -7182,6 +7479,8 @@ def _mask_code_spans(text: str) -> str:
         close_m = close_re.search(text, m.end())
         end = close_m.end() if close_m else len(text)
         for i in range(m.start(), end):
+            if check is not None and i % 4096 == 0:
+                check()
             if text[i] != "\n":
                 out[i] = " "
         pos = end
@@ -7189,7 +7488,11 @@ def _mask_code_spans(text: str) -> str:
     inline_re = re.compile(r"(`+)([^\n`]+?)\1")
     masked_str = "".join(out)
     for m in inline_re.finditer(masked_str):
+        if check is not None:
+            check()
         for i in range(m.start(), m.end()):
+            if check is not None and i % 4096 == 0:
+                check()
             if out[i] != "\n":
                 out[i] = " "
     return "".join(out)
@@ -7197,10 +7500,22 @@ def _mask_code_spans(text: str) -> str:
 
 def find_body_wikilinks(text: str) -> list[re.Match[str]]:
     """Return wikilink matches in `text`, skipping fenced code + inline code."""
+    return list(iter_body_wikilinks(text))
+
+
+def iter_body_wikilinks(
+    text: str, *, check: Callable[[], None] | None = None,
+) -> Iterator[re.Match[str]]:
+    """Stream the existing masked wikilink grammar, retaining original offsets."""
+    if check is not None:
+        check()
     if "[[" not in text:
-        return []
-    masked = _mask_code_spans(text)
-    return list(_WIKILINK_PATTERN.finditer(masked))
+        return
+    masked = _mask_code_spans(text, check=check)
+    for match in _WIKILINK_PATTERN.finditer(masked):
+        if check is not None:
+            check()
+        yield match
 
 
 def _rewritable_wikilinks(text: str) -> list[re.Match[str]]:
@@ -7297,6 +7612,11 @@ def document_newline(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
 
 
+def with_newline(text: str, newline: str) -> str:
+    """Rewrite `text`'s LF and CRLF line endings to `newline`."""
+    return text.replace("\r\n", "\n").replace("\n", newline)
+
+
 def render_frontmatter_document(
     fm_text: str, body: str, *, newline: str = "\n", blank_line: bool = False
 ) -> str:
@@ -7311,7 +7631,7 @@ def render_frontmatter_document(
     `body` is passed through byte-for-byte; only the delimiters and the
     frontmatter block, which callers build themselves, are normalized.
     """
-    block = fm_text.replace("\r\n", "\n").replace("\n", newline)
+    block = with_newline(fm_text, newline)
     lead = newline if blank_line else ""
     return f"---{newline}{block}{newline}---{newline}{lead}{body}"
 
@@ -7354,7 +7674,7 @@ def prepend_log_entry(
         title = title[len(kb_prefix()) :]
     newline = document_newline(log_text)
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
-    new_entry = new_entry.replace("\r\n", "\n").replace("\n", newline)
+    new_entry = with_newline(new_entry, newline)
     if new_entry in log_text:
         return log_text
     # Reuse the same separator the indexes module emits.

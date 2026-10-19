@@ -10,10 +10,10 @@ configured threshold, margin, and standout rules; otherwise it SHALL remain anon
 
 #### Scenario: Enrolled speaker is named in the transcript
 
-- **WHEN** a media file is diarized for a vault with an enrolled profile "Hugo" and a cluster's
-  ECAPA centroid matches the Hugo centroid above threshold and margin
-- **THEN** that cluster's turns are rendered as `[Hugo]: …` in the transcript text
-- **AND** the structured `speakers` field carries `speaker: "Hugo"` for those turns
+- **WHEN** a media file is diarized for a vault with an enrolled profile "Fixture Speaker" and a cluster's
+  ECAPA centroid matches the Fixture Speaker centroid above threshold and margin
+- **THEN** that cluster's turns are rendered as `[Fixture Speaker]: …` in the transcript text
+- **AND** the structured `speakers` field carries `speaker: "Fixture Speaker"` for those turns
 
 #### Scenario: Unknown voice stays anonymous
 
@@ -93,14 +93,14 @@ as an MCP connector tool.
 
 #### Scenario: Enroll the vault owner
 
-- **WHEN** `python -m kb_mcp enroll-speaker --name Hugo --self <sample.wav>` is run
-- **THEN** a profile "Hugo" with `is_self: true` and a 192-dim centroid is stored
+- **WHEN** `python -m kb_mcp enroll-speaker --name "Fixture Speaker" --self <sample.wav>` is run
+- **THEN** a profile "Fixture Speaker" with `is_self: true` and a 192-dim centroid is stored
 - **AND** `list-speakers` reports it
 
 #### Scenario: Remove a profile
 
-- **WHEN** `python -m kb_mcp remove-speaker --name Hugo` is run
-- **THEN** the "Hugo" profile is deleted from the store
+- **WHEN** `python -m kb_mcp remove-speaker --name "Fixture Speaker"` is run
+- **THEN** the "Fixture Speaker" profile is deleted from the store
 - **AND** subsequent diarization labels that voice anonymously again
 
 ### Requirement: Deterministic Pure-Substrate Measurement

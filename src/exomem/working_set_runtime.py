@@ -50,7 +50,9 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -72,6 +74,33 @@ from .activation_result import INDEX_WARMING as WARMING
 log = logging.getLogger(__name__)
 
 CACHE_SIZE = 16
+
+_DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
+    "activation_deferred_index_builds", default=None
+)
+
+
+@contextmanager
+def defer_index_refreshes() -> Iterator[None]:
+    """Dispatch this activation's refreshes after its live evidence guards.
+
+    A request must not invalidate its own catalogue evidence. Independent
+    publishers still meet the unchanged token guards; no worker waits here.
+    """
+    if _DEFERRED_BUILDS.get() is not None:
+        yield
+        return
+    pending: dict[Path, str] = {}
+    token = _DEFERRED_BUILDS.set(pending)
+    try:
+        yield
+    finally:
+        _DEFERRED_BUILDS.reset(token)
+        for root, stamp in pending.items():
+            try:
+                _schedule_build(root, freshness_stamp=stamp)
+            except Exception:  # noqa: BLE001 - optional dispatch cannot replace the earned result
+                log.warning("deferred activation refresh could not start", exc_info=True)
 
 #: The token's wire version. A payload of any other version is not decoded at
 #: all: a token is a hint, and guessing at an unknown shape is worse than
@@ -797,11 +826,13 @@ def visible_marks(
     return out
 
 
-def reset_caches_for_tests() -> None:
+def reset_caches_for_tests(*, packets_only: bool = False) -> None:
     """Drop the packet cache, any in-flight build marker, and the manifests the
-    index published for request threads."""
+    index published for request threads, or only packets for warm measurements."""
     with _CACHE_LOCK:
         _PACKET_CACHE.clear()
+        if packets_only:
+            return
         _BUILDS.clear()
         _REEMBED_SCHEDULED.clear()
         _INLINE_LOCKS.clear()
@@ -1314,6 +1345,39 @@ def adjacent_rare_pairs(
     )
 
 
+def request_admission(
+    vault_root: Path,
+    visible: Callable[[str], bool] | None,
+    status_basis: lifecycle_statuses.Basis,
+    query_context=None,
+):
+    """The request's carry admission: `query_context` when the caller already
+    holds one, else a new `lexstore.RequestQueryContext` for `visible`.
+
+    The ranking mode comes from configuration, never from which pages exist.
+    A caller with its own predicate (a restricted reader's view) always ranks
+    on what it admits. Otherwise the walk owner decides: its `None` means no
+    governance policy, collection-store marker, bound writer or lifecycle
+    marker exists and the owner's access is unrestricted, so nothing can be
+    withheld and the catalogue's statistics apply. Any of those configured,
+    an owner rule or not, ranks on admission: under a governance policy the
+    owner's walk also withholds by page content (an unapproved bridge, an
+    unresolved scope membership).
+    """
+    if query_context is not None:
+        return query_context
+    from . import lexstore
+    from .governance import egress
+
+    admitted = visible if visible is not None else egress.release_walk_filter(vault_root)
+    return lexstore.RequestQueryContext(
+        vault_root,
+        admitted if admitted is not None else (lambda _path: True),
+        status_basis,
+        catalogue_ranking=admitted is None,
+    )
+
+
 def rare_turn_terms(
     vault_root: Path,
     stems: Sequence[str],
@@ -1321,25 +1385,18 @@ def rare_turn_terms(
     freshness=None,
     recall_checkpoint=None,
     visible: Callable[[str], bool] | None = None,
-    admitted_paths: set[str] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
 ) -> tuple[tuple[str, ...], int, str]:
     """Distinctive stems and corpus size over this request's admitted pages."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import lexstore
-    from .governance import egress
 
-    # An omitted predicate is not proof of complete admission. Ask the existing
-    # walk owner; its None result proves the unrestricted empty-policy case.
-    admitted = (
-        query_context.visible if query_context is not None
-        else visible if visible is not None else egress.release_walk_filter(vault_root)
-    )
+    query_context = request_admission(vault_root, visible, status_basis, query_context)
     result = lexstore.carry_term_statistics(
         vault_root,
         stems,
-        visible=admitted if admitted is not None else lambda _path: True,
+        visible=query_context.visible,
         status_basis=status_basis,
         path_limit=lambda pages: (
             working_set.rare_document_cap(pages) + working_set.RETRIEVAL_CARRY_FETCH
@@ -1350,9 +1407,7 @@ def rare_turn_terms(
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status
-    frequencies, corpus_pages, paths, admitted_set = result.value
-    if admitted_paths is not None:
-        admitted_paths.update(admitted_set)
+    frequencies, corpus_pages, paths, _admitted = result.value
     cap = working_set.rare_document_cap(corpus_pages)
     frequencies = working_set.discount_superseded_pages(
         vault_root,
@@ -1459,7 +1514,9 @@ def carry_named_groups(
     Everything else is `carry_candidates`' contract, unchanged: the
     maintained catalogue only, no foreground delta, an incomplete catalogue
     reported rather than repaired, raw material, navigation and retired
-    pages dropped before anyone counts.
+    pages dropped before anyone counts. Rarity is counted over the request's
+    admitted pages (`request_admission`), and each ranking query decides on
+    its own snapshot whether that admission lets it rank on the catalogue.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import find, lexstore
@@ -1468,12 +1525,13 @@ def carry_named_groups(
     # are kept in its token coordinates, so both must read the same text.
     turn = working_set_index.subject_text(turn)
     try:
+        # Inside the try: a failed admission abstains like every other carry fault.
+        query_context = request_admission(vault_root, visible, status_basis, query_context)
         stems = pairable_stems(turn)
         skipped = frozenset(pairable_stems(skip_terms)) if skip_terms else frozenset()
         stems = tuple(stem for stem in stems if stem not in skipped) if skipped else stems
         if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
-        admitted_paths: set[str] = set()
         rare, corpus_pages, state = rare_turn_terms(
             vault_root,
             stems,
@@ -1481,7 +1539,6 @@ def carry_named_groups(
             recall_checkpoint=recall_checkpoint,
             status_basis=status_basis,
             visible=visible,
-            admitted_paths=admitted_paths,
             query_context=query_context,
         )
         if state != "available":
@@ -1517,7 +1574,6 @@ def carry_named_groups(
                 term_budget=lexical_term_budget(),
                 exclude_navigation=True,
                 exclude_raw_material=True,
-                admitted_paths=admitted_paths,
                 query_context=query_context,
             )
             if not result.readiness.complete:
@@ -1553,7 +1609,6 @@ def carry_named_groups(
                 recall_checkpoint=recall_checkpoint,
                 contacts=contacts,
                 status_basis=status_basis,
-                admitted_paths=admitted_paths,
                 query_context=query_context,
             )
         return tuple(groups), "available"
@@ -1577,7 +1632,6 @@ def _carry_title_groups(
     limit: int | None,
     freshness,
     recall_checkpoint,
-    admitted_paths: set[str],
     contacts: dict[str, set[tuple[int, int]]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
@@ -1622,7 +1676,6 @@ def _carry_title_groups(
         recall_checkpoint=recall_checkpoint,
         exclude_navigation=True,
         exclude_raw_material=True,
-        admitted_paths=admitted_paths,
         query_context=query_context,
     )
     if not result.readiness.complete or len(result.value or ()) >= fetch:
@@ -1843,10 +1896,12 @@ def title_named_pages(
     The query uses the maintained catalogue only, no foreground
     delta, raw material and navigation excluded before the row limit,
     `carry_fetch_size` rows. `visible` is the caller's reader view, `None`
-    for the owner. A restricted reader's rows are scored over the pages it
-    may see, so a withheld page neither takes a row nor moves another page's
-    rank. The corpus-size floor does not apply: it exists because rarity
-    cannot be measured in a small vault, and nothing here measures rarity.
+    for the owner. Rows are scored on the catalogue only when the request's
+    admission withholds no page; otherwise over the pages it admits, so a
+    withheld page neither takes a row nor moves another page's rank, for the
+    owner and a restricted reader alike. The corpus-size floor does not
+    apply: it exists because rarity cannot be measured in a small vault, and
+    nothing here measures rarity.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import lexstore
@@ -1855,6 +1910,8 @@ def title_named_pages(
     # The resolver's reading of the turn, as the carry reads it.
     turn = working_set_index.subject_text(turn)
     try:
+        # Inside the try: a failed admission lists nothing like every other listing fault.
+        query_context = request_admission(vault_root, visible, status_basis, query_context)
         from . import bm25 as bm25_module
 
         sentences = _positioned_units(turn)
@@ -1862,14 +1919,10 @@ def title_named_pages(
         if len({unit for unit in units}) < 2:
             return (), "available"
         # Reuse request admission only after this snapshot proves its generation.
-        admitted = (
-            query_context.visible if query_context is not None
-            else visible if visible is not None else egress.release_walk_filter(vault_root)
-        )
         corpus = lexstore.carry_term_statistics(
             vault_root,
             [],
-            visible=admitted if admitted is not None else lambda _path: True,
+            visible=query_context.visible,
             status_basis=status_basis,
             path_limit=lambda pages: 0,
             freshness=freshness,
@@ -1878,10 +1931,7 @@ def title_named_pages(
         )
         if not corpus.readiness.complete:
             return (), corpus.readiness.status
-        _frequencies, corpus_pages, _paths, admitted_paths = corpus.value
-        # The owner keeps catalogue ranking; restricted readers use admitted
-        # statistics so hidden pages cannot move a visible page's rank.
-        restricted = visible is not None
+        _frequencies, corpus_pages, _paths, _admitted = corpus.value
         result = lexstore.search_bm25_result(
             vault_root,
             turn,
@@ -1897,7 +1947,6 @@ def title_named_pages(
             term_budget=lexical_term_budget(),
             exclude_navigation=True,
             exclude_raw_material=True,
-            admitted_paths=admitted_paths if restricted else None,
             query_context=query_context,
         )
         if not result.readiness.complete:
@@ -2000,6 +2049,11 @@ def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
     enough.
     """
     root = Path(vault_root).absolute()
+    pending = _DEFERRED_BUILDS.get()
+    if pending is not None:
+        # Preserve the first dispatch's stamp, as the existing single-flight owner does.
+        pending.setdefault(root, freshness_stamp)
+        return
     with _CACHE_LOCK:
         if root in _BUILDS:
             return
@@ -2046,6 +2100,8 @@ def serve(
     attribution: working_set_heat.Attribution | None = None,
     conversation: working_set_conversation.Conversation | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    trigger: str = "user_turn",
+    intent_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
 
@@ -2090,6 +2146,8 @@ def serve(
     def evidence_changed() -> dict | None:
         if evidence_token is None or index.token() == evidence_token:
             return None
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
         return working_set.abstained_packet(
             reason=UNAVAILABLE,
             max_chars=limit,
@@ -2223,6 +2281,7 @@ def serve(
         egress.restricted_release_filter(root, purpose=purpose) is None
         and not with_conversation
         and not index_stale
+        and trigger == "user_turn"
     )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None
@@ -2232,6 +2291,8 @@ def serve(
         return copy.deepcopy(cached[0])
 
     def _abstain_unavailable() -> dict[str, Any]:
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
         return working_set.abstained_packet(
             reason=UNAVAILABLE,
             max_chars=limit,
@@ -2267,6 +2328,8 @@ def serve(
             marks=marks,
             conversation=conversation if with_conversation else None,
             status_basis=status_basis,
+            trigger=trigger,
+            _intent_resolution=intent_resolution,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The
@@ -2295,6 +2358,9 @@ def serve(
     changed = evidence_changed()
     if changed is not None:
         return changed
+    if packet.get("abstained") and packet.get("abstention", {}).get("reason") == UNAVAILABLE:
+        # Resident evidence can recover without changing this packet's cache key.
+        return packet
     if index_stale:
         # Transient, so never cached: the scheduled build may leave the vault's
         # rows and the sidecar token exactly as they were, and a cached copy

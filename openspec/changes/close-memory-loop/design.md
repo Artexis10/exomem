@@ -24,9 +24,43 @@ The active agent decides meaning, importance, equivalence, candidate disposition
 
 The programme serves a domain-neutral epistemic substrate, not only conversational memory. Canonical means accepted governed state with an attributable basis, not certified truth. Preserve observations, reported interpretations, decisions and intentions without imposing one validation method on all of them. The compiler supplies task-relevant context; it is one part of the loop, not its historian, authority owner or semantic judge.
 
+#### Integrated epistemic acceptance
+
+Epistemic commitments govern how supported knowledge is formed, justified, connected, used and revised across the product. Sources, interpretations, structured state and later answers must preserve those commitments together. A collection is part of that knowledge lifecycle, with exact mutable values linked to their available evidence and interpreted meaning.
+
+Methods depend on the subject and task. Ordinary interaction must not require scientific terminology, formal hypotheses, experiments or numeric confidence. Users can inspect evidence, qualifications, relationships and prior interpretations on demand through supported interfaces. An interface claim requires exercising that interface; backend support alone does not demonstrate a viewer or embedded product.
+
+The acceptance object is an evolving body of knowledge used successfully in a later task. A passing writer, graph edge or compact packet proves only its own contribution. The following dimensions reuse existing owners and tasks; they are neither a closed knowledge ontology nor additional workstreams.
+
+| Journey dimension | Existing owner or task | Required integrated evidence |
+|---|---|---|
+| Preserve and interpret material | 3.12–3.14; existing preservation owners | Original bytes remain distinct from extractions and interpretations, with attributable source bindings and explicit missing material. |
+| Correct and evolve understanding | 3.13, 3.15, 3.17; `resolve-relation-fragment-targets` | Local and cross-note relationships retain exact endpoints; ordinary edits retain history without gratuitous correction objects or edges. |
+| Join structured state and explanations | 3.14; `move-structured-collections-to-sqlite` | Exact rows, collection authority, interpreted claims and evidence agree through supported writes, corrections and later reads. |
+| Deliver useful context | 3.18; 6.1–6.9; existing graph and compiler owners | Fresh answers retain necessary dependencies, qualifications, uncertainty and provenance within declared resource budgets. |
+| Inspect and recover knowledge | 3.15, 3.19; existing disclosure and portability owners | Authorized history reads and supported recovery preserve identities and retained material; unavailable history remains explicit. |
+| Operate naturally and reliably | 3.16; 6.x; 9.3 | Ordinary agent initiation, supported client or consumer behaviour, contention and safe degraded operation are observed separately. |
+
+Use a few source-authored journeys that expose distinct failures, rather than a Cartesian combination of every dimension. Include a simple factual correction and a later qualification or refutation across units. Preserve unaffected propositions and reasoning-critical dependencies. Repeated extraction from one source must not become independent corroboration.
+
+Report implemented, merged, released, installed, enabled and operationally demonstrated states separately. Reuse existing proof when its source, configuration and conditions still match. Forced tool calls, synthetic actors and hand-built packets cannot establish ordinary agent initiation or fresh-session usefulness.
+
+Feature overlap does not establish whole-system equivalence. Comparative assessment must examine the supported lifecycle and useful outcomes under matched conditions. Architectural breadth and coherent commitments are relevant evidence, but neither proves measured superiority or universal domain coverage.
+
+This reconciliation retains current storage authorities and the existing collection GA sequence. It selects no semantic-store migration or independent unit-identity redesign. A later storage comparison must isolate an unmet requirement or measured storage cause while preserving semantics, retrieval policy and authorization. Reuse 3.19 and the existing benchmark before proposing custom instruments. Compare canonical commit, publication, useful answers, resource cost, history, recovery, portability and governed edit-back; faster inserts or fewer tokens alone do not justify migration.
+
+These are programme acceptance criteria, not new gates on unrelated ordinary releases. Close the relevant capability only after its claimed journey is demonstrated. Keep broader product ambition explicit without making every future domain or optional comparison a prerequisite for the current tranche.
+
 **Recoverable correction without page proliferation.** A knowledge object keeps its stable identity through ordinary refinement. Retain consequential previous interpretation content, rationale, author/operation and evidence/version bindings as revisions through the owning guarded writer. Supersession remains an explicit semantic transition, not a storage trick for every edit. SQLite collection `item_versions` already supplies row content history; ordinary note-edit rationales and file Records audit hashes do not. Reuse existing version and receipt mechanisms where they provide the required evidence. For the remaining note/unit and file-mode seams, settle the smallest bounded revision representation in task 3.15 before implementing it; prefer per-object records and payload reuse, not whole-vault snapshots or a universal event store. Revision payloads are authoritative history, not disposable graph/index state. The supported backup/export/restore path must retain them. No legacy history is fabricated from a hash.
 
 Only semantic changes covered by the correction contract require such interpretation history; formatting and derived maintenance do not create new knowledge objects. Bounded history reads must not scan every prior revision or the whole vault. Retention, deletion and current disclosure govern historical payloads as well as current content; keep an explicit unavailable state if retained content is no longer accessible. Measure storage/write amplification and bounded history-read cost at realistic correction depth, including retention/restore, before claiming the representation scales. This does not make full history a prerequisite for ordinary current-state reads.
+
+**Note and unit history reporting (3.15).** The existing reader counts independently admitted, usable revisions.
+It reports `status: retained` when that count is positive and `status: unavailable` otherwise.
+Every result carries `coverage: unverified`, because a readable subset cannot prove complete retention.
+Absent, denied, corrupt and unreadable entries remain indistinguishable; current-page authority grants no exception for historical diagnostics.
+The existing admission and pagination stay in place.
+The reader still examines retained entries, so bounded total read cost remains open.
 
 **File-row history (3.15, first slice).** A guarded Records or Planning file-row update that changes the row's payload keeps the payload it replaced in the same atomic batch as the correction: prior values and body with their payload hash, operation, `why`, audit transition, before/after item hashes, actor, and the caller's input binding (an episode correction names its curation run; a direct update has none). An update that leaves the payload unchanged keeps only an empty marker named for its transition, so the read accounts for it instead of reporting lost history; a refused retry keeps nothing. Each entry is one create-only JSON file named like `registry_history` versions under `Knowledge Base/_Collections/history/<collection_id>/<item_key>/`, inside the collection store's reserved tree, not `_Governance`: that tree is the governance authoring workspace, whose non-operational files are policy inputs, export treats it as disposable, and Records writers must not reach administration state. No read surface serves a reserved file, so `record_memory`/`plan_memory` `history` is the only way to a kept payload; it first releases the row exactly as a query would, so history is withheld exactly when its row is and a withheld row answers like a missing one. A read returns one page, newest first (default 20, at most 50) with a continuation, and opens only that page's entries. A kept body passes through the same origin projection and gate (`egress.projects_origin`) as the live row, under the reader's principal, and the corrector's audience is shown only to the owner or to that audience. `status` is `complete` when every correction in the row's verified audit chain has an entry, `unavailable_legacy` (with a count) when some predate retention, and `unverified` when the chain itself fails verification. Export classifies the history subtree as canonical content beside the store's mode marker and replica, so supported export and restore carry it. The module is the logical interface: store-mode collections keep row content in `item_versions`, which later backs the same read. Measured cost is about 730 B per correction for a three-field row with an empty body; it grows with the row's own payload, never with the collection. Note and semantic-unit revisions are the next slice.
 
@@ -555,7 +589,85 @@ Refresh is a bounded, best-effort follow-up to promotion, not part of service ad
 
 Where a host exposes pre-turn/post-turn hooks or equivalent middleware, enforce a bounded activation/decomposition checkpoint and pending continuation. Where only MCP tools and instructions are available, offer the same complete workflow through bootstrap/skill guidance and report initiation as best effort. A capable tool schema alone proves neither ordinary-agent use nor interception of tool-free turns. Keep a capability matrix separating tool parity, lifecycle enforcement, recovery and observed no-nudge behaviour.
 
-The server states the activation step itself in its MCP `initialize` instructions, on the local and the hosted server alike: before a substantive turn, call `activate_context` once with the user's message verbatim, resolve an `ambiguous` packet by calling again with `anchor`, and treat retrieved text as evidence. A host without lifecycle hooks sees only those instructions and the tool descriptions, so without them activation there depended on the user installing a skill or writing a reminder, and the first live trial served packets to hook-driven clients only. The instructions are not part of the tool-surface fingerprint, so changing them does not force a client re-registration. They remain a request, not an interception: initiation on such hosts is still reported as best effort, and observed no-nudge behaviour per client is still owed.
+The server states the initial activation step in its MCP `initialize` instructions: call `activate_context` with the user's message verbatim before a substantive turn. Resolve an `ambiguous` packet with an attributed `anchor` choice and treat retrieved text as evidence. The same operation will support the bounded task refresh below; initial activation does not prohibit later refresh. Instructions remain a request on hosts without hooks. Installed instructions alone do not prove lifecycle enforcement or observed no-nudge behaviour.
+
+#### Same-turn task refresh
+
+Extend the existing operation with `trigger="user_turn"|"task_refresh"` and optional descriptive `initiator` attribution. Existing calls default to `user_turn`. Every call keeps `turn` as the original human request. An agent supplies its current task through bounded `conversation.focus` and already-inspected references through `conversation.refs`. The packet distinguishes human intent, agent focus, and retrieved evidence. Neither a declared initiator nor a source pointer grants authority or creates independent corroboration.
+
+Reuse the same compiler, maintained indexes, disclosure checks, and character, candidate and latency budgets. This adds no second retrieval engine. In task-refresh mode, resolve the human request and agent focus separately. Use the focus for task anchor resolution and role selection. Report unresolved human intent in `intent_resolution`; it must not suppress otherwise resolved, unrelated task context. Ambiguous task focus still abstains. Agent focus cannot silently settle whom the human meant; an explicit anchor choice remains attributed to the agent.
+
+Share one request's audience view, index snapshot and evidence work across both resolution views, then assemble material once. Do not concatenate two full activations. Prefer a bounded categorical `intent_resolution` status. Any candidates in that field cross the same audience filter, final egress and packet accounting as existing candidates.
+
+Hooks expose checkpoints after substantive external evidence, before an action or final response, and after continuation restoration where the host supports those events. The active agent decides whether a refresh would change its work. Hooks must not infer semantic need from tool names, word lists or response text. Tool-only clients can request the same refresh, while reporting initiation as best effort. Refresh exposes relevant context; deeper recall and source inspection remain existing tools when the packet leaves a material question open.
+
+Deduplicate each checkpoint by human-turn identity, task revision and inspected source versions within bounded existing client state. Use compiler generation only where the caller already receives it. Restricted callers do not gain vault-wide generation or freshness counters for deduplication. Store neither conversation text nor its hashes for this bookkeeping.
+
+A refresh result cannot schedule another refresh. Memory reads and subsequent activation stay inside the checkpoint's existing work budget. Another checkpoint requires distinct external evidence, a source correction or a real task transition; rephrased summaries alone do not qualify. Access changes invalidate reused packets even when the task is unchanged. Report exhausted or unavailable refresh explicitly and let the agent continue or abstain under the action's existing contract.
+
+On continuation restoration, read relevant episode open items and existing Planning references, then reconcile newer correction and closure evidence. Recent-context summaries are pointers, not complete obligation restoration or completion proof. Reuse the existing episode and Planning carriers without adding an obligation store or inventing commitments. Expand a named evidence gap through an exact read, relationship context or search as appropriate; do not run every retrieval mode automatically.
+
+Late evidence can support a correction through existing governed writers. Preserve the superseded interpretation and its source history. Refresh grants no new capture, relationship, supersession, Planning or side-effect authority. A checkpoint failure must not become a general release or user-action gate. This contract is a programme milestone, not a prerequisite for an already selected patch release.
+
+#### Native checkpoint accounting
+
+The first controller covers native correlation scopes, rather than claiming verified human origin.
+Codex 0.162.1 and Claude Code 2.1.296 command hooks expose correlation identifiers but omit input origin.
+Their capability reports separate correlation, origin, native leaf interception, completion receipts and restoration.
+Tool-only clients and dispatch without native leaf envelopes remain best effort.
+The older continuation contract retains its own version pins.
+
+Reuse the retrieve hook, continuation state locks and maintained installer.
+The installer generates operation metadata from `product_commands_for("mcp")` and `Command.read_only`.
+It records the producing package version and source hashes, plus the compiler's character bounds.
+Explicit configured MCP bindings enable accounting; an unmatched binding remains uncovered.
+Missing, invalid or demonstrably stale metadata reports unavailable classification and never gates an entire server.
+Local metadata alone does not prove the version of a remote server.
+
+Only associated, statically read-only operations consume the first controller's limits.
+Mixed invocations remain uncovered because their classification belongs to the maintained product dispatcher.
+Every recognized memory response, including a mixed-tool response, is excluded from external-evidence invitations.
+Canonical writes and imports remain ungated by this controller.
+False classification would interrupt useful work, so no approximate mixed-operation classifier is justified.
+Mixed-read coverage and observed later-response usefulness remain open acceptance work.
+
+The controller issues an opaque scope identifier for the native client, profile, session, actor and correlation.
+A local JSON declaration names that scope, an unsigned task revision, a closed boundary kind and inspected source versions.
+Boundary kinds are external evidence, source correction, task transition and continuation restoration.
+At most twelve source entries carry a reference, optional version and declared version basis.
+Bookkeeping stores neither prompts, focus, summaries, response text nor conversation hashes.
+Canonical task/source tuples deduplicate declarations; missing versions report partial deduplication.
+Caller-declared task transitions do not prove their semantic truth or create authority.
+
+An idempotent end clears association and never resets scope totals or refunds reservations.
+Pre-tool events reserve one operation and the effective compiler character allowance atomically.
+The default scope allowance is eight associated operations and three default activation allowances; installation can configure both.
+Post-tool receipts record bounded identifiers, outcome and returned activation characters when available.
+Failures, interruption and missing receipts retain reservations; late receipts cannot reopen ended association.
+Compaction and restoration clear association while preserving the scope's totals.
+A genuine new native correlation creates a new scope without asserting that its author was human.
+
+Use the existing private directories, locks, atomic writer and 64 KiB state ceiling.
+Recognize and prune the additive refresh state through the continuation controller's existing lifecycle.
+Reject oversized declarations explicitly rather than truncating identity fields.
+Lock failure, unavailable state or unsupported events degrade accounting instead of refusing ordinary work.
+Exhaustion denies only covered calls inside an active association and explains how to end that association.
+After end, ordinary inspection still reaches its dispatcher.
+These units measure reserved operations and activation characters, not CPU, elapsed time, tokens or complete packet bytes.
+
+The source batch follows the compiler batch so hook implementation does not delay the independently ready compiler correction.
+Its decisive isolated proof uses deployed hook copies and native direct and nested envelopes.
+An exhausted refresh must not reach the simulated dispatcher; an ordinary read after end must reach it.
+The same workflow covers concurrent reservations, repeated declaration and end, missing receipts, memory-only chains and continuation restoration.
+Installed hook configuration and real host use remain separate acceptance claims.
+
+#### Reuse installed instructions
+
+Clients with a current installed skill or hook contract reuse it. Use the existing session handshake and capability fingerprint for bounded live policy, availability and version information. A mismatch requests the affected contract section or one compact fallback; it does not repeatedly inject full diagnostics or all instructions. Clients with only MCP tools retain instruction-bearing bootstrap fallback. Permission checks remain live at the governed operation and never rely solely on a cached instruction bundle.
+
+The session profile, digest comparison, targeted sections and same-call compact fallback already exist. This milestone integrates client use and verifies the altered lifecycle, rather than introducing another bootstrap subsystem.
+
+Update the generated adapters, schema fingerprint, skill and hook guidance together when implementing refresh. Preserve old-call behaviour and report unsupported trigger fields rather than changing an agent focus into a fabricated human turn. Prove the workflow at actual host events, including a later task that needs a relationship or constraint absent from the initial packet. Reuse unchanged instruction and dependency evidence; test the new integration boundaries.
 
 Recording an episode follows the same split: hooks trigger, agents author. A host with a Stop hook asks the agent to record a recap after a prominence-set number of substantive turns since the last successful record, within a cooldown, with the session's episode key in the ask. Only a successful `episode_memory` record resets that count; an unrelated committed note or a failed record does not. The server instructions carry one sentence asking the agent to record once at a decision or stopping point. A tool-only client has no hook, so after about eight activations from one MCP caller without a record, the activation packet carries a one-sentence `episode_due` advisory, at most once per thirty minutes; it is silent when proactive capture is off, is never offered on the REST or CLI doors the hooks use, and is not offered to a Claude Code or Codex MCP client when this vault's host-local activation log shows that client's hook served it within the same window, because its Stop hook is already asking; with only the MCP server, such a client still gets the advisory. Every one of these is a request. The agent decides whether anything durable happened, and nothing records on its behalf.
 
@@ -591,11 +703,19 @@ Use one admission predicate before both unit projection paths and before creatio
 
 For the recognized occurrence, demote only an affected ordinary-word band candidate lacking independent subject contact before material assembly. Preserve the existing name/casing protections, including multilingual names, and independently resolved anchors elsewhere in the turn. Empty or rejected rival material cannot resurrect that candidate. The conditional refinement in `band-yields-to-retrieval-carry` owns this change to its earlier material-dependent fallback. Add no model, property-to-category ontology, graph traversal, scorer adjustment or separate parser framework.
 
+#### Prior naming does not decide a singleton partial entity name
+
+An entity's current singleton partial-name contact can name a different, unindexed subject that shares the same word. Prior naming does not supply independent evidence for that candidate. Keep the candidate and its historical evidence visible as partial; serve no lane material until independent current contact or agent choice resolves it. Exact authored aliases, full-name focus and existing independent-contact paths retain their semantics.
+
+This applies to every `entity` anchor, including entity-backed projects; hubs and resources keep their existing history qualification. This changes surname-plus-history behavior: the active agent must select the lead or supply its full name. The agent can use existing arguments without asking the user. Reuse the candidate's partial-name metadata; add no meaning classifier, word list or whole-turn topic veto. Unspaced containment and terms registered as whole names keep their existing paths; this is not universal unknown-name detection.
+
 #### Open-category material without changing standing role knowledge
 
 Open semantic categories are valid knowledge, but the current categorical role filters can exclude every unit on a compiled page. Naming that page or resolving its project does not remove the exclusion. Preserve the earlier categorical-lane decision: standing constraints, preferences, current state and methods are not re-ranked by resemblance to the turn. Add one explicit `material` role with its own lane for query-matched knowledge no effective categorical role owns.
 
-Declare material after `active_plans` and before `methods`, with defaults for project, hub and the existing transient carried-page context; it has no shipped cues and counts within the six-role ceiling. A pathless project contributes no default to an effective entity lane, which cannot read a page there; the anchor header already identifies the project. Keep the declared defaults intact: an owner override switching identity to a units lane can still use its project default. Cue selection and page-bearing defaults remain unchanged. With shipped configuration this frees an empty slot without displacing project precedents, current state or active plans. Mixed-kind or heavily cued turns may exhaust the existing ceiling before material; report that limitation rather than adding a seventh lane. Ordinary notes do not become indexed anchors. Owner-authored overrides retain their authority to narrow material defaults and assign categories to their own roles.
+Declare material after `active_plans` and `contact`, before `methods`, with defaults for entity, project, hub and the existing transient carried-page context. It has no shipped cues and counts within the six-role ceiling. Contact precedes material so entity material does not displace requested contact units. Entity material uses the existing admitted neighbourhood, including linked notes; it does not add candidates or infer their subject.
+
+A pathless project contributes no default to an effective entity lane, which cannot read a page there; the anchor header already identifies the project. Keep the declared defaults intact: an owner override switching identity to a units lane can still use its project default. With shipped configuration this frees an empty slot without displacing uncued project precedents, current state or active plans. Mixed-kind or heavily cued turns may exhaust the ceiling; report that limitation rather than adding a seventh lane. Ordinary notes do not become indexed anchors. Owner overrides retain authority to narrow material defaults and assign categories to their own roles.
 
 Exclude categories owned by any effective non-material role, selected or not, so an unselected contact or owner-defined role cannot be bypassed. Compare effective category identities in each candidate parent's attached-project/page-type registry view, including accepted aliases in that scope and literal identity for unregistered labels. The maintained catalogue already stores resolved unit categories and parent eligibility metadata; do not infer semantic equivalence from a label or construct a global project-alias expansion.
 
@@ -1511,6 +1631,35 @@ standby warm budget's value; a fixed shorter window restarted the unit into the
 same cold catalog. It is a separate setting because it answers a separate
 question: how long a hung cold worker stays invisible with nothing else serving.
 
+The candidate also needs a path past an unfixed serving worker whose compatible
+catalogue repair never publishes current rows. Reuse detached build, adoption
+and healing for positively proven compatible staleness. Read schema, semantic
+identity and well-formed stored checkpoints in one SQLite snapshot, against
+explicitly captured candidate projections. Revalidate candidate projections and
+semantic/access identities before deciding; a missing, malformed, unreadable,
+busy or unsampled observation cannot establish compatible staleness. Retry
+assessment at the existing reproof interval without requiring a live publication.
+
+Preparation writes only a complete held temporary and takes no publication
+barrier or source proof. The assessment uses a normal read-only SQLite transaction.
+It causes no source, catalogue-content, committed-WAL, descriptor or owner-publication
+writes. SQLite may initialize and update native coordination on the exact live
+SHM path; that permission covers no application publication or checkpoint.
+
+Ordinary source edits do not discard the held build.
+After ownership, adoption and watcher seed, existing healing updates changed
+and new pages and removes deleted or excluded pages before strict runtime proof.
+A prepared cutover component never admits runtime retrieval. Today's primitives
+cannot prove final runtime admission before stopping the serving worker, so this
+repair establishes delivery correctness rather than a full availability guarantee.
+Native preparation and stop-to-admission latency remain separate acceptance facts.
+
+A catalogue retry or graph reproof replaces the candidate's recall baseline and
+invalidates adopted graph origins. Withdraw the held graph proof before reseeding.
+Evict the exact vault's resolver cache, prime it at the new checkpoint, and
+reprove the graph before carrying its handoff. A declined reproof keeps graph
+cutover readiness waiting.
+
 | Contract | Owner | Programme integration |
 | --- | --- | --- |
 | Activation, roles, host continuity | Canonical `context-activation`, `context-roles`, `context-activation-continuity`; active `make-anchor-resolution-sound` | Reconcile current merges and convention work before wiring activation; preserve their requirements |
@@ -1590,6 +1739,96 @@ question order, bare-name and focus negatives, single-topic capacity, existing
 ownership/egress/continuity controls, four/seven named-domain coverage, full-set
 ambiguity, matched latency and whole-packet bytes/reference tokens before delivery. This
 does not close the original client incident without its actual request and packet.
+
+## Granular epistemic corrections
+
+The active agent identifies the affected propositions and decides whether new
+evidence refutes, qualifies, confirms or replaces them. Deterministic writers
+validate identity, authority and structure; they do not interpret corrections.
+The ordinary workflow reads the exact units, updates their suitable existing
+home, authors justified relationships, and verifies committed and current state.
+It needs no correction-specific user nudge or new confirmation.
+
+An anchored unit keeps its identity when its wording changes.
+A false historical proposition keeps its text and receives an authored verdict.
+A distinct corrective proposition can occupy another unit in the same note.
+Refutation and contradiction do not implicitly author supersession or alter rank.
+Registered relation families govern behaviour; code does not classify meaning
+from relation names or prose keywords.
+
+The semantic write owner retains prior Markdown in the same atomic transition
+as an interpretation change. One internal entry retains the prior document,
+parent identity, before/after hashes, affected units, reason, attribution and
+available source/version bindings. The entry is planned before lifecycle sealing
+and participates in auxiliary hashes, so replay cannot generate another revision.
+Timestamp-only writes need no revision. Full prior documents are the initial
+format; report their storage amplification rather than introducing another store.
+
+History reads use held bytes and bounded pagination. They independently admit
+retained content and source bindings under current policy before returning text,
+unit projections, reasons, attribution or counts. Current-page access cannot
+authorize a prior interpretation. History remains outside ordinary indexing and
+generic reads, receives no implicit registry-history pruning, and travels through
+the maintained export/restore owner.
+
+One episode `observe-unit` leaf projects the existing observation writer and its
+unit fingerprint guards. It reuses validation, atomic witnesses and historical
+hash chains. It adds no semantic engine, compensation interface or authority.
+Registered compiled pages retain observation support. Entity and legacy pages
+use their existing authorized edit owner; Records reuse shipped row corrections
+and retained history. No ordinary correction creates a dated child by default.
+
+The compiler preserves verdict, the check_by deadline, provenance and temporal state.
+For each served unit it can inspect bounded admitted incoming corrective facts,
+including a counterpart absent from the initial retrieval window. Existing
+budgets and disclosure checks apply before context or counts reach the caller.
+A hidden counterpart cannot change visible lifecycle or disclose its existence.
+Missing publication remains unknown; historical revisions do not flood recall.
+
+Incoming discovery holds one exact live graph view and its resident resolver.
+It does not build a cold resolver, prove a cold graph, or wait for publication.
+One request deadline bounds discovery and SQL work; changed publication discards tentative contributions.
+Exact admitted counterparts enter ordinary unit selection, temporal labels, caps and prose budgets.
+They carry no nested plaintext adapter or independent lifecycle override.
+The native renderer shows authored verdicts and check_by deadlines with those ordinary units.
+
+Acceptance combines deterministic public journeys with ordinary agent initiation.
+Invented cases cover exact local and cross-page targets, repeated corrections,
+stale references, evidence grades, legacy and Records routes, and current context.
+The protected 15 October sequence runs outside Git from its source truth.
+Incident closure names what shipped, what the native check proved, and what
+remains open. Source inclusion alone cannot establish seamless agent behaviour.
+
+## Identity and resource follow-through
+
+The bounded identity evaluation retains the current parent UUID and anchor API for this batch.
+Note renames and anchored wording changes preserve identity; fingerprints guard revisions.
+An anchor rename invalidates the old reference, and an anonymous reference becomes stale when its content changes.
+Raw copy-and-remove reparenting is unsupported: the old parent reports the unit missing and never forwards to another claim.
+Path-based legacy references do not gain UUID stability when their note moves.
+A future independent unit UUID in Markdown needs an explicit compatibility policy and an atomic move across both parents.
+That move must publish history, authorization and source bindings together; no identifier migration or dormant UUID field ships here.
+Exact resolution must remain deterministic across full and selected documents and report stale, ambiguous or unavailable state without substitution.
+
+Compiler acceptance must exercise the actual public workflow with the minimum sufficient connected units.
+The served context must retain verdicts, source and version provenance, and temporal state without unconditional parent-page expansion.
+An exact unit read may expand bounded parent context when the agent needs it.
+For an exact selected unit, preserve admitted explicit outgoing relations as actionable exact read pointers.
+Bind each relation to the selected unit's source hash and the current graph interpretation.
+Resolve and admit the exact target before applying the existing pointer and context limits.
+Emit a relation pointer only when its source version survives packet assembly; retain distinct source-to-target bindings.
+Hidden targets contribute no pointer, source qualification or allowance use.
+Unavailable, ambiguous or moving publication omits optional enrichment without cold proof, waiting or page substitution.
+Reuse the incoming correction scan, its deadline and its row bound without reducing the correction allowance.
+Target bodies remain explicit reads; relation pointers do not infer dependencies or change claim currency.
+Prove same-page and cross-page targets, stale source versions, withheld targets and omitted-source negatives.
+An ordinary agent must follow a useful pointer and give the source-grounded qualified answer.
+Legacy in-place correction remains with the existing authorized edit owner, with retained history and no default dated child.
+
+SQLite remains the core disk-backed graph owner.
+Reuse maintained resource instruments and a reproducible synthetic corpus to measure process RSS, defined cold and warm queries, bounded multi-hop traversal, incremental updates and index size.
+Record commands, corpus size, cache conditions, counts, hardware and storage amplification beside each result.
+A graph-backend comparison may evaluate Neo4j separately; it must not delay the SQLite correction and compiler path.
 
 ## Risks / Trade-offs
 

@@ -45,7 +45,11 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 13
+#: The first schema that the vault state manifest guards with an ID. Every release since the
+#: manifest's optional IDs (0.114.0) treats an unknown ID the same way, so an ID for schema 11
+#: would refuse 0.119.0 and 0.120.0, which read it; the launcher's schema check covers 11.
+FIRST_GUARDED_SCHEMA_VERSION = 12
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -57,6 +61,10 @@ META_STORE_HEAD_HASH = "store_head_hash"
 META_LAST_PUBLISHED_REPLICA_SHA256 = "last_published_replica_sha256"
 META_PENDING_REPLICA_PUBLICATION = "pending_replica_publication"
 META_PUBLISHED_REPLICA_HEAD = "published_replica_head"
+# The lease epoch in the verified installed copy; business heads do not track lease changes.
+META_PUBLISHED_REPLICA_EPOCH = "published_replica_lease_epoch"
+# The digest of the pending intent row the last installed replica copy holds, absent when it held none.
+META_PUBLISHED_INTENT_SHA256 = "published_intent_sha256"
 META_REPLICA_DIVERGENCE = "replica_divergence"
 # "1" while a view carries another store instance's stamp; business writes refuse until adopt-local or reconcile.
 META_VIEW_DIVERGED = "diverged"
@@ -64,6 +72,8 @@ META_VIEW_DIVERGED = "diverged"
 META_ADOPTED_FOREIGN_REPLICA = "adopted_foreign_replica"
 # Digests of foreign evidence already reconciled into held corrections.
 META_RECONCILED_FOREIGN = "reconciled_foreign"
+# Per collection, the checkpoint an abandoned export left in the files: the next export's legacy parent.
+META_EXPORT_PARENTS = "export_legacy_parents"
 META_CREATED_AT = "created_at"
 META_MIGRATED_FROM = "migrated_from"
 META_LEASE_EPOCH = "lease_epoch"
@@ -85,6 +95,8 @@ TABLES = (
     "query_cursor_state",
     "version_identity",
     "typed_encoding_mappings",
+    "typed_field_epochs",
+    "typed_value_formats",
     "import_jobs",
     "import_rejections",
     "import_members",
@@ -100,7 +112,7 @@ _V1_APPEND_ONLY_TABLES = (
     "collection_manifests",
     "collection_type_versions",
 )
-APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members")
+APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members", "typed_field_epochs", "typed_value_formats")
 
 _TABLES_V1 = (
     """
@@ -291,6 +303,9 @@ _CONFLICT_KEYS = {
     "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
     "version_identity": (("row_id", "row_version"),),
     "import_members": (("collection_id", "seq"),),
+    "typed_field_epochs": (("collection_id", "generation", "field_ordinal"),),
+    "typed_value_formats": (("collection_id", "generation", "field_ordinal", "format_id"),
+                            ("collection_id", "generation", "field_ordinal", "format_json")),
 }
 
 
@@ -760,6 +775,146 @@ _TRIGGERS_V10 = (
     """,
 )
 
+
+def _migrate_to_12(conn: sqlite3.Connection) -> None:
+    # This protocol floor prevents detached bytes from inheriting authority from copied content.
+    conn.execute("ALTER TABLE held_candidates ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0 "
+                 "CHECK (quarantined IN (0,1))")
+
+
+def _migrate_to_11(conn: sqlite3.Connection) -> None:
+    """Bind typed history to its verified generation before admitting typed-v2."""
+    from . import typed_storage
+
+    # A guessed binding could reinterpret immutable history. Prove every retained
+    # typed payload first; failure rolls back the existing installation transaction.
+    typed_storage.validate_history_bindings(conn)
+    histories = [typed_storage._layout(cid, generation, encoded).version_table
+                 for cid, generation, encoded in conn.execute(
+                     "SELECT collection_id,generation,layout_json FROM typed_encoding_mappings")]
+    affected = ("collections", "items", "version_identity", "typed_encoding_mappings", "item_versions", *histories)
+    for name, in conn.execute(
+        f"SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name IN ({','.join('?' for _ in affected)})",
+        affected,
+    ).fetchall():
+        conn.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
+    conn.execute(_COLLECTIONS_V11)
+    conn.execute(_ITEMS_V11)
+    conn.execute(_IDENTITY_V11)
+    conn.execute(_MAPPINGS_V11)
+    for name in ("collections", "items"):
+        conn.execute(f"INSERT INTO {name}_v11 SELECT * FROM {name}")
+    conn.execute("INSERT INTO typed_encoding_mappings_v11 SELECT *,NULL FROM typed_encoding_mappings")
+    conn.execute("""INSERT INTO version_identity_v11
+      SELECT v.*, CASE WHEN v.encoding='typed-v1' THEN (
+        SELECT m.generation FROM typed_encoding_mappings m JOIN items i ON i.collection_id=m.collection_id
+        WHERE i.row_id=v.row_id AND m.state='ready') END FROM version_identity v""")
+    for name in ("collections", "items", "version_identity", "typed_encoding_mappings"):
+        conn.execute(f"DROP TABLE {name}")
+    for name in ("collections", "items", "version_identity", "typed_encoding_mappings"):
+        conn.execute(f"ALTER TABLE {name}_v11 RENAME TO {name}")
+    conn.execute("CREATE UNIQUE INDEX items_natural_key ON items(collection_id,natural_key) WHERE natural_key IS NOT NULL")
+    conn.execute("CREATE INDEX items_by_collection_row ON items(collection_id,row_id)")
+    for state in ("ready", "building"):
+        conn.execute(f"CREATE UNIQUE INDEX typed_encoding_one_{state} ON typed_encoding_mappings(collection_id) WHERE state='{state}'")
+    from . import native_metadata
+
+    native_metadata.install(conn)
+
+
+# These discriminators and columns are the closed installation/wire schema.
+_COLLECTIONS_V11 = """CREATE TABLE collections_v11(
+  collection_id TEXT PRIMARY KEY,
+  type_name TEXT NOT NULL REFERENCES collection_types(name), type_version INTEGER NOT NULL,
+  manifest_path TEXT NOT NULL UNIQUE, source_path TEXT NOT NULL UNIQUE,
+  layout TEXT NOT NULL CHECK(layout IN ('markdown-items','markdown-log')),
+  manifest_version INTEGER NOT NULL, generation INTEGER NOT NULL, audit_head TEXT,
+  audit_reader_version INTEGER NOT NULL, legacy_audit_status TEXT, verified_through_txn INTEGER,
+  log_frame_json TEXT, created_txn INTEGER NOT NULL, updated_txn INTEGER NOT NULL, query_plan_hash TEXT,
+  encoding TEXT NOT NULL DEFAULT 'json-v1' CHECK(encoding IN ('json-v1','typed-v1','typed-v2')),
+  view_mode TEXT NOT NULL DEFAULT 'items' CHECK(view_mode IN ('items','summary')),
+  derived INTEGER NOT NULL DEFAULT 0 CHECK(derived IN (0,1)),
+  FOREIGN KEY(collection_id,manifest_version) REFERENCES collection_manifests(collection_id,manifest_version)
+    DEFERRABLE INITIALLY DEFERRED
+) STRICT"""
+
+_ITEMS_V11 = """CREATE TABLE items_v11(
+  row_id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+  item_key TEXT NOT NULL, natural_key TEXT, row_version INTEGER NOT NULL, schema_version INTEGER NOT NULL,
+  values_json TEXT, body TEXT NOT NULL DEFAULT '', payload_hash TEXT NOT NULL, view_path TEXT,
+  created_txn INTEGER NOT NULL, updated_txn INTEGER NOT NULL, governance_json TEXT,
+  encoding TEXT NOT NULL DEFAULT 'json-v1' CHECK(encoding IN ('json-v1','typed-v1','typed-v2')),
+  UNIQUE(collection_id,item_key), UNIQUE(view_path), CHECK((encoding='json-v1')=(values_json IS NOT NULL))
+) STRICT"""
+
+_IDENTITY_V11 = """CREATE TABLE version_identity_v11(
+  row_id INTEGER NOT NULL REFERENCES items(row_id), row_version INTEGER NOT NULL CHECK(row_version>=1),
+  encoding TEXT NOT NULL CHECK(encoding IN ('json-v1','typed-v1','typed-v2')), payload_hash TEXT NOT NULL,
+  txn_id INTEGER NOT NULL REFERENCES txns(txn_id) DEFERRABLE INITIALLY DEFERRED, schema_version INTEGER NOT NULL,
+  payload_generation INTEGER,
+  CHECK((encoding='json-v1' AND payload_generation IS NULL) OR
+        (encoding<>'json-v1' AND payload_generation IS NOT NULL AND payload_generation>0)),
+  PRIMARY KEY(row_id,row_version)
+) STRICT, WITHOUT ROWID"""
+
+_MAPPINGS_V11 = """CREATE TABLE typed_encoding_mappings_v11(
+  collection_id TEXT NOT NULL REFERENCES collections(collection_id), generation INTEGER NOT NULL CHECK(generation>0),
+  state TEXT NOT NULL CHECK(state IN ('building','ready','retired','failed')),
+  layout_json TEXT NOT NULL CHECK(json_valid(layout_json)), layout_hash TEXT NOT NULL,
+  last_row_id INTEGER NOT NULL DEFAULT 0,
+  diagnostic_json TEXT CHECK(diagnostic_json IS NULL OR json_valid(diagnostic_json)),
+  PRIMARY KEY(collection_id,generation)
+) STRICT, WITHOUT ROWID"""
+
+_TRIGGERS_V11 = (
+    *_append_only_triggers("version_identity"),
+    """CREATE TRIGGER IF NOT EXISTS item_versions_mint_identity AFTER INSERT ON item_versions
+    BEGIN INSERT INTO version_identity(row_id,row_version,encoding,payload_hash,txn_id,schema_version,payload_generation)
+      VALUES(NEW.row_id,NEW.row_version,'json-v1',NEW.payload_hash,NEW.txn_id,
+             (SELECT schema_version FROM items WHERE row_id=NEW.row_id),NULL); END""",
+    """CREATE TRIGGER IF NOT EXISTS version_identity_json_payload BEFORE INSERT ON version_identity
+    WHEN NEW.encoding='json-v1' AND NOT EXISTS(
+      SELECT 1 FROM item_versions WHERE row_id=NEW.row_id AND row_version=NEW.row_version)
+    BEGIN SELECT RAISE(ABORT,'version_identity requires its JSON payload'); END""",
+    """CREATE TRIGGER IF NOT EXISTS version_identity_typed_collection BEFORE INSERT ON version_identity
+    WHEN NEW.encoding<>'json-v1' AND NOT EXISTS(
+      SELECT 1 FROM items i JOIN collections c ON c.collection_id=i.collection_id
+      JOIN typed_encoding_mappings m ON m.collection_id=i.collection_id AND m.generation=NEW.payload_generation
+      WHERE i.row_id=NEW.row_id AND i.encoding=NEW.encoding AND c.encoding=NEW.encoding AND m.state='ready'
+      AND ((NEW.encoding='typed-v1' AND json_extract(m.layout_json,'$.version')=1) OR
+           (NEW.encoding='typed-v2' AND json_extract(m.layout_json,'$.version')=2)))
+    BEGIN SELECT RAISE(ABORT,'version_identity requires its typed payload in the ready generation'); END""",
+    """CREATE TRIGGER IF NOT EXISTS item_versions_json_rows_only BEFORE INSERT ON item_versions
+    WHEN EXISTS(SELECT 1 FROM items WHERE row_id=NEW.row_id AND encoding<>'json-v1')
+    BEGIN SELECT RAISE(ABORT,'typed rows take typed versions, not JSON payloads'); END""",
+    """CREATE TRIGGER IF NOT EXISTS items_encoding_matches_collection BEFORE INSERT ON items
+    WHEN EXISTS(SELECT 1 FROM collections WHERE collection_id=NEW.collection_id AND encoding<>NEW.encoding)
+    BEGIN SELECT RAISE(ABORT,'item encoding must match its collection encoding'); END""",
+    """CREATE TRIGGER IF NOT EXISTS items_encoding_update_matches_collection BEFORE UPDATE OF encoding ON items
+    WHEN EXISTS(SELECT 1 FROM collections WHERE collection_id=NEW.collection_id AND encoding<>NEW.encoding)
+    BEGIN SELECT RAISE(ABORT,'item encoding must match its collection encoding'); END""",
+    """CREATE TRIGGER IF NOT EXISTS items_collection_fixed BEFORE UPDATE OF collection_id ON items
+    WHEN NEW.collection_id IS NOT OLD.collection_id
+    BEGIN SELECT RAISE(ABORT,'item collection owns its immutable version bindings'); END""",
+    """CREATE TRIGGER IF NOT EXISTS collections_encoding_forward_only BEFORE UPDATE OF encoding ON collections
+    WHEN (OLD.encoding='typed-v2' AND NEW.encoding<>'typed-v2') OR
+         (OLD.encoding='typed-v1' AND NEW.encoding='json-v1')
+    BEGIN SELECT RAISE(ABORT,'typed collection encoding has no in-place reverse'); END""",
+    """CREATE TRIGGER IF NOT EXISTS typed_encoding_descriptor_fixed BEFORE UPDATE ON typed_encoding_mappings
+    WHEN NEW.collection_id IS NOT OLD.collection_id OR NEW.generation IS NOT OLD.generation OR
+         NEW.layout_json IS NOT OLD.layout_json OR NEW.layout_hash IS NOT OLD.layout_hash
+    BEGIN SELECT RAISE(ABORT,'typed payload descriptor is immutable'); END""",
+    """CREATE TRIGGER IF NOT EXISTS typed_encoding_no_replace BEFORE INSERT ON typed_encoding_mappings
+    WHEN EXISTS(SELECT 1 FROM typed_encoding_mappings WHERE collection_id=NEW.collection_id AND generation=NEW.generation)
+    BEGIN SELECT RAISE(ABORT,'typed payload descriptor is immutable'); END""",
+    """CREATE TRIGGER IF NOT EXISTS typed_encoding_no_delete BEFORE DELETE ON typed_encoding_mappings
+    BEGIN SELECT RAISE(ABORT,'typed payload descriptor is retained'); END""",
+    """CREATE TRIGGER IF NOT EXISTS typed_encoding_state_forward BEFORE UPDATE OF state ON typed_encoding_mappings
+    WHEN NEW.state<>OLD.state AND NOT((OLD.state='building' AND NEW.state IN ('ready','failed')) OR
+                                     (OLD.state='ready' AND NEW.state='retired'))
+    BEGIN SELECT RAISE(ABORT,'typed payload state has no reverse transition'); END""",
+)
+
 _MIGRATION_PATH = Path(__file__).with_name("migrations")
 # Alembic's context/op proxies are process-global, so environment lifetimes cannot overlap.
 _ALEMBIC_ENVIRONMENT_LOCK = threading.Lock()
@@ -795,6 +950,20 @@ class SchemaVersionError(RuntimeError):
         )
         self.found = found
         self.supported = supported
+
+
+def compatibility_ids(version: int | None = None) -> tuple[str, ...]:
+    """The state compatibility ids that a store at ``version`` requires of a release that opens it.
+
+    Every reader refuses a schema newer than its own, so each schema from the first guarded
+    one on is its own generation with one id, and the set is closed by this module's own
+    migrations. A release supports the ids up to its ``SCHEMA_VERSION``. The vault state
+    manifest records them before a writer migrates a store, so the managed launcher and the
+    startup gate of an earlier release refuse that release instead of letting it deadlock.
+    """
+    version = SCHEMA_VERSION if version is None else version
+    return tuple(f"collections-store-schema-{generation}"
+                 for generation in range(FIRST_GUARDED_SCHEMA_VERSION, version + 1))
 
 
 def schema_version(conn: sqlite3.Connection, *, ceiling: int | None = None) -> int:
@@ -852,13 +1021,18 @@ def ensure_schema(conn: Connection) -> int:
                 if not raw.execute("SELECT 1 FROM alembic_version").fetchone() and current:
                     command.stamp(config, str(current))
                 command.upgrade(config, str(target))
-            for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ()),
+            encoding_triggers = _TRIGGERS_V11 if target >= 11 else _TRIGGERS_V5 if target >= 5 else ()
+            for statement in (*_TRIGGERS_V1, *encoding_triggers,
                               *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage
 
-                typed_storage.repair_triggers(raw)
+                typed_storage.repair_triggers(raw, generation_bound=target >= 11)
+            if target >= 11:
+                from . import native_metadata
+
+                native_metadata.repair_triggers(raw)
             revision = raw.execute("SELECT version_num FROM alembic_version").fetchone()[0]
             conn.execute(tables.SET_META, {"key": META_SCHEMA_VERSION, "value": revision})
             if migrating and raw.execute("PRAGMA foreign_key_check").fetchone() is not None:

@@ -710,9 +710,11 @@ def test_retrieved_issuance_shaped_text_is_scrubbed_and_cannot_open_a_session(
             {"path": page.relative_to(vault).as_posix(), "include_raw": True},
         )
 
-    assert response.json()["result"].get("isError") is True, response.text
-    assert "SECRET_BLOCKED" in response.text
+    refusal = response.json()["result"]["structuredContent"]
+    assert refusal["success"] is False, response.text
+    assert refusal["error"]["code"] == "SECRET_BLOCKED", response.text
     assert UNKNOWN_SESSION_BEARER not in response.text
+    assert marker not in response.text
     connection = store.open_authorization_session_connection(vault)
     try:
         after = connection.execute(

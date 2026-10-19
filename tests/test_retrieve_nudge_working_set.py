@@ -324,7 +324,8 @@ def test_the_header_says_the_turn_is_already_activated() -> None:
     header = hook._WORKING_SET_HEADER
     assert "\n" not in header
     assert "already activated for this turn" in header
-    assert "call `activate_context` again only for another anchor" in header
+    assert "trigger=task_refresh" in header
+    assert "original turn" in header and "conversation.focus" in header
 
 
 def test_the_block_carries_state_then_units_then_pointers_with_refs() -> None:
@@ -337,6 +338,28 @@ def test_the_block_carries_state_then_units_then_pointers_with_refs() -> None:
     assert "Never exceed 400 kg." in body[1]
     assert "Knowledge Base/Products/Cargo Sled.md#u1" in body[1]
     assert "Depot Ledger" in body[2]
+
+
+def test_relevant_due_rendering_keeps_both_guards_or_omits_the_entire_candidate() -> None:
+    """A shortened review ref or fingerprint leaves the injected advice unusable."""
+    packet = _packet()
+    candidate = {
+        "ref": "exomem://review/0123456789abcdef01234567",
+        "fingerprint": "fedcba987654321001234567",
+        "category": "prediction_window", "due_since": "2026-08-01",
+        "anchor": "exomem://memory/00000000-0000-4000-8000-000000000091",
+    }
+    packet["relevant_due_refs"] = [candidate]
+    full = hook._format_working_set_block(packet, 4000)
+    (line,) = [line for line in full.splitlines() if line.startswith("- relevant due:")]
+    assert json.dumps(candidate, ensure_ascii=True, separators=(",", ":")) in line
+    assert "review_item_context" in line and "triage_memory" in line
+    assert "one due item" in line and "compaction" in line and "OAuth renewal" in line
+
+    tight = hook._format_working_set_block(packet, len(full) - 1)
+    assert "Never exceed 400 kg." in tight
+    assert "relevant due" not in tight
+    assert candidate["ref"] not in tight and candidate["fingerprint"] not in tight
 
 
 def test_the_block_keeps_whole_items_and_drops_trailing_ones() -> None:

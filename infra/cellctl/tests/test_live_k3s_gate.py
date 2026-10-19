@@ -6,8 +6,10 @@ templates or the live suite itself, and on manual dispatch."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,56 @@ def test_the_live_suite_runs_on_pull_requests_that_touch_the_policy_templates() 
     live = jobs["live-k3s"]
     assert set(live["needs"]) == {"checks", "live-k3s-scope"}
     assert " ".join(str(live["if"]).split()) == "needs.live-k3s-scope.outputs.run == 'true'"
+
+
+def test_parallel_live_groups_run_every_collected_case_once(tmp_path: Path) -> None:
+    """Two green import groups must not silently omit the platform scenarios."""
+    live = _workflow()["jobs"]["live-k3s"]
+    step = next(step for step in live["steps"] if step.get("name") == "Live K3s suite")
+    # The real shell step and pytest select cases; this hook records collection without running fixtures.
+    (tmp_path / "ci_collection_receipt.py").write_text(
+        "import json, os\nfrom pathlib import Path\n"
+        "def pytest_collection_finish(session):\n"
+        "    Path(os.environ['COLLECTED_NODES']).write_text(json.dumps([item.nodeid for item in session.items]))\n"
+    )
+    helm = tmp_path / "helm"
+    helm.write_text("#!/bin/sh\nexit 0\n")
+    helm.chmod(0o700)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "PYTHONPATH": f"{tmp_path}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+        "PYTEST_PLUGINS": "ci_collection_receipt",
+        "PYTEST_ADDOPTS": "--collect-only",
+        "COLLECTED_NODES": str(tmp_path / "all.json"),
+    }
+    subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_k3s_integration.py"],
+        cwd=REPO_ROOT / "infra/cellctl", env=env, check=True, capture_output=True, text=True,
+    )
+    expected = set(json.loads(Path(env["COLLECTED_NODES"]).read_text()))
+    assert expected
+    observed: set[str] = set()
+    for suite in live["strategy"]["matrix"]["suite"]:
+        output = tmp_path / suite
+        output.mkdir()
+        group_env = {
+            **env,
+            "RUNNER_TEMP": str(output),
+            "COLLECTED_NODES": str(output / "nodes.json"),
+            "SUITE_GROUP": suite,
+            "IMPORT_TEST": step["env"]["IMPORT_TEST"],
+            "EXPORT_TEST": step["env"]["EXPORT_TEST"],
+        }
+        subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+            cwd=REPO_ROOT / "infra/cellctl", env=group_env, check=True, capture_output=True, text=True,
+        )
+        selected = set(json.loads(Path(group_env["COLLECTED_NODES"]).read_text()))
+        assert selected, suite
+        assert not observed & selected, f"{suite} repeats another group's cases"
+        observed |= selected
+    assert observed == expected, "the parallel live groups omit or add cases"
 
 
 def _scope_step() -> dict[str, Any]:

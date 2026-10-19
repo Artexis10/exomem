@@ -8,12 +8,13 @@ import pytest
 
 from exomem import vocabulary_authority
 from exomem.governance import (
+    authorization_custody,
     authorization_session_authority,
     authorization_session_lifecycle,
     store,
 )
 from exomem.governance.authorization_session_lifecycle import AuthorizationSessionContext
-from exomem.governance.principal import RequestPrincipal
+from exomem.governance.principal import RequestPrincipal, effective_principal
 from exomem.vocabulary_effects import Effect
 
 NOW = 1_700_000_000
@@ -26,6 +27,25 @@ def install_unit_session_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     The production path is exercised by the real custody/session lifecycle
     tests; these cases isolate authority-ledger behavior with synthetic custody.
     """
+
+    native_custody_loader = authorization_custody.load_authorization_custody
+
+    def custody_loader(root, *, now):
+        if effective_principal().verified_authorization_session is None:
+            return native_custody_loader(root, now=now)
+        return _Custody()
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        custody_loader,
+    )
+    # Runtime status compares the maintained default loader by identity.
+    monkeypatch.setitem(
+        vocabulary_authority.VocabularyAuthority.__init__.__kwdefaults__,
+        "custody_loader",
+        custody_loader,
+    )
 
     monkeypatch.setattr(
         authorization_session_lifecycle,

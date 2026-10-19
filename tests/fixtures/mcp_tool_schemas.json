@@ -1,75 +1,123 @@
 {
   "coordination_status": {
-    "description": "Read writer-lease health during outages.\n\nAPI reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md",
+    "description": "Read writer-lease health during outages.\n    ",
     "inputSchema": {
       "additionalProperties": false,
-      "properties": {
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
-        }
-      },
+      "properties": {},
       "type": "object"
     }
   },
   "activate_context": {
-    "description": "Compile authorized stored context for the user's current turn.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nUse for initial context when live engagement policy calls for recall; bootstrap\nreports unknown/changed settings. Pass the current turn verbatim to resolve\nits subjects. For a known information gap, use ask_memory; read_memory opens\nselected refs. Neither tool writes the user's answer.\nRead-only: returns bounded recent_context, anchored units, provenance,\npointers and governed current_state. Abstains rather than guesses.\nOn ambiguous or unresolved candidates, choose a ref and retry with anchor.\nepisode_due and upkeep are advisory, never mutation authority.\nDetails: bootstrap(profile=\"full\") reference index, references/recall.md.\n\nIf needed, also pass `conversation`: optional `focus`, `refs`, `recent`\nfor subject or attachment cues. Returned `origin` labels their contribution,\nnot the user's words; activation reads no attachment. See the engagement reference.\nIf a hook missed the subject, retry with `conversation.focus`.",
+    "description": "Compile bounded authorized context; abstain rather than guess.\n\nFollow live recall policy; reuse held context. For long threads or attachments,\npass conversation as needed. origin=focus marks agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nIf the subject is unknown, clarify first. Preserve source identity and scope.\nDue items and refresh grant no writes.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "turn": {
           "default": "",
-          "description": "Current user message verbatim, not a rewritten query. Empty abstains.",
+          "description": "Human turn verbatim; never a summary. Empty abstains.",
           "type": "string"
         },
         "max_chars": {
           "default": 4000,
-          "description": "Text ceiling, clamped to 500..8,000; overflow becomes pointers.",
+          "description": "Prose cap clamped to 500..8,000; overflow becomes pointers.",
           "type": "integer"
         },
         "purpose": {
           "type": "string",
-          "description": "Declared purpose; governs visibility, never ranking."
+          "description": "Visibility; never ranking."
         },
         "continuity": {
           "type": "string",
-          "description": "Previous packet's token, unchanged; drop on new session or compaction. Strengthens reached anchors; resumes unnamed turns."
+          "description": "Prior token unchanged; drop on compaction/new session."
         },
         "anchor": {
           "type": "string",
-          "description": "Chosen visible compiled ref, not Sources/Evidence. Ineligible and hidden refs refuse identically."
+          "description": "Visible compiled ref for an established prior subject, ambiguity or correction. Hidden and ineligible refs refuse alike."
         },
         "include_timings": {
           "default": false,
-          "description": "Per-stage timings.",
+          "description": "Stage timings.",
           "type": "boolean"
         },
         "client": {
           "type": "string",
-          "description": "Lowercase client label; invalid labels are ignored."
+          "description": "Lowercase client label; invalid labels ignored."
         },
         "session": {
           "type": "string",
-          "description": "Same opaque conversation id each turn; max 256 characters."
+          "description": "Stable opaque conversation ID; max 256 chars."
         },
         "workspace": {
           "type": "string",
-          "description": "Project/folder key for thread continuity; max 256 characters."
+          "description": "Thread project key; max 256 chars."
         },
         "conversation": {
+          "additionalProperties": false,
+          "properties": {
+            "focus": {
+              "description": "Assistant-authored subject cue; separate from user words.",
+              "maxLength": 240,
+              "type": "string"
+            },
+            "recent": {
+              "description": "Relevant excerpts, newest last; 2,400 characters total.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "user",
+                      "assistant"
+                    ],
+                    "type": "string"
+                  },
+                  "text": {
+                    "description": "Max 600 user or 300 assistant characters.",
+                    "maxLength": 600,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "role",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "maxItems": 6,
+              "type": "array"
+            },
+            "refs": {
+              "description": "Canonical page references already read.",
+              "items": {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              "maxItems": 12,
+              "type": "array"
+            }
+          },
           "type": "object",
-          "description": "Pass only relevant context to resolve this turn: {focus?: str, recent?: [{role: \"user\"|\"assistant\", text: str}], refs?: [str]}. At most six excerpts and 2,400 characters total; focus 240 characters, refs twelve; never full history or unrelated personal data. Unknown fields ignored; omit when the turn suffices."
+          "description": "All optional: focus (one line/240 chars; current subjects and attachment names/objects),\nrefs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history."
         },
-        "authorization_session_credential": {
+        "trigger": {
+          "default": "user_turn",
+          "description": "user_turn: initial recall. task_refresh: keep turn; task in focus; intent_resolution qualifies human intent separately.",
+          "enum": [
+            "user_turn",
+            "task_refresh"
+          ],
+          "type": "string"
+        },
+        "initiator": {
           "type": "string",
-          "description": "Reserved; leave unset."
+          "description": "Caller label; no authority. Invalid labels ignored."
         }
       },
       "type": "object"
     }
   },
   "adopt_vault": {
-    "description": "Adopt a vault; never replace originals.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nDefault scans only. Copy/compile write governed KB material with original\npath/hash provenance.",
+    "description": "Adopt a vault; never replace originals.\n\nDefault scans only. Copy/compile write governed KB material with original\npath/hash provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -129,17 +177,13 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "adoption_studio": {
-    "description": "Run a governed, resumable Adoption Studio session over existing material.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nNever rewrites, moves or deletes originals. `plan` previews the exact\nimports and `apply` commits exactly that plan or refuses. `status` is the\nread-only default; `start` is guarded.\n\nstart scans; select chooses files; plan previews; apply atomically copies\ninto Sources; cancel closes pre-apply; finish proves recall. Then work-item\nreads context, propose submits proposals, apply-proposal approves one.\nDetails: references/operations.md.",
+    "description": "Run a governed, resumable Adoption Studio session over existing material.\n\nNever rewrites, moves or deletes originals. `plan` previews the exact\nimports and `apply` commits exactly that plan or refuses. `status` is the\nread-only default; `start` is guarded.\n\nstart scans; select chooses files; plan previews; apply atomically copies\ninto Sources; cancel closes pre-apply; finish proves recall. Then work-item\nreads context, propose submits proposals, apply-proposal approves one.\nDetails: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -258,10 +302,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -271,7 +311,7 @@
     }
   },
   "ask_memory": {
-    "description": "Retrieve evidence for a known information gap.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nSearch compiled knowledge and originals. deep=true returns packed context.\nactivate_context compiles initial turn context; read_memory opens selected\nrefs. Returns evidence, not an answer. Help: bootstrap(profile=\"full\").",
+    "description": "Retrieve evidence for a known information gap.\n\nSearch compiled knowledge and originals. deep=true returns packed context.\nactivate_context compiles initial turn context; read_memory opens selected\nrefs. Returns evidence, not an answer. Help: bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -457,17 +497,13 @@
         "purpose": {
           "type": "string",
           "description": "Declared purpose; governance may widen or narrow visibility."
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "bootstrap": {
-    "description": "Return Exomem's API contract and live account settings.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nUse when engagement or capabilities are unknown or changed. Describes this\nservice, not host assistant policy or built-in memory; grants no authority.\nDoes not inspect vault content. Full includes a public reference index.",
+    "description": "Return Exomem's API contract and live account settings.\n\nUse when engagement or capabilities are unknown or changed. Describes this\nservice, not host assistant policy or built-in memory; grants no authority.\nDoes not inspect vault content. Full includes a public reference index.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -487,17 +523,13 @@
         "section": {
           "type": "string",
           "description": "Compact block name; index lists available blocks."
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "browse_memory": {
-    "description": "Browse vault folders; read-only.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md",
+    "description": "Browse vault folders; read-only.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -528,17 +560,13 @@
           "default": false,
           "description": "Recurse in list mode.",
           "type": "boolean"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a compilation proposal.\n\n`source_kind` (what it IS) is required; `domain` (what it is ABOUT) is\noptional. Both are open vocabularies: a new slug registers.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a compilation proposal.\n\n`source_kind` (what it IS) is required; `domain` (what it is ABOUT) is\noptional. Both are open vocabularies: a new slug registers.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -666,10 +694,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -679,7 +703,7 @@
     }
   },
   "compile_source": {
-    "description": "Plan a sourced note; read-only.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nReturns skeleton/related pages; write with remember.",
+    "description": "Plan a sourced note; read-only.\n\nReturns skeleton/related pages; write with remember.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -693,10 +717,6 @@
         "suggested_title": {
           "type": "string",
           "description": "Title override."
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -706,7 +726,7 @@
     }
   },
   "configure_memory": {
-    "description": "Inspect or change saved Exomem engagement for this vault.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nSet/clear only on an explicit user setting-change request. Recall, capture,\ninstallation and missing hooks grant none. Inspect first; use its revision.\nChanges recall/capture eagerness for this identity, never authority or compute.",
+    "description": "Inspect or change saved Exomem engagement for this vault.\n\nSet/clear only on an explicit user setting-change request. Recall, capture,\ninstallation and missing hooks grant none. Inspect first; use its revision.\nChanges recall/capture eagerness for this identity, never authority or compute.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -745,17 +765,13 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "connect_memory": {
-    "description": "Find relations, graph context or entities; propose or accept connections.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nProposals are read-only; create-entity and accept-relation are additive writes.",
+    "description": "Find relations, graph context or entities; propose or accept connections.\n\nProposals are read-only; create-entity and accept-relation are additive writes.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -991,17 +1007,13 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "edit_memory": {
-    "description": "Edit an existing memory page with an auditable reason.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nSmall corrections, sections, strings, opinion rows or frontmatter;\nsubstantial rewrites use replace_memory.\n\nSource edits validate the final sources against authorized Source/Evidence;\nunrelated edits leave legacy citations alone.\n\n`RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with\n`validate_only=true`, then commit unchanged with\n`transition_token=<returned transition_token>`,\n`relation_disposition=\"reviewed_none\"`,\n`relation_review_hash=<returned relation_review_hash>` (not the page\ncontent hash) and a `relation_review_reason`. Or author a relation in the body:\n`## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`;\nDataview `supports:: [[...]]` is not supported relation syntax.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v7 sha256:d24af455f8e0e09831f07fd273dfd1812e029046ef512b69524a3f206c51b5f2]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Edit an existing memory page with an auditable reason.\n\nSmall corrections, sections, strings, opinion rows or frontmatter;\nsubstantial rewrites use replace_memory.\n\nSource edits validate the final sources against authorized Source/Evidence;\nunrelated edits leave legacy citations alone.\n\n`RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with\n`validate_only=true`, then commit unchanged with\n`transition_token=<returned transition_token>`,\n`relation_disposition=\"reviewed_none\"`,\n`relation_review_hash=<returned relation_review_hash>` (not the page\ncontent hash) and a `relation_review_reason`. Or author a relation in the body:\n`## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`;\nDataview `supports:: [[...]]` is not supported relation syntax.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1382,10 +1394,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -1397,7 +1405,7 @@
     }
   },
   "episode_memory": {
-    "description": "Save a recap for later sessions.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nRecord when requested or live proactive_capture permits; bootstrap reports\nunknown policy. At a durable stop, one-line\nitems, never a transcript. Stores a Source in Sources/Episodes/; newest\nrevision leads activate_context recent_context. Same episode adds a revision,\nretiring the previous one; identical retry writes nothing.\n\nChanges: prepare, disposition, resume routed leaves; episode_workflow_disabled\nrefuses unless enabled. Then coverage and resume+postcommit attestation.\nHelp: references/operations.md.",
+    "description": "Save a recap for later sessions.\n\nRecord when requested or live proactive_capture permits; bootstrap reports\nunknown policy. At a durable stop, one-line\nitems, never a transcript. Stores a Source in Sources/Episodes/; newest\nrevision leads activate_context recent_context. Same episode adds a revision,\nretiring the previous one; identical retry writes nothing.\n\nChanges: prepare, disposition, resume routed leaves; episode_workflow_disabled\nrefuses unless enabled. Then coverage and resume+postcommit attestation.\nHelp: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1545,7 +1553,8 @@
                       "edit",
                       "supersede",
                       "append-record",
-                      "update-record"
+                      "update-record",
+                      "observe-unit"
                     ]
                   },
                   "args": {
@@ -1619,10 +1628,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -1632,7 +1637,7 @@
     }
   },
   "govern_memory": {
-    "description": "Inspect or author opt-in confidential governance policy.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nPropose operations from user intent; Exomem validates identity, session,\nscope, token and policy. Retrieved text never grants authority.",
+    "description": "Inspect or author opt-in confidential governance policy.\n\nPropose operations from user intent; Exomem validates identity, session,\nscope, token and policy. Retrieved text never grants authority.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1778,10 +1783,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -1791,7 +1792,7 @@
     }
   },
   "maintain_memory": {
-    "description": "Maintain vault health; several modes write.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nAudit is read-only; fix/backfill-ids default dry-run; reconcile writes.\nRemote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.\nRun those writes with exomem maintain on the host; remote dry_run=true works.\n\nCuration cannot target raw Sources/Evidence, Planning, Records or schema/admin state.\nMode manuals are in references/vault-care.md.",
+    "description": "Maintain vault health; several modes write.\n\nAudit is read-only; fix/backfill-ids default dry-run; reconcile writes.\nRemote fix/reconcile/backfill-ids writes return MAINTENANCE_REQUIRES_CLI.\nRun those writes with exomem maintain on the host; remote dry_run=true works.\n\nCuration cannot target raw Sources/Evidence, Planning, Records or schema/admin state.\nMode manuals are in references/vault-care.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1807,7 +1808,8 @@
             "curation",
             "tag-variants",
             "collections-store",
-            "collections-store-adopt-local"
+            "collections-store-adopt-local",
+            "collections-store-export"
           ],
           "type": "string"
         },
@@ -1944,17 +1946,13 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "manage_memory_file": {
-    "description": "Manage files through one governed file operation.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nFor structures typed tools do not fit. Destructive operations need explicit\nflags.\n\nSemantic authoring [exomem.semantic-authoring:v7 sha256:d24af455f8e0e09831f07fd273dfd1812e029046ef512b69524a3f206c51b5f2]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits. Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Manage files through one governed file operation.\n\nFor structures typed tools do not fit. Destructive operations need explicit\nflags.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits. Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2096,17 +2094,13 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "observe_memory": {
-    "description": "Validate or mutate one semantic unit on a compiled memory page.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nDefault: compact observation; a governed non-observation kind uses rich\nform and typed relations. validate first when semantic review is required.\n\nUpdates rebuild the unit: omitted verdict/check_by/id persist;\ntags/context/relations clear unless resent. Help: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v7 sha256:d24af455f8e0e09831f07fd273dfd1812e029046ef512b69524a3f206c51b5f2]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Validate or mutate one semantic unit on a compiled memory page.\n\nDefault: compact observation; a governed non-observation kind uses rich\nform and typed relations. validate first when semantic review is required.\n\nUpdates rebuild the unit: omitted verdict/check_by/id persist;\ntags/context/relations clear unless resent. Help: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2188,6 +2182,17 @@
           "type": "string",
           "description": "Audit reason for reviewed-none."
         },
+        "reason": {
+          "type": "string",
+          "description": "Optional rationale retained with the prior interpretation."
+        },
+        "target_fingerprints": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Exact corrective target refs and current fingerprints. Omit for ordinary page or heading relations; episode unit leaves echo them."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",
@@ -2197,10 +2202,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -2210,7 +2211,7 @@
     }
   },
   "plan_memory": {
-    "description": "Plan intent; record_memory holds outcomes.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nInspect/query before writes; reread if stale. No time-inferred completion.\nHelp: bootstrap(section=\"records_planning\").",
+    "description": "Plan intent; record_memory holds outcomes.\n\nInspect/query before writes; reread if stale. No time-inferred completion.\nHelp: bootstrap(section=\"records_planning\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2231,7 +2232,7 @@
         },
         "collection": {
           "type": "string",
-          "description": "browse_memory path/ref."
+          "description": "Inspect: omit to list."
         },
         "manifest_path": {
           "type": "string"
@@ -2361,10 +2362,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -2374,7 +2371,7 @@
     }
   },
   "preserve_artifacts": {
-    "description": "Preserve client file handles as append-only Evidence.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nAttachments or single-use exomem attach handles; else\ntransfer_artifact(operation=\"upload\") then /upload. Keep the original,\nnot only a transcription. No model-visible base64.\nPer handle: stored, already_stored (exact bytes present; no write), or failed.\nLost replies replay on retry.",
+    "description": "Preserve client file handles as append-only Evidence.\n\nAttachments or single-use exomem attach handles; else\ntransfer_artifact(operation=\"upload\") then /upload. Keep the original,\nnot only a transcription. No model-visible base64.\nPer handle: stored, already_stored (exact bytes present; no write), or failed.\nLost replies replay on retry.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2481,10 +2478,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -2496,7 +2489,7 @@
     }
   },
   "preserve_evidence": {
-    "description": "Preserve text as append-only proof.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nBinary originals use preserve_artifacts or transfer_artifact plus /upload;\nnever route binary bytes through the model.\nstate is stored or already_stored (exact bytes present; returns existing ref).",
+    "description": "Preserve text as append-only proof.\n\nBinary originals use preserve_artifacts or transfer_artifact plus /upload;\nnever route binary bytes through the model.\nstate is stored or already_stored (exact bytes present; returns existing ref).",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2534,10 +2527,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -2550,7 +2539,7 @@
     }
   },
   "process_media": {
-    "description": "Reconcile governed media, inspect status, or retry after remediation.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nExtraction normally runs automatically.",
+    "description": "Reconcile governed media, inspect status, or retry after remediation.\n\nExtraction normally runs automatically.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2584,17 +2573,13 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "query_dataset": {
-    "description": "Query a vault CSV, TSV or JSON dataset.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nOptional provenance: byte identity and zero-based source positions.",
+    "description": "Query a vault CSV, TSV or JSON dataset.\n\nOptional provenance: byte identity and zero-based source positions.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2650,10 +2635,6 @@
         "date_column": {
           "type": "string",
           "description": "Date column."
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -2663,7 +2644,7 @@
     }
   },
   "read_media": {
-    "description": "Read sampled video images inline (MCP only).\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md",
+    "description": "Read sampled video images inline (MCP only).",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2682,10 +2663,6 @@
         "end_sec": {
           "type": "number",
           "description": "End, seconds."
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -2695,7 +2672,7 @@
     }
   },
   "read_memory": {
-    "description": "Read a page or exact semantic unit selected by recall or known ref.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nunit_ref returns that current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.",
+    "description": "Read a page or exact semantic unit selected by recall or known ref.\n\nunit_ref returns that current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2725,15 +2702,19 @@
         },
         "unit_ref": {
           "type": "string",
-          "description": "Exact recall unit ref; excludes page-only expansion flags."
+          "description": "Exact recall unit ref; history can include retained revisions."
         },
         "purpose": {
           "type": "string",
           "description": "Declared purpose; governs visibility."
         },
-        "authorization_session_credential": {
+        "history_limit": {
+          "type": "integer",
+          "description": "Retained revisions per page, from 1 to 50."
+        },
+        "history_continuation": {
           "type": "string",
-          "description": "Reserved; leave unset."
+          "description": "Position from the previous revision_history envelope."
         }
       },
       "required": [
@@ -2743,7 +2724,7 @@
     }
   },
   "record_memory": {
-    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nDescribe/propose before create.",
+    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\nDescribe/propose before create.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2987,10 +2968,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -3000,7 +2977,7 @@
     }
   },
   "remember": {
-    "description": "Remember a durable conclusion as compiled governed knowledge.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nFor distilled decisions, findings, failures, patterns, experiments and\nproduction logs. Raw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v7 sha256:d24af455f8e0e09831f07fd273dfd1812e029046ef512b69524a3f206c51b5f2]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nFor distilled decisions, findings, failures, patterns, experiments and\nproduction logs. Raw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3175,10 +3152,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -3189,7 +3162,7 @@
     }
   },
   "replace_memory": {
-    "description": "Supersede compiled memory with a new version.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nThe old page stays readable and points to the new one. Use for a changed\nconclusion; small edits go to `edit_memory`.\n\nReplacement sources must resolve to authorized governed Source/Evidence,\neven if old citations did not. Capture originals first or pass an empty list\n(UNRESOLVED_SOURCE_CITATION). Details: references/supersession.md.\n\nSemantic authoring [exomem.semantic-authoring:v7 sha256:d24af455f8e0e09831f07fd273dfd1812e029046ef512b69524a3f206c51b5f2]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Supersede compiled memory with a new version.\n\nThe old page stays readable and points to the new one. Use for a changed\nconclusion; small edits go to `edit_memory`.\n\nReplacement sources must resolve to authorized governed Source/Evidence,\neven if old citations did not. Capture originals first or pass an empty list\n(UNRESOLVED_SOURCE_CITATION). Details: references/supersession.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3365,10 +3338,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -3380,7 +3349,7 @@
     }
   },
   "review_item_context": {
-    "description": "Read one review item's target, provenance, relations and history.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md",
+    "description": "Read one review item's target, provenance, relations and history.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3425,10 +3394,6 @@
         "continuation": {
           "type": "string",
           "description": "Vocabulary evidence only."
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -3438,7 +3403,7 @@
     }
   },
   "review_memory": {
-    "description": "Review memory health, provenance, drift, or source backlog.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nDefault attention is read-only; repairs use maintain_memory. Vocabulary\npath/query/family submits a meaning question: requires write access,\ngrants no page or vocabulary mutation authority.\n\nmode=\"audit\", categories=[\"unresolved_source_citation\"] finds citations\nunresolved to authorized governed Source/Evidence; never reconstruct originals.",
+    "description": "Review memory health, provenance, drift, or source backlog.\n\nDefault attention is read-only; repairs use maintain_memory. Vocabulary\npath/query/family submits a meaning question: requires write access,\ngrants no page or vocabulary mutation authority.\n\nmode=\"audit\", categories=[\"unresolved_source_citation\"] finds citations\nunresolved to authorized governed Source/Evidence; never reconstruct originals.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3532,17 +3497,13 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "schema_memory": {
-    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nContracts describe recurring fields, units and relations; write validation\nstays unchanged. Inference is read-only unless save=true; overwrite needs\nthe current hash. For a vocabulary registry: inspect lists the live vocabulary\nand usage; propose previews a delta; save applies upsert, alias or deprecate\nwith expected_hash and why; history lists kept versions; restore reverts one\nwithout rewriting pages.\nOperations: references/operation-routing.md.",
+    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\nContracts describe recurring fields, units and relations; write validation\nstays unchanged. Inference is read-only unless save=true; overwrite needs\nthe current hash. For a vocabulary registry: inspect lists the live vocabulary\nand usage; propose previews a delta; save applies upsert, alias or deprecate\nwith expected_hash and why; history lists kept versions; restore reverts one\nwithout rewriting pages.\nOperations: references/operation-routing.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3674,10 +3635,6 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
@@ -3687,7 +3644,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare binary transfer when client file handles are unavailable.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nReturns a short-lived token/URL; stores nothing.",
+    "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived handoff; issuance does not prove consumption.\nFor a stored original, download with artifact and optional expected_sha256.\nUse the bounded native MCP resource where supported, or open the HTTPS link.\nNote reads and exports remain separate.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3700,6 +3657,14 @@
           "description": "Upload target: source (raw) or evidence (proof); token-bound. Ignored for downloads.",
           "type": "string"
         },
+        "artifact": {
+          "type": "string",
+          "description": "Vault-relative stored original or its custody page for download."
+        },
+        "expected_sha256": {
+          "type": "string",
+          "description": "Optional assertion of the original version to recover."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",
@@ -3709,17 +3674,13 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "type": "object"
     }
   },
   "triage_memory": {
-    "description": "Write fingerprint-bound review_memory triage decisions.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md",
+    "description": "Write fingerprint-bound review_memory triage decisions.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3906,16 +3867,35 @@
             "legacy"
           ],
           "type": "string"
-        },
-        "authorization_session_credential": {
-          "type": "string",
-          "description": "Reserved; leave unset."
         }
       },
       "required": [
         "ref",
         "action"
       ],
+      "type": "object"
+    }
+  },
+  "viewer_map": {
+    "description": "Return a bounded global map of admitted current graph pages. Read-only.\n\nRank pages by admitted incoming cross-page edges, then graph node key.\nInclude isolated pages and collapse semantic-unit endpoints to their pages.\nRelation vocabulary retains source instance and definition identities.\n\nComplete scans report exact eligible totals even when drawing is capped.\nPartial scans report observed counts, unknown exact totals and provisional\nranking. Missing, stale, unproven or incompatible snapshots are unavailable.\nNo interactive request builds or proves a cold graph snapshot.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_nodes": {
+          "default": 200,
+          "description": "Drawing cap, from 1 to 200. Default 200.",
+          "type": "integer"
+        },
+        "max_edges": {
+          "default": 400,
+          "description": "Drawing cap, from 0 to 400. Default 400.",
+          "type": "integer"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Optional declared purpose under the existing disclosure policy."
+        }
+      },
       "type": "object"
     }
   }

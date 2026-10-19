@@ -60,7 +60,8 @@ is made**, or **an observed outcome or event is reported** — capture it:
   tentative events stay quiet. Durable interpretations may be preserved with
   explicit attribution and uncertainty; they are not established facts or
   observed events. Eligibility never creates an Entity, collection, or
-  schema: an affiliation relation uses `link_acceptance`; a new Entity follows `proactive_capture`; merge or substantial curation
+  schema: a new Entity or your own affiliation edge follows `proactive_capture`;
+  accepting a queued relation uses `link_acceptance`; merge or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
   facts follow `proactive_capture` and its active disposition.
 
@@ -189,6 +190,32 @@ then attest with `resume` and `postcommit=true`. A committed note or a Saved
 marker is not coverage, and the server never claims your candidates exhaust
 the input.
 
+## Relevant due advice
+
+Activation may carry one `relevant_due_refs` candidate associated with released current material.
+Its `anchor` is the released parent reference or, for a current-state source without a reference, its released source path.
+Recent context, upkeep, ambiguous candidates and partial-only anchors do not trigger this advice.
+Missing advice does not mean nothing is due.
+
+Write advice with `scope: affected_paths` counts only affected pages. Bootstrap and review retain global counts. Treat the scopes separately.
+
+Judge whether the finding matters to the current work before raising it in the user's language.
+Raise at most one due item per maintained client conversation, including items received through the existing due-state block.
+Remember any prior due mention through continuation, compaction, hooks, MCP, REST and OAuth renewal.
+A transport session, credential, workspace or process does not define a new client conversation.
+Receiving a candidate does not use this allowance; the active agent remembers the mention without a new server ledger.
+
+Read `review_item_context(ref, expected_fingerprint)` for the needed context; its bounded lookup may fall back to an existing wider audit.
+`review_memory` has no `expected_fingerprint` argument.
+After `REVIEW_ITEM_CHANGED`, refresh context and decide again before a mutation.
+
+Use one applicable authored writer to record a verdict or resolving relation under the existing authority gates.
+For example, `observe_memory(operation="update")` uses the real unit fingerprint and current parent hash.
+The due fingerprint binds a review finding and is not the unit fingerprint.
+The existing projection update clears a resolved finding; do not add a second dismissal.
+If presentation dismissal is the decision, use one `triage_memory(ref, action="dismiss", expected_fingerprint, why)` mutation.
+That disposition does not claim an authored resolution, and no operation universally combines repair with dismissal.
+
 ## Passing the conversation to activation
 
 In a longer conversation, or when the user's words lean on attachments, pass
@@ -215,12 +242,13 @@ as your `anchor` choice, and cannot settle an ambiguity between anchors the
 user's own words reached. Earlier turns and refs never reach an anchor by
 themselves: they strengthen one the turn or your `focus` already reached, or
 break a tie when exactly one competitor was named before
-(`generation.disambiguated_by`). A turn that points back ("is it still on
-track?") and uses no word the earlier turns lack is carried from the newest
-earlier user turn that named one subject. A turn that brings in a new word
-("does it snow much in oslo?") is read as a new topic and is not carried, even
-when it also says "it"; pass `focus` when such a turn still means the earlier
-subject.
+(`generation.disambiguated_by`). When the current turn resolves no subject,
+automatic carry requires a pointing turn without new local material.
+Its content must be licensed by subject titles or the shipped task vocabulary;
+words appearing earlier do not themselves license carry.
+The newest earlier user entry that resolves subjects supplies them; multiple
+subjects remain ambiguous. If this misses a grounded follow-up, use the
+explicit recovery in [recall](recall.md).
 
 Activation reads no attachment itself and runs no media model: only the names
 you put into `focus` count. Conversation text is used for that one call and

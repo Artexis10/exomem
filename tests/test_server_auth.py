@@ -5,9 +5,11 @@ from typing import Any
 
 import httpx
 import pytest
+from mcp.shared.auth import OAuthClientInformationFull
+from pydantic import AnyUrl
 
 from exomem import server_auth
-from exomem.auth_sessions import SessionAuthority
+from exomem.auth_sessions import SessionAuthority, SessionIdentity
 from exomem.lease_coordinator import create_app
 from exomem.remote_oauth_storage import RemoteOAuthStorage
 
@@ -132,10 +134,60 @@ def test_ha_runtime_refuses_replica_local_session_authority(
 ) -> None:
     _set_oauth_env(monkeypatch)
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "https://coordinator.example")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "main")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "local")
     monkeypatch.delenv("EXOMEM_OAUTH_STORAGE_URL", raising=False)
 
     with pytest.raises(RuntimeError, match="EXOMEM_OAUTH_STORAGE_URL"):
         server_auth.build_session_authority(base_url="https://memory.example")
+
+
+@pytest.mark.anyio
+async def test_existing_local_session_survives_single_host_coordination_and_auth_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Enabling a local coordinator must not strand a session in another auth store."""
+    from fastmcp import settings
+
+    _set_oauth_env(monkeypatch)
+    monkeypatch.delenv("EXOMEM_OAUTH_STORAGE_URL", raising=False)
+    monkeypatch.setattr(settings, "home", tmp_path)
+    original = server_auth.build_oauth(require_auth=True, base_url="https://memory.example")
+    client = OAuthClientInformationFull(
+        client_id="local-client", redirect_uris=[AnyUrl("http://127.0.0.1:8765/callback")],
+    )
+    await original.register_client(client)
+    bearer, issued = await original._session_authority.issue(
+        client_id="local-client", scopes=("exomem:read",),
+        identity=SessionIdentity(github_user_id=123456, github_login="person"),
+    )
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOPOLOGY", "single-host")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://127.0.0.1:8766")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "main")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "local")
+    restarted = server_auth.build_oauth(require_auth=True, base_url="https://memory.example")
+    assert (await restarted.get_client("local-client")).client_id == client.client_id
+    assert await restarted._session_authority.validate(bearer) == issued
+    assert await restarted._session_authority.tombstone(issued.session_id, reason="operator")
+    assert await original._session_authority.validate(bearer) is None
+
+
+@pytest.mark.parametrize("storage_token", ["", "shared-secret"])
+def test_explicit_shared_auth_retains_validation_and_selection_in_single_host_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, storage_token: str,
+) -> None:
+    _set_oauth_env(monkeypatch, EXOMEM_WRITER_LEASE_TOPOLOGY="single-host",
+                   EXOMEM_WRITER_LEASE_URL="http://127.0.0.1:8766",
+                   EXOMEM_WRITER_LEASE_VAULT_ID="main", EXOMEM_WRITER_LEASE_REPLICA_ID="local",
+                   EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path),
+                   EXOMEM_OAUTH_STORAGE_URL="https://coordinator.example",
+                   EXOMEM_OAUTH_STORAGE_TOKEN=storage_token)
+    if not storage_token:
+        with pytest.raises(RuntimeError, match="EXOMEM_OAUTH_STORAGE_TOKEN"):
+            server_auth.build_session_authority(base_url="https://memory.example")
+    else:
+        authority = server_auth.build_session_authority(base_url="https://memory.example")
+        assert isinstance(authority._storage.raw, RemoteOAuthStorage)
 
 
 def test_build_oauth_constructs_durable_proxy_and_cache_disabled_verifier(

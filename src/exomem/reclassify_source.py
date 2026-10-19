@@ -620,6 +620,7 @@ def _write_correction(
     *,
     today: dt.date,
     extra_writes: tuple[PlannedWrite, ...] = (),
+    _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> tuple[str, int]:
     """Commit a correction and return the source's final path and rewrite count.
 
@@ -631,6 +632,7 @@ def _write_correction(
         batch_atomic_write(
             [PlannedWrite(path=absolute, content=transform(text)), *extra_writes],
             vault_root=vault_root,
+            _validate_prepared_bindings=_validate_prepared_bindings,
         )
         return rel, 0
     outcome = _referrer_outcome(
@@ -648,6 +650,7 @@ def _write_correction(
             today=today,
             content_transform=transform,
             extra_writes=extra_writes,
+            _validate_prepared_bindings=_validate_prepared_bindings,
         )
     except move_file_module.MoveFileError as error:
         raise ReclassifyError(error.code, error.reason) from error
@@ -740,6 +743,7 @@ def reclassify(
         transform,
         today=today,
         extra_writes=tuple(plan.writes),
+        _validate_prepared_bindings=lambda: plan.recheck_bindings(vault_root),
     )
     return ReclassifyResult(
         old_path=rel,

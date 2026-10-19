@@ -16,6 +16,8 @@ import yaml
 
 from exomem import context_roles, semantic_language_registry
 
+pytestmark = pytest.mark.reads_repository_docs
+
 SHIPPED_VOCABULARY = (
     "identity",
     "preferences",
@@ -24,6 +26,7 @@ SHIPPED_VOCABULARY = (
     "current_state",
     "recent_change",
     "active_plans",
+    "contact",
     "material",
     "methods",
     "precedents",
@@ -32,7 +35,6 @@ SHIPPED_VOCABULARY = (
     "baseline",
     "evidence",
     "open_questions",
-    "contact",
 )
 
 

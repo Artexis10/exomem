@@ -196,6 +196,52 @@ def test_edit_after_start_is_replayed_and_target_checkpoint_is_exact(
     assert stored.generation > pre_gen
 
 
+@pytest.mark.parametrize("edit_timing", ["observed_before", "missed_before", "observed_after"])
+def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit_timing: str
+) -> None:
+    """An observed edit during final proof must not waste a completed build."""
+    page = _kb_file(tmp_path, "a.md", "- [config] beforecensus ^u1")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_walk = store._walk_entries
+    walks = 0
+
+    def edit() -> None:
+        page.write_text(_page_text("a", "- [config] aftercensus ^u1"), encoding="utf-8")
+        _touch_future(page)
+        if edit_timing != "missed_before":
+            freshness.on_files_changed(tmp_path, changed=[page])
+
+    def walk_with_late_edit() -> Any:
+        nonlocal walks
+        walks += 1
+        if walks == 2 and edit_timing != "observed_after":
+            edit()
+        snapshot = real_walk()
+        if walks == 2 and edit_timing == "observed_after":
+            edit()
+        return snapshot
+
+    monkeypatch.setattr(store, "_walk_entries", walk_with_late_edit)
+    published = store.rebuild_atomic()
+    assert walks >= 2
+    assert published is (edit_timing != "missed_before")
+    with sqlite3.connect(store.path) as live:
+        contents = {row[0] for row in live.execute("SELECT content FROM semantic_units")}
+    if not published:
+        assert any("beforecensus" in content for content in contents)
+        assert not any("aftercensus" in content for content in contents)
+        return
+    assert any("aftercensus" in content for content in contents)
+    assert not any("beforecensus" in content for content in contents)
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path, schedule_repair=False) is not None
+    assert any("aftercensus" in hit.content for hit in _units_in_category(tmp_path, "config"))
+
+
 def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -884,6 +930,45 @@ def test_wal_mode_main_without_sidecars_is_persistently_switched_to_delete(
     assert not wal.exists() and not shm.exists()
 
 
+@pytest.mark.skipif(not lexstore.fts5_available(), reason="SQLite lacks FTS5")
+def test_rebuilt_catalog_serves_committed_hits_during_an_index_write(tmp_path: Path) -> None:
+    """Publishing a rebuilt catalogue must not restore reader-blocking journals."""
+    page = _kb_file(tmp_path, "a.md", "searchable committed payload")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    assert store.rebuild_atomic()
+
+    writer = store._connect()
+    try:
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("INSERT INTO meta(key, value) VALUES('pending-write', 'uncommitted')")
+        result = lexstore.search_bm25_result(tmp_path, "searchable", 5, allow_delta=False)
+        assert result.readiness.complete, result.readiness
+        assert result.value and result.value[0][0] == "Knowledge Base/a.md"
+    finally:
+        writer.rollback()
+        writer.close()
+
+    # The next replacement must still fold the live WAL safely.
+    assert store.rebuild_atomic()
+    _assert_standalone_valid_db(store.path)
+
+
+def test_inherited_catalog_warm_restores_concurrent_read_journaling(tmp_path: Path) -> None:
+    """An already-current inherited DELETE catalogue also needs off-request setup."""
+    page = _kb_file(tmp_path, "a.md")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    assert store._quiesce_live_wal()
+
+    store.rebase_inherited_checkpoints()
+
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+
+
 def test_foreground_delta_after_temp_target_rebases_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -930,6 +1015,78 @@ def test_foreground_delta_after_temp_target_rebases_replacement(
     assert any("newercontent" in c for c in contents)
     assert not any("startcontent" in c for c in contents)
     assert not any("deletedcontent" in c for c in contents)
+
+
+def test_live_blessed_inside_the_replayed_span_does_not_veto_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Steady traffic must not decline every completed detached rebuild.
+
+    The watcher blesses live during the build and the next event is still
+    unblessed at the barrier, so live sits between the build's start and its
+    rebased target. The replacement already holds that state.
+    """
+    a = _kb_file(tmp_path, "a.md", "- [config] startcontent ^u1")
+    b = _kb_file(tmp_path, "b.md", "- [config] stablecontent ^u2")
+    _seed(tmp_path, [a, b])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    real_fold = lexstore.LexicalStore._fold_to_single_file
+    injected = False
+
+    def fold_then_bless_then_lag(conn: Any) -> bool:
+        nonlocal injected
+        if not injected:
+            injected = True
+            a.write_text(_page_text("a", "- [config] blessedcontent ^u1"), encoding="utf-8")
+            _touch_future(a)
+            freshness.on_files_changed(tmp_path, changed=[a])
+            blessed = freshness.recall_triple(tmp_path, "kb")
+            assert store.catalog_readiness("kb", blessed).complete
+            b.write_text(_page_text("b", "- [config] laggingcontent ^u2"), encoding="utf-8")
+            _touch_future(b)
+            freshness.on_files_changed(tmp_path, changed=[b])
+        return real_fold(conn)
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_bless_then_lag)
+    published = store.rebuild_atomic()
+    monkeypatch.undo()
+
+    assert published is True, store._last_rebuild_result
+    assert store.catalog_checkpoint("kb") == freshness.recall_checkpoint(tmp_path, "kb")
+    contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
+    assert any("blessedcontent" in c for c in contents)
+    assert any("laggingcontent" in c for c in contents)
+
+
+@pytest.mark.parametrize(
+    ("instance", "generation", "policy"),
+    [
+        pytest.param("other-registry", 5, "policy", id="foreign registry"),
+        pytest.param("registry", 2, "policy", id="behind the build's start"),
+        pytest.param("registry", 5, "other-policy", id="changed recall policy"),
+    ],
+)
+def test_publication_guard_refuses_live_state_the_replacement_may_lack(
+    instance: str, generation: int, policy: str
+) -> None:
+    def checkpoint(instance: str, generation: int, policy: str = "policy"):
+        return freshness.RecallFreshnessCheckpoint(
+            instance, generation, (generation, 0, "digest"), policy, "access"
+        )
+
+    start = {
+        "exists": True,
+        "schema_current": True,
+        "identity": "identity",
+        "checkpoints": {"kb": checkpoint("registry", 3)},
+    }
+    now = {**start, "checkpoints": {"kb": checkpoint(instance, generation, policy)}}
+
+    assert lexstore.LexicalStore._publication_guard_changed(
+        start, now, {"kb": checkpoint("registry", 8)}
+    )
 
 
 def test_large_off_barrier_rebase_converges_without_another_full_scan(

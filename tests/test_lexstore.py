@@ -860,9 +860,8 @@ def test_source_proof_walk_failure_applies_rows_and_converges_without_rebuild(
 def test_walk_refuted_stale_proof_cannot_bless(tmp_path, monkeypatch):
     """A prepared proof must never outlive its refutation.
 
-    Two guards carry this: a walk that refutes a checkpoint EVICTS any stale
-    stored proof for that scope (the newest walk's verdict is authoritative),
-    and a proof never outlives its own batch (cleared on every exit path).
+    A refuting walk invalidates older operation-local tickets for that scope.
+    A later batch cannot borrow a ticket from an earlier failed operation.
     Act 1 pins the cross-batch leak: a batch fails transiently after its proof
     was prepared, the source mutates unobserved (generation unchanged), and
     the next batch's walk refutes that exact checkpoint — nothing may bless.
@@ -898,7 +897,6 @@ def test_walk_refuted_stale_proof_cannot_bless(tmp_path, monkeypatch):
         monkeypatch.setattr(store, "_apply_paths_locked", _failing_apply)
         blessed_before = lexstore.source_proof_telemetry()["blessed"]
         assert store.apply_watcher_batch([page], []) is False
-        leaked_after_failure = dict(store._reconciled_source_proofs)
 
         # Unobserved edit: no event, no reconcile — the registry keeps the
         # pre-edit signature, so the NEXT walk refutes checkpoint C.
@@ -944,9 +942,6 @@ def test_walk_refuted_stale_proof_cannot_bless(tmp_path, monkeypatch):
             )
             assert readiness.complete is False
 
-        # A proof never outlives its batch — success, refusal, or failure.
-        assert leaked_after_failure == {}
-        assert store._reconciled_source_proofs == {}
     finally:
         freshness.clear()
 
@@ -1477,6 +1472,34 @@ def test_emitted_parent_hints_use_json_for_large_path_sets(tmp_path):
     assert result.value == {path: None for path in paths}
 
 
+def test_emitted_parent_hints_probe_each_requested_path_by_key(tmp_path):
+    """Recall passes every lane's candidates here. Driving the join from the
+    in-scope pages rescans the JSON array once per page: a 1,000-path lookup
+    on a 7,000-page vault took 1.4 s instead of ~20 ms."""
+    paths = {f"Knowledge Base/large/page-{number:04d}.md" for number in range(50)}
+    for rel in paths:
+        _write_page(tmp_path, rel, "ordinary page")
+    assert lexstore.search_bm25(tmp_path, "ordinary", k=3, scope="kb")
+
+    conn = sqlite3.connect(lexstore.get_store(tmp_path).path)
+    executed = []
+
+    class _Recording:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+            return conn.execute(sql, params)
+
+    try:
+        hints = lexstore.get_store(tmp_path)._emitted_parent_hints_query(_Recording(), paths, "kb")
+        assert hints == {path: None for path in paths}
+        (sql, params), = executed
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    finally:
+        conn.close()
+    pages_steps = [step for step in plan if " p " in f" {step} "]
+    assert pages_steps and all("(path=?)" in step for step in pages_steps), plan
+
+
 def test_emitted_parent_hints_missing_row_is_incomplete(tmp_path):
     known = _write_page(tmp_path, "Knowledge Base/known.md", "known page")
     out_of_scope = _write_page(tmp_path, "Projects/out-of-scope.md", "outside page")
@@ -1497,6 +1520,61 @@ def test_emitted_parent_hints_missing_row_is_incomplete(tmp_path):
     )
     assert not scoped_out.readiness.complete
     assert scoped_out.value is None
+
+
+def test_eligibility_metadata_work_stays_bound_to_candidates(
+    tmp_path, monkeypatch, warm_managed_cell
+):
+    """Unrelated pages must not turn a fixed candidate lookup into a vault scan."""
+    parent = "Knowledge Base/media/demo.mp4.md"
+    child = "Knowledge Base/media/demo.mp4.frames/scene.jpg.md"
+    missing = "Knowledge Base/missing.md"
+    steps = 0
+    connect = lexstore.LexicalStore._connect
+
+    def count_step():
+        nonlocal steps
+        steps += 1
+        return 0
+
+    def measured_connect(store, *args, **kwargs):
+        conn = connect(store, *args, **kwargs)
+        conn.set_progress_handler(count_step, 1)
+        return conn
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_connect", measured_connect)
+    work = {False: [], True: []}
+    for size in (200, 800):
+        root = tmp_path / str(size)
+        _write_page(root, parent, "transcript")
+        page = _write_page(root, child, "frame OCR")
+        page.write_text(
+            "---\ntype: source\nparent_media: Knowledge Base/media/demo.mp4\n"
+            "evidence_file: Knowledge Base/media/demo.mp4.frames/scene.jpg\n"
+            "updated: 2026-01-01\n---\n# frame\n\nframe OCR\n",
+            encoding="utf-8",
+        )
+        for number in range(size):
+            _write_page(root, f"Knowledge Base/filler/{number}.md", "unrelated text")
+        warm_managed_cell(root, prebuild_refs=False)
+
+        for parents_only in (False, True):
+            steps = 0
+            result = lexstore.eligibility_metadata_result(
+                root, {child, missing}, scope="kb", freshness=None,
+                parents_only=parents_only,
+            )
+            work[parents_only].append(steps)
+            assert result.readiness.complete
+            assert set(result.value) == {child, parent}
+            assert result.value[child].parent == parent
+            assert result.value[parent].parent is None
+            assert result.value[child].updated == "2026-01-01"
+            assert (result.value[child].view is None) == parents_only
+
+    for parents_only, (small, large) in work.items():
+        assert small > 0
+        assert large <= 1.5 * small, (parents_only, small, large)
 
 
 # ---------------------------------------------------------------- substring primitive

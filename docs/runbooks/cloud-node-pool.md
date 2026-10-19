@@ -19,12 +19,20 @@ server with encrypted local cell storage), follow
   `cloud-secrets.md`. It must differ from `k3s_server_token`.
 - The first run that introduces the agent token restarts the K3s server once.
   Schedule it in a maintenance window; running cells ride through the restart.
+  Straight after that run, save the bootstrap data again, as in steps 4 to 6 of
+  [Rotate the agent token](cloud-dedicated-host.md#rotate-the-agent-token), with
+  step 6's first-selection credentials.
 - Pick an unused private address in the subnet (not the fleet server's
   `10.50.1.10`), and a type from the allow-list: `cpx42`, `ccx23`, `ccx33`
   or `ccx43`. A `cx33` (4 CPU / 8 GiB) is permitted only with a nonempty
   exact `dedicated_cell_id`, reserving the node for that one cell and zero
   general slots. Check actual same-location availability and obtain saved-plan
   cost authority before purchase; a list price does not prove stock.
+- Every agent runs the fleet server's CPU architecture: one cluster runs one
+  architecture ([node replacement](cloud-node-loss.md#change-the-cpu-architecture)).
+  The allow-list above is x86 only, so Terraform refuses agents beside a CAX
+  fleet server, and the k3s role refuses an agent whose architecture differs
+  from the server's.
 - Before a removal, confirm that no cell row carries a hold. The playbook sees
   holds on StatefulSets, but not a hold recorded only on a row whose
   StatefulSet is gone:
@@ -126,17 +134,25 @@ manual host reservation that can drift from that declaration.
 
 Run the removal playbook first, while the entry and its inventory host still
 exist. It refuses while a cell whose volume is on the target holds a
-maintenance hold, and when the cluster's cell volumes would not fit the
-remaining nodes' slots (add a node first). It also refuses while any desired
-cell template selects the target reservation, including a stopped cell;
-relocate and clear that selection first. On an agent with local storage, it
-refuses while a cell's live volume is still on the target; relocate those cells
-first ([node loss](cloud-node-loss.md)). Until the playbook relocates them
-itself, that means stopping the agent and relocating as for a lost node, which
-loses each cell's writes since its last hourly backup. It cordons, drains without force, stops K3s and every container, deletes the Node,
-and revokes the node's inter-node firewall rules. Remove nodes when no
-invitations are pending: rows admitted during the drain are not yet visible as
-volumes.
+maintenance hold, and when the cells would not fit the remaining nodes (add a
+node first). Each cell counts against the storage it uses: a cell on a Hetzner
+volume against the remaining attachment slots, and a cell on the target's
+local storage against one remaining node's pool, which must keep its snapshot
+reserve ([remove a dedicated host](cloud-dedicated-host.md#remove-the-host)).
+It also refuses while any desired cell template selects the target
+reservation, including a stopped cell;
+relocate and clear that selection first. It cordons the agent. On an agent
+with local storage, move and accept its cells before you run the playbook
+([remove the host](cloud-dedicated-host.md#remove-the-host)). The playbook
+skips a cell already bound elsewhere, and moves a cell still on the agent to
+a new claim on another node, one at a time, through a fresh stopped backup
+([move a cell](cloud-dedicated-host.md#move-a-cell-to-a-new-claim)). A failed
+move stops the removal with the agent still in the cluster and cordoned. It refuses to move
+cells off an agent that is not Ready; relocate those cells as for a lost node
+first ([node loss](cloud-node-loss.md)). Then it drains without force, stops
+K3s and every container, deletes the Node, and revokes the node's inter-node
+firewall rules. Remove nodes when no invitations are pending: rows admitted
+during the drain are not yet visible as volumes.
 
 The removal reads no secret, so it runs without the SOPS wrapper:
 

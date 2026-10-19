@@ -1,11 +1,16 @@
 ## Why
 
+Knowledge handling must preserve meaning, evidence, uncertainty and justified revisions throughout the supported product journey. Capture, structured state, relationships, history and context delivery must carry those commitments together.
+
 Ordinary conversations can leave durable facts uncaptured, identities disconnected and current context unused. Capture, entity maintenance and context activation must form one complete loop whose usefulness is demonstrated by later agent behaviour, with no user reminder to save, connect or recall.
 
 ## What Changes
 
+- Make epistemic commitments foundational across the supported knowledge lifecycle, including natural interaction and structured collections. Judge the integrated journey, rather than infer its completeness from isolated memory features. Reuse the existing tasks and storage authorities.
 - Reconcile the accepted epistemic-substrate direction (2026-10-05) within this programme: stable knowledge identities with recoverable interpretation revisions, exact explanatory relationships, scoped reusable methods and an embedded-product acceptance case. Keep the current compiler and first-owner SQLite delivery sequence; none of these refinements activates live authority or adds a parallel storage/execution system.
-- Establish one programme spanning pre-turn context activation, agent-led episode decomposition, canonical writes, entity hydration and typed relations, derived publication, and subsequent activation.
+- Establish one programme spanning pre-turn context activation, bounded same-turn task refresh, agent-led episode decomposition, canonical writes, entity hydration and typed relations, derived publication, and subsequent activation.
+- Reuse `activate_context` for agent-requested refresh after relevant evidence or a task transition. Preserve the original human request, label agent focus separately, and prevent memory-derived refresh loops. Hooks supply supported checkpoints; the active agent decides relevance.
+- Reuse installed skill and hook instructions with bounded live-state checks. Keep instruction-bearing bootstrap fallback for clients without the current contract, rather than repeatedly injecting it into capable clients.
 - Make working-set capacity follow evidence-qualified explicit current-turn contexts rather than a fixed material count: adjudicate indexed senses before admission cuts, preserve bounded implicit/categorical behavior, and measure whole-packet overhead alongside useful context. This is a correction within the existing compiler, not a new semantic task splitter or retrieval framework.
 - Make multimodal unstructured-to-governed knowledge a first-class workflow: preserve authorized originals, interpret and project into appropriate knowledge/collection destinations, correct conversationally, then prove later query/context use. Reuse the current preservation, episode and writer boundaries; do not replace raw evidence with extractions or curated reasoning with rows.
 - Distinguish a correction to one fact/projection from a proposed reusable alias, schema or routing convention. Reconcile affected derived state under existing authority, preserve source/history, and measure correction burden and repeat-error behaviour rather than treating a successful edit as a closed feedback loop.
@@ -39,9 +44,10 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 
 ### Modified Capabilities
 
-- `context-activation`: bounded, query-matched material within already admitted contexts and truthful project-registry freshness.
+- `context-activation`: bounded, query-matched material, origin-aware task refresh within the same turn, and truthful project-registry freshness.
+- `retrieve-inject-hook`: supported lifecycle checkpoints with bounded refresh and truthful host coverage.
 - `context-roles`: one explicit material lens, preserving owner overrides and the existing six-role ceiling.
-- `managed-service-upgrades`: a release that changes the lexical catalogue schema cuts over through a catalogue its standby built instead of a cold start.
+- `managed-service-upgrades`: a standby prepares a replacement for an incompatible or proven compatible stale catalogue without waiting for the serving owner's repair. Promotion still proves current source and access state before runtime admission.
 
 The existing `activate-agent-led-vocabulary-evolution` change continues to own scoped additive authority; its artifacts are revised with this programme rather than introducing a competing authority delta. The existing `add-context-activation-benchmark` change retains its fixture/scoring ownership. The integration contract adds no second mutation executor or canonical storage engine.
 

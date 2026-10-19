@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import held_fs, state_paths
+from .collection_store import schema as store_schema
 from .kbdir import kb_dirname
 
 log = logging.getLogger("exomem.state_migration")
@@ -44,9 +45,12 @@ _BOOTSTRAP_LOCK_TIMEOUT_SECONDS = 5.0
 CONNECTOR_BOUNDARY_COMPATIBILITY_ID = "connector-content-ceiling-v1"
 # The marker schema fixes this optional format ID; the coordinator still uses collections-store-v1.
 COLLECTION_MARKER_COMPATIBILITY_ID = "collections-marker-v2"
-_OPTIONAL_COMPATIBILITY_IDS = frozenset({
-    "collections-store-v1", "raw-protection-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
-    CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
+#: What a store-routed vault records; its reverse export retires these with the store schema IDs.
+_COLLECTION_STORE_COMPATIBILITY_IDS = frozenset({"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID})
+# With the store schema IDs, the closed catalog this release recognizes; an earlier release
+# reads any other ID as unknown.
+_OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
+    "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
 })
 
 
@@ -235,7 +239,7 @@ def supported_state_compatibility_ids() -> tuple[str, ...]:
 
     return (
         "raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
-        CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
+        CONNECTOR_BOUNDARY_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
     )
 
 
@@ -245,7 +249,8 @@ def partition_state_descriptor_ids(
     """Separate physical families from the closed optional compatibility catalog."""
 
     recorded = frozenset(descriptors)
-    return recorded - _OPTIONAL_COMPATIBILITY_IDS, recorded & _OPTIONAL_COMPATIBILITY_IDS
+    optional = _OPTIONAL_COMPATIBILITY_IDS | set(store_schema.compatibility_ids())
+    return recorded - optional, recorded & optional
 
 
 def _require_supported_compatibility(optional: frozenset[str]) -> None:
@@ -267,21 +272,53 @@ def _require_collection_store_recovery(session, token) -> None:
         if manifest is None or manifest["state"] != "complete":
             raise StateMigrationOfflineRequired("collection-store recovery requires complete state")
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
-        if (physical != set(_descriptor_ids()) or optional - {"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID}
+        if (physical != set(_descriptor_ids()) or optional - _store_owned_ids()
                 or manifest.get("governance_rollback") is not None
                 or manifest.get("governance_adoption") is not None
                 or scan_vault_state(session.root)):
             raise StateMigrationOfflineRequired("collection-store recovery requires ready families")
-        if optional:
-            with closing(connection.open_reader(session.path)) as reader:
+        # A schema ID alone is recorded before an adopted replica is installed, so no store need exist yet.
+        if optional & _COLLECTION_STORE_COMPATIBILITY_IDS:
+            # This check precedes admission's migration, so it reads only the head of an earlier schema.
+            with closing(connection.open_head_reader(session.path)) as reader:
                 chain.verify_store_chain(reader)
                 intent = authority.pending_create(reader)
-                raw = intent["target_marker"] if intent is not None else authority.read_marker(session.root)
-                marker = authority.parse_marker(session.root, raw)
+                # An export's marker is the one it retires; a create or migration's, the one it installs.
                 sid = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
-                if marker["store_id"] != sid:
-                    raise StateMigrationOfflineRequired("collection-store recovery identity differs")
+                fence = session.fence_client.collection_store_fence()
+                intended = None if intent is None else authority.parse_marker(session.root,
+                    intent["expected_marker"] if intent["kind"] == authority.EXPORT else intent["target_marker"])
+                foreign = fence.enrolled and fence.store_id != sid
+                # A bound first import may replace exactly its predecessor; complete import proof still precedes CAS.
+                if (foreign and intended is not None and intended["store_id"] == sid
+                        and authority.first_import_fence_matches(intent, intended, fence)
+                        and authority.intent_status(session.root, reader, intent) == "pending"):
+                    foreign = False
+                if (foreign or intended is not None and intended["store_id"] != sid
+                        or not fence.enrolled and intended is None):
+                    raise connection.CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection-store recovery identity differs")
         session.require(token)
+
+
+@contextmanager
+def _collection_store_manifest(vault_root: Path, authority_check: Callable[[], bool], action: str):
+    """Yield the complete state manifest under the migration lock, checking the caller's authority first."""
+
+    if not callable(authority_check):
+        raise StateMigrationOfflineRequired("collection-store authority is absent")
+    state_dir = state_paths.vault_state_dir(vault_root)
+    with _migration_lock(state_dir):
+        if authority_check() is not True:
+            raise StateMigrationOfflineRequired("collection-store authority is absent")
+        manifest = _load_manifest(state_dir, vault_root=vault_root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired(f"collection-store {action} requires complete state")
+        try:
+            yield state_dir, manifest
+        finally:
+            # Publication can succeed before a final durability check raises.
+            with _RESOLUTION_LOCK:
+                _RESOLUTION_CACHE.pop(_cache_key(vault_root, state_dir), None)
 
 
 def record_collection_store_compatibility(
@@ -294,15 +331,31 @@ def record_collection_store_compatibility(
     old-process exclusion; this seam establishes none of those boundaries.
     """
 
-    if not callable(authority_check):
-        raise StateMigrationOfflineRequired("collection-store authority is absent")
-    state_dir = state_paths.vault_state_dir(vault_root)
-    with _migration_lock(state_dir):
-        if authority_check() is not True:
-            raise StateMigrationOfflineRequired("collection-store authority is absent")
-        manifest = _load_manifest(state_dir, vault_root=vault_root)
-        if manifest is None or manifest["state"] != "complete":
-            raise StateMigrationOfflineRequired("collection-store enrollment requires complete state")
+    _record_optional(vault_root, authority_check, add=_COLLECTION_STORE_COMPATIBILITY_IDS)
+
+
+def record_collection_store_schema(
+    vault_root: Path, *, authority_check: Callable[[], bool], version: int | None = None,
+) -> None:
+    """Make the recorded store schema IDs those of a store at ``version``, the current schema by default.
+
+    A writer records the current schema's IDs before it migrates a store or installs a
+    migrated copy: an earlier release cannot open that store, and with the IDs recorded
+    its startup gate and the managed launcher refuse it instead. After a migration that
+    rolled back, the writer records the earlier schema again. The caller's authority is
+    the same as for ``record_collection_store_compatibility``.
+    """
+
+    wanted = frozenset(store_schema.compatibility_ids(version))
+    _record_optional(vault_root, authority_check, add=wanted,
+                     drop=frozenset(store_schema.compatibility_ids()) - wanted)
+
+
+def _record_optional(vault_root: Path, authority_check: Callable[[], bool], *,
+                     add: frozenset[str], drop: frozenset[str] = frozenset()) -> None:
+    if not (add or drop):
+        return  # A store schema without an ID has nothing to record and needs no manifest.
+    with _collection_store_manifest(vault_root, authority_check, "enrollment") as (state_dir, manifest):
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
         if (
             physical != set(_descriptor_ids())
@@ -312,15 +365,33 @@ def record_collection_store_compatibility(
             raise StateMigrationOfflineRequired("collection-store enrollment requires ready families")
         if authority_check() is not True:
             raise StateMigrationOfflineRequired("collection-store authority was lost")
-        try:
-            required = {"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID}
-            if required - optional:
-                manifest["descriptors"] = sorted(set(manifest["descriptors"]) | required)
-                _write_manifest(state_dir, manifest)
-        finally:
-            # Publication can succeed before a final durability check raises.
-            with _RESOLUTION_LOCK:
-                _RESOLUTION_CACHE.pop(_cache_key(vault_root, state_dir), None)
+        if add - optional or drop & optional:
+            manifest["descriptors"] = sorted((set(manifest["descriptors"]) - drop) | add)
+            _write_manifest(state_dir, manifest)
+
+
+def retire_collection_store_compatibility(
+    vault_root: Path, *, authority_check: Callable[[], bool],
+) -> None:
+    """Drop the store's compatibility requirement once its export retired the vault's marker.
+
+    The reverse export calls this after the vault routes no collection to the store, so
+    that a release from before the store, or from before its schema, may open this state
+    again. As with the enrollment, the caller proves its mutation authority on each check
+    and owns the store custody and export intent; this seam removes only the store's IDs.
+    """
+
+    owned = _store_owned_ids()
+    with _collection_store_manifest(vault_root, authority_check, "retirement") as (state_dir, manifest):
+        if owned & set(manifest["descriptors"]):
+            manifest["descriptors"] = sorted(set(manifest["descriptors"]) - owned)
+            _write_manifest(state_dir, manifest)
+
+
+def _store_owned_ids() -> frozenset[str]:
+    """Every ID that a store-routed vault may record: the store's own and its schema's."""
+
+    return _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset(store_schema.compatibility_ids())
 
 
 def scan_vault_state(vault_root: Path) -> dict[str, tuple[Path, ...]]:
@@ -447,12 +518,22 @@ def migration_status(vault_root: Path) -> str:
         manifest = _load_manifest(state_dir, vault_root=vault_root)
     except StateMigrationManifestError:
         return "invalid"
+    return manifest_status(manifest)
+
+
+def manifest_status(manifest: dict[str, Any] | None) -> str:
+    """What a loaded manifest records: absent, unsupported, stale, in-progress or complete.
+
+    Optional compatibility IDs sit beside the physical families in the descriptor
+    list, so only the physical families decide staleness, as at startup admission.
+    """
+
     if manifest is None:
         return "absent"
-    state = str(manifest["state"])
     physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
     if optional - set(supported_state_compatibility_ids()):
         return "unsupported"
+    state = str(manifest["state"])
     if state == "complete" and physical != set(_descriptor_ids()):
         return "stale"
     return state

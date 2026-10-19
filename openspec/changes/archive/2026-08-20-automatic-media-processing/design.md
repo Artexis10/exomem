@@ -29,7 +29,7 @@ The implementation must preserve Evidence binaries byte-for-byte, avoid expensiv
 
 A lightweight `media_processing` module will own classification, Evidence-path validation, sidecar inspection/repair, durable enqueue, reconciliation, status, and retry. Upload handling, watcher events, startup reconciliation, periodic reconciliation, and the `process_media` command will call this leaf rather than reimplementing policy.
 
-This keeps the model-heavy worker disposable and the orchestration import-safe. A watcher-only extension or a Yolo-specific recovery script was rejected because either would leave other ingress paths divergent.
+This keeps the model-heavy worker disposable and the orchestration import-safe. A watcher-only extension or a scope-specific recovery script was rejected because either would leave other ingress paths divergent.
 
 ### 2. Observe binary events separately from Markdown freshness
 

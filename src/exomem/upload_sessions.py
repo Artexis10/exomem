@@ -92,7 +92,7 @@ _SESSION_ID = re.compile(r"[0-9a-f]{32}")
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CHUNK = 1024 * 1024
-#: How long a part waits for an earlier part of the same session to finish.
+#: How long a session waits for an earlier part or failed worker to release its lock.
 _LOCK_WAIT_SECONDS = 30.0
 _now = time.time
 
@@ -160,7 +160,6 @@ class _Running:
     lock: threading.Lock = field(default_factory=threading.Lock)
     size: int = -1
     digest: Any = None
-    committing: bool = False
 
 
 _RUNNING: dict[str, _Running] = {}
@@ -195,7 +194,8 @@ def _write_record(store: Path, record: dict) -> None:
 
 def _commit_lock(store: Path, session_id: str) -> FileLock:
     """The lock a process holds while it commits this session; any other process skips it."""
-    return FileLock(store / f"{session_id}.lock", timeout=0)
+    # Admission and the daemon share this instance across threads.
+    return FileLock(store / f"{session_id}.lock", timeout=0, thread_local=False)
 
 
 def _read_record(store: Path, session_id: str) -> dict | None:
@@ -514,27 +514,17 @@ def _fail(store: Path, record: dict, code: str, reason: str) -> None:
     _forget(record["id"])
 
 
-def _commit(store: Path, session_id: str, committer: Committer) -> None:
-    running = _running(session_id)
+def _commit(store: Path, session_id: str, committer: Committer, lock: FileLock) -> None:
     try:
-        with _commit_lock(store, session_id):
-            _commit_locked(store, session_id, committer, running)
-    except Timeout:
-        pass  # another process is committing this session
+        _commit_locked(store, session_id, committer, _running(session_id))
     finally:
-        running.committing = False
+        lock.release()
 
 
 def _commit_locked(store: Path, session_id: str, committer: Committer, running: _Running) -> None:
     record = _read_record(store, session_id)
     if record is None or record.get("state") not in _COMMITTABLE:
         return
-    record = {**record, "state": COMMITTING}
-    # A retry clears the refusal it recorded last time. The state is written before the
-    # re-hash, so a client polling a multi-gigabyte retry sees it running, not retryable.
-    record.pop("code", None)
-    record.pop("reason", None)
-    _write_record(store, record)
     part = store / f"{session_id}.part"
     size = _part_size(part)
     if running.size == size and running.digest is not None:
@@ -567,7 +557,7 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
 
 
 def start_commit(session: Session, committer: Committer) -> None:
-    """Verify and commit a complete session in the background, once per process.
+    """Admit one background commit after publishing its pending state.
 
     The thread runs in the starting request's context, as `/upload` runs its
     preserve. It is a daemon: a commit that a shutdown interrupts restarts the
@@ -575,15 +565,38 @@ def start_commit(session: Session, committer: Committer) -> None:
     """
     if session.record["state"] not in _COMMITTABLE:
         return
-    running = _running(session.id)
-    with _RUNNING_LOCK:
-        if running.committing:
+    lock = _commit_lock(session.store, session.id)
+    try:
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            latest = _read_record(session.store, session.id)
+            if latest is None or latest.get("state") != RETRYABLE:
+                return
+            # A failed worker can still hold its lock during cleanup; reuse the part wait budget.
+            lock.acquire(timeout=_LOCK_WAIT_SECONDS)
+    except Timeout:
+        return
+    try:
+        record = _read_record(session.store, session.id)
+        if record is None or record.get("state") not in _COMMITTABLE:
+            lock.release()
             return
-        running.committing = True
-    context = contextvars.copy_context()
-    threading.Thread(
-        target=context.run,
-        args=(_commit, session.store, session.id, committer),
-        name=f"upload-session-commit-{session.id[:8]}",
-        daemon=True,
-    ).start()
+        # Report a failure found under the lock even when GET captured the preceding attempt.
+        if record["state"] == RETRYABLE:
+            session.record = record
+        accepted = {**record, "state": COMMITTING}
+        accepted.pop("code", None)
+        accepted.pop("reason", None)
+        _write_record(session.store, accepted)
+        # Keep the request snapshot: a GET that observed a failed attempt still reports it once.
+        context = contextvars.copy_context()
+        threading.Thread(
+            target=context.run,
+            args=(_commit, session.store, session.id, committer, lock),
+            name=f"upload-session-commit-{session.id[:8]}",
+            daemon=True,
+        ).start()
+    except BaseException:
+        lock.release()
+        raise

@@ -79,6 +79,26 @@
     group: root
     mode: "0600"
 
+# The agent-token rotation and first selection run this after their server
+# restart (docs/runbooks/cloud-dedicated-host.md, task 5.7).
+- name: Install the bootstrap re-save helper
+  ansible.builtin.copy:
+    src: exomem-k3s-resave-bootstrap.sh
+    dest: /usr/local/sbin/exomem-k3s-resave-bootstrap
+    owner: root
+    group: root
+    mode: "0750"
+
+# The client-CA rotation after a lost agent disk runs this, then restarts K3s
+# on every node (docs/runbooks/cloud-dedicated-host.md, task 5.8).
+- name: Install the client CA rotation helper
+  ansible.builtin.copy:
+    src: exomem-k3s-rotate-client-ca.sh
+    dest: /usr/local/sbin/exomem-k3s-rotate-client-ca
+    owner: root
+    group: root
+    mode: "0750"
+
 # K3s cannot list the write-only etcd bucket, so it never prunes its records of
 # the snapshots it uploaded; the bucket's lifecycle deletes the snapshots.
 - name: Install the expired etcd snapshot record pruner

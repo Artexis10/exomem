@@ -2,7 +2,7 @@
 
 ## Context
 
-The 2026-08-15 no-nudge architecture audit (KB: `Notes/Research/Exomem/no-nudge-architecture-sensors-verifiers-one-decider`; full report preserved as Evidence) mandates contracts-first sequencing: these families file before the detectors, consumers, and carriers they measure exist. Sequence 1 (f15–f19) built the governance this amendment rides — dated §7 entries, amendment receipts, registration-is-not-release, ratified-identity drift checks. Nothing here re-implements that machinery.
+The 2026-08-15 architecture audit established contracts-first sequencing: register these families before building the detectors, consumers, and carriers they measure. Sequence 1 (f15–f19) supplies dated §7 entries, amendment receipts, registration-is-not-release, and ratified-identity drift checks. This amendment reuses that governance.
 
 ## Decisions
 

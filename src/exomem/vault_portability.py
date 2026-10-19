@@ -18,7 +18,7 @@ import tempfile
 import unicodedata
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import AbstractContextManager, closing, nullcontext
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -156,6 +156,10 @@ def _is_registered_internal_state(path: str, parts: tuple[str, ...]) -> bool:
     if not parts or parts[0].casefold() != kb_dirname().casefold():
         return False
     classification = reserved_paths.classify_logical(path)
+    if classification.descriptor_id == "compiled-history":
+        from . import compiled_history
+
+        return not path.startswith(compiled_history.history_root() + "/")
     if classification.descriptor_id == "collection-replica":
         from . import record_history
         from .collection_store import authority, replica
@@ -541,7 +545,19 @@ def _open_regular_source(
     *,
     expected_signature: tuple[int, int, int, int, int, int] | None = None,
 ) -> tuple[int, tuple[int, int, int, int, int, int]]:
-    before = _safe_lstat(path)
+    try:
+        return _open_regular_source_native(path, expected_signature=expected_signature)
+    except OSError:
+        _fail("SOURCE_CHANGED_DURING_EXPORT", "a source file changed during export")
+
+
+def _open_regular_source_native(
+    path: Path,
+    *,
+    expected_signature: tuple[int, int, int, int, int, int] | None = None,
+) -> tuple[int, tuple[int, int, int, int, int, int]]:
+    """Retain regular-source checks without reclassifying the caller's native I/O errors."""
+    before = path.lstat()
     if stat.S_ISLNK(before.st_mode):
         _fail("UNSAFE_SYMLINK", "vault exports never follow symbolic links")
     if not stat.S_ISREG(before.st_mode):
@@ -559,10 +575,7 @@ def _open_regular_source(
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        _fail("SOURCE_CHANGED_DURING_EXPORT", "a source file changed during export")
+    descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
         if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
@@ -1500,6 +1513,115 @@ def _verify_migrated_archive(vault_root: Path, manifest: Mapping[str, Any], stat
             )
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedCollectionReplica:
+    """A validated private connection and the digest of its original source bytes.
+
+    The connection lives only inside its checking context.
+    """
+
+    connection: sqlite3.Connection
+    source_sha256: str
+
+
+def _validate_collection_replica_connection(vault_root, reader, check):
+    """Share structural validation between the two private replica-copy owners."""
+    from .collection_store import authority, chain, ownership, snapshot
+
+    metadata = snapshot._validate(reader, check)
+    chain.verify_store_chain(reader, check=check)
+    authority.pending_create(reader)
+    canonical, _ = ownership.declarations(vault_root, reader)
+    if canonical is None:
+        _fail("INVALID_ARCHIVE", "collection replica has no canonical declarations")
+    authority.require_projection_ownership(reader, canonical, root=vault_root)
+    check()
+    return metadata, canonical
+
+
+@contextmanager
+def _checked_collection_replica_structure(
+    vault_root: Path,
+    *,
+    source_path: Path,
+    check: Callable[[], None] = lambda: None,
+):
+    """Verify private structural evidence without granting adoption or writer authority."""
+    from .collection_store import connection, snapshot
+
+    source_path = Path(source_path)
+    # A published replica is a standalone SQLite file, never a database/WAL family.
+    if any(os.path.lexists(str(source_path) + suffix) for suffix in snapshot._COMPANIONS):
+        _fail("INVALID_ARCHIVE", "collection replica requires SQLite companions")
+    with tempfile.TemporaryDirectory(prefix="exomem-restore-replica-") as private:
+        path = Path(private) / connection.STORE_FILENAME
+        descriptor, signature = _open_regular_source(source_path)
+        digest = hashlib.sha256()
+        try:
+            with path.open("xb") as output:
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    check()
+                    digest.update(chunk)
+                    output.write(chunk)
+            if (_source_signature(os.fstat(descriptor)) != signature
+                    or _cross_source_signature(source_path.lstat()) != _cross_source_signature(os.fstat(descriptor))):
+                _fail("SOURCE_CHANGED_DURING_EXPORT", "collection replica changed during validation")
+        finally:
+            os.close(descriptor)
+        check()
+        snapshot.migrate_copy(path, check)
+        with closing(sqlite3.connect(path, isolation_level=None)) as reader, connection.checked_sql(reader, check):
+            _validate_collection_replica_connection(vault_root, reader, check)
+            yield VerifiedCollectionReplica(reader, digest.hexdigest())
+
+
+@contextmanager
+def checked_collection_replica(
+    vault_root: Path,
+    *,
+    source_path: Path | None = None,
+    ancestor_witness: bool = False,
+    check: Callable[[], None] = lambda: None,
+):
+    """Verify a replica and retain its adoption and hint checks.
+
+    ``ancestor_witness`` proves an old copy only against a validated replacement.
+    It grants no destination writer authority.
+    """
+    from .collection_store import authority, connection, replica, schema, takeover
+
+    raw_marker = authority.read_marker(vault_root)
+    source_path = replica.replica_path(vault_root) if source_path is None else Path(source_path)
+    if raw_marker is None and not source_path.is_file():
+        yield None
+        return
+    marker = None if raw_marker is None else authority.parse_marker(vault_root, raw_marker)
+    with _checked_collection_replica_structure(vault_root, source_path=source_path, check=check) as verified:
+        reader = verified.connection
+        metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
+        if marker is not None and metadata[schema.META_STORE_ID] != marker["store_id"]:
+            _fail("INVALID_ARCHIVE", "collection replica belongs to another store")
+        intent = authority.pending_create(reader)
+        refusal = takeover.replica_adoptability(metadata, raw_marker)
+        if ancestor_witness and intent is not None and intent["kind"] != authority.EXPORT:
+            # This old copy proves ancestry only; it cannot be adopted under its historical target.
+            authority.parse_marker(vault_root, intent["target_marker"].encode())
+            if refusal is not None and refusal[0] == takeover.SYNC_PENDING:
+                refusal = None
+        if refusal is not None:
+            raise connection.CollectionStoreError(*refusal)
+        if ancestor_witness:
+            present = dict(reader.execute("SELECT collection_id,manifest_path FROM collections"))
+            for entry in () if marker is None else marker["collections"]:
+                if entry["collection_id"] in present:
+                    authority.require_selected(reader, marker, entry, root=vault_root)
+        else:
+            if marker is not None:
+                authority.require_marker(reader, marker, root=vault_root)
+        check()
+        yield verified
+
+
 def prepare_restore(
     archive_path: Path | str,
     staging_root: Path | str,
@@ -1533,15 +1655,14 @@ def prepare_restore(
         _extract_verified_archive(verified.archive_path, records, temporary)
         _verify_staged_files(temporary, verified.manifest)
         from . import structured_collections as collections
-        from .collection_store import authority, chain, connection, replica
+        from .collection_store import authority, chain, connection, ownership
 
         try:
             raw_marker = authority.read_marker(temporary)
             marker = None if raw_marker is None else authority.parse_marker(temporary, raw_marker)
-            if marker is not None:
-                with closing(connection.open_reader(replica.replica_path(temporary))) as reader:
-                    chain.verify_store_chain(reader)
-                    authority.require_marker(reader, marker, root=temporary)
+            with checked_collection_replica(temporary) as verified_replica:
+                if verified_replica is not None:
+                    marker, _ = ownership.declarations(temporary, verified_replica.connection)
         except (connection.CollectionStoreError, sqlite3.Error, chain.StoreChainError,
                 collections.CollectionError, ValueError):
             _fail("INVALID_ARCHIVE", "collection store structure is invalid")

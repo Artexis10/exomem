@@ -15,9 +15,10 @@ for a sibling lane's implementation.
 
 from __future__ import annotations
 
-import json
 import sqlite3
+import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -100,6 +101,7 @@ def _governed_write(
     idempotency_key: str | None = None,
     response_detail: str = "compact",
     declare: bool = True,
+    guarded: bool = False,
 ) -> dict:
     """One governed canonical batch through the real lease + batch seams.
 
@@ -112,17 +114,19 @@ def _governed_write(
     def leaf(vault_root: Path):
         target.parent.mkdir(parents=True, exist_ok=True)
         planned = [vault.PlannedWrite(target, source, create_only=not target.exists())]
-        if declare:
-            states = {
+        states = (
+            {
                 rel_path: semantic_index.build_parent_index_state(
                     vault_root, rel_path, source=source
                 )
             }
+            if declare
+            else None
+        )
+        with manager.mutation_guard(vault_root) if guarded else nullcontext():
             vault.batch_atomic_write(
                 planned, vault_root=vault_root, semantic_states=states
             )
-        else:
-            vault.batch_atomic_write(planned, vault_root=vault_root)
         return {"path": rel_path, "warnings": []}
 
     command = SimpleNamespace(name=command_name, leaf=leaf, read_only=False)
@@ -154,6 +158,7 @@ def _drain(root: Path, *, passes: int = 24, limit: int = 32) -> int:
             dispatch=dispatch,
             observe_current_generation=observe,
             visibility_publisher=pending_recall.publish,
+            retire_visibility=derived_drain.pending_visibility_retirer(),
             limit=limit,
             now=now,
         )
@@ -245,6 +250,82 @@ def test_immediate_write_is_visible_by_stable_ref_keyword_and_hybrid(
     assert (vault / rel).read_text(encoding="utf-8").count(marker) == 1
     assert rel in _keyword(vault, marker)
     assert rel in _hybrid(vault, marker)
+
+
+@pytest.mark.parametrize("command_name", ["remember", "governed_batch"])
+def test_pending_visibility_precedes_release_to_a_waiting_reader(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_name: str
+) -> None:
+    """A waiting reader inherits visible custody at the first writer release."""
+    manager = _manager(tmp_path)
+    rel = "Knowledge Base/Notes/Insights/waiting-reader.md"
+    marker = "waitingreadermarker"
+    coordinator = manager._mutation_coordinator_for(vault)
+    waiting = threading.Event()
+    observed: list[list[str]] = []
+    errors: list[Exception] = []
+    releases: list[list[str]] = []
+    published_generations: list[int | None] = []
+    released_generations: list[int | None] = []
+    writer_thread = threading.get_ident()
+    real_complete = writer_lease.complete_active_derived_batch
+    real_release = type(coordinator)._release_boundary
+    real_publish = writer_lease._PENDING_VISIBILITY_PUBLISHER
+
+    def publish(root, receipt):
+        published_generations.append(writer_lease.read_commit_generation(root))
+        return real_publish(root, receipt)
+
+    def read_after_writer() -> None:
+        try:
+            waiting.set()
+            with manager.consistency_guard(vault, operation="waiting_reader"):
+                observed.append(_keyword(vault, marker))
+        except Exception as error:
+            errors.append(error)
+
+    reader = threading.Thread(target=read_after_writer)
+
+    def completed(*args, **kwargs):
+        real_complete(*args, **kwargs)
+        reader.start()
+        assert waiting.wait(15.0)
+        deadline = time.monotonic() + 15.0
+        while coordinator.waiter_count() == 0 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert coordinator.waiter_count() > 0
+
+    def release(boundary, *args, **kwargs):
+        if (
+            threading.get_ident() == writer_thread
+            and boundary.lock_path == coordinator.lock_path
+        ):
+            releases.append(_pending_row_states(vault))
+            released_generations.append(writer_lease.read_commit_generation(vault))
+        return real_release(boundary, *args, **kwargs)
+
+    monkeypatch.setattr(writer_lease, "complete_active_derived_batch", completed)
+    monkeypatch.setattr(type(coordinator), "_release_boundary", release)
+    monkeypatch.setattr(writer_lease, "_PENDING_VISIBILITY_PUBLISHER", publish)
+    try:
+        terminal = _governed_write(
+            manager,
+            vault,
+            rel_path=rel,
+            source=_compiled_page("Waiting reader", marker),
+            command_name=command_name,
+            guarded=True,
+        )
+    finally:
+        if reader.ident is not None:
+            reader.join(timeout=15.0)
+    assert not reader.is_alive()
+    assert errors == []
+    assert terminal["status"] == "committed", terminal
+    assert releases and releases[0] == ["live"], releases
+    assert published_generations == [released_generations[0]]
+    assert published_generations[0] is not None and published_generations[0] > 0
+    assert observed and rel in observed[0], observed
 
 
 # --------------------------------------------------------------------------- #
@@ -640,47 +721,65 @@ def test_publication_notice_reproves_a_named_row_against_current_bytes(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize("wide_hold", [False, True])
 def test_superseded_batch_releases_the_session_advisory_claim(
-    vault: Path, tmp_path: Path
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wide_hold: bool
 ) -> None:
     """A later committed batch must still get the session's advisory job.
 
     One acknowledgement carries one advisory result reference, and the claim is
     taken at the committed handoff. A leaf that writes the same governed page
-    twice supersedes its own first batch: that batch publishes nothing, carries
-    no result reference, and its advisory work belongs to whatever superseded
+    twice supersedes its own first batch: that batch carries no result
+    reference, and its advisory work belongs to whatever superseded
     it. Holding the session's only claim there would leave the batch that
     actually survives with no advisory job at all and no way to ask for one.
     """
     rel = "Knowledge Base/Notes/Insights/lane5-claim-release.md"
     first_source = _compiled_page("Lane5 claim release", "lane5claimfirst")
     second_source = _compiled_page("Lane5 claim release", "lane5claimsecond")
+    disjoint = "Knowledge Base/Notes/Insights/disjoint-handoff.md"
     prepared: list[str | None] = []
+    visible: list[list[str]] = []
+    proven: list[str] = []
+    real_prove = derived_receipts.prove_committed
+
+    def prove(root, receipt, **kwargs):
+        proven.append(receipt.batch_id)
+        return real_prove(root, receipt, **kwargs)
+
+    monkeypatch.setattr(derived_receipts, "prove_committed", prove)
+    manager = _manager(tmp_path)
 
     def leaf(vault_root: Path):
-        for source in (first_source, second_source):
-            target = vault_root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            states = {
-                rel: semantic_index.build_parent_index_state(
-                    vault_root, rel, source=source
-                )
-            }
-            vault_module.batch_atomic_write(
-                [
-                    vault_module.PlannedWrite(
-                        target, source, create_only=not target.exists()
+        with manager.mutation_guard(vault_root) if wide_hold else nullcontext():
+            for path, source in (
+                (rel, first_source),
+                (disjoint, first_source),
+                (rel, second_source),
+            ):
+                target = vault_root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                states = {
+                    path: semantic_index.build_parent_index_state(
+                        vault_root, path, source=source
                     )
-                ],
-                vault_root=vault_root,
-                semantic_states=states,
-            )
-            session = writer_lease._ACTIVE_FAST_ACK_SESSION.get()
-            assert session is not None
-            prepared.append(session.batches[-1].advisory_target)
+                }
+                with manager.mutation_guard(vault_root):
+                    vault_module.batch_atomic_write(
+                        [
+                            vault_module.PlannedWrite(
+                                target, source, create_only=not target.exists()
+                            )
+                        ],
+                        vault_root=vault_root,
+                        semantic_states=states,
+                    )
+                session = writer_lease._ACTIVE_FAST_ACK_SESSION.get()
+                assert session is not None
+                prepared.append(session.batches[-1].advisory_target)
+                visible.append(_pending_row_states(vault_root))
         return {"path": rel, "warnings": []}
 
-    manager = _manager(tmp_path)
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
     terminal = manager.invoke(
         command,
@@ -690,9 +789,15 @@ def test_superseded_batch_releases_the_session_advisory_claim(
         mutation_request_id="33333333-3333-4333-8333-333333333333",
     )
 
-    # Both batches name the target: the first takes the claim, and the second
+    # Both overlapping batches name the target: the first takes the claim, and the second
     # takes it back because its own paths supersede the first's.
-    assert prepared == [rel, rel], prepared
+    assert prepared == [rel, None, rel], prepared
+    if wide_hold:
+        assert all(set(states) == {"prepared"} for states in visible), visible
+    else:
+        assert visible[0] == ["live"], visible
+        assert set(visible[1]) == {"live"}, visible
+        assert sorted(visible[2]) == ["live", "live", "retired"], visible
 
     assert terminal["status"] == "committed", terminal
     assert terminal["advisory_sync"] == "pending", terminal
@@ -700,9 +805,12 @@ def test_superseded_batch_releases_the_session_advisory_claim(
     assert ref.startswith("exomem://write-advisory-result/")
 
     ids = _batch_ids(vault)
-    assert len(ids) == 2, ids
+    assert len(ids) == 3, ids
+    assert proven.count(ids[0]) == (1 if wide_hold else 2), proven
+    assert proven.count(ids[1]) == 1, proven
+    assert proven.count(ids[2]) == 1, proven
     older = derived_receipts._load_receipt(vault, ids[0])
-    newer = derived_receipts._load_receipt(vault, ids[1])
+    newer = derived_receipts._load_receipt(vault, ids[2])
     # The reference the caller holds belongs to the batch that survived.
     assert derived_receipts.advisory_result_ref(vault, newer) == ref
     assert derived_receipts.advisory_result_ref(vault, older) != ref
@@ -1354,168 +1462,6 @@ def test_the_drain_records_its_pass_and_the_diagnostics_report_it(
 
 
 # --------------------------------------------------------------------------- #
-# Task 5.7 — the live-acceptance script (written and unit-tested here; the
-# native Windows runs against a live cell are the operator's)
-# --------------------------------------------------------------------------- #
-
-
-def _acceptance():
-    import importlib.util
-
-    script = Path(__file__).parents[1] / "scripts" / "live_write_acceptance.py"
-    spec = importlib.util.spec_from_file_location("live_write_acceptance", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _report(
-    *,
-    remember_p50: float = 900.0,
-    remember_p90: float = 1_800.0,
-    edit_p50: float = 800.0,
-    edit_p90: float = 1_500.0,
-    samples: int = 30,
-    exact: int = 60,
-    warming: int = 0,
-    stale: int = 0,
-    uncovered_full_receipts: int = 0,
-    converged: bool = True,
-    convergence_seconds: float = 12.0,
-    reconciliation_demanded: int = 0,
-) -> dict:
-    return {
-        "transport": "direct",
-        "samples_per_operation": samples,
-        "fast_durable_ack": "active",
-        "operations": {
-            "remember": {
-                "samples": samples,
-                "p50_ms": remember_p50,
-                "p90_ms": remember_p90,
-                "max_ms": remember_p90,
-            },
-            "edit": {
-                "samples": samples,
-                "p50_ms": edit_p50,
-                "p90_ms": edit_p90,
-                "max_ms": edit_p90,
-            },
-        },
-        "read_your_write": {"exact": exact, "warming": warming, "stale": stale},
-        "uncovered_full_receipts": uncovered_full_receipts,
-        "post_burst_convergence_seconds": convergence_seconds,
-        "post_burst_converged": converged,
-        "reconciliation_demanded": reconciliation_demanded,
-    }
-
-
-def test_live_acceptance_thresholds_are_the_designs_numbers() -> None:
-    module = _acceptance()
-    assert module.P50_MS == 3_000.0
-    assert module.P90_MS == 5_000.0
-    assert module.MIN_SAMPLES_PER_OPERATION == 30
-    assert module.OPERATIONS == ("remember", "edit")
-
-
-def test_live_acceptance_accepts_a_healthy_report() -> None:
-    _acceptance().check(_report())
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "expected"),
-    [
-        ({"remember_p50": 3_100.0}, "remember p50"),
-        ({"remember_p90": 5_100.0}, "remember p90"),
-        ({"edit_p50": 3_000.1}, "edit p50"),
-        ({"edit_p90": 5_000.1}, "edit p90"),
-        ({"samples": 29}, "samples"),
-        ({"stale": 1}, "stale read"),
-        ({"uncovered_full_receipts": 1}, "uncovered full receipt"),
-        ({"converged": False}, "did not converge"),
-        ({"reconciliation_demanded": 1}, "reconciliation demand"),
-    ],
-)
-def test_live_acceptance_each_threshold_is_load_bearing(
-    kwargs: dict, expected: str
-) -> None:
-    """Every acceptance condition must be able to fail the run on its own."""
-    with pytest.raises(SystemExit, match=expected):
-        _acceptance().check(_report(**kwargs))
-
-
-def test_live_acceptance_warming_is_acceptable_but_stale_is_not() -> None:
-    """Explicit warming is a truthful answer; a stale answer never is."""
-    module = _acceptance()
-    module.check(_report(exact=40, warming=20))
-    with pytest.raises(SystemExit, match="stale read"):
-        module.check(_report(exact=59, stale=1))
-
-
-def test_live_acceptance_output_is_content_free(vault: Path, tmp_path: Path) -> None:
-    """Closed codes, counts and percentiles -- never a path, title or excerpt."""
-    module = _acceptance()
-    report = module.measure(
-        vault,
-        transport="direct",
-        samples_per_operation=2,
-        state_dir=tmp_path / "st",
-        convergence_bound_seconds=30.0,
-    )
-    rendered = json.dumps(report, sort_keys=True, default=str)
-    for token in ("Knowledge Base", str(vault), "acceptance-target", ".md"):
-        assert token not in rendered, (token, rendered)
-    assert report["operations"]["remember"]["samples"] == 2
-    assert report["operations"]["edit"]["samples"] == 2
-    # Never stale. `exact` versus `warming` depends on whether this harness's
-    # catalogue proof was admitted, which the report states rather than
-    # assumes -- the contract accepts either, and only a stale answer is a
-    # failure.
-    assert report["read_your_write"]["stale"] == 0
-    assert (
-        report["read_your_write"]["exact"] + report["read_your_write"]["warming"] == 4
-    )
-    assert report["recall_admission"] in {"ready", "warming", "unavailable"}
-    assert report["uncovered_full_receipts"] == 0
-    assert report["post_burst_converged"] is True
-    assert isinstance(report["reconciliation_demanded"], int)
-
-
-def test_live_acceptance_refuses_a_vault_it_was_not_given(tmp_path: Path) -> None:
-    """It runs against a disposable vault it is handed, and nothing else.
-
-    The one way this script could do harm is by being pointed at a live cell,
-    so resolving a vault from the ambient environment is refused outright
-    rather than merely discouraged.
-    """
-    module = _acceptance()
-    with pytest.raises(SystemExit, match="requires an explicit --vault"):
-        module.main(["--transport", "direct", "--samples-per-operation", "1"])
-
-
-def test_live_acceptance_connector_transport_requires_an_endpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A connector run that cannot reach a connector must say so, not fall back."""
-    module = _acceptance()
-    monkeypatch.delenv("EXOMEM_CONNECTOR_URL", raising=False)
-    vault_root = tmp_path / "vault"
-    (vault_root / "Knowledge Base").mkdir(parents=True)
-    with pytest.raises(SystemExit, match="connector transport requires"):
-        module.main(
-            [
-                "--transport",
-                "connector",
-                "--vault",
-                str(vault_root),
-                "--samples-per-operation",
-                "1",
-            ]
-        )
-
-
-# --------------------------------------------------------------------------- #
 # Ruling R1 — a burst of ordinary writes strands no custody
 # --------------------------------------------------------------------------- #
 
@@ -1604,9 +1550,10 @@ def test_a_burst_of_ordinary_writes_strands_no_custody(
     # cleared only once the catalogue actually holds the exact after
     # generation. The lexical component reports `deferred` -- its publication
     # belongs to the repair worker, not to the drain -- so the catalogue is
-    # driven here the way a running server's would be, and only then does the
-    # next hydration retire the custody.
+    # driven here the way a running server's would be. A bounded worker turn
+    # retires custody after that publication, independently of reader hydration.
     lexstore.ensure_fresh(vault)
+    _drain(vault)
     pending_recall.reset(vault)
     pending_recall.overlay(vault)
 

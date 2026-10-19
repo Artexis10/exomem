@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import ipaddress
 import json
 import os
@@ -38,8 +40,9 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "Private JSON object of K3s agents Terraform does not create (dedicated or "
             "auction servers, other providers), keyed by inventory name: ipv4, "
-            "admin_address, private_ip, link (wireguard or vswitch), data_disks and "
-            "optional wipe. A file holding {} when there are none."
+            "admin_address, private_ip, link (wireguard or vswitch), data_disks, "
+            "optional wipe and, on a wireguard host, optional wireguard_public_key. "
+            "A file holding {} when there are none."
         ),
     )
     return parser
@@ -167,6 +170,22 @@ def _data_disks(name: str, host: dict[str, Any]) -> tuple[list[str], list[str]]:
     return disks, wipe
 
 
+def _wireguard_public_key(name: str, host: dict[str, Any]) -> str:
+    """The recorded key, in the one form `wg pubkey` prints: canonical base64 of 32 bytes.
+
+    The role renders it into every peer's wg-quick file, which runs commands as
+    root, and compares it with the key the host itself reports.
+    """
+    value = host["wireguard_public_key"]
+    try:
+        decoded = base64.b64decode(value, validate=True) if isinstance(value, str) else b""
+    except binascii.Error:
+        decoded = b""
+    if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError(f"{name}: wireguard_public_key must be one WireGuard public key")
+    return value
+
+
 def _dedicated_hosts(
     path: Path, user: str, vswitch: dict[str, Any] | None
 ) -> dict[str, dict[str, Any]]:
@@ -219,6 +238,12 @@ def _dedicated_hosts(
         elif link != "wireguard":
             raise ValueError(f"{name}: link must be wireguard or vswitch")
         coordinates["k3s_private_link"] = link
+        # Only a WireGuard host's key reaches its peers' configuration; a run
+        # limited to the server reads it from here (task 6.6).
+        if "wireguard_public_key" in host:
+            if link != "wireguard":
+                raise ValueError(f"{name}: wireguard_public_key needs link wireguard")
+            coordinates["k3s_wireguard_public_key"] = _wireguard_public_key(name, host)
         hosts[name] = coordinates
     return hosts
 

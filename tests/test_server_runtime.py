@@ -292,6 +292,7 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
 def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    readiness.reset()
     monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     calls: list[str] = []
     observed_timeouts: list[float | None] = []
@@ -356,6 +357,7 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
 def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    readiness.reset()
     monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     managed_at_compute: list[bool] = []
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
@@ -514,6 +516,52 @@ def test_local_runtime_activation_falls_back_without_liveness_probe(
 
     try:
         asyncio.run(exercise())
+    finally:
+        readiness.reset()
+
+
+def test_stdio_transport_activates_when_the_pipe_opens_not_on_the_fallback_timer(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A stdio client has no `/health` probe. Workers that start on the 5 s
+    # fallback timer land their CPU burst inside the client's first queries.
+    import io
+
+    from exomem import server
+    from exomem.governance import authorization_transport
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    activated = threading.Event()
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda root: activated.set() if root == vault else None,
+    )
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+    mcp = server.ExomemFastMCP("stdio-activation-probe", lifespan=activation.lifespan())
+    mcp._exomem_local_runtime_activation = activation
+
+    class _ClientClosesOnceWorkersStart(io.RawIOBase):
+        # The client sends nothing and closes stdin when the workers start,
+        # or after 5 s, far inside the 60 s fallback timer.
+        def readable(self) -> bool:
+            return True
+
+        def readinto(self, _buffer) -> int:
+            activated.wait(5.0)
+            return 0
+
+    stdin = io.BufferedReader(_ClientClosesOnceWorkersStart())
+    monkeypatch.setattr(authorization_transport.sys, "stdin", SimpleNamespace(buffer=stdin))
+    monkeypatch.setattr(authorization_transport.sys, "stdout", SimpleNamespace(buffer=io.BytesIO()))
+
+    try:
+        asyncio.run(mcp.run_stdio_async(show_banner=False))
+        assert activated.is_set()
     finally:
         readiness.reset()
 
@@ -971,6 +1019,9 @@ def test_later_drop_is_immediately_blocked_after_runtime_start_failure(
 
 
 def _quiet_starters(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    monkeypatch.setattr(
+        server_runtime.LocalRuntimeActivation, "_start_catalogue_recovery", lambda self, _root: None
+    )
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
     monkeypatch.setattr(
         server_runtime, "_start_compute_runtime", lambda _root: calls.append("compute")
@@ -1044,7 +1095,11 @@ def test_a_service_started_with_the_dreamer_off_starts_it_when_switched_on(
     _quiet_starters(monkeypatch, [])
     # `fx.build` seeded freshness as the watcher does; a stand-in that says so
     # keeps activation from revoking it.
-    watcher = SimpleNamespace(wait_until_seeded=lambda timeout: True, stop=lambda: None)
+    watcher = SimpleNamespace(
+        wait_until_seeded=lambda timeout: True,
+        arm_optional_recovery=lambda: None,
+        stop=lambda: None,
+    )
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: watcher)
     # The compute runtime's own config poll, at a test interval.
     monkeypatch.setattr(

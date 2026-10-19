@@ -674,16 +674,84 @@ def finish_images(tag: str, images: dict, directory: Path) -> None:
         )
 
 
+def join_image(repository: str, name: str, directory: Path) -> str:
+    # The multi-platform release contract fixes these two native runtime platforms.
+    platforms = ("linux/amd64", "linux/arm64")
+    sources = []
+    for platform in platforms:
+        architecture = platform.removeprefix("linux/")
+        digest = _digest(
+            (directory / f"{name}-{architecture}.digest").read_text().strip(),
+            label="native image digest",
+        )
+        sources.append(f"{repository}@{digest}")
+    command = ["docker", "buildx", "imagetools", "create"]
+    # Buildx adds one display newline; the remaining bytes are the manifest it pushes.
+    raw = subprocess.check_output([*command, "--dry-run", *sources]).removesuffix(b"\n")
+    index = json.loads(raw)
+    if (
+        index.get("schemaVersion") != 2
+        or index.get("mediaType") != "application/vnd.oci.image.index.v1+json"
+    ):
+        raise ValueError("native image join must produce an OCI image index")
+    manifests = index.get("manifests")
+    if not isinstance(manifests, list) or not manifests:
+        raise ValueError("native image index has no platform descriptors")
+    runtime = []
+    for descriptor in manifests:
+        if not isinstance(descriptor, dict):
+            raise ValueError("native image platform descriptor is malformed")
+        _digest(descriptor.get("digest"), label="native image platform digest")
+        if (
+            descriptor.get("mediaType") != "application/vnd.oci.image.manifest.v1+json"
+            or type(descriptor.get("size")) is not int
+            or descriptor["size"] <= 0
+        ):
+            raise ValueError("native image platform descriptor has invalid media type or size")
+        platform_info = descriptor.get("platform") or {}
+        value = f"{platform_info.get('os')}/{platform_info.get('architecture')}"
+        # BuildKit stores its provenance as unknown/unknown attestation manifests.
+        if (
+            value == "unknown/unknown"
+            and descriptor.get("annotations", {}).get("vnd.docker.reference.type")
+            == "attestation-manifest"
+        ):
+            continue
+        runtime.append(value)
+    if sorted(runtime) != list(platforms):
+        raise ValueError("native image platforms must be exactly linux/amd64 and linux/arm64")
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    destination = f"{repository}@{digest}"
+    run(*command, "--tag", destination, *sources)
+    published = subprocess.check_output(
+        ["docker", "buildx", "imagetools", "inspect", "--raw", destination]
+    ).removesuffix(b"\n")
+    if published != raw:
+        raise ValueError("published native image index differs from the validated bytes")
+    verify_build_target(destination, name)
+    return digest
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     # Commands are this CLI's closed protocol, not authored vocabulary.
     parser.add_argument(
         "command",
-        choices=("assets", "distributions", "cloud", "upload", "pypi", "images", "finish-images"),
+        choices=(
+            "assets",
+            "distributions",
+            "cloud",
+            "upload",
+            "pypi",
+            "images",
+            "finish-images",
+            "join-image",
+        ),
     )
     parser.add_argument("--tag", required=True)
     parser.add_argument("--directory", type=Path, default=Path("dist"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--image", help="Image role from the publication plan to join")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.command == "assets":
@@ -716,6 +784,13 @@ def main() -> None:
                 )
             )
         )
+    elif args.command == "join-image":
+        if args.dry_run:
+            parser.error("join-image publishes an index and cannot run in a dry run")
+        images = json.loads(os.environ["IMAGES"])
+        if args.image not in images:
+            parser.error("--image must name an image in the publication plan")
+        print(join_image(images[args.image]["ref"].rsplit(":", 1)[0], args.image, args.directory))
     else:
         finish_images(args.tag, json.loads(os.environ["IMAGES"]), args.directory)
 

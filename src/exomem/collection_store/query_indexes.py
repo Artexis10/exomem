@@ -147,7 +147,8 @@ def _upsert_sql(plan: ProjectionPlan) -> str:
 
 
 def build_projection_plan(collection_id: str, fields: Mapping, indexes: tuple[IndexSpec, ...], *,
-                          generation: int = 1, scalar_paths: Mapping | None = None) -> ProjectionPlan:
+                          generation: int = 1, scalar_paths: Mapping | None = None,
+                          payload_layout=None, file_role=None) -> ProjectionPlan:
     """Freeze a canonical collection's validated logical index intent.
 
     These templates do not install, backfill or mark a projection ready. Their
@@ -172,4 +173,12 @@ def build_projection_plan(collection_id: str, fields: Mapping, indexes: tuple[In
             ):
                 raise IndexDeclarationError("INVALID_INDEX_DECLARATION", "declared scalar path required", f"fields.{key.field}")
             scalars.append(ScalarProjection(key.field, kind, path))
+    if payload_layout is not None:
+        from .native_operands import FileRole
+        from .native_projections import NativeProjectionPlan
+
+        return NativeProjectionPlan(collection_id, generation, tuple(scalars), normalized, payload_layout,
+                                    FileRole.STORE if file_role is None else FileRole(file_role))
+    if file_role is not None:
+        raise ValueError("a native file role requires its payload layout")
     return ProjectionPlan(collection_id, generation, tuple(scalars), normalized)

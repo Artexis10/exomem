@@ -767,18 +767,34 @@ class AuthorizationSessionMiddleware(Middleware):
     async def _read_content(self, context, call_next, error_type):
         who = principal_module.resolve_mcp_principal()
         try:
+            from .. import artifact_recovery
+
+            uri = str(getattr(context.message, "uri", ""))
+            grant = None
+            if uri.startswith(artifact_recovery.RESOURCE_PREFIX):
+                who = artifact_recovery.native_principal(self.vault_root, uri, who)
+                grant = uri[len(artifact_recovery.RESOURCE_PREFIX):]
+                # FastMCP traces the dispatch URI after middleware; retain the capability only in request-local custody.
+                message = context.message.model_copy(update={"uri": artifact_recovery.RESOURCE_PREFIX + "authorized"})
+                context = context.copy(message=message)
             if not await auth_sessions.origin_session_active(who):
                 raise AuthorizationContextUnavailable
             revision = connector_boundary.cache_identity(self.vault_root, who)
             unrestricted = connector_boundary.unrestricted(self.vault_root, who)
-            with principal_module.request_scope(who):
+            with principal_module.request_scope(who), artifact_recovery.native_grant_scope(grant) as native:
                 result = await call_next(context)
             changed = connector_boundary.cache_identity(self.vault_root, who) != revision
             limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, who)
-            if not await auth_sessions.origin_session_active(who) or changed and limited:
+            if grant is not None:
+                # The native leaf owns the last await and its synchronous version/release fence.
+                if not native.completed:
+                    raise AuthorizationContextUnavailable
+            elif not await auth_sessions.origin_session_active(who):
+                raise AuthorizationContextUnavailable
+            if changed and limited:
                 raise AuthorizationContextUnavailable
             return result
-        except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
+        except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable, artifact_recovery.RecoveryUnavailable):
             raise error_type("request authority changed before result consumption") from None
 
     async def on_read_resource(self, context, call_next):

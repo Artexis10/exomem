@@ -28,3 +28,18 @@
 ## 6. Live acceptance
 
 - [ ] 6.1 After release and connector refresh, accept each client path live: a ChatGPT conversation preserves attached images with `transcriptions`, a local client redeems an `exomem attach` handle over its local token, and claude.ai code execution uploads an attached file after the user's opt-in; each stored artifact's SHA-256 matches the original.
+
+## 7. Recover originals across clients
+
+- [ ] 7.1 Verify each supported client's documented file-output interface and actual consumption; distinguish native files, resource references and HTTPS fallback.
+- [ ] 7.2 Extend existing transfer owners to retrieve an exact stored artifact version through existing identity, session and full-byte disclosure checks.
+- [ ] 7.2a Reuse retained copying into private disk storage and thread computed identity through all disclosure owners; prove bounded original reads and unchanged scope decisions.
+- [ ] 7.3 Bind new short-lived download grants to one artifact version; verify absent, expired, revoked, foreign and changed-version authority without content or existence leakage.
+- [ ] 7.3a Match native caller bindings, recheck authority after staging, preserve header-only legacy tokens, and verify interruption cleanup plus capability-free logs.
+- [ ] 7.4 Prove isolated preservation, external-source removal, original retrieval, client consumption, derivative provenance and re-preservation with matching original hashes.
+- [ ] 7.4a Verify human browser download without hidden headers and bounded recovery of larger audio/video originals; keep unsupported client payloads explicit.
+- [ ] 7.5 Deliver the cohesive outbound batch after independent security review and required CI; verify each released client path before closing its acceptance.
+- [ ] 7.6 Deliver the compatible Cloud gateway/runtime bridge through its existing deployment owners; verify originating OAuth binding, cell isolation and the human browser route before claiming Cloud recovery.
+
+Outbound delivery has its own security and deployment boundary. It does not delay
+the already-reviewed inbound preservation work or another accepted release base.

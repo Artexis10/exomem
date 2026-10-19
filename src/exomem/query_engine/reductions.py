@@ -215,12 +215,30 @@ def _from_rollup(session, shape: _Shape, plan: _Plan, after: str | None):
         raise QueryError("QUERY_CURSOR_STALE")
 
 
-def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple[str, ...]):
+def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple[str, ...], *, semantic_fields=frozenset()):
     """Choose released dependencies before decoding any canonical value."""
     from ..collection_store.field_admission import WHOLE_SUBTREE
 
-    selection = session._field_plans[collection_id].fields
-    if layout is not None and all(name in layout.fields and (selection.get(name) is True
+    selection = session._selected_fields(collection_id, fields)
+    if layout is not None and layout.encoding == typed_storage.TYPED_V2:
+        from ..collection_store.native_rows import prepare_dense_selection
+
+        prepared = prepare_dense_selection(session.connection, layout, selection,
+                                           max_bytes=_MAX_DECODE_BYTES, check=session.check, semantic_fields=semantic_fields)
+        if prepared is not None:
+            columns, decode_dense = prepared
+
+            def decode_native(row):
+                physical = row[1:]
+                values = decode_dense(physical)
+                return values if values is not None else session.selected_values(
+                    physical[0], layout, fields, max_bytes=_MAX_DECODE_BYTES, check=session.check)
+
+            return (f"SELECT i.item_key,{columns} FROM {layout.items} i "
+                    f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id "
+                    f"WHERE i.collection_id=? AND {predicate}"), decode_native
+
+    if layout is not None and layout.encoding == typed_storage.TYPED_V1 and all(name in layout.fields and (selection.get(name) is True
                                  or selection.get(name) is WHOLE_SUBTREE) for name in fields):
         # Dense admitted scalars share one scan; residuals still need the bounded field-tree reader.
         columns = [(name, layout.fields.index(name)) for name in fields]
@@ -269,7 +287,17 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
     Rows of buckets before the cursor's bucket are skipped, not retained.
     """
     read = shape.reads()
-    sql, decode = _scan_sql(session, collection_id, layout, predicate, read)
+    semantic = frozenset()
+    if (session._project_values is None and shape.basis is not None
+            and shape.basis.field not in (*shape.fields, *shape.others)
+            and layout is not None and layout.encoding == typed_storage.TYPED_V2):
+        from ..collection_store.native_layout import Codec
+
+        name = shape.basis.field
+        if name in layout.fields and layout.codecs[layout.fields.index(name)] is (
+                Codec.DATE if shape.basis.kind == "date" else Codec.DATETIME):
+            semantic = frozenset((name,))
+    sql, decode = _scan_sql(session, collection_id, layout, predicate, read, semantic_fields=semantic)
     project = session._project_values
     basis, bucket, timed = shape.basis, "", shape.timed
     start, end = shape.window
@@ -290,6 +318,11 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
                 raise QueryError("QUERY_UNAVAILABLE") from error
             if project is not None:
                 values = project(values)
+            item_key = row[0]
+            if layout is not None and layout.encoding == typed_storage.TYPED_V2 and type(item_key) is bytes:
+                from ..collection_store.native_identity import decode as decode_identity
+
+                item_key = decode_identity(item_key, layout.identity)
             order = None
             if basis is not None:
                 located = basis.locate(values, ordered=latest)
@@ -317,7 +350,7 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
             group[1] += 1
             accumulators = group[2]
             for name, kind, extremes in reduced:
-                retained += accumulators[name].add(values.get(name), kind, row[0], order, extremes)
+                retained += accumulators[name].add(values.get(name), kind, item_key, order, extremes)
             if retained > limits.max_state_bytes:
                 raise QueryError("QUERY_COST_LIMIT")
     finally:

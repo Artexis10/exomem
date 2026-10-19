@@ -29,7 +29,7 @@
 - name: Validate K3s and off-host snapshot inputs
   ansible.builtin.assert:
     that:
-      - ansible_facts['architecture'] == "x86_64"
+      - ansible_facts['architecture'] in k3s_binaries
       - k3s_server_hosts | length == 1
       - k3s_server_token | length >= 32
       - k3s_etcd_s3_endpoint | length > 0
@@ -41,25 +41,66 @@
       - groups['k3s_agents'] | default([]) | length == 0 or k3s_agent_token | length >= 32
       - k3s_agent_token | length == 0 or (k3s_agent_token | length >= 32 and k3s_agent_token != k3s_server_token)
     fail_msg: >-
-      Pinned x86 K3s, one server, complete encrypted snapshot credentials, and a
-      distinct agent token of at least 32 characters whenever agents exist are required.
+      A K3s binary pinned for this node's architecture, one server, complete
+      encrypted snapshot credentials, and a distinct agent token of at least 32
+      characters whenever agents exist are required.
   no_log: true
   when: k3s_node_role == 'server'
 
 - name: Validate K3s agent join inputs
   ansible.builtin.assert:
     that:
-      - ansible_facts['architecture'] == "x86_64"
+      - ansible_facts['architecture'] in k3s_binaries
       - k3s_server_hosts | length == 1
       - inventory_hostname not in k3s_server_hosts
       - hostvars[k3s_server_hosts[0]]['private_node_ip'] | default('') | length > 0
+      # One cluster runs one CPU architecture. The server's facts come from the
+      # earlier plays of the same run; without them the agent does not join.
+      - ansible_facts['architecture'] == hostvars[k3s_server_hosts[0]]['ansible_facts']['architecture'] | default('')
       - k3s_agent_token | length >= 32
       - k3s_agent_token != k3s_server_token
     fail_msg: >-
-      An agent needs exactly one inventoried server with a private address and a
-      dedicated agent token of at least 32 characters that differs from the server token.
+      An agent needs a K3s binary pinned for its architecture, the server's CPU
+      architecture, exactly one inventoried server with a private address, and a
+      dedicated agent token of at least 32 characters that differs from the
+      server token.
   no_log: true
   when: k3s_node_role == 'agent'
+
+# Before any restart. Prevents: VXLAN packets larger than a link in use, which
+# that link drops while every node stays Ready, and a dedicated host joining
+# before the MTU is set. Fires wrongly: never for an MTU that fits every link.
+- name: Validate the flannel MTU against the links in use
+  ansible.builtin.assert:
+    that:
+      - k3s_flannel_mtu is none or k3s_flannel_mtu is integer
+      # No link in design D8 is below 1400; the 1280 floor only catches a mistyped value.
+      - k3s_flannel_mtu is none or (k3s_flannel_mtu >= 1280 and k3s_flannel_mtu <= k3s_smallest_link_mtu | int)
+      - k3s_flannel_mtu is not none or (k3s_vswitch_hosts + k3s_wireguard_hosts) | length == 0
+    fail_msg: >-
+      k3s_flannel_mtu must be unset or an integer from 1280 to {{ k3s_smallest_link_mtu }},
+      the smallest link in use, and it must be set before any vSwitch or WireGuard
+      host joins. It is {{ k3s_flannel_mtu | to_json }}.
+
+- name: Look for a flannel configuration the role installed
+  ansible.builtin.stat:
+    path: "{{ k3s_flannel_conf_path }}"
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: k3s_flannel_conf_installed
+  when: k3s_flannel_mtu is none
+
+# Prevents: a split MTU nothing reports. Without the MTU, K3s writes its own
+# configuration, and a restart keeps flannel.1 at the role's old MTU.
+- name: Refuse to unset a flannel MTU the role applied
+  ansible.builtin.assert:
+    that:
+      - not k3s_flannel_conf_installed.stat.exists
+    fail_msg: >-
+      {{ k3s_flannel_conf_path }} exists but k3s_flannel_mtu is unset. Undo the MTU by
+      setting k3s_flannel_mtu to {{ k3s_cloud_network_mtu }}, never by unsetting it.
+  when: k3s_flannel_mtu is none
 
 - name: Look for the removal marker on the agent
   ansible.builtin.stat:

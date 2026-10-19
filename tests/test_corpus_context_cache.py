@@ -22,6 +22,7 @@ import pytest
 from exomem import (
     activation_manifest,
     freshness,
+    memory_refs,
     relation_registry,
     semantic_contract,
     semantic_language_registry,
@@ -305,12 +306,64 @@ def test_markdown_delete_reconciles_without_full_rebuild(
     assert all(entry.path != removed for entry in second.identity_census.entries)
 
 
+@pytest.mark.parametrize(
+    ("title", "body", "rebuilds_corpus"),
+    [
+        # A new title can change how every other page's links resolve.
+        ("Incremental", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", True),
+        # An in-place edit re-derives only the edited page's own facts.
+        ("One", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", False),
+    ],
+    ids=["retitled", "edited-in-place"],
+)
 def test_incremental_reconcile_matches_full_rebuild(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    title: str,
+    body: str,
+    rebuilds_corpus: bool,
 ) -> None:
     _shared_context(vault)
-    (vault / _PAGE_REL).write_text(
-        _page(title="Incremental", body="Changed with the same governed rules.\n"),
+    (vault / _PAGE_REL).write_text(_page(title=title, body=body), encoding="utf-8")
+    real_rebuild = semantic_contract._context_from_state_map
+    rebuilt_corpus: list[bool] = []
+
+    def record_rebuild(*args, **kwargs):
+        rebuilt_corpus.append(True)
+        return real_rebuild(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(semantic_contract, "_context_from_state_map", record_rebuild)
+        incremental = _shared_context(vault)
+    assert bool(rebuilt_corpus) is rebuilds_corpus
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    rebuilt = _shared_context(vault)
+
+    assert rebuilt.relation_facts
+    assert incremental.as_dict() == rebuilt.as_dict()
+
+
+def test_edit_to_a_page_sharing_its_id_keeps_relation_identities_distinct(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared_id = "0b7c6f3e-8d2a-4c1e-9f5b-2a6d8e4c1b3f"
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    relations = "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n"
+    # A copy outside the KB sorts first and has no stable-identity census entry.
+    copy = vault / "Archive" / "copy.md"
+    copy.parent.mkdir()
+    for path in (copy, notes / "one.md"):
+        path.write_text(
+            f"---\ntitle: {path.name}\ntype: insight\nstatus: active\nproject: atlas\n"
+            f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\n{relations}",
+            encoding="utf-8",
+        )
+    _shared_context(vault)
+    (notes / "one.md").write_text(
+        f"---\ntitle: one.md\ntype: insight\nstatus: active\nproject: atlas\n"
+        f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\nEdited.\n\n{relations}",
         encoding="utf-8",
     )
     incremental = _shared_context(vault)
@@ -319,6 +372,40 @@ def test_incremental_reconcile_matches_full_rebuild(
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
     rebuilt = _shared_context(vault)
 
+    assert len({fact.identity for fact in rebuilt.relation_facts}) == 2
+    assert incremental.as_dict() == rebuilt.as_dict()
+
+
+def test_edit_to_a_unit_target_keeps_shared_id_inbound_identities(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared_id = "4d1f7a2c-9b3e-4c6a-8e5d-1f2a3b4c5d6e"
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    (notes / "two.md").write_text(
+        _page(title="Two", body="## Observations\n\n- [claim] The first wording ^claim\n"),
+        encoding="utf-8",
+    )
+    # Six linking pages share one id, so a hash-ordered re-derive would number
+    # their identical facts in a different order from a full build.
+    for index in range(6):
+        (notes / f"link-{index}.md").write_text(
+            f"---\ntitle: Link {index}\ntype: insight\nstatus: active\nproject: atlas\n"
+            f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\n"
+            "## Relations\n- supports [[Knowledge Base/Notes/Insights/two#^claim]]\n",
+            encoding="utf-8",
+        )
+    _shared_context(vault)
+    (notes / "two.md").write_text(
+        _page(title="Two", body="## Observations\n\n- [claim] The second wording ^claim\n"),
+        encoding="utf-8",
+    )
+    incremental = _shared_context(vault)
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    rebuilt = _shared_context(vault)
+
+    assert len({fact.identity for fact in rebuilt.relation_facts}) == 6
     assert incremental.as_dict() == rebuilt.as_dict()
 
 
@@ -332,6 +419,8 @@ def test_live_event_patch_makes_hot_reads_census_free(
         "vault",
         ((str(path), freshness.stat_signature(path)) for path in pages),
     )
+    # A replacement baseline must first prove the retained corpus census.
+    assert _shared_context(vault) is first
     page = vault / _PAGE_REL
     page.write_text(_page(title="Event patched"), encoding="utf-8")
     freshness.on_files_changed(vault, changed=(page,))
@@ -955,24 +1044,34 @@ def test_a_second_publisher_joins_no_second_whole_vault_build(
     """
     entered = threading.Event()
     release = threading.Event()
-    calls: list[tuple] = []
+    calls: list[Path] = []
+    censuses: list[Path] = []
+    real_build = semantic_contract._build_corpus_context_uncached
+    real_census = semantic_contract._corpus_census
 
-    def blocking_build(root: Path, cache_key: tuple[str, str]) -> bool:
-        calls.append(cache_key)
+    def counted_census(root: Path):
+        censuses.append(root)
+        return real_census(root)
+
+    def blocking_build(root: Path, **kwargs):
+        calls.append(root)
         entered.set()
         assert release.wait(_HOLD_SECONDS)
-        return False
+        return real_build(root, **kwargs)
 
-    monkeypatch.setattr(semantic_contract, "_build_and_admit_corpus_context", blocking_build)
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", blocking_build)
+    monkeypatch.setattr(semantic_contract, "_corpus_census", counted_census)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         first = pool.submit(semantic_contract._populate_corpus_context_after_miss, vault)
         assert entered.wait(_OBSERVE_SECONDS), "the first publisher never reached the build"
 
         # The second publisher finds the same cold key mid-build and must
-        # return rather than start its own.
+        # return without another whole-vault census or parse.
+        before = len(censuses)
         semantic_contract._populate_corpus_context_after_miss(vault)
         assert len(calls) == 1
+        assert len(censuses) == before
 
         release.set()
         first.result(timeout=10)
@@ -1220,6 +1319,42 @@ def test_a_warm_owner_view_follows_a_relation_save_without_a_page_edit(vault: Pa
             why="a vault relation",
         )
         assert "vault.hosts" in relations()
+
+
+def test_a_warm_supplied_view_follows_the_registry_it_is_handed(vault: Path) -> None:
+    """A supplied relation registry is the meaning of every unbound page.
+
+    Relation review hands the corpus the registry it loaded. A view warmed with
+    one registry must not answer for a caller holding another, even over the
+    same unchanged pages and overlay.
+    """
+    from exomem.governance.principal import library_scope
+
+    (vault / _PAGE_REL).write_text(
+        _page(title="One", body="- vault.hosts [[Knowledge Base/Notes/Insights/two]]\n"),
+        encoding="utf-8",
+    )
+    language = semantic_language_registry.load_registry(vault)
+
+    def relations(registry: relation_registry.RelationRegistry) -> set[str | None]:
+        context = semantic_contract.build_corpus_context_with_census(
+            vault, registry=registry, language_registry=language
+        )[0]
+        return {
+            fact.canonical_relation
+            for fact in context.relation_facts
+            if fact.logical_source_path == _PAGE_REL
+        }
+
+    proposed = relation_registry.load_registry(vault, proposal={
+        "schema_version": 1,
+        "extensions": {"vault.hosts": {
+            "parent": "relates_to", "description": "A venue hosts an event.",
+        }},
+    })
+    with library_scope():
+        assert "vault.hosts" not in relations(relation_registry.load_registry(vault))
+        assert "vault.hosts" in relations(proposed)
 
 
 _MEETING_REL = "Knowledge Base/Notes/Meetings/m1.md"

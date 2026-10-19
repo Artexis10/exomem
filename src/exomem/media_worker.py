@@ -63,10 +63,12 @@ from .media_jobs import (
 from .vault import (
     MISSING_CONTENT_HASH,
     DeferredGraphCompletion,
+    PathGuardError,
     PlannedWrite,
     batch_atomic_write,
     content_hash,
     post_commit_batch_fanout,
+    read_guarded_text,
 )
 from .writer_lease import get_manager
 
@@ -124,6 +126,13 @@ _LOCK_UNAVAILABLE_EXIT_CODE = 76
 _MEMORY_RECYCLE_EXIT_CODE = 77
 #: The cell had no room for the next job's anonymous-memory budget.
 _MEMORY_WAIT_EXIT_CODE = 78
+#: The child started without write authority and claimed nothing. Unlike a transient
+#: stop mid-job, repeating it at a fixed pace spawns a process every few seconds for
+#: as long as the writer lease is elsewhere, so the supervisor backs off.
+_AUTHORITY_UNAVAILABLE_EXIT_CODE = 79
+#: Relaunch delay after consecutive authority refusals: from the follower cadence,
+#: doubling to this ceiling, so a lease that frees up still starts work within it.
+_AUTHORITY_BACKOFF_MAX_SECONDS = 60.0
 #: How long the supervisor waits for room after a refusal or a memory stop. Long
 #: enough for reclaim or a checkpoint to finish; a pending job costs only latency.
 _MEMORY_WAIT_SECONDS = 15.0
@@ -306,6 +315,7 @@ class MediaWorker:
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
         self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
+        self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
         self._child_started_at = 0.0
         self._engine_waits: list[_Job] = []
         # The last pressure reading was high; the supervisor then reads it every pass
@@ -502,15 +512,14 @@ class MediaWorker:
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return _ProcessOutcome(_COMPLETE)
         try:
-            claimed_content = job.sidecar_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            claimed_content = ""
+            claimed_content, guard = read_guarded_text(self._vault_root, job.sidecar_path)
+        except (OSError, UnicodeError, PathGuardError):
+            return _ProcessOutcome(_STALE, "input identity unavailable")
         if media_processing.has_completed_transcript(
             claimed_content, media_type=job.media_type
         ):
             return _ProcessOutcome(_COMPLETE)
-        expected_sidecar = _content_digest(job.sidecar_path)
-        expected_sidecar_text_hash = content_hash(claimed_content)
+        expected_sidecar = guard.expected_content_hash
         expected_binary = _binary_identity(job.binary_path)
         if expected_sidecar is None or expected_binary is None:
             log.warning("extraction skip %s: input identity unavailable", job.binary_path.name)
@@ -661,7 +670,7 @@ class MediaWorker:
                         self._vault_root,
                         job.sidecar_path,
                         attempts=max(1, job.attempts),
-                        expected_hash=expected_sidecar_text_hash,
+                        expected_hash=expected_sidecar,
                     )
             detail = ", ".join(stale_parts) or "commit precondition changed"
             return _ProcessOutcome(_STALE, f"stale extraction: {detail}")
@@ -1041,8 +1050,8 @@ class MediaWorker:
                 )
                 return False
             try:
-                current_content = job.sidecar_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
+                current_content, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+            except (OSError, UnicodeError, PathGuardError):
                 current_content = ""
             from . import media_processing
 
@@ -1462,6 +1471,13 @@ class MediaWorker:
                     elif returncode == _MEMORY_WAIT_EXIT_CODE:
                         delay = _MEMORY_WAIT_SECONDS
                         log.info("media child found no memory room; retrying after %.1fs", delay)
+                    elif returncode == _AUTHORITY_UNAVAILABLE_EXIT_CODE:
+                        delay = self._authority_backoff
+                        self._authority_backoff = min(delay * 2, _AUTHORITY_BACKOFF_MAX_SECONDS)
+                        log.info(
+                            "media child found no writer authority; retrying after %.1fs",
+                            delay,
+                        )
                     elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
                         delay = (
                             _LOCK_UNAVAILABLE_RECHECK_SECONDS
@@ -1483,6 +1499,8 @@ class MediaWorker:
                         delay = 0.5
                         if brakes:
                             self._reset_memory_recovery()  # the child's job completed
+                    if returncode != _AUTHORITY_UNAVAILABLE_EXIT_CODE:
+                        self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
                     relaunch_after = max(_clock() + delay, self._memory_hold_until)
                     recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                 if self._child is None and _clock() >= relaunch_after:
@@ -1705,7 +1723,7 @@ class MediaWorker:
             operation="background_media_parent_publication",
             holder_kind="background",
         ):
-            before = job.sidecar_path.read_text(encoding="utf-8")
+            before, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
             if _content_digest(job.sidecar_path) != result.sidecar_before_hash:
                 return
             if _result_binary_identity(_binary_identity(job.binary_path) or ((-1,) * 5, None)) != result.binary_identity:
@@ -1795,8 +1813,8 @@ class MediaWorker:
             holder_kind="background",
         ):
             try:
-                before = job.sidecar_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
+                before, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+            except (OSError, UnicodeError, PathGuardError):
                 return False
             if _content_digest(job.sidecar_path) != expected_sidecar:
                 return False
@@ -2013,7 +2031,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
         log.info("media worker: marked %d retained CUDA runtime failure(s) blocked", recovered_compute)
     if not _writer_authority_available():
         log.info("media worker: writer authority unavailable; leaving work queued")
-        return _TRANSIENT_EXIT_CODE
+        return _AUTHORITY_UNAVAILABLE_EXIT_CODE
     store.set_worker(os.getpid(), idle_seconds)
     # Process mode makes scene-frame follow-up enqueue durable in this same ledger;
     # the nested supervisor is never started because the child calls _process directly.

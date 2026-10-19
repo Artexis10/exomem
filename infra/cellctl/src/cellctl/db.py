@@ -46,6 +46,11 @@ OBSERVED_COLUMNS = (
     "hold_started_at",
     # move-cloud-cells-to-local-storage D10, Substrate migration 0059.
     "grown_storage_gib",
+    "observed_storage_pvc_uid",
+    "observed_storage_pvc_version",
+    "observed_storage_capacity_bytes",
+    "observed_storage_generation",
+    "observed_storage_at",
     # Migration 0066: the disk use the last backup or export Job measured.
     "used_bytes",
     "filesystem_bytes",

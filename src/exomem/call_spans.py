@@ -47,6 +47,10 @@ _TTL_SECONDS = 300.0
 #: generating names, which is a caller bug; truncate rather than let one call
 #: grow without bound.
 MAX_NAMES_PER_CALL = 64
+#: The last of those slots. Spans under names past the bound are summed here, so
+#: a call that ran out of names reports how many calls and how much time it
+#: could not name instead of dropping them.
+OVERFLOW_SPAN = "spans.overflow"
 #: Calls tracked at once, so a missed pop cannot leak indefinitely. The
 #: middleware pops unconditionally; this and the TTL are independent guards for
 #: paths that never reach it, such as a direct test harness.
@@ -59,6 +63,8 @@ NAME_MAX_CHARS = 64
 #: calls, exactly as `ms` and `count` are, so an aggregated span still reports
 #: one honest total.
 MAX_FIELDS_PER_SPAN = 4
+# CPU is one fixed metadata field, separate from the four caller measurements.
+THREAD_CPU_US = "thread_cpu_us"
 #: A field key is a measurement name, never a value. Structural rather than a
 #: declared list, so a new count needs no registry edit, but a key carrying
 #: content cannot pass: no slashes, dots, spaces, digits or capitals, which is
@@ -151,9 +157,10 @@ def record_span(
                 _SPANS[token] = entry
             names: dict[str, list[float]] = entry["names"]
             slot = names.get(clean)
+            if slot is None and len(names) >= MAX_NAMES_PER_CALL - 1:
+                clean, fields = OVERFLOW_SPAN, None
+                slot = names.get(clean)
             if slot is None:
-                if len(names) >= MAX_NAMES_PER_CALL:
-                    return
                 names[clean] = [1.0, float(elapsed_ms)]
             else:
                 slot[0] += 1.0
@@ -180,7 +187,9 @@ def _merge_fields_locked(
         if not FIELD_KEY_PATTERN.match(clean_key):
             _warn_rejected_field_key(clean_key)
             continue
-        if clean_key not in totals and len(totals) >= MAX_FIELDS_PER_SPAN:
+        measurements = len(totals) - int(THREAD_CPU_US in totals)
+        if (clean_key != THREAD_CPU_US and clean_key not in totals
+                and measurements >= MAX_FIELDS_PER_SPAN):
             continue
         try:
             totals[clean_key] = totals.get(clean_key, 0) + int(value)
@@ -217,10 +226,15 @@ def span(name: str, fields: dict[str, Any] | None = None):
     nothing and the span is shaped exactly as it always was.
     """
     started = time.perf_counter()
+    cpu_started = time.thread_time_ns() if MCP_CALL_TOKEN.get() is not None else None
     try:
         yield fields
     finally:
-        record_span(name, (time.perf_counter() - started) * 1000.0, fields)
+        measured = (
+            {**(fields or {}), THREAD_CPU_US: (time.thread_time_ns() - cpu_started) // 1000}
+            if cpu_started is not None else fields
+        )
+        record_span(name, (time.perf_counter() - started) * 1000.0, measured)
 
 
 def timed(name: str):
@@ -295,6 +309,134 @@ def record_span_since(name: str, mark_name: str) -> None:
         record_span(name, (time.monotonic() - float(started)) * 1000.0)
     except Exception:  # noqa: BLE001 - instrumentation must never break a call
         pass
+
+
+#: Measurement keys the shared read seams report into an open `meter`, so a
+#: seam and the span that collects from it spell each name once.
+#: Catalogue rows a maintained-catalogue read returned, and its wall time.
+CATALOGUE_ROWS = "rows_read"
+CATALOGUE_MS = "catalogue_ms"
+#: Unit-parent pages read from Markdown and parsed, and their wall time.
+PAGES_PARSED = "pages_parsed"
+HYDRATION_MS = "hydration_ms"
+#: A carry rung's work: the request's admitted pages, the rows its per-stem
+#: counts scanned, the candidate rows its corroboration test examined, and
+#: whether admitted ranking statistics were rebuilt rather than reused.
+ADMITTED_PAGES = "admitted"
+STEM_ROWS = "stem_rows"
+CANDIDATES = "candidates"
+STATS_REBUILT = "stats_rebuilt"
+
+#: The meter open on this thread of control, innermost first: the counts a
+#: span collects from code several calls below it. A ContextVar rather than a
+#: parameter, because the counts come from catalogue and Markdown seams that
+#: every caller shares; only a span that opened a meter receives them.
+_METER: ContextVar[dict[str, float] | None] = ContextVar("exomem_span_meter", default=None)
+
+
+@contextmanager
+def meter(*keys: str):
+    """Collect the named counts that calls below this point report.
+
+    The yielded dict starts at zero for every key and is what a span hands to
+    `record_span` as its fields, so the keys are the span's fixed field names
+    (at most `MAX_FIELDS_PER_SPAN`). `measure` adds only to a key the
+    innermost meter declared: a seam that reports a count nobody asked for
+    costs one lookup and adds nothing.
+    """
+    measured: dict[str, float] = dict.fromkeys(keys[:MAX_FIELDS_PER_SPAN], 0)
+    handle = _METER.set(measured)
+    try:
+        yield measured
+    finally:
+        _METER.reset(handle)
+
+
+def measure(key: str, value: float = 1) -> None:
+    """Add `value` to `key` of the innermost open meter, if it declared `key`."""
+    try:
+        measured = _METER.get()
+        if measured is not None and key in measured:
+            measured[key] += value
+    except Exception:  # noqa: BLE001 - instrumentation must never break a call
+        pass
+
+
+@contextmanager
+def measure_ms(key: str):
+    """Add the elapsed wall milliseconds of the block to `key` (see `measure`)."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        measure(key, (time.perf_counter() - started) * 1000.0)
+
+
+#: Process-wide garbage-collection pauses since the first `gc_window`:
+#: `[collections, pause seconds]`. A collection stops every thread, so a call
+#: is delayed by any pause inside its own wall interval, whichever thread's
+#: allocation triggered it; one global total read at both ends says that.
+_GC_TOTALS = [0, 0.0]
+#: When the running collection started. Collections never overlap: one runs
+#: at a time, holding the interpreter.
+_GC_STARTED: list[float | None] = [None]
+#: Open `gc_window`s. The callback stays installed for the process, so with
+#: none open it returns at once: no clock read and no work in a collection
+#: that nothing measures.
+_GC_WINDOWS = [0]
+_GC_INSTALL_LOCK = threading.Lock()
+_GC_INSTALLED = False
+
+
+def _on_gc(phase: str, _info: Mapping[str, Any]) -> None:
+    # Runs inside every collection, so it only stamps and adds.
+    if phase == "start":
+        _GC_STARTED[0] = time.perf_counter() if _GC_WINDOWS[0] else None
+        return
+    started = _GC_STARTED[0]
+    if started is not None:
+        _GC_TOTALS[1] += time.perf_counter() - started
+        _GC_TOTALS[0] += 1
+        _GC_STARTED[0] = None
+
+
+def _install_gc_callback() -> None:
+    global _GC_INSTALLED
+
+    if _GC_INSTALLED:
+        return
+    with _GC_INSTALL_LOCK:
+        if not _GC_INSTALLED:
+            import gc
+
+            gc.callbacks.append(_on_gc)
+            _GC_INSTALLED = True
+
+
+@contextmanager
+def gc_window():
+    """Record the collector's pauses inside the block as `runtime.gc`.
+
+    The span's duration is the pause time and its `collections` field the
+    number of collections. Nothing is recorded when no collection ran, so a
+    call that paid no pause carries no such span.
+    """
+    _install_gc_callback()
+    with _GC_INSTALL_LOCK:
+        _GC_WINDOWS[0] += 1
+    collections, paused = _GC_TOTALS[0], _GC_TOTALS[1]
+    try:
+        yield
+    finally:
+        with _GC_INSTALL_LOCK:
+            _GC_WINDOWS[0] -= 1
+        ran = _GC_TOTALS[0] - collections
+        if ran > 0:
+            record_span(
+                "runtime.gc",
+                (_GC_TOTALS[1] - paused) * 1000.0,
+                {"collections": ran},
+            )
 
 
 def pop_call_spans(token: str | None) -> list[dict[str, Any]]:

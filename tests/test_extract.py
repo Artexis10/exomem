@@ -701,7 +701,7 @@ def test_readiness_healthy_logs_info_with_profiles(
     monkeypatch.setattr(
         voice_profiles,
         "load_profiles",
-        lambda _path, **_kwargs: {"Hugo": object(), "Maria": object()},
+        lambda _path, **_kwargs: {"Fixture Speaker": object(), "Maria": object()},
     )
     with caplog.at_level(logging.INFO, logger="exomem.extract"):
         extract.log_diarization_readiness(tmp_path)
@@ -709,7 +709,7 @@ def test_readiness_healthy_logs_info_with_profiles(
     assert rec.levelno == logging.INFO
     msg = rec.getMessage()
     assert "enabled=True" in msg and "sidecar_venv=True" in msg and "hf_token=True" in msg
-    assert "profiles=2" in msg and "Hugo" in msg and "Maria" in msg
+    assert "profiles=2" in msg and "Fixture Speaker" in msg and "Maria" in msg
     assert "hf_secret_value_123" not in caplog.text  # token presence only, never the value
 
 

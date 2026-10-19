@@ -41,25 +41,27 @@ list.
   markers while the reported totals remain exact
 
 ### Requirement: Reachable from all three doors and callable pre-init
-The `overview` operation SHALL be registered as a Tier 1 registry command exposed
-via the MCP tool surface, the CLI (`overview` subcommand), and the REST facade
-from the same leaf, and SHALL remain exposed when Tier 2 is disabled. The
+The structural report SHALL be reachable through Tier 1
+`browse_memory(mode="overview")` on MCP, the CLI (`browse_memory` subcommand
+with `mode="overview"`), and the REST facade (`/api/browse_memory`). Every public
+door SHALL delegate to the same `op_overview` leaf, and SHALL remain exposed
+when Tier 2 is disabled. The
 underlying core function SHALL accept a raw directory path and produce a report
 for vaults with no initialized `Knowledge Base/`.
 
 #### Scenario: Tier 2 disabled deployments keep overview
 - **WHEN** the server runs with `EXOMEM_DISABLE_TIER2=1`
-- **THEN** the `overview` MCP tool is still registered
+- **THEN** the `browse_memory` MCP tool remains registered with `mode="overview"` available
 
 #### Scenario: Pre-init scan
 - **WHEN** the core function runs on a directory that has no `Knowledge Base/`
 - **THEN** it returns a full report with `kb.present` false instead of raising
 
 ### Requirement: Skill guidance steers agents away from bulk reads
-The shipped skill contract SHALL document `overview` as the first step for
-assessing vault structure (before `list_directory`, `find scope="vault"`, and
-targeted `get`), SHALL include phrasing mappings such as "what does this vault
-look like" to the `overview` operation, and SHALL instruct agents never to
+The shipped skill contract SHALL document `browse_memory(mode="overview")` as the first step for
+assessing vault structure (before `browse_memory(mode="list")`,
+`ask_memory(scope="vault")`, and targeted `read_memory`), SHALL include phrasing mappings such as "what does this vault
+look like" to `browse_memory(mode="overview")`, and SHALL instruct agents never to
 bulk-read a vault to answer structural questions. Scaffold wording SHALL remain
 generic (no personal or product tokens).
 

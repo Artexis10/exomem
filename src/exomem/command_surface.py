@@ -327,6 +327,9 @@ class Command:
     routes: tuple[str, ...] = ()
     response_detail: ResponseDetail | None = None
     path_roles: tuple[reserved_paths.PathRole, ...] = ()
+    #: A direct read whose refusals a restricted caller receives no sooner than
+    #: `projection_timing.RESTRICTED_REFUSAL_FLOOR_MS` after dispatch.
+    restricted_refusal_floor: bool = False
     mcp_meta: Mapping[str, tuple[str, ...]] = field(
         default_factory=lambda: types.MappingProxyType({}), hash=False
     )
@@ -394,6 +397,22 @@ def bind_vault(
         )
         for p in visible
     ]
+    if command is not None and command.name == "activate_context":
+        from .working_set_conversation import public_input_schema
+
+        # Discovery describes existing bounds; validation still uses the permissive dict.
+        visible = [
+            parameter.replace(
+                annotation=typing.Annotated[
+                    dict[str, typing.Any] | None,
+                    WithJsonSchema({"anyOf": [public_input_schema(), {"type": "null"}]}),
+                    Field(description=help_text["conversation"]),
+                ],
+            )
+            if parameter.name == "conversation"
+            else parameter
+            for parameter in visible
+        ]
     if command is not None and command.name == "edit_memory":
         from .edit_operations import EditOperation, public_edit_operation_schema
 
@@ -436,29 +455,7 @@ def bind_vault(
             len(visible),
         )
         visible.insert(insert_at, response_detail)
-    if command is not None and (
-        surface_descriptor is None or surface_descriptor.surface == "mcp"
-    ):
-        authorization_credential = inspect.Parameter(
-            "authorization_session_credential",
-            kind=inspect.Parameter.KEYWORD_ONLY,
-            default=None,
-            annotation=typing.Annotated[
-                str | None,
-                Field(
-                    description="Reserved; leave unset."
-                ),
-            ],
-        )
-        insert_at = next(
-            (
-                index
-                for index, parameter in enumerate(visible)
-                if parameter.kind is inspect.Parameter.VAR_KEYWORD
-            ),
-            len(visible),
-        )
-        visible.insert(insert_at, authorization_credential)
+    # Raw transport consumes credentials before validation; tools advertise task inputs only.
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
@@ -494,6 +491,9 @@ def bind_vault(
                 # uncovered selector before its leaf. This preliminary result
                 # exists only to keep retry/admission metadata conservative.
                 invocation_read_only = False
+            from . import call_ledger
+
+            call_ledger.note_call_access(invocation_read_only)
             request_id = mcp_request_id()
             tool_name = command.name
             # Computed at most once per call, and only for a mutation: a
@@ -529,7 +529,13 @@ def bind_vault(
                 from .governance.egress import is_vault_root, postfilter
 
                 if injected and is_vault_root(injected[0]):
-                    result = postfilter(command.name, result, injected[0])
+                    from .collection_store import ownership
+
+                    # One ownership proof for the pass, as in the dispatcher's;
+                    # outside a scope every path decision proved its own.
+                    with ownership.read_scope(injected[0]) as ownership_scope:
+                        result = postfilter(command.name, result, injected[0])
+                        ownership_scope.finish()
                 from .governance import scrubber as governance_scrubber
 
                 if governance_scrubber._issuance_projection_context(result) is not None:
@@ -570,28 +576,28 @@ def bind_vault(
                 from . import cli_ops
 
                 duration_ms = round((time.perf_counter() - t0) * 1000, 2)
-                if isinstance(error, cli_ops.OpError):
-                    _log_tool_failure(
-                        tool=tool_name,
-                        request_id=request_id,
-                        code=error.code,
-                        duration_ms=duration_ms,
-                        message=error.message,
-                        retry_scope=retry_scope,
-                    )
-                    return cli_ops.envelope(False, error=error.as_public_dict())
-                semantic_error = cli_ops.semantic_validation_error_dict(error)
-                if semantic_error is None:
+                if isinstance(
+                    error,
+                    (
+                        authorization_request.AuthorizationContextUnavailable,
+                        authorization_request.AuthorizationRouteUnclassified,
+                    ),
+                ):
+                    # Lost authority answers with the content-free native tool
+                    # error that the authorization middleware also raises.
+                    raise
+                refusal = cli_ops.public_refusal(error)
+                if refusal is None:
                     raise
                 _log_tool_failure(
                     tool=tool_name,
                     request_id=request_id,
-                    code=str(semantic_error.get("code") or "OP_ERROR"),
+                    code=str(refusal.get("code") or "OP_ERROR"),
                     duration_ms=duration_ms,
-                    message=str(semantic_error.get("message") or ""),
+                    message=str(refusal.get("message") or ""),
                     retry_scope=retry_scope,
                 )
-                return cli_ops.envelope(False, error=semantic_error)
+                return cli_ops.envelope(False, error=refusal)
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__
@@ -670,6 +676,11 @@ def mcp_caller_identity() -> dict[str, str | None]:
     "which client?" while protecting nothing. The per-principal identity stays
     hashed and separate.
 
+    The name comes from `clientInfo`, then (cloud mode only) the gateway's
+    `cloud_cell.GATEWAY_CLIENT_HEADER`, then `User-Agent`.
+    `app_id` comes only from the Cloud gateway's authenticated grant UUID.
+    It correlates owner activity and never participates in authorization.
+
     Never raises. Outside an MCP call every field is simply `None`.
     """
     identity: dict[str, str | None] = {
@@ -677,6 +688,7 @@ def mcp_caller_identity() -> dict[str, str | None]:
         "client_version": None,
         "transport": None,
         "session_id": None,
+        "app_id": None,
     }
     try:
         from fastmcp.server.dependencies import get_context, get_http_headers
@@ -703,12 +715,44 @@ def mcp_caller_identity() -> dict[str, str | None]:
         # transport signal; there is no separate flag to read.
         headers = get_http_headers()
         identity["transport"] = "http" if headers else "stdio"
+        from . import cloud_cell
+
+        if cloud_cell.cloud_mode_enabled():
+            identity["app_id"] = cloud_cell.canonical_app_id(
+                headers.get(cloud_cell.GATEWAY_APP_ID_HEADER)
+            )
+        if not identity["client_name"]:
+            if cloud_cell.cloud_mode_enabled():
+                gateway_client = str(
+                    headers.get(cloud_cell.GATEWAY_CLIENT_HEADER, "") or ""
+                ).strip()
+                identity["client_name"] = gateway_client or None
         agent = str(headers.get("user-agent", "") or "").strip()
         if agent and not identity["client_name"]:
             identity["client_name"] = agent
     except (LookupError, RuntimeError):
         identity["transport"] = identity["transport"] or "stdio"
     return identity
+
+
+def gateway_client_context() -> str | None:
+    """The engagement context the Cloud gateway declared for this request.
+
+    Cloud mode only, for the reason `cloud_cell.GATEWAY_CONTEXT_HEADER` gives.
+    A value outside the closed context set is ignored, not refused: the header
+    tunes eagerness only, and name detection still answers without it.
+    """
+    from . import cloud_cell, prominence
+
+    if not cloud_cell.cloud_mode_enabled():
+        return None
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+
+        value = get_http_headers().get(cloud_cell.GATEWAY_CONTEXT_HEADER)
+    except (ImportError, LookupError, RuntimeError):
+        return None
+    return value if value in prominence.CONTEXTS else None
 
 
 def peek_request_id() -> str | None:

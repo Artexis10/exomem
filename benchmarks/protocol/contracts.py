@@ -779,6 +779,7 @@ _PINNED_GIT_FLAGS: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {
         frozenset(
             {
                 "--full-history",
+                "--no-walk=unsorted",
                 "--no-renames",
                 "--name-status",
                 "--follow",
@@ -1018,21 +1019,23 @@ def _git_receipt_introduction_revisions(
             "receipt history does not have a unique introduction commit; "
             "delete/re-add is ambiguous"
         )
-    renamed = _git(
-        root,
-        "log",
-        "--full-history",
-        "--format=",
-        "--max-count=128",
-        "--name-status",
-        "--find-renames=1%",
-        "--follow",
-        pin,
-        "--",
-        path,
-    ).stdout.decode().splitlines()
-    if any(line.startswith("R") for line in renamed):
-        raise ContractIdentityError("receipt history contains a rename ambiguity")
+    # A rename into this path is its unique addition; older source history
+    # cannot change that ambiguity, so inspect only the introduction commit.
+    for introduction in additions:
+        renamed = _git(
+            root,
+            "log",
+            "--no-walk=unsorted",
+            "--format=",
+            "--name-status",
+            "--find-renames=1%",
+            "--follow",
+            introduction,
+            "--",
+            path,
+        ).stdout.decode().splitlines()
+        if any(line.startswith("R") for line in renamed):
+            raise ContractIdentityError("receipt history contains a rename ambiguity")
     if len(history) == 1:
         return additions
     if len(history) == 2 and len(additions) == 1 and history[-1] == additions[0]:

@@ -17,8 +17,9 @@ from pathlib import Path
 
 from .. import held_fs, planning, record_formats, records, vault
 from .. import structured_collections as collections
-from . import chain, governance, summary, tokens, types
+from . import authority, chain, governance, log_view, summary, tokens, types
 from .connection import CollectionStoreError
+from .connection import checked_sql as checked_sql
 from .legacy import LegacyAuditProof, LegacyAuditSpool
 
 _WHY = "capture legacy state into unpublished staging"
@@ -79,16 +80,8 @@ class CapturedLogFrame:
     final_newline: bool
 
     def as_json(self) -> str:
-        return _json(
-            {
-                "version": 1,
-                "text": self.prefix.decode("utf-8"),
-                "suffix": self.suffix.decode("utf-8"),
-                "bom": self.bom,
-                "newline": self.newline,
-                "final_newline": self.final_newline,
-            }
-        )
+        return log_view.LogFrame(self.prefix.decode("utf-8"), self.suffix.decode("utf-8"), self.bom,
+                                 self.newline, self.final_newline).as_json()
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +98,9 @@ class CapturedLegacyCollection:
     audit_proof: LegacyAuditProof
     log_frame: CapturedLogFrame | None
     input_digest: str
+    #: ``input_digest`` without the vault-wide audit segment census, plus every per-collection
+    #: proof value the checkpoint records: an unrelated activity-log write leaves it unchanged.
+    collection_basis: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +111,7 @@ class LegacyImportResult:
     checkpoint_txn_id: int
     checkpoint_transition_id: str
     checkpoint_event_hash: str
+    material_digest: str
 
 
 def _capture_held(root, manifest, snapshot):
@@ -190,31 +187,9 @@ def _capture_log_frame(manifest, snapshot):
     if manifest.storage.strategy != "markdown-log":
         return None
     data = dict(snapshot.source_bytes)[manifest.storage.source]
-    data.decode("utf-8")  # Frame persistence must not silently replace invalid bytes.
-    section = manifest.storage.descriptor["section"]
-    headings = record_formats._headings_outside_fences(data)
-    heading = next(
-        item
-        for item in headings
-        if item.level == section["level"] and item.title == section["title"]
-    )
-    end = next(
-        (
-            item.start
-            for item in headings
-            if item.start > heading.start and item.level <= heading.level
-        ),
-        len(data),
-    )
-    start = snapshot.records[0].span.start if snapshot.records else end
-    match = re.search(rb"\r\n|\n|\r", data)
-    return CapturedLogFrame(
-        data[:start],
-        data[end:],
-        data.startswith(b"\xef\xbb\xbf"),
-        match.group().decode() if match else "\n",
-        data.endswith((b"\n", b"\r")),
-    )
+    frame = log_view.capture(manifest, data, snapshot.records)
+    return CapturedLogFrame(frame.text.encode("utf-8"), frame.suffix.encode("utf-8"), frame.bom, frame.newline,
+                            frame.final_newline)
 
 
 def _recheck(captured):
@@ -302,6 +277,14 @@ def capture_legacy_collection(
         "legacy_inspection": inspection,
         "legacy_audit_paths": captured_inspection.influencing_paths,
     }
+    collection_basis = {
+        **{name: value for name, value in basis.items() if name != "audit_inputs"},
+        "manifest_head": proof.manifest_head,
+        "reachable_head": proof.reachable_head,
+        "reachable_count": proof.reachable_count,
+        "exhaustive": [proof.exhaustive_status, proof.scan_complete, proof.gap_count,
+                       proof.discontinuity_count, list(proof.diagnostic_samples)],
+    }
     captured = CapturedLegacyCollection(
         root,
         manifest,
@@ -315,6 +298,7 @@ def capture_legacy_collection(
         proof,
         _capture_log_frame(manifest, snapshot),
         _sha(records._canonical_json(basis)),
+        _sha(records._canonical_json(collection_basis)),
     )
     _recheck(captured)
     audit.require_source_root(root)
@@ -378,6 +362,7 @@ def _envelope(captured, context, transition, generation, previous, *, original=N
                     "count": proof.reachable_count,
                     "ordered_event_digest": proof.ordered_event_digest,
                 },
+                "original_items": _original_items(captured),
                 # These claimed passes cannot commit until the independent checks succeed.
                 "verification_summary": dict.fromkeys("abcdef", "passed"),
             }
@@ -385,11 +370,32 @@ def _envelope(captured, context, transition, generation, previous, *, original=N
     return envelope
 
 
+def _original_items(captured):
+    """Bind each imported item file to its exact source bytes and structural audit marker.
+
+    The checkpoint keeps this proof after ordinary view publication replaces the source hash.
+    A missing marker remains missing; this evidence does not repair historical gaps.
+    """
+    # File-mode curation receipts support item files only; a shared log needs no per-row binding.
+    if captured.manifest.storage.strategy != "markdown-items":
+        return {}
+    sources = dict(captured.snapshot.source_bytes)
+    return {
+        record.identity.key: {
+            "source_sha256": record.source.hash,
+            "transition_id": records._structural_audit_marker(
+                captured.manifest, sources[record.source.path], record
+            ),
+        }
+        for record in captured.snapshot.records
+    }
+
+
 def _event_hash(envelope):
     return _sha(_ENVELOPE_DOMAIN + records._canonical_json(envelope))
 
 
-def _insert_envelope(conn, txn_id, envelope, original):
+def _insert_envelope(conn, txn_id, envelope, original, receipt=None):
     sequence, head = chain.recorded_head(conn)
     digest = _event_hash(envelope)
     try:
@@ -409,7 +415,7 @@ def _insert_envelope(conn, txn_id, envelope, original):
                 envelope["manifest_version_after"],
                 envelope["actor"],
                 envelope["why"],
-                _json(envelope),
+                _json(envelope) if receipt is None else receipt,
                 envelope["imported_at"],
                 envelope["prev_event_hash"],
                 digest,
@@ -425,78 +431,76 @@ def _insert_envelope(conn, txn_id, envelope, original):
     return digest
 
 
-def _projection(conn, cid, path, kind, version, raw, row_id=None):
-    conn.execute(
-        "INSERT INTO projection_state(path,collection_id,row_id,kind,published_row_version,"
-        "published_sha256,state) VALUES(?,?,?,?,?,?,'current')",
-        (path, cid, row_id, kind, version, _sha(raw)),
-    )
+# This version describes the temporary normalized import and its proof, not canonical receipts.
+MATERIAL_VERSION = 1
 
 
-def _map_current(conn, captured, checkpoint, checkpoint_hash):
+@dataclass(frozen=True, slots=True)
+class LegacyMaterial:
+    collection_id: str
+    source_basis: str
+    collection: tuple
+    manifest: tuple
+    items: tuple
+    held: tuple
+    projections: tuple
+    envelopes: tuple
+
+    def digest(self, check=lambda: None):
+        digest = hashlib.sha256(b"exomem.legacy-material:v1\0")
+
+        def frame(value):
+            check()
+            raw = records._canonical_json(value)
+            digest.update(len(raw).to_bytes(8, "big"))
+            digest.update(raw)
+
+        # This fixed field order and count framing define the temporary normalized format.
+        for value in (self.collection_id, self.source_basis, self.collection, self.manifest):
+            frame(value)
+        frame(len(self.items))
+        for entry in self.items:
+            frame(entry)
+        frame(len(self.held))
+        for entry in self.held:
+            # Held bytes are the sole binary field in this closed import shape.
+            frame((*entry[:3], entry[3].hex(), *entry[4:]))
+        for entries in (self.projections, self.envelopes):
+            frame(len(entries))
+            for entry in entries:
+                frame(entry)
+        check()
+        return digest.hexdigest()
+
+
+def _materialize(captured, envelopes, check):
     manifest = captured.manifest
-    cid = manifest.collection_id
     declared = types.type_for_manifest(manifest)
-    types.register_builtins(conn, txn_id=checkpoint)
     text = captured.manifest_bytes.decode("utf-8")
     frontmatter, _, _ = vault.parse_frontmatter(text, strict=True)
     metadata = governance.manifest_metadata(text)
     audit_property = records.profile_for(manifest.semantic_profile).manifest_audit_property
     reader_version = frontmatter.get(audit_property, {}).get("version", 1)
-    conn.execute(
-        "INSERT INTO collections(collection_id,type_name,type_version,manifest_path,source_path,"
-        "layout,manifest_version,generation,audit_head,audit_reader_version,legacy_audit_status,"
-        "log_frame_json,created_txn,updated_txn) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?)",
-        (
-            cid,
-            declared.name,
-            declared.version,
-            manifest.path,
-            manifest.storage.source,
-            manifest.storage.strategy,
-            captured.audit_proof.reachable_count + 1,
-            checkpoint_hash,
-            reader_version,
-            captured.legacy_inspection["status"],
-            captured.log_frame.as_json() if captured.log_frame else None,
-            checkpoint,
-            checkpoint,
-        ),
-    )
-    conn.execute(
-        "INSERT INTO collection_manifests(collection_id,manifest_version,manifest_text,manifest_hash,"
-        "schema_json,natural_key_json,txn_id,governance_json) VALUES(?,1,?,?,?,?,?,?)",
-        (
-            cid,
-            text,
-            _sha(captured.manifest_bytes),
-            _json(frontmatter["item_schema"]),
-            _json(list(manifest.schema.natural_key)),
-            checkpoint,
-            metadata,
-        ),
-    )
-    _projection(conn, cid, manifest.path, "manifest", 1, captured.manifest_bytes)
+    collection = (declared.name, declared.version, manifest.path, manifest.storage.source,
+                  manifest.storage.strategy, captured.audit_proof.reachable_count + 1,
+                  _event_hash(json.loads(envelopes[-1][0])), reader_version,
+                  captured.legacy_inspection["status"], captured.log_frame.as_json() if captured.log_frame else None)
+    current_manifest = (text, _sha(captured.manifest_bytes), _json(frontmatter["item_schema"]),
+                        _json(list(manifest.schema.natural_key)), metadata)
+    projections = [(manifest.path, "manifest", 1, _sha(captured.manifest_bytes), None)]
     records_in_order = captured.snapshot.records
-    if (
-        manifest.storage.strategy == "markdown-log"
-        and manifest.storage.descriptor["insertion"] == "newest-first"
-    ):
+    if manifest.storage.strategy == "markdown-log" and manifest.storage.descriptor["insertion"] == "newest-first":
         records_in_order = tuple(reversed(records_in_order))
     sources = dict(captured.snapshot.source_bytes)
-    plans = {}
-    natural_keys = set()
+    plans, natural_keys, items, held_items = {}, set(), [], []
     for record in records_in_order:
+        check()
         values = record.values
+        # The legacy adapter preserves the fixed Planning product wire contract, not a registry entity type.
         if manifest.semantic_profile == "planning":
             planning.require_planning_profile(manifest)
-            values = planning.normalize_item(
-                values,
-                vault_root=captured.root,
-                stored=values,
-                apply_defaults=False,
-                validate_motivation=planning.motivation_is_governed(manifest),
-            )
+            values = planning.normalize_item(values, vault_root=captured.root, stored=values,
+                apply_defaults=False, validate_motivation=planning.motivation_is_governed(manifest))
             planning._validate_declared_text(manifest, values)
         allowed = (records._log_note_field(manifest),) if records._log_note_field(manifest) else ()
         manifest.schema.validate(values, allowed_fields=allowed)
@@ -505,86 +509,172 @@ def _map_current(conn, captured, checkpoint, checkpoint_hash):
         plans[key] = values
         natural = _natural_key(manifest, values)
         if natural is not None and natural in natural_keys:
-            raise CollectionStoreError(
-                "COLLECTION_LEGACY_IMPORT_NATURAL_KEY_CONFLICT", "duplicate complete natural key"
-            )
+            raise CollectionStoreError("COLLECTION_LEGACY_IMPORT_NATURAL_KEY_CONFLICT", "duplicate complete natural key")
         natural_keys.add(natural)
         body = _body(manifest, values, record.body)
         payload = tokens.payload_hash(manifest.schema.version, key, values, body)
-        path = (
-            record.source.path
-            if manifest.storage.strategy == "markdown-items"
-            else manifest.storage.source + "#" + key
-        )
-        try:
-            row_id = conn.execute(
-                "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
-                "body,payload_hash,view_path,created_txn,updated_txn,governance_json) VALUES(?,?,?,1,?,?,?,?,?,?,?,?)",
-                (
-                    cid,
-                    key,
-                    natural,
-                    manifest.schema.version,
-                    _json(values),
-                    body,
-                    payload,
-                    path,
-                    checkpoint,
-                    checkpoint,
-                    governance.row_metadata(manifest.schema, values, metadata),
-                ),
-            ).lastrowid
-        except sqlite3.IntegrityError as error:
-            raise CollectionStoreError(
-                "COLLECTION_LEGACY_IMPORT_PATH_CONFLICT", "item identity or view path collides"
-            ) from error
-        conn.execute(
-            "INSERT INTO item_versions VALUES(?,1,?,?,?,?)",
-            (row_id, _json(values), body, payload, checkpoint),
-        )
+        path = record.source.path if manifest.storage.strategy == "markdown-items" else manifest.storage.source + "#" + key
+        items.append((key, natural, manifest.schema.version, _json(values), body, payload, path,
+                      governance.row_metadata(manifest.schema, values, metadata)))
         if manifest.storage.strategy == "markdown-items":
-            _projection(conn, cid, path, "item", 1, sources[record.source.path], row_id)
+            projections.append((path, "item", 1, _sha(sources[record.source.path]), key))
     for name in declared.validators:
         types.named_validator(name).validate(manifest, plans, write=None)
     if manifest.storage.strategy == "markdown-log":
-        _projection(
-            conn,
-            cid,
-            manifest.storage.source,
-            "log",
-            captured.audit_proof.reachable_count + 1,
-            sources[manifest.storage.source],
-        )
+        projections.append((manifest.storage.source, "log", captured.audit_proof.reachable_count + 1,
+                            _sha(sources[manifest.storage.source]), None))
     for entry in captured.held:
+        check()
         held = entry.candidate
         try:
-            held_meta = governance.held_metadata(
-                manifest.schema, held.candidate, metadata, before=plans.get(held.target_item_key)
-            )
+            held_meta = governance.held_metadata(manifest.schema, held.candidate, metadata,
+                                                 before=plans.get(held.target_item_key))
         except (ValueError, TypeError, AttributeError) as error:
-            raise CollectionStoreError(
-                "COLLECTION_LEGACY_IMPORT_HELD_METADATA", "held governance cannot be represented"
-            ) from error
+            raise CollectionStoreError("COLLECTION_LEGACY_IMPORT_HELD_METADATA", "held governance cannot be represented") from error
         code = next((issue["code"] for issue in held.diagnostics if issue.get("code")), None)
-        conn.execute(
-            "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
+        held_items.append((held.held_id, code, _json(records._encode_held_value(held.candidate)), entry.original_bytes,
+                           _json(records._encode_held_value(list(held.diagnostics))), held.path, held.held_at,
+                           held_meta, _sha(entry.original_bytes)))
+        projections.append((held.path, "held", 1, _sha(entry.original_bytes), None))
+    return LegacyMaterial(manifest.collection_id, captured.collection_basis, collection, current_manifest,
+                          tuple(items), tuple(sorted(held_items)),
+                          tuple(sorted(projections)), tuple(envelopes))
+
+
+def assemble(conn, material, check):
+    """Assemble only the closed legacy-import shape, allocating all destination surrogate IDs."""
+    check()
+    cid = material.collection_id
+    first = conn.execute("SELECT COALESCE(MAX(txn_id),0)+1 FROM txns").fetchone()[0]
+    checkpoint = first + len(material.envelopes) - 1
+    types.register_builtins(conn, txn_id=checkpoint)
+    conn.execute("INSERT INTO collections(collection_id,type_name,type_version,manifest_path,source_path,layout,"
+                 "manifest_version,generation,audit_head,audit_reader_version,legacy_audit_status,log_frame_json,"
+                 "created_txn,updated_txn,verified_through_txn) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)",
+                 (cid, *material.collection, checkpoint, checkpoint, checkpoint))
+    text, digest, declared, natural, metadata = material.manifest
+    conn.execute("INSERT INTO collection_manifests(collection_id,manifest_version,manifest_text,manifest_hash,"
+                 "schema_json,natural_key_json,txn_id,governance_json) VALUES(?,1,?,?,?,?,?,?)",
+                 (cid, text, digest, declared, natural, checkpoint, metadata))
+    row_ids = {}
+    for key, natural, version, values, body, payload, path, governance_json in material.items:
+        check()
+        try:
+            row_id = conn.execute("INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,"
+                "values_json,body,payload_hash,view_path,created_txn,updated_txn,governance_json) "
+                "VALUES(?,?,?,1,?,?,?,?,?,?,?,?)",
+                (cid, key, natural, version, values, body, payload, path, checkpoint, checkpoint, governance_json)).lastrowid
+        except sqlite3.IntegrityError as error:
+            raise CollectionStoreError("COLLECTION_LEGACY_IMPORT_PATH_CONFLICT", "item identity or view path collides") from error
+        row_ids[key] = row_id
+        conn.execute("INSERT INTO item_versions VALUES(?,1,?,?,?,?)", (row_id, values, body, payload, checkpoint))
+    for held_id, code, candidate, raw, diagnostics, path, updated_at, governance_json, governance_hash in material.held:
+        check()
+        conn.execute("INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
             "diagnostics_json,view_path,created_txn,updated_at,governance_json,governance_hash) "
             "VALUES(?,?,'write-refusal',?,?,?,?,?,?,?,?,?)",
-            (
-                held.held_id,
-                cid,
-                code,
-                _json(records._encode_held_value(held.candidate)),
-                entry.original_bytes,
-                _json(records._encode_held_value(list(held.diagnostics))),
-                held.path,
-                checkpoint,
-                held.held_at,
-                held_meta,
-                _sha(entry.original_bytes),
-            ),
-        )
-        _projection(conn, cid, held.path, "held", 1, entry.original_bytes)
+            (held_id, cid, code, candidate, raw, diagnostics, path, checkpoint, updated_at, governance_json, governance_hash))
+    for path, kind, version, digest, key in material.projections:
+        check()
+        conn.execute("INSERT INTO projection_state(path,collection_id,row_id,kind,published_row_version,"
+                     "published_sha256,state) VALUES(?,?,?,?,?,?,'current')",
+                     (path, cid, row_ids.get(key), kind, version, digest))
+    for index, (receipt, original) in enumerate(material.envelopes):
+        check()
+        _insert_envelope(conn, first + index, json.loads(receipt), original, receipt)
+    envelope = json.loads(material.envelopes[-1][0])
+    return LegacyImportResult(cid, len(material.items), len(material.envelopes) - 1, checkpoint,
+                              envelope["transition_id"], _event_hash(envelope), material.digest(check))
+
+
+def retained_material(conn, entry, *, check):
+    """Load only an initial, never-written JSON-v1 import whose proved normalized digest still matches.
+
+    A mismatch costs one fresh import; it prevents reusing a proof for altered material or another format.
+    """
+    if entry.get("material_version") != MATERIAL_VERSION or not isinstance(entry.get("material_digest"), str):
+        return None
+    checkpoint = entry["txn_id"]
+    cid_row = conn.execute("SELECT collection_id FROM txns WHERE txn_id=?", (checkpoint,)).fetchone()
+    if cid_row is None or authority.pending_create(conn) is not None:
+        return None
+    cid = cid_row[0]
+    row = conn.execute("SELECT type_name,type_version,manifest_path,source_path,layout,generation,audit_head,"
+        "audit_reader_version,legacy_audit_status,log_frame_json FROM collections WHERE collection_id=? "
+        "AND encoding='json-v1' AND view_mode='items' AND derived=0 AND manifest_version=1 "
+        "AND created_txn=? AND updated_txn=? AND verified_through_txn=? AND query_plan_hash IS NULL",
+        (cid, checkpoint, checkpoint, checkpoint)).fetchone()
+    if row is None or row[2:5] != (entry["manifest_path"], entry["source_path"], entry["layout"]):
+        return None
+    manifests = conn.execute("SELECT manifest_text,manifest_hash,schema_json,natural_key_json,governance_json "
+        "FROM collection_manifests WHERE collection_id=? AND manifest_version=1 AND txn_id=?", (cid, checkpoint)).fetchall()
+    if len(manifests) != 1 or conn.execute("SELECT COUNT(*) FROM collection_manifests WHERE collection_id=?", (cid,)).fetchone()[0] != 1:
+        return None
+    items = []
+    for item in conn.execute("SELECT row_id,item_key,natural_key,schema_version,values_json,body,payload_hash,view_path,governance_json,"
+        "row_version,created_txn,updated_txn,encoding FROM items WHERE collection_id=? ORDER BY row_id", (cid,)):
+        check()
+        row_id, key, natural, version, values, body, payload, path, governance_json, current, created, updated, encoding = item
+        if (current, created, updated, encoding) != (1, checkpoint, checkpoint, 'json-v1'):
+            return None
+        if conn.execute("SELECT row_version,values_json,body,payload_hash,txn_id FROM item_versions WHERE row_id=?", (row_id,)).fetchall() != [(1, values, body, payload, checkpoint)]:
+            return None
+        if conn.execute("SELECT row_version,payload_hash,txn_id FROM version_identity WHERE row_id=?", (row_id,)).fetchall() != [(1, payload, checkpoint)]:
+            return None
+        if conn.execute("SELECT 1 FROM item_sources WHERE row_id=?", (row_id,)).fetchone():
+            return None
+        items.append((key, natural, version, values, body, payload, path, governance_json))
+    envelopes = []
+    previous = None
+    for index, txn in enumerate(conn.execute("SELECT txn_id,receipt_json,legacy_event_json,operation,event_hash,prev_event_hash,"
+                                            "transition_id,profile_operation,generation_before,generation_after,"
+                                            "manifest_version_before,manifest_version_after,actor,why,request_id,request_hash,committed_at "
+                                            "FROM txns WHERE collection_id=? ORDER BY txn_id", (cid,))):
+        check()
+        txn_id, receipt, original, operation, digest, prior = txn[:6]
+        envelope = json.loads(receipt)
+        if (operation, digest, prior) != ("legacy_import", _event_hash(envelope), previous):
+            return None
+        if txn[6:] != (envelope["transition_id"], envelope["profile_operation"], envelope["generation_before"],
+                       envelope["generation_after"], envelope["manifest_version_before"], envelope["manifest_version_after"],
+                       envelope["actor"], envelope["why"], None, None, envelope["imported_at"]):
+            return None
+        if (original is None) != (txn_id == checkpoint):
+            return None
+        if (envelope["collection_id"], envelope["generation_before"], envelope["generation_after"]) != (cid, index, index + 1):
+            return None
+        previous = digest
+        envelopes.append((receipt, original))
+    if not envelopes or json.loads(envelopes[-1][0]).get("captured_input_digest") is None:
+        return None
+    # These schema tables are empty for legacy imports; their presence records native work.
+    if conn.execute("SELECT 1 FROM audit_effects JOIN txns USING(txn_id) WHERE collection_id=?", (cid,)).fetchone():
+        return None
+    if conn.execute("SELECT 1 FROM import_jobs WHERE collection_id=? "
+                    "UNION ALL SELECT 1 FROM rollup_definitions WHERE collection_id=? LIMIT 1", (cid, cid)).fetchone():
+        return None
+    held = []
+    for item in conn.execute("SELECT held_id,code,candidate_json,held_bytes,diagnostics_json,view_path,updated_at,"
+        "governance_json,governance_hash,kind,created_txn,base_row_version FROM held_candidates WHERE collection_id=? ORDER BY held_id", (cid,)):
+        check()
+        if item[-3:] != ("write-refusal", checkpoint, None):
+            return None
+        held.append(item[:-3])
+    projections = []
+    for item in conn.execute("SELECT p.path,p.kind,p.published_row_version,p.published_sha256,i.item_key,"
+        "p.state,p.pending_row_version,p.pending_sha256,p.stat_identity,p.install_json FROM projection_state p "
+        "LEFT JOIN items i ON i.row_id=p.row_id AND i.collection_id=p.collection_id "
+        "WHERE p.collection_id=? ORDER BY p.path", (cid,)):
+        check()
+        if item[5:] != ("current", None, None, None, None):
+            return None
+        projections.append(item[:5])
+    material = LegacyMaterial(cid, entry["basis"], row, manifests[0], tuple(items), tuple(held),
+                              tuple(projections), tuple(envelopes))
+    if (material.digest(check) != entry["material_digest"] or len(items) != entry["rows"]
+            or len(envelopes) != entry["legacy_events"] + 1 or row[6] != previous):
+        return None
+    return material
 
 
 def _prove_round_trip(captured, key, values, body, natural):
@@ -623,7 +713,20 @@ def _prove_round_trip(captured, key, values, body, natural):
         _refuse("b", "render/parse values, body, identity or natural key differ")
 
 
-def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash):
+def _prove_log_block(captured, record, key):
+    """Check (b) for a log block: its first render keeps every line of the owner's text.
+
+    The store keeps a block's values only, and the projector and the export render the
+    block from them, so a line that no value holds would be lost at the first render. The
+    values themselves are proved by the round trip; their spacing may change.
+    """
+    data = dict(captured.snapshot.source_bytes)[captured.manifest.storage.source]
+    if log_view.stray_lines(data[record.span.start:record.span.end], record):
+        line = data[:record.span.start].count(b"\n") + 1
+        _refuse("b", f"log block {key} at line {line} holds text that its row cannot render")
+
+
+def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash, *, check=lambda: None):
     manifest = captured.manifest
     cid = manifest.collection_id
     original = {record.identity.key: record for record in captured.snapshot.records}
@@ -634,6 +737,7 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
     if len(stored) != len(original) or {row[0] for row in stored} != set(original):
         _refuse("a", "row count or identity set differs")
     for key, raw_values, body, natural, payload, version in stored:
+        check()
         values = json.loads(raw_values)
         record = original[key]
         recomputed = tokens.payload_hash(version, key, values, body)
@@ -648,6 +752,8 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
         ):
             _refuse("b", "stored values, body or natural key differ")
         _prove_round_trip(captured, key, values, body, natural)
+        if manifest.storage.strategy == "markdown-log":
+            _prove_log_block(captured, record, key)
     count, head, previous = 0, None, None
     checkpoint_seen = False
     ordered = hashlib.sha256(b"legacy-audit-ordered-v1\0")
@@ -677,6 +783,7 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
             digest,
             legacy_json,
         ) = row
+        check()
         expected = _envelope(captured, context, transition, count, previous, original=legacy_json)
         if checkpoint_seen:
             _refuse("d", "history follows import checkpoint")
@@ -752,7 +859,7 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
     ).fetchone()
     if status is None or status[0] != captured.legacy_inspection["status"]:
         _refuse("f", "captured historical status differs")
-    chain.verify_store_chain(conn)
+    chain.verify_store_chain(conn, check=check)
 
 
 def import_legacy_collection(
@@ -788,19 +895,19 @@ def import_legacy_collection(
         # A file collection is an items view of its rows; summary is only ever a NEW collection.
         raise summary.mode_change_refused("items", captured.manifest.view_mode)
     _recheck(captured)
-    chain.verify_store_chain(staging_conn)
-    first = staging_conn.execute("SELECT COALESCE(MAX(txn_id),0)+1 FROM txns").fetchone()[0]
+    chain.verify_store_chain(staging_conn, check=audit._check)
+    envelopes = []
     previous = None
     count = 0
     for event in audit.iter_reachable(captured.audit_proof):
         envelope = _envelope(
             captured, context, event.transition_id, count, previous, original=event.original_json
         )
-        previous = _insert_envelope(staging_conn, first + count, envelope, event.original_json)
+        envelopes.append((_json(envelope), event.original_json))
+        previous = _event_hash(envelope)
         count += 1
     if count != captured.audit_proof.reachable_count:
         _refuse("d", "captured reachable count differs")
-    checkpoint = first + count
     checkpoint_transition = _sha(
         b"exomem.collection-legacy-import-checkpoint:v1\0"
         + records._canonical_json(
@@ -814,9 +921,11 @@ def import_legacy_collection(
     )[:24]
     envelope = _envelope(captured, context, checkpoint_transition, count, previous)
     checkpoint_hash = _event_hash(envelope)
-    _map_current(staging_conn, captured, checkpoint, checkpoint_hash)
-    _insert_envelope(staging_conn, checkpoint, envelope, None)
-    _prove(staging_conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash)
+    envelopes.append((_json(envelope), None))
+    material = _materialize(captured, envelopes, audit._check)
+    result = assemble(staging_conn, material, audit._check)
+    checkpoint = result.checkpoint_txn_id
+    _prove(staging_conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash, check=audit._check)
     _recheck(captured)
     # Iterator acquisition rechecks audit files even for an empty baseline.
     with closing(audit.iter_reachable(captured.audit_proof)) as iterator:
@@ -824,11 +933,4 @@ def import_legacy_collection(
     staging_conn.execute(
         "UPDATE collections SET verified_through_txn=? WHERE collection_id=?", (checkpoint, cid)
     )
-    return LegacyImportResult(
-        cid,
-        len(captured.snapshot.records),
-        count,
-        checkpoint,
-        checkpoint_transition,
-        checkpoint_hash,
-    )
+    return result

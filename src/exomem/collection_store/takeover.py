@@ -19,7 +19,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from dataclasses import dataclass, field
 
 from .. import held_fs
@@ -36,8 +36,13 @@ DIVERGED = "COLLECTION_STORE_DIVERGED"
 BUSY = "COLLECTION_STORE_BUSY"
 # Single-host custody stopped verifying: publication and writes wait, reads continue.
 CUSTODY_LOST = "COLLECTION_STORE_CUSTODY_UNVERIFIED"
+# The writer's migration of a store an earlier release wrote failed and rolled back; retried when due.
+SCHEMA_PENDING = "COLLECTION_STORE_SCHEMA_PENDING"
+# An unfinished reverse export owns the store: no host serves it until the owner finishes it.
+EXPORTING = "COLLECTION_STORE_EXPORT_PENDING"
 SUPERSEDED = ".superseded-"
-_DROPPED = (schema.META_PUBLISHED_REPLICA_HEAD, schema.META_PENDING_REPLICA_PUBLICATION, authority.PENDING_CREATE)
+_DROPPED = (schema.META_PUBLISHED_REPLICA_HEAD, schema.META_PUBLISHED_REPLICA_EPOCH,
+            schema.META_PENDING_REPLICA_PUBLICATION, authority.PENDING_CREATE)
 
 
 def _signature(found):
@@ -80,7 +85,9 @@ class Pending:
     def error(self):
         remedy = {SYNC_PENDING: REMEDY, BUSY: "reads continue; the takeover is rechecked on next use",
                   CUSTODY_LOST: "reads continue; collection writes and publication resume once "
-                                "single-host custody verifies again"}
+                                "single-host custody verifies again",
+                  SCHEMA_PENDING: "the store keeps its earlier schema, and the migration is retried on the next "
+                                  f"use at least {RECHECK_SECONDS:g} s later"}
         message = (f"{self.reason}; recorded commit_seq {self.recorded}, local commit_seq {self.local}; "
                    + remedy.get(self.code, "reads continue; reconcile before collection writes resume"))
         if self.attention:
@@ -98,54 +105,123 @@ class Staged:
     collections: dict
     relation: dict
     lineage: list
+    canonical: dict | None
+    reader: sqlite3.Connection | None = field(repr=False)
+
+    def close_reader(self):
+        if self.reader is not None:
+            self.reader.close()
+            self.reader = None
 
 
 @contextmanager
-def staged_replica(session, check, heads):
-    """Copy the shared replica into private state custody and validate exactly those bytes."""
+def staged_replica(session, raw_check, heads=()):
+    """Retain one private validated copy through routing and the takeover decision."""
+    from .. import structured_collections as collections
+    from ..cli_ops import OpError
+    from ..vault_portability import (
+        PortabilityError,
+        _cross_source_signature,
+        _open_regular_source_native,
+        _source_signature,
+        _validate_collection_replica_connection,
+    )
+
     leaf = f".exomem-adopt-{secrets.token_hex(16)}.sqlite"
     path = session.path.parent / leaf
+    source = replica.replica_path(session.root)
     digest = hashlib.sha256()
+    signature = None
+    conn = None
+    held = ExitStack()
+    stopped = None
+
+    def check():
+        nonlocal stopped
+        try:
+            raw_check()
+        except BaseException as error:
+            stopped = error
+            raise
+
     try:
         try:
-            shared = open(replica.replica_path(session.root), "rb")  # noqa: SIM115 - read-only copy
-        except FileNotFoundError:
-            yield None
-            return
-        with shared, session.state_fs.file(session.state_directory, leaf, create=True, exclusive=True,
-                                           access="write").require() as staged:
-            before = _signature(os.fstat(shared.fileno()))
-            while chunk := shared.read(1024 * 1024):
+            # A published replica has no SQLite companions; unknown families never supply recovery facts.
+            if any(os.path.lexists(str(source) + suffix) for suffix in snapshot._COMPANIONS):
+                raise connection.CollectionStoreError(SYNC_PENDING, "the replica requires SQLite companions")
+            try:
+                descriptor, before = _open_regular_source_native(source)
+            except FileNotFoundError:
+                descriptor = None
+            if descriptor is None:
+                result = None
+            else:
+                with os.fdopen(descriptor, "rb") as shared:
+                    staged = held.enter_context(session.state_fs.file(
+                        session.state_directory, leaf, create=True, exclusive=True, access="write").require())
+                    while chunk := shared.read(1024 * 1024):
+                        check()
+                        digest.update(chunk)
+                        remaining = memoryview(chunk)
+                        while remaining:
+                            remaining = remaining[os.write(staged.descriptor, remaining):]
+                    os.fsync(staged.descriptor)
+                    after = os.fstat(shared.fileno())
+                    if (_source_signature(after) != before
+                            or _cross_source_signature(source.lstat()) != _cross_source_signature(after)):
+                        raise connection.CollectionStoreError(BUSY, "the replica changed during staging")
+                    signature = _signature(after)
                 check()
-                digest.update(chunk)
-                os.write(staged.descriptor, chunk)
-            os.fsync(staged.descriptor)
-            signature = before if _signature(os.fstat(shared.fileno())) == before else None
-        conn = sqlite3.connect(path, isolation_level=None)
-        try:
-            metadata = snapshot._validate(conn, check)
-            chain.verify_store_chain(conn)
-            marker = authority.parse_marker(session.root, authority.read_marker(session.root))
-            collections = dict(conn.execute("SELECT collection_id,manifest_path FROM collections"))
-            # Preserve the takeover decision's foreign-store and lagging-replica verdicts before checking owned paths.
-            if metadata[schema.META_STORE_ID] == marker["store_id"] and all(
-                    collections.get(entry["collection_id"]) == entry["manifest_path"] for entry in marker["collections"]):
-                authority.require_marker(conn, marker, root=session.root)
-            result = Staged(
-                leaf, digest.hexdigest(), signature, metadata, collections,
-                {head: chain.head_relation(conn, *head) for head in heads if head is not None},
-                json.loads(metadata[schema.META_LINEAGE]),
-            )
-        except (connection.CollectionStoreError, chain.StoreChainError, sqlite3.DatabaseError):
-            result = Staged(leaf, digest.hexdigest(), signature, {}, {}, {}, [])
-        finally:
-            conn.close()
+                # Earlier schemas keep their established before/after migration validation in this same copy.
+                snapshot.migrate_copy(path, check)
+                conn = sqlite3.connect(path, isolation_level=None)
+                held.callback(conn.close)
+                with connection.checked_sql(conn, check):
+                    metadata, canonical = _validate_collection_replica_connection(session.root, conn, check)
+                    result = Staged(
+                        leaf, digest.hexdigest(), signature, metadata,
+                        {entry["collection_id"]: entry["manifest_path"] for entry in canonical["collections"]},
+                        {head: chain.head_relation(conn, *head) for head in heads if head is not None},
+                        json.loads(metadata[schema.META_LINEAGE]), canonical, conn,
+                    )
+        except (connection.CollectionStoreError, chain.StoreChainError, PortabilityError,
+                collections.CollectionError, OpError) as error:
+            if stopped is not None:
+                raise stopped from None
+            # These fixed validation codes describe candidate bytes, never authority or native I/O failures.
+            invalid = (isinstance(error, chain.StoreChainError)
+                       or isinstance(error, collections.CollectionError)
+                       or isinstance(error, connection.CollectionStoreError) and error.code in {
+                           "COLLECTION_SNAPSHOT_INVALID", "COLLECTION_STORE_MARKER_CONFLICT",
+                           "COLLECTION_STORE_CREATE_CONFLICT", SYNC_PENDING}
+                       or isinstance(error, PortabilityError) and error.code in {
+                           "INVALID_ARCHIVE", "UNSAFE_SYMLINK", "UNSAFE_SOURCE_ENTRY"}
+                       or isinstance(error, OpError) and error.code == "COLLECTION_STORE_UNAVAILABLE")
+            if not invalid:
+                if isinstance(error, PortabilityError) and error.code == "SOURCE_CHANGED_DURING_EXPORT":
+                    raise connection.CollectionStoreError(BUSY, "the replica changed while it was opened") from error
+                raise
+            result = Staged(leaf, digest.hexdigest(), signature, {}, {}, {}, [], None, conn)
         yield result
     finally:
+        held.close()  # Close the reader, then the held stage, before removing its old name.
         try:
             os.unlink(path)
         except FileNotFoundError:
             pass
+
+
+def replica_adoptability(metadata, raw_marker, *, intent_only=False):
+    """Pure replica refusals shared by takeover and offline archive validation."""
+    if not intent_only and schema.META_REPLICA_DIVERGENCE in metadata:
+        return DIVERGED, "the vault replica records unresolved divergence"
+    intent = None if metadata.get(authority.PENDING_CREATE) is None else json.loads(metadata[authority.PENDING_CREATE])
+    if intent is not None and intent.get("kind") == authority.EXPORT:
+        # Only the owner's export may finish the collections' departure from this store.
+        return EXPORTING, "the vault replica carries an unfinished export; finish it with `exomem collections export`"
+    if intent is not None and intent["target_marker"].encode() != raw_marker:
+        return SYNC_PENDING, "the vault replica carries an unfinished create"
+    return None
 
 
 def decide(*, marker, raw_marker, recorded, local, local_relation, staged, token):
@@ -188,9 +264,9 @@ def decide(*, marker, raw_marker, recorded, local, local_relation, staged, token
     if any(staged.collections.get(entry["collection_id"]) != entry["manifest_path"]
            for entry in marker["collections"]):
         return "COLLECTION_STORE_SYNC_PENDING", "the vault replica predates the authority marker"
-    intent = meta.get(authority.PENDING_CREATE)
-    if intent is not None and json.loads(intent)["target_marker"].encode() != raw_marker:
-        return "COLLECTION_STORE_SYNC_PENDING", "the vault replica carries an unfinished create"
+    refusal = replica_adoptability(meta, raw_marker, intent_only=True)
+    if refusal is not None:
+        return refusal
     head = (sequence, meta.get(schema.META_STORE_HEAD_HASH))
     if local is not None and recorded_head == head == (local.commit_seq, local.head_hash):
         return "continue", "this host's store already carries the recorded replica head"
@@ -233,29 +309,57 @@ def install(session, staged, token, check):
         conn.execute("BEGIN IMMEDIATE")
         identity = _restamp(conn, staged, token)
         conn.execute("COMMIT")
-    if session.path.exists():
-        # Fold the superseded store's WAL into its own file; any open connection refuses this.
-        try:
-            with closing(sqlite3.connect(session.path, isolation_level=None, timeout=0)) as live:
-                if live.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
-                    raise sqlite3.OperationalError("journal mode unchanged")
-        except sqlite3.OperationalError as error:
-            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open") from error
-    for suffix in ("-wal", "-shm", "-journal"):
-        if (session.path.parent / (session.path.name + suffix)).exists():
-            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open")
+    replace_live(session, staged.leaf, check)
+    return identity
+
+
+def replace_live(session, leaf, check, *, subdirectory=None, expected_identity=None, expected_version=None):
+    """Rename a closed, journal-free store file into place as this host's live store.
+
+    ``leaf`` lies in the state directory, or in its private ``subdirectory`` on the same
+    volume. A live store it replaces is kept as the newest superseded store.
+    """
     fs = session.state_fs
     check()
     with fs.parent(session.path.parent.name, access="mutate").require() as directory:
         if not held_fs._same_file_identity(directory.identity, session.state_directory.identity):
             raise connection.CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "state directory changed")
-        superseded = None
-        if session.path.exists():
-            superseded = f"{session.path.name}{SUPERSEDED}{secrets.token_hex(8)}"
-            with fs.file(directory, session.path.name, access="mutate").require() as live:
-                fs.rename(live, directory, superseded, replace=False).require()
-        with fs.file(directory, staged.leaf, access="mutate").require() as adopted:
+        with (nullcontext(directory) if subdirectory is None else fs.parent(
+                f"{session.path.parent.name}/{subdirectory}", access="mutate").require()) as source, \
+                fs.file(source, leaf, access="mutate").require() as adopted:
+            def require_source():
+                if expected_identity is not None and not held_fs._same_file_identity(adopted.identity, expected_identity):
+                    raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the sealed staging store changed")
+                if expected_version is not None:
+                    if adopted.version() != expected_version:
+                        raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the sealed staging bytes changed")
+                    for suffix in snapshot._COMPANIONS:
+                        companion = fs.file(source, leaf + suffix)
+                        if companion.ok:
+                            companion.require().close()
+                            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the sealed staging store has SQLite companions")
+                        if companion.error.code != "MISSING":
+                            raise companion.error
+            require_source()
+            if session.path.exists():
+                # Fold the superseded store's WAL into its own file; any open connection refuses this.
+                try:
+                    with closing(sqlite3.connect(session.path, isolation_level=None, timeout=0)) as live:
+                        if live.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+                            raise sqlite3.OperationalError("journal mode unchanged")
+                except sqlite3.OperationalError as error:
+                    raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open") from error
+            for suffix in snapshot._COMPANIONS:
+                if (session.path.parent / (session.path.name + suffix)).exists():
+                    raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open")
+            check()
             os.fsync(adopted.descriptor)
+            require_source()
+            superseded = None
+            if session.path.exists():
+                superseded = f"{session.path.name}{SUPERSEDED}{secrets.token_hex(8)}"
+                with fs.file(directory, session.path.name, access="mutate").require() as live:
+                    fs.rename(live, directory, superseded, replace=False).require()
             fs.rename(adopted, directory, session.path.name, replace=False).require()
         fs.flush_directory(directory).require()
         if superseded is not None:
@@ -266,4 +370,3 @@ def install(session, staged, token, check):
                 with fs.file(directory, name, access="mutate").require() as old:
                     fs.unlink(old).require()
             fs.flush_directory(directory).require()
-    return identity

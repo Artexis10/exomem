@@ -623,6 +623,33 @@ def _nudge_item(
     }
 
 
+def _refresh_items(hook_dir: Path, client: str, home: Path) -> list[dict]:
+    from ._hooks import exomem_retrieve_nudge as retrieve
+
+    items = []
+    for event in retrieve.REFRESH_HOST_CONTRACTS[client]["events"]:
+        item = _nudge_item(
+            "exomem_retrieve_nudge.py",
+            "exomem-retrieve-nudge.sh",
+            event,
+            hook_dir,
+            client,
+            home,
+            "mcp",
+            10 if event == "UserPromptSubmit" else 5,
+        )
+        item.update(kind="refresh", activation_mode="mcp")
+        item["command"] += f" --refresh-event {event}"
+        if item.get("commandWindows"):
+            item["commandWindows"] += f" --refresh-event {event}"
+        if event == "PreCompact":
+            item["matcher"] = "manual|auto"
+        elif event == "SessionStart":
+            item["matcher"] = "compact|resume"
+        items.append(item)
+    return items
+
+
 def _command_basenames(command: str) -> set[str]:
     return set(re.findall(r"[A-Za-z0-9_.-]+(?:\.py|\.sh)(?=[\"'\s]|$)", command))
 
@@ -634,7 +661,13 @@ def _has_client_arg(command: str, client: str) -> bool:
 def _is_matching_entry(hook: dict, item: dict) -> bool:
     command = f"{hook.get('command', '')} {hook.get('commandWindows', '')}"
     if item.get("kind") != "continuation":
-        return any(marker in command for marker in _MARKERS)
+        # Closed installed script names distinguish retrieval from capture on shared events.
+        stem = Path(item["script"]).stem.removeprefix("exomem_")
+        return any(
+            marker in command
+            for marker in _MARKERS
+            if stem.replace("_", "-") in marker.replace("_", "-")
+        )
     names = _command_basenames(command)
     if names.intersection(_CONTINUATION_LEGACY):
         return True
@@ -1190,18 +1223,27 @@ def check_hooks(
             )
 
         scripts = {}
+        if activation_mode is not None and activation_mode != "mcp":
+            from ._hooks import exomem_retrieve_nudge as retrieve
+
+            refresh = retrieve.refresh_capabilities(client, "disabled")
+        else:
+            refresh = _refresh_check(hd, home, client, data)
         for script, wrapper, event in _HOOK_SPECS:
             if data is None:
                 unevaluated(f"config.{event}")
             else:
                 entries = _commands_for_event(data, event)
                 expected = _nudge_item(script, wrapper, event, hd, client, home, activation_mode)
+                if event == "UserPromptSubmit" and refresh["classification"] == "available":
+                    expected = _refresh_items(hd, client, home)[0]
                 expected["activation_mode"] = activation_mode
                 configured = (
                     _configured_item(data, expected)
                     if activation_mode
                     else any(_contains_any(h, (script, wrapper)) for h in entries)
                 )
+
                 legacy = [h for h in entries if _contains_any(h, _LEGACY_MARKERS)]
                 add(
                     f"config.{event}",
@@ -1239,6 +1281,16 @@ def check_hooks(
                     f"{event} deployed hook files match bundled source",
                     status,
                 )
+
+        if refresh["classification"] == "available":
+            for item in _refresh_items(hd, client, home):
+                if item["event"] != "UserPromptSubmit":
+                    configured = _configured_item(data, item)
+                    add(
+                        f"config.refresh.{item['event']}",
+                        "pass" if configured else "fail",
+                        f"{item['event']} checkpoint interception is {'configured' if configured else 'unavailable'}",
+                    )
 
         continuation_items = _continuation_items(hd, client, home, activation_mode)
         for item in continuation_items:
@@ -1367,6 +1419,7 @@ def check_hooks(
                 "hook_home": str(home),
                 "activation_mode": activation_mode or "legacy",
                 "runtime_activation": "unverified",
+                "refresh": refresh,
                 "windows_command_supported": all(item.get("commandWindows") is not None for item in continuation_items) if client == "codex" else None,
                 "scripts": scripts,
                 "logs": logs,
@@ -1715,11 +1768,23 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
     raise RuntimeError(f"concurrent hook config changes persisted at {path}")
 
 
-def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
-    return _rewrite_hooks(path, lambda data: _merged_config(data, installed, timeout))
+def _merge_hooks(
+    path: Path, installed: list[dict], timeout: int, *, refresh_items: list[dict] | None = None
+) -> dict:
+    return _rewrite_hooks(
+        path,
+        lambda data: _merged_config(
+            _pruned_config(data, matches=lambda hook: _is_refresh_entry(hook, refresh_items))[0]
+            if refresh_items else data,
+            installed,
+            timeout,
+        ),
+    )
 
 
-def _merge_one_config(path: Path, installed: list[dict], timeout: int) -> dict:
+def _merge_one_config(
+    path: Path, installed: list[dict], timeout: int, *, refresh_items: list[dict] | None = None
+) -> dict:
     """Merge into one alternate source, reporting rather than raising on failure.
 
     A yadm alternate may be a Jinja template rather than JSON, so parseability
@@ -1738,7 +1803,12 @@ def _merge_one_config(path: Path, installed: list[dict], timeout: int) -> dict:
     try:
         migration = _rewrite_hooks(
             path,
-            lambda data: _merged_config(data, installed, timeout),
+            lambda data: _merged_config(
+                _pruned_config(data, matches=lambda hook: _is_refresh_entry(hook, refresh_items))[0]
+                if refresh_items else data,
+                installed,
+                timeout,
+            ),
             create=False,
         )
     except (OSError, RuntimeError, ValueError) as error:
@@ -1772,6 +1842,95 @@ def _mark_restart_pending(hook_dir: Path) -> None:
         pass
 
 
+def _refresh_check(hook_dir: Path, home: Path, client: str, data: dict | None) -> dict:
+    from ._hooks import exomem_retrieve_nudge as retrieve
+
+    metadata, classification = retrieve.refresh_metadata(hook_dir, client, home)
+    report = retrieve.refresh_capabilities(client, classification)
+    if metadata is not None:
+        report["limits"] = metadata["limits"]
+        report["producing_package_version"] = metadata["package_version"]
+        report["descriptor_hash"] = metadata["descriptor_hash"]
+        report["configured_events"] = [
+            item["event"]
+            for item in _refresh_items(hook_dir, client, home)
+            if _configured_item(data, item)
+        ]
+        if "PreToolUse" not in report["configured_events"]:
+            report["accounting"] = "unavailable"
+    return report
+
+
+def _refresh_metadata(
+    client: str,
+    home: Path,
+    bindings: tuple[str, ...],
+    max_operations: int | None,
+    max_activation_chars: int | None,
+) -> dict:
+    """Generate the static bridge from the maintained command and compiler sources."""
+    from . import __version__, commands, working_set
+    from ._hooks import exomem_continuation_checkpoint as safe
+    from ._hooks import exomem_retrieve_nudge as retrieve
+
+    prefixes = []
+    for binding in bindings:
+        if not isinstance(binding, str):
+            raise ValueError("checkpoint binding must be a native MCP name or prefix")
+        prefix = binding if binding.startswith("mcp__") else f"mcp__{binding}__"
+        if not retrieve._REFRESH_PREFIX.fullmatch(prefix):
+            raise ValueError("invalid native MCP binding prefix")
+        prefixes.append(prefix)
+    if (
+        not 1 <= len(prefixes) <= 8
+        or len(set(prefixes)) != len(prefixes)
+        or any(left != right and left.startswith(right) for left in prefixes for right in prefixes)
+    ):
+        raise ValueError("checkpoint bindings must be distinct, bounded and non-overlapping")
+    operation_limit = 8 if max_operations is None else max_operations
+    character_limit = (
+        3 * working_set.DEFAULT_BUDGET_CHARS
+        if max_activation_chars is None
+        else max_activation_chars
+    )
+    if (
+        not retrieve._refresh_uint(operation_limit, retrieve._REFRESH_MAX_OPERATIONS)
+        or operation_limit < 1
+        or not retrieve._refresh_uint(character_limit, 128_000_000)
+        or character_limit < 1
+    ):
+        raise ValueError("invalid checkpoint allowance")
+    operations = {
+        command.name: command.read_only for command in commands.product_commands_for("mcp")
+    }
+    source_paths = {
+        "commands.py": Path(commands.__file__),
+        "working_set.py": Path(working_set.__file__),
+        "exomem_retrieve_nudge.py": _HOOK_DIR_SRC / "exomem_retrieve_nudge.py",
+        "exomem_continuation_checkpoint.py": _HOOK_DIR_SRC / _CONTINUATION_SCRIPT,
+    }
+    return {
+        "schema_version": 1,
+        "client": client,
+        "profile_binding": safe._state_root_binding(home, client),
+        "bindings": prefixes,
+        "operations": operations,
+        "activation": {
+            "operation": "activate_context",
+            "default": working_set.DEFAULT_BUDGET_CHARS,
+            "minimum": working_set.MIN_BUDGET_CHARS,
+            "maximum": working_set.MAX_BUDGET_CHARS,
+        },
+        "limits": {"operations": operation_limit, "activation_chars": character_limit},
+        "package_version": __version__,
+        "source_hashes": {
+            name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for name, path in source_paths.items()
+        },
+        "descriptor_hash": safe._sha256_bytes(safe._canonical_bytes(operations)),
+    }
+
+
 def install_hook(
     *,
     hook_dir: Path | None = None,
@@ -1782,6 +1941,9 @@ def install_hook(
     client: str = DEFAULT_CLIENT,
     activation_mode: str | None = None,
     hook_home: Path | None = None,
+    refresh_bindings: tuple[str, ...] | None = None,
+    refresh_max_operations: int | None = None,
+    refresh_max_activation_chars: int | None = None,
 ) -> dict:
     """Install the bundled hook scripts + wrappers and (optionally) wire config.
 
@@ -1791,6 +1953,12 @@ def install_hook(
     _private_group_for_user.cache_clear()
     client = _normalize_client(client)
     activation_mode = _activation_mode(activation_mode)
+    if refresh_bindings is not None and (activation_mode != "mcp" or specs is not _HOOK_SPECS):
+        raise ValueError("native checkpoint bindings require the full MCP hook installation")
+    if refresh_bindings is None and (
+        refresh_max_operations is not None or refresh_max_activation_chars is not None
+    ):
+        raise ValueError("checkpoint allowances require explicit native MCP bindings")
     home = _profile_home(client, settings_path) if activation_mode else _default_home(client)
     if hook_home is not None:
         if activation_mode is None:
@@ -1806,8 +1974,10 @@ def install_hook(
                 f"bundled hook file missing at {_HOOK_DIR_SRC / name} — "
                 "is the exomem install intact?"
             )
-    hook_dir = Path(hook_dir).expanduser() if hook_dir else (
-        home / "hooks" if activation_mode else _default_hook_dir(client)
+    hook_dir = (
+        Path(hook_dir).expanduser()
+        if hook_dir
+        else (home / "hooks" if activation_mode else _default_hook_dir(client))
     )
     if activation_mode is not None and client == "codex" and os.name == "nt":
         for name in bundled:
@@ -1817,6 +1987,24 @@ def install_hook(
 
     if activation_mode is not None:
         safe.validate_nudge_home(home, client)
+    refresh_report = {"classification": "disabled"}
+    metadata = None
+    if activation_mode == "mcp" and specs is _HOOK_SPECS:
+        from ._hooks import exomem_retrieve_nudge as retrieve
+
+        # Reinstallation preserves a prior explicit profile-local selection. It
+        # never discovers bindings from tool names or enables a legacy profile.
+        if refresh_bindings is None:
+            prior, prior_status = retrieve.refresh_metadata(hook_dir, client, home)
+            refresh_report = retrieve.refresh_capabilities(client, prior_status)
+            if prior is not None:
+                refresh_bindings = tuple(prior["bindings"])
+                refresh_max_operations = prior["limits"]["operations"]
+                refresh_max_activation_chars = prior["limits"]["activation_chars"]
+        if refresh_bindings is not None:
+            metadata = _refresh_metadata(
+                client, home, refresh_bindings, refresh_max_operations, refresh_max_activation_chars
+            )
     hook_fd = safe._ensure_secure_dir(hook_dir)
     if hook_fd is not None:
         os.close(hook_fd)
@@ -1825,12 +2013,38 @@ def install_hook(
     for py_name, sh_name, event in source_specs:
         _deploy_file(_HOOK_DIR_SRC / py_name, hook_dir / py_name)
         _deploy_file(_HOOK_DIR_SRC / sh_name, hook_dir / sh_name)
-        installed.append(_nudge_item(py_name, sh_name, event, hook_dir, client, home, activation_mode, timeout))
+        installed.append(
+            _nudge_item(py_name, sh_name, event, hook_dir, client, home, activation_mode, timeout)
+        )
     if specs is _HOOK_SPECS:
         _deploy_file(_HOOK_DIR_SRC / _LOCAL_CREDENTIAL_SCRIPT, hook_dir / _LOCAL_CREDENTIAL_SCRIPT)
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_SCRIPT, hook_dir / _CONTINUATION_SCRIPT)
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_WRAPPER, hook_dir / _CONTINUATION_WRAPPER)
         installed.extend(_continuation_items(hook_dir, client, home, activation_mode))
+
+    if metadata is not None:
+        safe.write_nudge_file(
+            hook_dir / retrieve.REFRESH_METADATA_NAME, safe.encode_checkpoint(metadata)
+        )
+        installed = [item for item in installed if item["event"] != "UserPromptSubmit"]
+        installed.extend(_refresh_items(hook_dir, client, home))
+        refresh_report = retrieve.refresh_capabilities(client, "available")
+
+    remove_refresh = activation_mode != "mcp" and specs is _HOOK_SPECS
+    prior_refresh_items = None
+    if remove_refresh:
+        from ._hooks import exomem_retrieve_nudge as retrieve
+
+        # Legacy mode uses a different home; ownership still follows the prior MCP profile.
+        refresh_home = home if activation_mode is not None else _profile_home(client, settings_path)
+        prior_refresh_items = _refresh_items(hook_dir, client, refresh_home)
+        try:
+            safe.unlink_nudge_file(hook_dir / retrieve.REFRESH_METADATA_NAME)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # The selected mode disables leftover metadata even when safe removal is unavailable.
+            refresh_report["metadata_cleanup"] = "unavailable"
 
     if activation_mode != "mcp":
         _mark_restart_pending(home / "hooks" if activation_mode else hook_dir)
@@ -1842,16 +2056,22 @@ def install_hook(
         "client": client,
         "hook_home": str(home),
         "activation_mode": activation_mode or "legacy",
+        "refresh": refresh_report,
         "config_changed": False,
         "backup": None,
         "alternates": [],
     }
     if wire:
-        sp = Path(settings_path).expanduser() if settings_path else (
-            home / ("hooks.json" if client == "codex" else "settings.json")
-            if activation_mode else _default_settings(client)
+        sp = (
+            Path(settings_path).expanduser()
+            if settings_path
+            else (
+                home / ("hooks.json" if client == "codex" else "settings.json")
+                if activation_mode
+                else _default_settings(client)
+            )
         )
-        migration = _merge_hooks(sp, installed, timeout)
+        migration = _merge_hooks(sp, installed, timeout, refresh_items=prior_refresh_items)
         result["wired"] = True
         result["settings"] = str(sp)
         result["config_changed"] = migration["changed"]
@@ -1863,7 +2083,7 @@ def install_hook(
         # of them matches the machine.
         written = Path(migration["path"]).name
         result["alternates"] = [
-            _merge_one_config(source, installed, timeout)
+            _merge_one_config(source, installed, timeout, refresh_items=prior_refresh_items)
             for source in _alternate_sources(sp)
             if source.name != written
         ]
@@ -2122,6 +2342,9 @@ def refresh_wired_profiles(
                 try:
                     args = shlex.split(command)
                     mode = args[args.index("--activation-mode") + 1]
+                    # Legacy commands omit the state home; explicit home options must still validate.
+                    if not any(arg.startswith("--hook-home") for arg in args):
+                        args.extend(["--hook-home", str(profile["hook_dir"].parent.absolute())])
                     bound_home = args[args.index("--hook-home") + 1]
                 except (ValueError, IndexError) as error:
                     raise ValueError("invalid installed hook activation/profile binding") from error
@@ -2229,6 +2452,7 @@ _DEPLOYED_NAMES = (
     _CONTINUATION_SCRIPT,
     _CONTINUATION_WRAPPER,
     _LOCAL_CREDENTIAL_SCRIPT,
+    "exomem_refresh_metadata.v1.json",
     *_CONTINUATION_LEGACY,
     "kb_capture_nudge.py",
     "kb-capture-nudge.sh",
@@ -2254,7 +2478,33 @@ def _is_exomem_entry(hook: dict) -> bool:
     return bool(_command_basenames(command).intersection(continuation))
 
 
-def _pruned_config(source: dict) -> tuple[dict, int]:
+def _is_refresh_entry(hook: dict, expected: list[dict]) -> bool:
+    if hook.get("type") != "command":
+        return False
+    commands = {}
+    # These native command fields are closed; complete renderer-produced argv defines ownership.
+    for field in ("command", "commandWindows"):
+        if field not in hook:
+            continue
+        command = hook[field]
+        if not isinstance(command, str):
+            return False
+        try:
+            commands[field] = shlex.split(command)
+        except ValueError:
+            return False
+        if not commands[field]:
+            return False
+    return "command" in commands and any(
+        all(
+            isinstance(item.get(field), str) and argv == shlex.split(item[field])
+            for field, argv in commands.items()
+        )
+        for item in expected
+    )
+
+
+def _pruned_config(source: dict, *, matches=_is_exomem_entry) -> tuple[dict, int]:
     """Drop every entry we own, and only the containers that became ours-only.
 
     Walks every event rather than the events the current specs name, because a
@@ -2284,7 +2534,7 @@ def _pruned_config(source: dict) -> tuple[dict, int]:
             remaining = [
                 hook
                 for hook in original
-                if not (isinstance(hook, dict) and _is_exomem_entry(hook))
+                if not (isinstance(hook, dict) and matches(hook))
             ]
             removed += len(original) - len(remaining)
             if len(remaining) == len(original):

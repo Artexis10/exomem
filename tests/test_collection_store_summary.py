@@ -135,7 +135,7 @@ def _seed(store, cid, count):
     manifest = collections.parse_manifest_bytes(store.root, path, text.encode())
     typed = typed_storage.ready_layout(conn, cid)
     txn = conn.execute("SELECT MAX(txn_id) FROM txns").fetchone()[0]
-    seeded = [(f"seed-{number}", {"title": f"Seed {number}"}) for number in range(count)]
+    seeded = [(f"00000000-0000-4000-8000-{number:012x}", {"title": f"Seed {number}"}) for number in range(count)]
     with store.handle.transaction() as tx:
         tx.executemany(
             "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
@@ -144,20 +144,20 @@ def _seed(store, cid, count):
               None if typed else json.dumps(values), tokens.payload_hash(1, key, values, ""),
               None if typed else f"{manifest.storage.source}/{key}.md", txn, txn,
               governance.row_metadata(manifest.schema, values, metadata),
-              "typed-v1" if typed else "json-v1") for key, values in seeded))
+              typed.encoding if typed else "json-v1") for key, values in seeded))
         if typed:
             ids = dict(tx.execute("SELECT item_key,row_id FROM items WHERE collection_id=?", (cid,)))
             for key, values in seeded:
                 typed_storage.write_version(store.handle, typed, row_id=ids[key], row_version=1, values=values, body="",
                                             payload_hash=tokens.payload_hash(1, key, values, ""), txn_id=txn,
-                                            schema_version=1)
+                                            schema_version=1, item_key=key)
 
 
 def test_new_summary_collection_is_typed_and_described_by_store_bounds(store):
     """A summary collection created as JSON rows with per-row view paths, or described with a file row cap."""
     receipt = create(store)
     assert mutation_terminal.valid_record_receipt(receipt)
-    assert store.connection.execute("SELECT encoding,view_mode FROM collections").fetchone() == ("typed-v1", "summary")
+    assert store.connection.execute("SELECT encoding,view_mode FROM collections").fetchone() == ("typed-v2", "summary")
     store.append_record(CID, item={"title": "One", "count": 1}, why="observe")
     assert store.connection.execute("SELECT view_path FROM items").fetchall() == [(None,)]
     described = store.inspect_collection(CID)
@@ -240,7 +240,10 @@ def test_summary_acknowledgement_writes_no_row_files_and_publishes_bounded_label
     declared = pages(store)
     held = refused.value.details["held"]["path"]
     owned = {path: data for path, data in files(store).items() if path not in {EVIDENCE, "Knowledge Base/log.md"}}
-    assert set(owned) == {manifest_path(), held, *declared}
+    history_path = Path(manifest_path()).with_name("_history.md").as_posix()
+    assert store.connection.execute(
+        "SELECT path FROM projection_state WHERE kind='history'").fetchall() == [(history_path,)]
+    assert set(owned) == {manifest_path(), held, history_path, *declared}
     assert 1 <= len(declared) <= PAGE_CAP
     assert all(len(owned[path]) <= PAGE_BYTES for path in declared)
     assert sum(len(owned[path]) for path in declared) <= PAGES_TOTAL
@@ -370,6 +373,12 @@ def test_file_collections_refuse_summary_on_create_and_revise(tmp_path):
 def test_empty_collection_changes_mode_only_without_outstanding_state(store, outstanding):
     """An empty collection refused a guarded mode change, or allowed one over held, unclassified or unpublished state."""
     create(store, summary=outstanding == "pending-publication")
+    if outstanding in {"none", "offline-edit"}:
+        store.reconcile_views()
+    if outstanding == "none":
+        store.reconcile_views()
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM projection_state WHERE state<>'current'").fetchone()[0] == 0
     if outstanding == "held":
         with pytest.raises(collections.CollectionError):
             store.append_record(CID, item={"title": "Refused", "count": "many"}, why="observe")
@@ -433,6 +442,7 @@ def test_summary_rows_live_only_in_the_external_store_while_items_stays_default(
     assert collections.parse_manifest_bytes(store.root, COPY_PATH, items_text.encode()).view_mode == "items"
     store.create_collection(COPY_PATH, items_text, why="items default", scaffold=False)
     receipt = store.append_record(COPY_CID, item={"title": "zq-items-8"}, why="observe")
+    store.reconcile_views()
     assert b"zq-items-8" in (store.root / receipt["affected_paths"][0]).read_bytes()
     assert store.connection.execute("SELECT view_mode FROM collections WHERE collection_id=?",
                                     (COPY_CID,)).fetchone() == ("items",)
@@ -527,6 +537,31 @@ def test_summary_policy_varying_past_the_bound_refuses_with_its_typed_limit(stor
     with runtime.read_session(store.root, store.handle.path) as session:
         with pytest.raises(runtime.QueryError, match="COLLECTION_RELEASE_LIMIT"):
             session.admit(CID)
+
+
+@pytest.mark.parametrize("population", ["empty", "uniform", "varying"])
+def test_summary_admission_preserves_held_refusal_and_row_limit(store, monkeypatch, population):
+    """Count-free admission must check held candidates without concealing the row-decision limit."""
+    create(store)
+    if population != "empty":
+        bulk(store, [{"title": f"Row {n}"} for n in range(3)])
+    with pytest.raises(collections.CollectionError) as refused:
+        store.append_record(CID, item={"title": "Candidate", "count": "invalid"}, why="capture")
+    held_path = refused.value.details["held"]["path"].removeprefix("Knowledge Base/")
+    write_scope(store.root, paths=held_path)
+    write_rule(store.root, ceiling=0)
+    expected = "COLLECTION_NOT_FOUND"
+    if population == "varying":
+        monkeypatch.setattr(governance, "MAX_SUMMARY_ROW_DECISIONS", 2)
+        key = store.connection.execute("SELECT item_key FROM items ORDER BY row_id LIMIT 1").fetchone()[0]
+        scope = _gov_dir(store.root) / "scopes" / "patterns.yaml"
+        scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{key}]\n")
+        expected = "COLLECTION_RELEASE_LIMIT"
+    before = tuple(store.connection.iterdump())
+    with request_scope(_external()):
+        with pytest.raises(collections.CollectionError, match=expected):
+            store.append_record(CID, item={"title": "Refused mutation"}, why="capture")
+    assert tuple(store.connection.iterdump()) == before
 
 
 def test_summary_collection_refuses_a_planning_join(store):

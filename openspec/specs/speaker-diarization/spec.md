@@ -22,17 +22,17 @@ configured threshold, margin, and standout rules; otherwise it SHALL remain anon
 
 Transcript rendering SHALL depend on the semantic-segments gate: with
 `EXOMEM_SEMANTIC_SEGMENTS` unset, diarized transcripts render as merged same-speaker turns
-(`[Hugo]: …`) exactly as today; with it set, they render as one timed line per ASR segment
-(`[m:ss] [Hugo]: …`) with the label repeated per segment. In both modes the structured
+(`[Fixture Speaker]: …`) exactly as today; with it set, they render as one timed line per ASR segment
+(`[m:ss] [Fixture Speaker]: …`) with the label repeated per segment. In both modes the structured
 `speakers` field SHALL carry the merged-turn shape unchanged.
 
 #### Scenario: Enrolled speaker is named in the transcript
 
-- **WHEN** a media file is diarized for a vault with an enrolled profile "Hugo" and a cluster's
-  ECAPA centroid matches the Hugo centroid above threshold and margin
-- **THEN** that cluster's turns are rendered as `[Hugo]: …` in the transcript text (prefixed
+- **WHEN** a media file is diarized for a vault with an enrolled profile "Fixture Speaker" and a cluster's
+  ECAPA centroid matches the Fixture Speaker centroid above threshold and margin
+- **THEN** that cluster's turns are rendered as `[Fixture Speaker]: …` in the transcript text (prefixed
   `[m:ss]` per segment when `EXOMEM_SEMANTIC_SEGMENTS` is set)
-- **AND** the structured `speakers` field carries `speaker: "Hugo"` for those turns
+- **AND** the structured `speakers` field carries `speaker: "Fixture Speaker"` for those turns
 
 #### Scenario: Unknown voice stays anonymous
 
@@ -125,14 +125,14 @@ as an MCP connector tool.
 
 #### Scenario: Enroll the vault owner
 
-- **WHEN** `python -m exomem enroll-speaker --name Hugo --self <sample.wav>` is run
-- **THEN** a profile "Hugo" with `is_self: true` and a 192-dim centroid is stored
+- **WHEN** `python -m exomem enroll-speaker --name "Fixture Speaker" --self <sample.wav>` is run
+- **THEN** a profile "Fixture Speaker" with `is_self: true` and a 192-dim centroid is stored
 - **AND** `list-speakers` reports it
 
 #### Scenario: Remove a profile
 
-- **WHEN** `python -m exomem remove-speaker --name Hugo` is run
-- **THEN** the "Hugo" profile is deleted from the store
+- **WHEN** `python -m exomem remove-speaker --name "Fixture Speaker"` is run
+- **THEN** the "Fixture Speaker" profile is deleted from the store
 - **AND** subsequent diarization labels that voice anonymously again
 
 ### Requirement: Deterministic Pure-Substrate Measurement

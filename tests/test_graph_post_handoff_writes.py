@@ -2035,6 +2035,9 @@ def test_a_residue_adoption_keeps_reads_refusing_until_the_repair_lands(
     )
     assert set(deferred_index.list_graph_paths(root)) == set(adoption.residue)
 
+    # The watcher publishes the edit it observed: a drain derives only bytes
+    # the registry records, so the repair waits for that publication.
+    freshness.on_files_changed(root, changed=[page])
     for _ in range(12):
         if not deferred_index.list_graph_paths(root):
             break
@@ -2393,8 +2396,8 @@ def test_a_rebuild_retarget_keeps_the_recall_resolver(
     ):
         calls.append(1)
         if len(calls) == 1:
-            # Class C, first admitted cause: the supplied freshness identity did
-            # not name the resolver bytes.
+            # The resolver cause: the supplied freshness identity did not name
+            # the resolver bytes, so the attempt re-targets.
             return None
         return real(inner_self, resolver, membership, **kwargs)
 
@@ -2414,16 +2417,22 @@ def test_a_rebuild_retarget_keeps_the_recall_resolver(
 # --- The promoted standby does not repeat its own warm (task 2.8) ------------
 
 
-def _trace_warm(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
-    """Record which warm steps ran and which readiness components were marked."""
-    from exomem import readiness, semantic_contract, warmup
+def _trace_warm(monkeypatch: pytest.MonkeyPatch, root: Path) -> tuple[list[str], list[str]]:
+    """Trace cold parses, graph handoff, cache work and readiness marks."""
+    from exomem import readiness, semantic_contract, service_standby, warmup
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    if "semantic_corpus" in service_standby.carried_warm_components():
+        semantic_contract.warm_corpus_context(root)
 
     order: list[str] = []
     marked: list[str] = []
     real_mark = readiness.mark_ready
+    real_build = semantic_contract._build_corpus_context_uncached
 
-    def traced_corpus(*_args: object, **_kwargs: object) -> None:
+    def traced_corpus(*args, **kwargs):
         order.append("semantic_corpus")
+        return real_build(*args, **kwargs)
 
     def traced_caches(*_args: object, **_kwargs: object) -> dict:
         order.append("lexical")
@@ -2444,7 +2453,9 @@ def _trace_warm(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
         lambda _root: (order.append("graph_snapshot"), {})[1],
         raising=True,
     )
-    monkeypatch.setattr(semantic_contract, "warm_corpus_context", traced_corpus, raising=True)
+    monkeypatch.setattr(
+        semantic_contract, "_build_corpus_context_uncached", traced_corpus, raising=True
+    )
     monkeypatch.setattr(readiness, "mark_ready", traced_mark, raising=True)
     return order, marked
 
@@ -2470,7 +2481,7 @@ def test_a_cold_warm_carries_nothing_and_runs_every_step(
     from exomem import service_standby, warmup
 
     service_standby.reset_for_tests()
-    order, marked = _trace_warm(monkeypatch)
+    order, marked = _trace_warm(monkeypatch, handoff_vault)
 
     durations = warmup.warm_all(handoff_vault)
 
@@ -2503,7 +2514,7 @@ def test_a_promoted_warm_repeats_neither_the_adoption_nor_the_corpus_build(
         lambda: frozenset({"graph_handoff", "semantic_corpus", "lexical"}),
         raising=True,
     )
-    order, marked = _trace_warm(monkeypatch)
+    order, marked = _trace_warm(monkeypatch, handoff_vault)
 
     durations = warmup.warm_all(handoff_vault)
 
@@ -2527,7 +2538,7 @@ def test_an_uncarried_component_is_still_warmed_after_promotion(
         lambda: frozenset({"semantic_corpus"}),
         raising=True,
     )
-    order, _marked = _trace_warm(monkeypatch)
+    order, _marked = _trace_warm(monkeypatch, handoff_vault)
 
     warmup.warm_all(handoff_vault)
 

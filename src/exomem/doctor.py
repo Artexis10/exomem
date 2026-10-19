@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Literal
 
 from . import __version__, install_info, process_memory
 from .cli_ops import OpError
+from .collection_store.ownership import reader as ownership_reader
 from .kbdir import kb_dirname, kb_prefix
 
 if TYPE_CHECKING:
@@ -971,20 +972,17 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
 def _check_collection_store(vault_root: Path | None) -> DoctorCheck | None:
     """State the collection store's unsupported writer setup for a vault that has a store.
 
-    A vault without the store's routing marker has only file collections, so it gets no line, and
-    a missing vault root is another check's finding.
+    Trusted host enrollment establishes this check. A missing vault root is another check's finding.
     """
     if vault_root is None or not vault_root.is_dir():
         return None
-    from . import held_fs
-    from .collection_store import authority, connection
+    from .collection_store import connection, ownership
 
     try:
-        marker = authority.read_marker(vault_root)
-    except (OSError, held_fs.HeldFsError):
-        return _check("collection_store", "warn", "The collection store's routing marker could not be read.",
-                      f"Check that this user can read {authority.marker_path(vault_root)}.")
-    if marker is None:
+        _, enrolled = ownership.enrollment(vault_root)
+    except (OSError, RuntimeError):
+        return _check("collection_store", "warn", "Collection store enrollment is unavailable.")
+    if "collections-store-v1" not in enrolled:
         return None
     return _check("collection_store", "pass", f"This vault has store collections. {connection.UNSUPPORTED_WRITERS}")
 
@@ -1195,14 +1193,10 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
     except state_migration.StateMigrationManifestError as error:
         manifest = None
         manifest_error = error
-    if manifest is None:
-        migration_status = "invalid" if manifest_error is not None else "absent"
-    elif manifest["state"] != "complete":
-        migration_status = "in-progress"
-    elif tuple(manifest["descriptors"]) != state_migration._descriptor_ids():
-        migration_status = "stale"
+    if manifest_error is not None:
+        migration_status = "invalid"
     else:
-        migration_status = "complete"
+        migration_status = state_migration.manifest_status(manifest)
     completed = migration_status == "complete"
     details = {
         "state_root": str(state_dir),
@@ -1234,6 +1228,16 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "A governance rollback or adoption marker is present; ordinary relocated startup is fenced.",
             "Resume the offline governance rollback or explicitly adopt `governance-store=vault`; "
             "do not delete either governance database.",
+            details=details,
+        )
+    # Startup and the migrator refuse an unsupported requirement before they look at leftovers.
+    if migration_status == "unsupported":
+        return _check(
+            "state.placement",
+            "fail",
+            "The state records a compatibility requirement this release cannot use; "
+            "ordinary startup refuses it.",
+            "Run the release that wrote this state, and export from it before downgrading.",
             details=details,
         )
     if leftovers:
@@ -2677,6 +2681,15 @@ def _check_remote_owner_former_audience(vault_root: Path | None) -> list[DoctorC
 
 
 def _check_ha_env() -> list[DoctorCheck]:
+    from .writer_lease import LeaseConfig
+
+    checks: list[DoctorCheck] = []
+    try:
+        config = LeaseConfig.from_env()
+    except ValueError as error:
+        config = None
+        checks.append(_check("ha.config", "fail", str(error), "Fix the writer-lease environment configuration."))
+    shared_auth = config is None or config.topology != "single-host" or bool(os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip())
     required = {
         "EXOMEM_BASE_URL": "Set the stable public OAuth origin.",
         "EXOMEM_JWT_SIGNING_KEY": "Set the stable durable-session signing root.",
@@ -2687,7 +2700,9 @@ def _check_ha_env() -> list[DoctorCheck]:
         "EXOMEM_OAUTH_STORAGE_TOKEN": "Set the coordinator bearer credential for auth state.",
         "EXOMEM_LEASE_COORDINATOR_TOKEN": "Set the bearer enforced by the coordinator service.",
     }
-    checks: list[DoctorCheck] = []
+    if not shared_auth:
+        for key in ("EXOMEM_OAUTH_STORAGE_URL", "EXOMEM_OAUTH_STORAGE_TOKEN", "EXOMEM_LEASE_COORDINATOR_TOKEN"):
+            del required[key]
     for key, remediation in required.items():
         if os.environ.get(key, "").strip():
             checks.append(_check(f"ha.env.{key}", "pass", f"{key} is set."))
@@ -2700,22 +2715,23 @@ def _check_ha_env() -> list[DoctorCheck]:
             "ha.env.EXOMEM_WRITER_LEASE_TOKEN",
             "fail",
             "Writer lease token is not set.",
-            "Set EXOMEM_WRITER_LEASE_TOKEN to the same bearer as EXOMEM_OAUTH_STORAGE_TOKEN.",
+            "Set EXOMEM_WRITER_LEASE_TOKEN to the coordinator's bearer credential.",
         ))
     namespace = (
         os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
         or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
     )
-    checks.append(_check(
-        "ha.env.EXOMEM_OAUTH_STORAGE_NAMESPACE",
-        "pass" if namespace else "fail",
-        "OAuth storage namespace is set."
-        if namespace
-        else "OAuth storage namespace is not set.",
-        None if namespace else (
-            "Set EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID."
-        ),
-    ))
+    if shared_auth:
+        checks.append(_check(
+            "ha.env.EXOMEM_OAUTH_STORAGE_NAMESPACE",
+            "pass" if namespace else "fail",
+            "OAuth storage namespace is set."
+            if namespace
+            else "OAuth storage namespace is not set.",
+            None if namespace else (
+                "Set EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID."
+            ),
+        ))
     raw_user_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
     try:
         valid_user_id = raw_user_id.isdecimal() and int(raw_user_id) > 0
@@ -2735,16 +2751,19 @@ def _check_ha_env() -> list[DoctorCheck]:
         os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip(),
     ]
     credentials_match = all(credential_values) and len(set(credential_values)) == 1
-    checks.append(_check(
-        "ha.auth.credentials_match",
-        "pass" if credentials_match else "fail",
-        "HA coordinator credentials are present and match."
-        if credentials_match
-        else "HA coordinator credentials are missing or do not match.",
-        None if credentials_match else (
-            "Use one bearer value for writer lease, OAuth storage, and the coordinator."
-        ),
-    ))
+    if shared_auth:
+        checks.append(_check(
+            "ha.auth.credentials_match",
+            "pass" if credentials_match else "fail",
+            "HA coordinator credentials are present and match."
+            if credentials_match
+            else "HA coordinator credentials are missing or do not match.",
+            None if credentials_match else (
+                "Use one bearer value for writer lease, OAuth storage, and the coordinator."
+            ),
+        ))
+    if config is not None and config.topology == "single-host":
+        return checks
     raw_contracts = os.environ.get("EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS", "").strip()
     try:
         contracts = _parse_runtime_contracts(raw_contracts)
@@ -3080,6 +3099,14 @@ def _check_ha_auth_probes(*, prefix: str = "ha.auth") -> list[DoctorCheck]:
 
 def _ha_auth_configured() -> bool:
     """Whether this environment declares any part of a replica/HA topology."""
+    from .writer_lease import LeaseConfig
+
+    try:
+        config = LeaseConfig.from_env()
+    except ValueError:
+        return True  # The environment checks report the invalid configuration.
+    if config.topology == "single-host":
+        return bool(os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip())
     return any(
         os.environ.get(key, "").strip()
         for key in HA_AUTH_ENV_KEYS
@@ -3635,8 +3662,9 @@ def _check_managed_hook_refresh() -> DoctorCheck:
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
     apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
-    entirely when writer-lease coordination is disabled."""
-    if not os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip():
+    entirely when writer-lease coordination is disabled; single-host probes only its coordinator."""
+    if not (os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()
+            or os.environ.get("EXOMEM_WRITER_LEASE_TOPOLOGY", "").strip()):
         return []
     from .writer_lease import LeaseConfig
 
@@ -3649,6 +3677,8 @@ def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
             str(e),
             "Fix the writer-lease environment configuration.",
         )]
+    if not config.enabled:
+        return []
 
     checks: list[DoctorCheck] = []
     if config.ttl_seconds < 30:
@@ -3669,6 +3699,32 @@ def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     if not probe:
         return checks
 
+    if config.topology == "single-host":
+        from .writer_lease import LeaseCoordinatorClient
+
+        client = LeaseCoordinatorClient(config)
+        try:
+            client.status()
+        except OpError as error:
+            checks.append(_check("writer_lease.coordinator", "fail", str(error),
+                                 "Check the local coordinator service and writer credential."))
+        else:
+            checks.append(_check("writer_lease.coordinator", "pass", "The local coordinator answers the lease status request."))
+        # A reachable coordinator can still leave writer authority unauthenticated.
+        try:
+            status = client.anonymous_status_code()
+        except OpError as error:
+            checks.append(_check("writer_lease.anonymous_rejected", "fail", str(error),
+                                 "Check the local coordinator before verifying anonymous rejection."))
+        else:
+            checks.append(_check(
+                "writer_lease.anonymous_rejected", "pass" if status == 401 else "fail",
+                "The local coordinator rejects anonymous lease status requests (HTTP 401)."
+                if status == 401 else f"The local coordinator returned HTTP {status} for anonymous lease status; expected HTTP 401.",
+                None if status == 401 else "Require the writer bearer credential on the local coordinator.",
+            ))
+        return checks
+
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     if not base_url:
         checks.append(_check(
@@ -3685,6 +3741,28 @@ def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     return checks
 
 
+def _check_recall_canary() -> DoctorCheck:
+    from .canary_systemd import status
+
+    observed = status()
+    state = observed["state"]
+    # These are the canary adapter's closed diagnostic states, never request admission.
+    level = (
+        "pass"
+        if state == "healthy-availability"
+        else "fail"
+        if state in ("failed", "old-success-after-failed-execution")
+        else "warn"
+    )
+    return _check(
+        "recall.canary",
+        level,
+        f"Read-only MCP canary: {state}. Delivery reaches the local unit, journal and doctor.",
+        "Inspect the independent observer with python -m exomem.canary_systemd status.",
+        details=observed,
+    )
+
+
 def doctor(
     *,
     vault: str | None = None,
@@ -3697,6 +3775,12 @@ def doctor(
         raise ValueError(f"unknown profile: {profile!r}. Valid: {list(VALID_PROFILES)}")
 
     vault_root, vault_check = _resolve_vault(vault)
+    return _doctor_report(vault_root, vault_check, profile=profile, probe=probe, replica_urls=replica_urls)
+
+
+# The resolved vault must cover the complete report, including nested census reads.
+@ownership_reader
+def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     lock_parity = _check_editable_lock_parity(profile)
     checks: list[DoctorCheck] = [
         _check_python(),
@@ -3785,24 +3869,32 @@ def doctor(
     if profile == "ha":
         checks.extend(_check_ha_env())
         if probe:
-            checks.extend(_check_ha_auth_probes())
+            if _ha_auth_configured():
+                checks.extend(_check_ha_auth_probes())
+            from .writer_lease import LeaseConfig
+
             try:
-                urls = _ha_replica_urls(replica_urls)
-            except ValueError as exc:
-                checks.append(_check(
-                    "ha.replica_urls",
-                    "fail",
-                    str(exc),
-                    "Pass credential-free replica origins such as https://replica.example.com.",
-                ))
+                config = LeaseConfig.from_env()
+            except ValueError:
+                pass  # The environment and coordinator sections expose this failure.
             else:
-                checks.extend(_check_ha_probes(urls))
+                if config.topology != "single-host":
+                    try:
+                        urls = _ha_replica_urls(replica_urls)
+                    except ValueError as exc:
+                        checks.append(_check(
+                            "ha.replica_urls", "fail", str(exc),
+                            "Pass credential-free replica origins such as https://replica.example.com.",
+                        ))
+                    else:
+                        checks.extend(_check_ha_probes(urls))
 
     # Not profile-gated: any profile can run with writer-lease coordination
     # enabled, and the section self-skips when it is not (design.md Decision 3).
     checks.extend(_check_edge_ingress(probe=probe))
     checks.append(_check_observability())
     checks.append(_check_latency())
+    checks.append(_check_recall_canary())
     checks.append(_check_idempotency_store())
     checks.append(_check_managed_hook_refresh())
 

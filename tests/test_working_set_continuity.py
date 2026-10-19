@@ -23,6 +23,8 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import sys
+import traceback
 from pathlib import Path
 
 import pytest
@@ -52,6 +54,38 @@ CONVENTIONS_HASH = "conv0"
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+def _graph_drain_context(vault: Path) -> list[dict] | str:
+    """Name the failed drain's owner and counters without printing fixture content."""
+    from exomem import epistemic_graph, graph_sync
+
+    frames = {}
+    top = frame = None
+    try:
+        fixture_root = vault.resolve()
+        frames = sys._current_frames()
+        details = []
+        for thread_id, top in frames.items():
+            for frame, _lineno in traceback.walk_stack(top):
+                if frame.f_globals.get("__name__") not in {graph_sync.__name__, epistemic_graph.__name__}:
+                    continue
+                local = frame.f_locals
+                # These are integer counters defined by the graph implementation.
+                counts = {name: value for name in ("attempts", "indexed")
+                          if type(value := local.get(name)) is int}
+                owner = local.get("self")
+                if isinstance(owner, graph_sync.GraphRebuildCoordinator):
+                    counts["fixture_owner"] = owner.vault_root == fixture_root
+                if counts:
+                    details.append({"thread": hex(thread_id), "phase": frame.f_code.co_name, **counts})
+        return details
+    except Exception:  # noqa: BLE001 - preserve the original failed-drain assertion
+        return "unavailable"
+    finally:
+        # Keep a failed test from retaining the sampled worker frames.
+        frames.clear()
+        top = frame = None
 
 
 def _candidate(
@@ -303,7 +337,13 @@ def test_a_forged_token_reaches_the_rest_door_as_a_served_packet(
     for leaky in ("EXOMEM_UPLOAD_TOKEN", "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD"):
         monkeypatch.delenv(leaky, raising=False)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
-    assert graph_sync.drain_active_rebuilds(timeout=5)
+    drained = graph_sync.drain_active_rebuilds(timeout=5)
+    if not drained:
+        import faulthandler
+
+        faulthandler.dump_traceback()
+        print("graph drain context:", _graph_drain_context(activation_vault), file=sys.stderr)
+    assert drained
     client = TestClient(server.build_server(require_auth=False).http_app())
 
     response = client.post(

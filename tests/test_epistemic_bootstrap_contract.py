@@ -27,6 +27,8 @@ import pytest
 from exomem import commands, semantic_blocks, semantic_units, workflow_skills
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
+pytestmark = pytest.mark.reads_repository_docs
+
 #: Every commitment the portable contract has to carry, keyed by payload key.
 _COMMITMENTS = (
     "preserve_the_record",
@@ -174,7 +176,6 @@ def test_compact_bootstrap_teaches_the_v1_vocabulary_consideration_loop(vault: P
     assert workflow["authority"] == {
         "contract_version": "v1",
         "scoped_delegation": False,
-        "rule": "Decision not permission; v1 writers retain confirmation.",
     }
 
 
@@ -339,10 +340,8 @@ def test_intent_boundary_separates_prediction_from_records_and_planning(
 def test_intent_boundary_routes_the_two_lifecycle_classes(vault: Path) -> None:
     """A hookless client sees this payload and nothing else.
 
-    The dogfood session carried the evidence in ordinary language every turn and
-    the boundary named only the three nouns, so nothing told the agent that
-    "let's do the next one" is a Planning write and "Kim posted it" is a Records
-    one. Asserted with the ROUTE, because a class without one is a label.
+    The boundary must name each lifecycle class and its route so the client
+    can act on stated intent and observed outcomes.
     """
     boundary = _op(vault)["records"]["intent_boundary"]
 
@@ -385,8 +384,9 @@ def test_bootstrap_teaches_the_planning_inventory_and_the_resolving_query(
     planning = json.dumps(_op(vault)["planning"]).lower()
 
     assert "inventory" in planning
-    assert "discover collections with browse_memory" in planning
-    assert "inspect requires collection" in planning
+    assert "plan_memory(action='inspect')" in planning
+    assert "without collection" in planning
+    assert "manifest_path" in planning
     # The resolution form D4 keeps instead of a new `match` action.
     assert "natural key" in planning
     assert "lifecycle" in planning and "status" in planning

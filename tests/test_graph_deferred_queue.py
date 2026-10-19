@@ -37,14 +37,31 @@ Red-first: these describe the seams Phase 2 builds. They fail until it does.
 from __future__ import annotations
 
 import ast
+import json
+import logging
+import os
 import sqlite3
+import threading
+import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+from test_graph_replay_currency import _assert_matches_a_fresh_rebuild
+from test_records_recall_graph import _manifest as _records_manifest
 
-from exomem import deferred_index, epistemic_graph, freshness, graph_sync, index_sync
+from exomem import (
+    deferred_index,
+    epistemic_graph,
+    freshness,
+    graph_drain,
+    graph_sync,
+    index_sync,
+    writer_lease,
+)
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.epistemic_graph import EpistemicGraphIndex
@@ -759,9 +776,13 @@ _DECLARED_GENERATION_RECORDING_SITES = {
     # the deferred scope STARTS as the checkpoint's changed and created paths
     # and only ever widens as the pass learns more; an enqueue that could not
     # admit every path escalates to whole-vault debt rather than reporting a
-    # queue that does not hold the work.
+    # queue that does not hold the work. A behind publication is the one caller
+    # that passes a partial set: its movement, at the acknowledgement the
+    # published sidecar keeps -- sound for the reason the adopted residue below
+    # is.
     "epistemic_graph.py::EpistemicGraphIndex::_queue_graph_repair": (
-        "the deferring write's own checkpoint scope, widened, never narrowed"
+        "the deferring write's own checkpoint scope, widened, never narrowed; or a "
+        "behind publication's movement at the ACKNOWLEDGED generation"
     ),
     # A pass-through seam, not a scope decision: it records whatever generation
     # its caller hands it. Its callers are declared below.
@@ -1023,13 +1044,16 @@ def test_a_late_refresh_behind_a_late_registry_update_repairs_per_path(
     """The no-op is only for a refresh that finds the marker current.
 
     Here the drain acknowledges the write's generation against the registry
-    as it stood, then the write's registry update lands, which leaves the
-    marker describing an older projection. The late refresh then finds its
+    as it stood, then a registry update lands, which leaves the marker
+    describing an older projection. The late refresh then finds its
     generation acknowledged. Returning without work there left nothing queued
     and nothing able to republish the marker, so the drain daemon paid a
     whole-vault rebuild for one page (probe L2: 3.6 s, one whole-vault pass,
     against 0.9 s and none on main). It must queue the page, as main does, so
     one per-path drain makes the graph readable again.
+
+    A drain derives only bytes the registry already records, so the late
+    update cannot be the write's own; here the page is touched, bytes unchanged.
     """
     passes: list[int] = []
     real_pass = EpistemicGraphIndex._rebuild_all_pass
@@ -1044,12 +1068,15 @@ def test_a_late_refresh_behind_a_late_registry_update_repairs_per_path(
         vault_root=vault,
         post_commit_fanout=False,
     )
+    freshness.on_files_changed(vault, changed=[vault / PAGE_A])
     checkpoint = graph_sync.read_checkpoint(vault)
     assert checkpoint is not None
     index_sync.drain_graph_work(vault)
     assert _acknowledged(vault) == int(checkpoint.generation)
     assert EpistemicGraphIndex(vault).available()
-    # The write's registry update lands after the drain acknowledged.
+    # A registry update lands after the drain acknowledged.
+    touched = (vault / PAGE_A).stat()
+    os.utime(vault / PAGE_A, ns=(touched.st_atime_ns, touched.st_mtime_ns + 1_000_000))
     freshness.on_files_changed(vault, changed=[vault / PAGE_A])
     assert not EpistemicGraphIndex(vault).available()
 
@@ -1063,6 +1090,423 @@ def test_a_late_refresh_behind_a_late_registry_update_repairs_per_path(
     assert EpistemicGraphIndex(vault).available()
     assert passes == [], "a whole-vault pass repaired one late page"
     monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", real_pass)
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_split_checkpoint_converges_through_one_covering_drain_not_a_whole_vault_pass(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipts that retired without an acknowledgement are re-covered, not rebuilt.
+
+    A drain acknowledges only a batch that covers the committed checkpoint's
+    whole path set. A truncated batch and the remainder that follows it each
+    publish their proven rows and retire their receipts without that claim, so
+    the queue empties while the graph stays unreadable. The drain daemon then
+    queued a whole-vault rebuild for a repair that one bounded drain of the
+    committed checkpoint finishes.
+    """
+    # No page links to either of these, so neither drain widens to the other.
+    committed = _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_C: _page("C", "C is a new plain claim."),
+        },
+    )
+    index_sync.drain_graph_work(vault, limit=1)
+    assert len(deferred_index.list_graph_paths(vault)) == 1
+    assert _acknowledged(vault) < committed
+
+    markers: list[int] = []
+    passes: list[int] = []
+    real_mark = deferred_index.mark_graph_full_rebuild
+    real_pass = EpistemicGraphIndex._rebuild_all_pass
+
+    def mark(root: Path, *, generation: int) -> None:
+        markers.append(generation)
+        real_mark(root, generation=generation)
+
+    def counted(self: Any, *args: Any, **kwargs: Any) -> Any:
+        passes.append(1)
+        return real_pass(self, *args, **kwargs)
+
+    monkeypatch.setattr(deferred_index, "mark_graph_full_rebuild", mark)
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", counted)
+    for _ in range(2):
+        graph_drain._work_once(vault)
+        if EpistemicGraphIndex(vault).available():
+            break
+
+    assert markers == [], "drain lag was escalated to a whole-vault rebuild"
+    assert passes == [], "a whole-vault pass repaired a two-page checkpoint"
+    assert EpistemicGraphIndex(vault).available()
+    assert _acknowledged(vault) == committed
+    assert deferred_index.list_graph_paths(vault) == []
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", real_pass)
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+# --- A drain derives rows only from bytes its resolver has seen -----------------
+
+RETITLED = "Knowledge Base/Notes/Insights/queue-retitled.md"
+OLD_LINKER = "Knowledge Base/Notes/Insights/queue-old-linker.md"
+NEW_LINKER = "Knowledge Base/Notes/Insights/queue-new-linker.md"
+CREATED = "Knowledge Base/Notes/Insights/queue-created.md"
+CREATE_LINKER = "Knowledge Base/Notes/Insights/queue-create-linker.md"
+
+
+def _titled(title: str, body: str) -> str:
+    return (
+        f"---\ntype: insight\nstatus: active\ntitle: {title}\n---\n"
+        f"# {title}\n\n## Claim\n\n{body}\n"
+    )
+
+
+@pytest.fixture
+def whole_vault_passes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Count every whole-vault pass, whichever caller starts it."""
+    passes: list[str] = []
+    real = EpistemicGraphIndex._rebuild_all_off_boundary
+
+    def counted(self: Any, **kwargs: Any) -> Any:
+        passes.append("pass")
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_off_boundary", counted)
+    return passes
+
+
+def _publish_with_a_resident_resolver(root: Path, pages: dict[str, str]) -> None:
+    """Add pages, publish the graph, and keep the recall resolver resident at its checkpoint.
+
+    A serving process holds that resolver. A cold one is built from current
+    disk, so it would already see a write's bytes and hide the race.
+    """
+    for rel, text in pages.items():
+        (root / rel).write_text(text, encoding="utf-8")
+    _seed_live_freshness(root)
+    EpistemicGraphIndex(root).rebuild_all()
+    epistemic_graph.clear_publication_memos()
+    find_module.recall_resolver_snapshot(
+        root, expected_checkpoint=freshness.recall_checkpoint(root, "vault")
+    )
+
+
+def _commit_before_its_fanout(root: Path, pages: dict[str, str]) -> None:
+    """A canonical batch whose bytes and graph receipts land; its fan-out has not run yet."""
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(root / rel, text) for rel, text in pages.items()],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+
+
+def _drain_while_the_write_publishes(
+    root: Path, monkeypatch: pytest.MonkeyPatch, rel: str
+) -> None:
+    """One drain, during whose pass the write's corpus publication lands."""
+    real_pass = EpistemicGraphIndex._refresh_paths_pass
+    published: list[int] = []
+
+    def publish_then_pass(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if not published:
+            published.append(1)
+            assert index_sync.publish_corpus_delta(root, changed=[root / rel])
+        return real_pass(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(EpistemicGraphIndex, "_refresh_paths_pass", publish_then_pass)
+        index_sync.drain_graph_work(root)
+
+
+def test_a_drain_that_races_a_retitle_leaves_the_graph_a_rebuild_would_build(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
+) -> None:
+    """A drain that indexed a retitle its resolver never saw published stale edges.
+
+    The batch's bytes land before its corpus publication, and a drain that
+    wakes in between samples the resolver from before the retitle. Its rows
+    landed with the new title, so the write's own refresh saw no topology
+    change: the old title's linker kept its edge to the page and the new
+    title's linker got none, with the graph reported current.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            RETITLED: _titled("Old Title", "A page about to be renamed."),
+            OLD_LINKER: _titled("Old Linker", "Cites [[Old Title]]."),
+            NEW_LINKER: _titled("New Linker", "Cites [[New Title]]."),
+        },
+    )
+    whole_vault_passes.clear()
+    _commit_before_its_fanout(vault, {RETITLED: _titled("New Title", "A page renamed.")})
+
+    _drain_while_the_write_publishes(vault, monkeypatch, RETITLED)
+    index_sync.upsert_after_write(vault, [vault / RETITLED])
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    assert whole_vault_passes == []
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_drain_that_races_a_create_converges_without_a_whole_vault_pass(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, whole_vault_passes: list[str]
+) -> None:
+    """The created page's rows landed first, so the write's refresh rebuilt the vault.
+
+    The drain's resolver did not know the page, so the page it already linked
+    from outside the batch got no edge; the write's refresh then found a row
+    for a page it had created and declined (`existing_row_with_create`).
+    """
+    _publish_with_a_resident_resolver(
+        vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
+    )
+    whole_vault_passes.clear()
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
+
+    _drain_while_the_write_publishes(vault, monkeypatch, CREATED)
+    index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
+    index_sync.drain_graph_work(vault)
+
+    assert whole_vault_passes == [], "a write that raced the drain rebuilt the vault"
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_write_whose_create_a_drain_acknowledged_first_rebuilds_nothing(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The drain-first order of the same race, through the write's own dispatch.
+
+    The write's corpus publication lands, a drain derives and acknowledges its
+    generation, and only then does the write's graph step run. That step found
+    the graph readable and refreshed with no checkpoint, so the created page
+    fell outside the empty delta (`caller_create_outside_delta`) and the vault
+    was rebuilt for a graph that was already current.
+    """
+    _publish_with_a_resident_resolver(
+        vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
+    )
+    whole_vault_passes.clear()
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
+    assert index_sync.publish_corpus_delta(vault, changed=[vault / CREATED])
+    index_sync.drain_graph_work(vault)
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    assert _acknowledged(vault) == int(checkpoint.generation)
+    assert EpistemicGraphIndex(vault).available()
+
+    index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
+
+    assert whole_vault_passes == [], "a refresh the drain already covered rebuilt the vault"
+    assert EpistemicGraphIndex(vault).available()
+    assert not EpistemicGraphIndex(vault).reads_suspended()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_standalone_late_refresh_that_cannot_prove_its_no_op_still_converges(
+    vault: Path,
+) -> None:
+    """A standalone caller has no envelope for pending, so it is never left queued.
+
+    The resolver was evicted after the drain acknowledged, so the late refresh
+    cannot prove the stored topology and queues its pages. The dispatch then
+    reported the rebuild completed while the graph stayed unavailable.
+    """
+    _publish_with_a_resident_resolver(
+        vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
+    )
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
+    assert index_sync.publish_corpus_delta(vault, changed=[vault / CREATED])
+    index_sync.drain_graph_work(vault)
+    assert EpistemicGraphIndex(vault).available()
+    find_module.unload_ram_caches()
+
+    index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
+
+    assert EpistemicGraphIndex(vault).available(), "a standalone caller was left with a queue"
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+AFFECTED = "Knowledge Base/Notes/Insights/queue-affected.md"
+AFFECTED_LINKER = "Knowledge Base/Notes/Insights/queue-affected-linker.md"
+TARGET = "Knowledge Base/Notes/Insights/queue-target.md"
+
+
+def test_a_late_refresh_does_not_trust_a_drain_that_left_the_topology_unowned(
+    vault: Path,
+) -> None:
+    """An acknowledged generation is not enough when the drain did not own its topology.
+
+    The write creates a target and retitles a page that cites it. A drain of
+    the target alone rewrites that page as affected, stores its new title and
+    acknowledges the generation, but never widens on the old title, so the
+    old title's linker keeps an edge a rebuild drops. The stale stored
+    topology is meant to fail closed at the next topology-changing write,
+    which is this write's own late refresh.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            AFFECTED: _titled("Old X", "Cites [[Y Title]]."),
+            AFFECTED_LINKER: _titled("X Linker", "Cites [[Old X]]."),
+        },
+    )
+    _commit_before_its_fanout(
+        vault,
+        {
+            TARGET: _titled("Y Title", "A new target."),
+            AFFECTED: _titled("New X", "Cites [[Y Title]]."),
+        },
+    )
+    assert index_sync.publish_corpus_delta(vault, changed=[vault / TARGET, vault / AFFECTED])
+    index_sync.drain_graph_work(vault, paths={TARGET})
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    assert _acknowledged(vault) == int(checkpoint.generation)
+
+    index_sync.upsert_after_write(
+        vault, [vault / TARGET, vault / AFFECTED], created_paths=[vault / TARGET]
+    )
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_page_edited_between_the_drain_s_check_and_its_read_lands_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proof at publish is the one that holds: a page can change after the first check.
+
+    An editor outside the writers' boundary retitles a queued page after the
+    drain checked it and before the pass read it. The pass then derives the
+    new title under the resolver from before it. Those rows must not land
+    before the registry records the edit.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            RETITLED: _titled("Old Title", "A page about to be renamed."),
+            OLD_LINKER: _titled("Old Linker", "Cites [[Old Title]]."),
+            NEW_LINKER: _titled("New Linker", "Cites [[New Title]]."),
+        },
+    )
+    deferred_index.add_graph_receipts(vault, [RETITLED])
+    real_pass = EpistemicGraphIndex._refresh_paths_pass
+    edited: list[int] = []
+
+    def edit_then_pass(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if not edited:
+            edited.append(1)
+            (vault / RETITLED).write_text(
+                _titled("New Title", "A page renamed."), encoding="utf-8"
+            )
+        return real_pass(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(EpistemicGraphIndex, "_refresh_paths_pass", edit_then_pass)
+        index_sync.drain_graph_work(vault)
+
+    assert edited
+    assert deferred_index.list_graph_paths(vault) == [RETITLED], (
+        "rows derived from bytes the registry had not recorded landed"
+    )
+    freshness.on_files_changed(vault, changed=[vault / RETITLED])
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_one_unrecorded_edit_does_not_hold_back_the_rest_of_its_batch(vault: Path) -> None:
+    """A page the registry has not recorded waits; the batch's recorded pages drain.
+
+    The unrecorded page is the only one the resolver has not seen. Each
+    receipt then drains alone under the same proof, so its batch neighbours
+    do not wait for the watcher with it.
+    """
+    (vault / PAGE_A).write_text(_page("A", "A is revised against [[queue-b]]."), encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[vault / PAGE_A])
+    (vault / PAGE_B).write_text(_page("B", "B changes where no event saw it."), encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [PAGE_A, PAGE_B])
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == [PAGE_B]
+    freshness.on_files_changed(vault, changed=[vault / PAGE_B])
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_manifest_whose_admission_flipped_unrecorded_lands_nothing(vault: Path) -> None:
+    """A page recall no longer admits is described only once the registry drops it too.
+
+    A collection manifest is admitted by its bytes, so an edit can flip it out
+    of recall with no policy change. Until the registry records that edit, the
+    resolver still holds the manifest as a page.
+    """
+    manifest = "Knowledge Base/Records/Health/_collection.md"
+    (vault / manifest).parent.mkdir(parents=True)
+    (vault / manifest).write_text(_records_manifest(), encoding="utf-8")
+    _seed_live_freshness(vault)
+    EpistemicGraphIndex(vault).rebuild_all()
+    (vault / manifest).write_text("# A raw page now\n", encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [manifest])
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == [manifest]
+    freshness.on_files_changed(vault, changed=[vault / manifest])
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_reprojection_of_the_last_written_batch_still_repairs_its_rows(vault: Path) -> None:
+    """Reconcile refreshes unchanged pages on purpose, and that refresh is not a no-op.
+
+    Its pages can be exactly the last write's batch, under an acknowledged
+    generation and a readable graph -- the shape of a late refresh a drain
+    already covered. Its unit rows are stale, though, so nothing has done the
+    repair it asks for.
+    """
+    vault_module.batch_atomic_write(
+        [
+            vault_module.PlannedWrite(
+                vault / PAGE_A,
+                _page("A", "A claims against [[queue-b]].\n\n- [config] one observation ^one"),
+            )
+        ],
+        vault_root=vault,
+    )
+    assert EpistemicGraphIndex(vault).available()
+    conn = sqlite3.connect(EpistemicGraphIndex(vault).path)
+    try:
+        with conn:
+            units = conn.execute(
+                "SELECT node_key, metadata FROM graph_nodes WHERE path = ? AND kind = ?",
+                (PAGE_A, epistemic_graph.CANDIDATE_KIND),
+            ).fetchall()
+            assert units
+            for node_key, raw in units:
+                metadata = {**json.loads(raw), "parent_generation": "stale-generation"}
+                conn.execute(
+                    "UPDATE graph_nodes SET metadata = ? WHERE node_key = ?",
+                    (json.dumps(metadata, sort_keys=True), node_key),
+                )
+    finally:
+        conn.close()
+    assert EpistemicGraphIndex(vault).available()
+
+    index_sync.upsert_after_write(vault, [vault / PAGE_A])
+
     assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
 
 
@@ -1223,6 +1667,175 @@ def test_a_busy_boundary_never_counts_against_a_page(
     assert _acknowledged(vault) == committed
     assert EpistemicGraphIndex(vault).available()
     assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+@contextmanager
+def _writer_holding_the_boundary(root: Path) -> Iterator[None]:
+    """A governed writer holds the vault mutation boundary for the block."""
+    held = threading.Event()
+    release = threading.Event()
+
+    def write() -> None:
+        with writer_lease.get_manager().mutation_guard(
+            root, operation="test_writer", holder_kind="command"
+        ):
+            held.set()
+            release.wait(10.0)
+
+    worker = threading.Thread(target=write, daemon=True)
+    worker.start()
+    assert held.wait(5.0)
+    try:
+        yield
+    finally:
+        release.set()
+        worker.join(10.0)
+
+
+def _counting(monkeypatch: pytest.MonkeyPatch, owner: Any, name: str) -> list[int]:
+    """Record the size of every call to `owner.name`, which still runs."""
+    calls: list[int] = []
+    real = getattr(owner, name)
+
+    def counted(*args: Any) -> Any:
+        calls.append(len(args[-1]))
+        return real(*args)
+
+    monkeypatch.setattr(owner, name, counted)
+    return calls
+
+
+def test_a_busy_boundary_refuses_the_whole_batch_and_replays_no_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A writer holding the boundary refuses the drain's batch with MUTATION_BUSY.
+
+    Isolating receipts after that refusal met it again once per page, each with
+    a boundary wait and, once a page got in, a hold that the next writer queued
+    behind. The refusal is about the boundary, not the pages, so every receipt
+    stays exactly where it was and the next pass retries the whole batch.
+    """
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.3")
+    writer_lease.reset_managers_for_tests()
+    committed = _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_B: _page("B", "B is revised and cites nothing."),
+        },
+    )
+    queued = deferred_index.list_graph_paths(vault)
+    assert sorted(queued) == [PAGE_A, PAGE_B]
+    drains = _counting(monkeypatch, EpistemicGraphIndex, "drain_paths")
+    rotations = _counting(monkeypatch, deferred_index, "rotate_graph_receipts")
+    caplog.set_level(logging.INFO, logger="exomem.index_sync")
+
+    with _writer_holding_the_boundary(vault):
+        assert index_sync.drain_graph_work(vault) == 0
+
+    assert drains == [2], "the drain replayed receipts after a busy boundary"
+    assert rotations == []
+    assert "isolating receipts" not in caplog.text
+    assert "deferred graph batch refused (MUTATION_BUSY)" in caplog.text
+    assert deferred_index.list_graph_paths(vault) == queued
+    assert _failure_attempts(vault, PAGE_A) == _failure_attempts(vault, PAGE_B) == 0
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _acknowledged(vault) == committed
+
+
+def test_receipt_replay_steps_aside_for_a_writer_waiting_on_the_boundary(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each isolated receipt takes the boundary again, so a writer queued on it
+    waits out every replay. After one replay per pass the drain returns to its
+    loop as soon as a writer waits, and leaves the rest queued untouched."""
+    committed = _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_B: _page("B", "B is revised and cites nothing."),
+        },
+    )
+    real_drain = EpistemicGraphIndex.drain_paths
+    drains: list[int] = []
+    writers = ExitStack()
+    index = EpistemicGraphIndex(vault)
+
+    def wait_to_write() -> None:
+        with writer_lease.get_manager().mutation_guard(
+            vault, operation="queued_writer", holder_kind="command"
+        ):
+            pass
+
+    waiting_writer = threading.Thread(target=wait_to_write, daemon=True)
+
+    def batch_fails(self: Any, paths: list[Path]) -> Any:
+        drains.append(len(paths))
+        if len(drains) == 1:
+            # Not a readiness refusal, so the drain turns to its receipts.
+            raise RuntimeError("the batch pass failed")
+        report = real_drain(self, paths)
+        if len(drains) == 2:
+            # A writer queues on the boundary while the first replay finishes.
+            writers.enter_context(_writer_holding_the_boundary(vault))
+            waiting_writer.start()
+            deadline = time.monotonic() + 5.0
+            while not index.boundary_waiters() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert index.boundary_waiters() == 1
+        return report
+
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", batch_fails)
+    rotations = _counting(monkeypatch, deferred_index, "rotate_graph_receipts")
+    with writers:
+        index_sync.drain_graph_work(vault)
+    waiting_writer.join(10.0)
+
+    assert drains == [2, 1], "the drain kept replaying receipts while a writer waited"
+    assert rotations == []
+    assert len(deferred_index.list_graph_paths(vault)) == 1
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _acknowledged(vault) == committed
+
+
+def test_a_page_that_always_fails_cannot_pin_the_healthy_pages_beside_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a writer waiting at every check, stepping aside before the first
+    replay replayed nothing at all: the failing page never rotated behind the
+    queue, so the healthy page batched with it never drained. One replay per
+    pass rotates the failing page, and the next pass replays the healthy one."""
+    _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_B: _page("B", "B is revised and cites nothing."),
+        },
+    )
+    real_drain = EpistemicGraphIndex.drain_paths
+    failing = vault / PAGE_A
+
+    def page_a_fails(self: Any, paths: list[Path]) -> Any:
+        if failing in paths:
+            raise RuntimeError("page A cannot be derived")
+        return real_drain(self, paths)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", page_a_fails)
+    # A writer waits on the boundary at every check the drain makes.
+    monkeypatch.setattr(EpistemicGraphIndex, "boundary_waiters", lambda self: 1)
+
+    _drain_ticks(vault, 2)
+
+    assert deferred_index.list_graph_paths(vault) == [PAGE_A]
 
 
 def test_a_transient_read_lock_neither_quarantines_nor_drops_a_page(

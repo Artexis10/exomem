@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from . import (
     activation_manifest,
+    call_spans,
     lifecycle_statuses,
     memory_schema,
     relation_registry,
@@ -470,25 +471,37 @@ class _Attempt:
     instead of paying a second stat-walk of the whole vault. ``None`` whenever
     no single walk unambiguously matches ``before_corpus`` — a reused
     pre-validated attempt, or a build the corpus cache could not caption."""
+    binding: tuple = ()
+    """The draft this verdict judged: destination, normalized source, identity,
+    operation and draft-token hash. A later attempt reuses it only for the same draft."""
 
     @property
     def prevalidated_outcome(self) -> str:
         """One of ``"reused"``/``"revalidated"``, for telemetry only.
 
         Only meaningful for an ``_attempt`` call that was given a ``reuse``
-        candidate at all (i.e. the in-lock call inside
-        ``commit_creation_draft``); other call sites never set ``reused``.
+        candidate at all (the commit's preliminary and in-lock attempts);
+        other call sites never set ``reused``. See ``_reuse_outcome``.
         """
         return "reused" if self.reused else "revalidated"
+
+
+def _reuse_outcome(reuse: _PrevalidatedAttempt | None, attempt: _Attempt) -> str:
+    """What an attempt did with a reuse offer, for telemetry only: ``unavailable``
+    (none offered), ``reused`` or ``revalidated`` (stale or another draft)."""
+    return "unavailable" if reuse is None else attempt.prevalidated_outcome
 
 
 @dataclass(frozen=True, slots=True)
 class _PrevalidatedAttempt:
     """A pre-boundary ``_attempt`` result, reusable by a later ``_attempt``
-    call only while ``census_token`` still matches a freshly computed one."""
+    call only for the same draft (``binding``) and only while ``census_token``
+    is still current (``semantic_contract.validity_stamp_current``)."""
 
     census_token: tuple | None
+    binding: tuple
     before_corpus: semantic_contract.SemanticCorpusContext
+    after_corpus: semantic_contract.SemanticCorpusContext
     candidate: semantic_contract.SemanticPageState
     contracts: memory_schema.ResolvedMemoryContracts
     language_registry: semantic_language_registry.SemanticLanguageRegistry
@@ -513,6 +526,7 @@ class _PreparedCreationDraft:
     preliminary: _Attempt
     reuse: _PrevalidatedAttempt | None
     preliminary_commit_result: semantic_contract.SemanticContractResult
+    preliminary_outcome: str
 
 
 class _DuplicateJsonKey(ValueError):
@@ -948,14 +962,18 @@ def serialize_lifecycle_prepared(prepared: LifecyclePreparedTransition) -> str:
 
 
 def _validate_lifecycle_entry(
-    directory: Path, entry: vault.PathIdentity, name: str
+    directory: Path, entry: vault.PathIdentity, name: str,
+    admission: Callable[[str], bool] | None = None,
 ) -> None:
+    _require_artifact_admission(admission, entry.relative_path)
     try:
         info = (directory / name).lstat()
     except OSError as error:
+        _require_artifact_admission(admission, entry.relative_path)
         raise RelationReviewError(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during inspection"
         ) from error
+    _require_artifact_admission(admission, entry.relative_path)
     if not vault._same_identity(entry, info):
         raise RelationReviewError(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during inspection"
@@ -971,7 +989,8 @@ def _validate_lifecycle_entry(
 
 
 def _inspect_lifecycle_identity(
-    vault_root: Path, page_identity: str
+    vault_root: Path, page_identity: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> tuple[Path, tuple[str, ...], vault.DirectoryCensusGuard]:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     root = Path(vault_root).absolute()
@@ -981,6 +1000,7 @@ def _inspect_lifecycle_identity(
             root,
             relative,
             max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+            admission=admission,
         )
     except vault.PathGuardError as error:
         if error.code == "PATH_GUARD_LIMIT":
@@ -1001,7 +1021,7 @@ def _inspect_lifecycle_identity(
     residue = 0
     names: list[str] = []
     for entry, name in zip(census.entries, raw_names, strict=True):
-        _validate_lifecycle_entry(current, entry, name)
+        _validate_lifecycle_entry(current, entry, name, admission)
         if _LIFECYCLE_ATOMIC_RESIDUE.fullmatch(name):
             residue += 1
             continue
@@ -1195,28 +1215,33 @@ def _parse_lifecycle_prepared(
 
 
 def _load_lifecycle_decision_bound(
-    vault_root: Path, page_identity: str, after_fingerprint: str
+    vault_root: Path, page_identity: str, after_fingerprint: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> tuple[LifecycleDecision | None, vault.PathGuard | None]:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     fingerprint = _canonical_fingerprint(after_fingerprint)
     root = Path(vault_root).absolute()
-    inspected = _inspect_lifecycle_identity(root, identity)
+    name = f"{fingerprint}.json"
+    _require_artifact_admission(admission, _lifecycle_reference(identity, name))
+    inspected = _inspect_lifecycle_identity(root, identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
         return None, None
-    name = f"{fingerprint}.json"
     if name not in names:
         return None, None
     with _open_review_directory(
         root,
         nested=("lifecycle", identity),
         max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+        admission=admission,
     ) as opened:
+        census.recheck(root)
         if opened is None:
             raise RelationReviewError(
                 "RELATION_REVIEW_SWAPPED", "review directory changed during access"
             )
         raw, guard = _read_artifact_bytes(opened, name)
+        census.recheck(root)
     return (
         _parse_lifecycle_decision(
             raw, page_identity=identity, after_fingerprint=fingerprint
@@ -1226,20 +1251,23 @@ def _load_lifecycle_decision_bound(
 
 
 def load_lifecycle_decision(
-    vault_root: Path, page_identity: str, after_fingerprint: str
+    vault_root: Path, page_identity: str, after_fingerprint: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> LifecycleDecision | None:
     decision, _ = _load_lifecycle_decision_bound(
-        vault_root, page_identity, after_fingerprint
+        vault_root, page_identity, after_fingerprint, admission=admission,
     )
     return decision
 
 
 def _load_lifecycle_prepared_bound(
-    vault_root: Path, page_identity: str
+    vault_root: Path, page_identity: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> tuple[LifecyclePreparedTransition | None, vault.PathGuard | None]:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     root = Path(vault_root).absolute()
-    inspected = _inspect_lifecycle_identity(root, identity)
+    _require_artifact_admission(admission, _lifecycle_reference(identity, "prepared.json"))
+    inspected = _inspect_lifecycle_identity(root, identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
         return None, None
@@ -1249,19 +1277,23 @@ def _load_lifecycle_prepared_bound(
         root,
         nested=("lifecycle", identity),
         max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+        admission=admission,
     ) as opened:
+        census.recheck(root)
         if opened is None:
             raise RelationReviewError(
                 "RELATION_REVIEW_SWAPPED", "review directory changed during access"
             )
         raw, guard = _read_artifact_bytes(opened, "prepared.json")
+        census.recheck(root)
     return _parse_lifecycle_prepared(raw, page_identity=identity), guard
 
 
 def load_lifecycle_prepared(
-    vault_root: Path, page_identity: str
+    vault_root: Path, page_identity: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> LifecyclePreparedTransition | None:
-    prepared, _ = _load_lifecycle_prepared_bound(vault_root, page_identity)
+    prepared, _ = _load_lifecycle_prepared_bound(vault_root, page_identity, admission=admission)
     return prepared
 
 
@@ -2053,8 +2085,10 @@ def cleanup_stale_lifecycle_prepared_batch(
     return LifecyclePreparedCleanupBatch(tuple(cleaned), tuple(blocked))
 
 
-def _ensure_lifecycle_decision_capacity(root: Path, page_identity: str) -> None:
-    inspected = _inspect_lifecycle_identity(root, page_identity)
+def _ensure_lifecycle_decision_capacity(
+    root: Path, page_identity: str, *, admission: Callable[[str], bool] | None = None,
+) -> None:
+    inspected = _inspect_lifecycle_identity(root, page_identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
         return
@@ -2068,9 +2102,11 @@ def _ensure_lifecycle_decision_capacity(root: Path, page_identity: str) -> None:
 
 
 def _plan_lifecycle_decision_install(
-    root: Path, decision: LifecycleDecision
+    root: Path, decision: LifecycleDecision,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> vault.PlannedWrite:
-    _ensure_lifecycle_decision_capacity(root, decision.page_identity)
+    _require_artifact_admission(admission, decision.reference)
+    _ensure_lifecycle_decision_capacity(root, decision.page_identity, admission=admission)
     decision_path = lifecycle_decision_path(
         root, decision.page_identity, decision.after_fingerprint
     )
@@ -2148,14 +2184,15 @@ def _validate_prepared_decision_binding(
 
 
 def _load_prepared_decision_guard(
-    root: Path, prepared: LifecyclePreparedTransition
+    root: Path, prepared: LifecyclePreparedTransition,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> vault.PathGuard | None:
     """Validate the immutable decision referenced by an existing prepared slot."""
     if prepared.decision_reference is None:
         return None
     fingerprint = prepared.decision_reference.rsplit("/", 1)[-1].removesuffix(".json")
     decision, guard = _load_lifecycle_decision_bound(
-        root, prepared.page_identity, fingerprint
+        root, prepared.page_identity, fingerprint, admission=admission,
     )
     if (
         decision is None
@@ -2287,6 +2324,7 @@ def plan_lifecycle_transition(
     prepared: LifecyclePreparedTransition,
     current: LifecyclePrimaryBinding,
     trashed_committed: LifecycleTrashProof | None = None,
+    admission: Callable[[str], bool] | None = None,
 ) -> LifecycleTransitionPlan:
     """Plan decision/slot writes without mutating lifecycle or primary state."""
     _validate_lifecycle_prepared(prepared)
@@ -2301,16 +2339,19 @@ def plan_lifecycle_transition(
         )
 
     writes: list[vault.PlannedWrite] = []
-    _, _, identity_guard = _inspect_lifecycle_identity(root, prepared.page_identity)
+    _require_artifact_admission(admission, prepared.reference)
+    if decision is not None:
+        _require_artifact_admission(admission, decision.reference)
+    _, _, identity_guard = _inspect_lifecycle_identity(root, prepared.page_identity, admission=admission)
     read_guards: list[vault.PathGuard | vault.DirectoryCensusGuard] = [
         identity_guard
     ]
     existing_prepared, prepared_guard = _load_lifecycle_prepared_bound(
-        root, prepared.page_identity
+        root, prepared.page_identity, admission=admission,
     )
     if existing_prepared is not None:
         existing_decision_guard = _load_prepared_decision_guard(
-            root, existing_prepared
+            root, existing_prepared, admission=admission,
         )
         if existing_decision_guard is not None:
             read_guards.append(existing_decision_guard)
@@ -2372,7 +2413,7 @@ def plan_lifecycle_transition(
     decision_guard: vault.PathGuard | None = None
     if decision is not None:
         existing_decision, decision_guard = _load_lifecycle_decision_bound(
-            root, decision.page_identity, decision.after_fingerprint
+            root, decision.page_identity, decision.after_fingerprint, admission=admission,
         )
         if existing_decision is not None and existing_decision != decision:
             raise RelationReviewError(
@@ -2391,7 +2432,7 @@ def plan_lifecycle_transition(
                 "new transition does not bind the current primary",
             )
         if decision is not None and existing_decision is None:
-            writes.append(_plan_lifecycle_decision_install(root, decision))
+            writes.append(_plan_lifecycle_decision_install(root, decision, admission=admission))
         writes.append(
             vault.PlannedWrite(
                 prepared_path,
@@ -2413,7 +2454,7 @@ def plan_lifecycle_transition(
             "next transition does not bind the committed primary",
         )
     if decision is not None and existing_decision is None:
-        writes.append(_plan_lifecycle_decision_install(root, decision))
+        writes.append(_plan_lifecycle_decision_install(root, decision, admission=admission))
     writes.append(
         vault.PlannedWrite(
             prepared_path,
@@ -2434,6 +2475,12 @@ class _OpenReviewDirectory:
     names: tuple[str, ...]
     chain: tuple[vault.PathIdentity, ...]
     descriptor_relative: bool
+    admission: Callable[[str], bool] | None = None
+
+
+def _require_artifact_admission(admission: Callable[[str], bool] | None, path: str) -> None:
+    if admission is not None and not admission(path):
+        raise ValueError("WRITE_REFUSED: target is unavailable")
 
 
 def _capture_review_directory(
@@ -2491,6 +2538,7 @@ def _open_review_directory(
     *,
     nested: tuple[str, ...] = (),
     max_entries: int | None = None,
+    admission: Callable[[str], bool] | None = None,
 ) -> Iterator[_OpenReviewDirectory | None]:
     directory, chain = _capture_review_directory(root, nested)
     if chain is None:
@@ -2523,6 +2571,7 @@ def _open_review_directory(
                     root,
                     directory.relative_to(root).as_posix(),
                     max_entries=max_entries,
+                    admission=admission,
                 )
             except vault.PathGuardError as error:
                 code = (
@@ -2534,10 +2583,18 @@ def _open_review_directory(
                     code, "review directory cannot be enumerated safely"
                 ) from error
             raw_names = [Path(entry.relative_path).name for entry in census.entries]
+        if admission is not None:
+            relative = directory.relative_to(root).as_posix()
+            if max_entries is None:
+                raw_names = [name for name in raw_names if admission(f"{relative}/{name}")]
+            else:
+                # Retain the captured admitted census; revocation must not refilter it.
+                for name in raw_names:
+                    _require_artifact_admission(admission, f"{relative}/{name}")
         names = tuple(sorted(raw_names, key=lambda name: name.encode("utf-8")))
         _recheck_review_directory(root, chain)
         yield _OpenReviewDirectory(
-            root, directory, descriptor, names, chain, descriptor_relative
+            root, directory, descriptor, names, chain, descriptor_relative, admission,
         )
     except UnicodeEncodeError as error:
         raise RelationReviewError(
@@ -2566,6 +2623,8 @@ def _read_artifact_bytes(
     opened: _OpenReviewDirectory, name: str
 ) -> tuple[bytes, vault.PathGuard]:
     path = opened.path / name
+    relative = path.relative_to(opened.root).as_posix()
+    _require_artifact_admission(opened.admission, relative)
     try:
         before = (
             os.stat(name, dir_fd=opened.descriptor, follow_symlinks=False)
@@ -2573,9 +2632,11 @@ def _read_artifact_bytes(
             else path.lstat()
         )
     except OSError as error:
+        _require_artifact_admission(opened.admission, relative)
         raise RelationReviewError(
             "RELATION_REVIEW_IO", "review artifact cannot be inspected"
         ) from error
+    _require_artifact_admission(opened.admission, relative)
     if (
         stat.S_ISLNK(before.st_mode)
         or vault._is_reparse(before)
@@ -2594,11 +2655,13 @@ def _read_artifact_bytes(
             else os.open(path, flags)
         )
     except OSError as error:
+        _require_artifact_admission(opened.admission, relative)
         raise RelationReviewError(
             "RELATION_REVIEW_IO", "review artifact cannot be opened"
         ) from error
     try:
         opened_info = os.fstat(descriptor)
+        _require_artifact_admission(opened.admission, relative)
         if not stat.S_ISREG(opened_info.st_mode):
             raise RelationReviewError("RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe")
         if not vault._same_identity(vault._identity(name, before), opened_info):
@@ -2607,9 +2670,11 @@ def _read_artifact_bytes(
             )
         raw = os.read(descriptor, _MAX_ARTIFACT_BYTES + 1)
     except OSError as error:
+        _require_artifact_admission(opened.admission, relative)
         raise RelationReviewError("RELATION_REVIEW_IO", "review artifact cannot be read") from error
     finally:
         os.close(descriptor)
+    _require_artifact_admission(opened.admission, relative)
     try:
         after = (
             os.stat(name, dir_fd=opened.descriptor, follow_symlinks=False)
@@ -2617,17 +2682,18 @@ def _read_artifact_bytes(
             else path.lstat()
         )
     except OSError as error:
+        _require_artifact_admission(opened.admission, relative)
         raise RelationReviewError(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
         ) from error
     if not vault._same_identity(vault._identity(name, before), after):
         raise RelationReviewError("RELATION_REVIEW_SWAPPED", "review artifact changed during read")
     _recheck_review_directory(opened.root, opened.chain)
+    _require_artifact_admission(opened.admission, relative)
     if len(raw) > _MAX_ARTIFACT_BYTES:
         raise RelationReviewError(
             "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
         )
-    relative = path.relative_to(opened.root).as_posix()
     try:
         guard = vault.PathGuard.capture(
             opened.root,
@@ -2640,6 +2706,7 @@ def _read_artifact_bytes(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
         ) from error
     _recheck_review_directory(opened.root, opened.chain)
+    _require_artifact_admission(opened.admission, relative)
     return raw, guard
 
 
@@ -2804,7 +2871,16 @@ def _parse_record(
 
 
 def _load_one(root: Path, identity: str) -> tuple[RelationReviewRecord | None, str | None]:
-    with _open_review_directory(root) as opened:
+    from . import access
+    from .governance import connector_boundary
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
+
+    def admission(path: str) -> bool:
+        return not access.refuse_if_excluded(root, path) and connector_boundary.permits(root, path, who)
+
+    with _open_review_directory(root, admission=admission) as opened:
         matches = _artifact_children_for(opened, identity)
         if not matches or opened is None:
             return None, None
@@ -2856,6 +2932,7 @@ def load_relation_review(
     page_state: semantic_contract.SemanticPageState,
     *,
     corpus: semantic_contract.SemanticCorpusContext,
+    admission: Callable[[str], bool] | None = None,
 ) -> semantic_contract.RelationReviewState | None:
     try:
         if page_state.identity_kind != "exomem_id":
@@ -2868,6 +2945,7 @@ def load_relation_review(
                 vault_root,
                 page_state.identity,
                 page_state.review_fingerprint,
+                admission=admission,
             )
             if decision is not None:
                 return semantic_contract.RelationReviewState(
@@ -3053,7 +3131,11 @@ def _attempt(
             raise RelationReviewError(
                 "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
             )
-    if reuse is not None:
+    # Commit-only inputs (auxiliaries, disposition, reason, predecessor) are
+    # read only by the exact-destination branch below, which runs on every
+    # attempt, reused or not; everything else the verdict read is named here.
+    binding = (destination, normalized, identity, operation, draft_token_hash)
+    if reuse is not None and reuse.binding == binding:
         from .writer_lease import read_commit_generation
 
         stamp_current = semantic_contract.validity_stamp_current(
@@ -3073,8 +3155,14 @@ def _attempt(
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
         loaded_contracts = memory_schema.load_saved_contracts(root)
+        corpus_registry, corpus_language = semantic_contract.corpus_registry_overrides(
+            root, registry, language
+        )
         before, before_census = semantic_contract.build_corpus_context_with_census(
-            root, registry=registry, language_registry=language, status_basis=status_basis
+            root,
+            registry=corpus_registry,
+            language_registry=corpus_language,
+            status_basis=status_basis,
         )
         candidate = semantic_contract.build_page_state(
             root,
@@ -3109,7 +3197,8 @@ def _attempt(
         raise RelationReviewError(
             "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
         )
-    after = before.with_candidate(candidate)
+    # `with_candidate` is a pure function of the two inputs a reuse carries.
+    after = reused.after_corpus if reused is not None else before.with_candidate(candidate)
     if reused is not None:
         contracts = reused.contracts
         result = reused.result
@@ -3223,6 +3312,32 @@ def _attempt(
         language,
         reused is not None,
         before_census,
+        binding,
+    )
+
+
+def prevalidated_attempt(
+    attempt: _Attempt, census_token: tuple | None
+) -> _PrevalidatedAttempt | None:
+    """Offer ``attempt``'s verdict to a later attempt on the same draft.
+
+    ``census_token`` is a validity stamp whose commit generation was read before
+    ``attempt`` read the corpus and which names every status and vocabulary
+    input it used. The later attempt re-admits it with ``validity_stamp_current``
+    and runs in full when it is stale. ``None`` when no stamp exists.
+    """
+    if census_token is None:
+        return None
+    return _PrevalidatedAttempt(
+        census_token,
+        attempt.binding,
+        attempt.before_corpus,
+        attempt.after_corpus,
+        attempt.candidate,
+        attempt.contracts,
+        attempt.language_registry,
+        attempt.result,
+        attempt.validation,
     )
 
 
@@ -3292,6 +3407,33 @@ def revalidate_prepared_creation_draft(
     this seam only lets deterministic writer preparation proceed far enough to
     reconstruct that exact ordered batch.
     """
+    return revalidate_prepared_creation_attempt(
+        vault_root,
+        path=path,
+        source=source,
+        draft_id=draft_id,
+        operation=operation,
+        draft_token=draft_token,
+        requested_disposition=requested_disposition,
+        predecessor_path=predecessor_path,
+        predecessor_content_hash=predecessor_content_hash,
+    ).validation
+
+
+def revalidate_prepared_creation_attempt(
+    vault_root: Path,
+    *,
+    path: str,
+    source: str,
+    draft_id: str,
+    operation: str,
+    draft_token: str,
+    requested_disposition: str | None = None,
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
+) -> _Attempt:
+    """``revalidate_prepared_creation_draft``, returning the whole attempt so a
+    caller can offer it to the commit through ``prevalidated_attempt``."""
     try:
         requested_disposition = normalize_relation_disposition(requested_disposition)
         if requested_disposition not in {None, "reviewed_none"}:
@@ -3313,7 +3455,7 @@ def revalidate_prepared_creation_draft(
         )
         record = attempt.artifact
         if record is None:
-            return attempt.validation
+            return attempt
         validation = attempt.validation
         expected_kind = (
             "qualifying"
@@ -3340,7 +3482,7 @@ def revalidate_prepared_creation_draft(
         )
         if not matches:
             raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
-        return validation
+        return attempt
     except RelationReviewError:
         raise
     except Exception as error:
@@ -3623,6 +3765,7 @@ def prepare_commit_creation_draft(
     draft_token: str = "",
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    prevalidated: _PrevalidatedAttempt | None = None,
 ) -> _PreparedCreationDraft:
     """Pre-boundary validation for ``commit_creation_draft``.
 
@@ -3630,6 +3773,10 @@ def prepare_commit_creation_draft(
     ``_attempt`` + ``_commit_plan`` pass — the same work ``commit_creation_draft``
     always did before acquiring ``vault_creation_lock``. Every error raised
     here happens before any lock or mutation-boundary exists to acquire.
+
+    ``prevalidated`` is the creation preflight's own attempt on this draft. The
+    preliminary attempt reuses it under the same admission as the in-lock one
+    (same draft, current validity stamp) and otherwise runs in full.
     """
     root = Path(vault_root).absolute()
     # Entry read: a governed commit landing during this preliminary pass
@@ -3708,6 +3855,7 @@ def prepare_commit_creation_draft(
             draft_token_hash=token_hash,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
+            reuse=prevalidated,
         )
         preliminary_commit_result, _preliminary_record = _commit_plan(
             preliminary,
@@ -3721,39 +3869,37 @@ def prepare_commit_creation_draft(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        # Thread the census straight from the corpus context this preliminary
-        # attempt just built, so the validity token never re-walks the vault.
-        # `cached_corpus_census` remains the fallback for the cases that walk
-        # produced no captionable census (or an eviction landed since), which
-        # is all it could ever offer on its own.
-        sc_token = (
-            semantic_contract.corpus_validity_token(
-                root,
-                status_dependencies=preliminary.after_corpus.status_dependencies,
-                definitions=semantic_contract.page_definitions_witnesses(preliminary.candidate),
-                corpus_census=(
-                    preliminary.before_corpus_census
-                    if preliminary.before_corpus_census is not None
-                    else semantic_contract.cached_corpus_census(root)
-                ),
+        if preliminary.reused:
+            # The preflight's stamp was current at this entry, so its captured
+            # generation equals `entry_generation`; it guards the in-lock
+            # attempt exactly as a freshly captured stamp would.
+            reuse = prevalidated
+        else:
+            # Thread the census straight from the corpus context this
+            # preliminary attempt just built, so the validity token never
+            # re-walks the vault. `cached_corpus_census` remains the fallback
+            # for the cases that walk produced no captionable census (or an
+            # eviction landed since), which is all it could ever offer on its own.
+            sc_token = (
+                semantic_contract.corpus_validity_token(
+                    root,
+                    status_dependencies=preliminary.after_corpus.status_dependencies,
+                    definitions=semantic_contract.page_definitions_witnesses(
+                        preliminary.candidate
+                    ),
+                    corpus_census=(
+                        preliminary.before_corpus_census
+                        if preliminary.before_corpus_census is not None
+                        else semantic_contract.cached_corpus_census(root)
+                    ),
+                )
+                if entry_generation is not None
+                else None
             )
-            if entry_generation is not None
-            else None
-        )
-        census_token = (sc_token, entry_generation) if sc_token is not None else None
-        reuse = (
-            _PrevalidatedAttempt(
-                census_token,
-                preliminary.before_corpus,
-                preliminary.candidate,
-                preliminary.contracts,
-                preliminary.language_registry,
-                preliminary.result,
-                preliminary.validation,
+            reuse = prevalidated_attempt(
+                preliminary,
+                (sc_token, entry_generation) if sc_token is not None else None,
             )
-            if census_token is not None
-            else None
-        )
         return _PreparedCreationDraft(
             identity,
             destination,
@@ -3767,6 +3913,7 @@ def prepare_commit_creation_draft(
             preliminary,
             reuse,
             preliminary_commit_result,
+            _reuse_outcome(prevalidated, preliminary),
         )
     except RelationReviewError:
         raise
@@ -3819,23 +3966,25 @@ def commit_prepared_creation_draft(
             commit_point=False,
         )
         with vault.vault_creation_lock(root, "semantic-creation"):
-            attempt = _attempt(
-                root,
-                path=path,
-                source=source,
-                draft_id=identity,
-                operation=operation,
-                commit_auxiliaries=auxiliaries,
-                commit_disposition=relation_disposition,
-                commit_reason=reason,
-                draft_token_hash=token_hash,
-                predecessor_path=predecessor_path,
-                predecessor_content_hash=predecessor_content_hash,
-                reuse=reuse,
-            )
-            _record_prevalidated_commit_outcome(
-                "unavailable" if reuse is None else attempt.prevalidated_outcome
-            )
+            # A fixed phase label; its one field names the outcome, a count.
+            with call_spans.span("commit.relation_review_attempt", {}) as measured:
+                attempt = _attempt(
+                    root,
+                    path=path,
+                    source=source,
+                    draft_id=identity,
+                    operation=operation,
+                    commit_auxiliaries=auxiliaries,
+                    commit_disposition=relation_disposition,
+                    commit_reason=reason,
+                    draft_token_hash=token_hash,
+                    predecessor_path=predecessor_path,
+                    predecessor_content_hash=predecessor_content_hash,
+                    reuse=reuse,
+                )
+                outcome = _reuse_outcome(reuse, attempt)
+                measured[outcome] = 1
+            _record_prevalidated_commit_outcome(outcome)
             validation = attempt.validation
             result, record = _commit_plan(
                 attempt,

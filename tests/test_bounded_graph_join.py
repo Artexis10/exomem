@@ -841,27 +841,26 @@ def test_convergence_republishes_the_marker_so_the_next_write_is_incremental(
 # --- 6. Regression: a genuinely broken projection still fails as today ------
 
 
-def test_a_genuinely_broken_projection_still_fails_the_way_it_does_today(
+def test_a_resolver_that_never_names_its_bytes_still_fails_closed_without_a_mark(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A resolver that never names its bytes stays Class C, marked exactly once."""
+    """A broken resolver proof never publishes, and with the registry matching the
+    disk it is no evidence the registry is behind: Class B, and no epoch is minted."""
     monkeypatch.setattr(
         EpistemicGraphIndex, "_resolver_source_versions", lambda *_args, **_kwargs: None
     )
     epoch_probe = tmp_path / "epoch-probe-root"
     clock_before = freshness.mark_external_pending(epoch_probe)
 
-    with pytest.raises(epistemic_graph.GraphProjectionMoved, match="did not stabilize") as raised:
+    with pytest.raises(epistemic_graph.GraphPublicationUnavailable, match="did not stabilize") as raised:
         EpistemicGraphIndex(vault)._rebuild_all_locked()
 
     error = raised.value
-    assert type(error) is epistemic_graph.GraphProjectionMoved
-    assert epistemic_graph.is_publication_failure(error) is False
+    assert epistemic_graph.is_publication_failure(error) is True
     assert epistemic_graph.may_mark_external_pending(error) is False
     assert "resolver bytes" in str(error)
-    assert freshness.external_pending(vault) is True
-    assert epistemic_graph.publication_refusal_active(vault) is False
-    assert freshness.mark_external_pending(epoch_probe) == clock_before + 2
+    assert freshness.external_pending(vault) is False
+    assert freshness.mark_external_pending(epoch_probe) == clock_before + 1
 
 
 # ---------------------------------------------------------------------------

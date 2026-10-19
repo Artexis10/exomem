@@ -16,12 +16,13 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from . import (
     activation_manifest,
+    call_spans,
     freshness,
     lifecycle_statuses,
     memory_schema,
@@ -42,7 +43,6 @@ from . import (
 from . import (
     find as find_module,
 )
-from .governance import connector_boundary
 from .kbdir import kb_prefix
 from .mutation_timings import MutationTimings, mutation_timing_span
 
@@ -923,6 +923,11 @@ class CreationPreflight:
     vocabulary_binding: Any | None = None
     vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
+    #: The relation-review verdict this preflight computed, offered to the
+    #: commit's own preliminary attempt; see `relation_review.prevalidated_attempt`.
+    relation_attempt: relation_review._PrevalidatedAttempt | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def draft_hash(self) -> str | None:
@@ -1025,8 +1030,15 @@ class ExistingPreflight:
     applicability: Literal["full", "structural", "not_semantic"]
     operation: Literal["edit", "observe", "tier2_overwrite", "tier2_append"]
     path: str
+    # The logical (LF) before image that semantic evaluation reads.
     before_source: str
+    # The before image as read. The writer hashes the after image as written, so
+    # the token, lifecycle record and history hash this one to keep one basis.
+    exact_before_source: str
     after_source: str
+    # `before.source_hash` stays logical for grandfathering: `build_census` reads
+    # with universal newlines, and the corpus census takes this LF state through
+    # the `with_candidate` repair in preflight. Bind transitions to `before_hash`.
     before: semantic_contract.SemanticPageState
     after: semantic_contract.SemanticPageState
     grandfathered: bool
@@ -1050,6 +1062,11 @@ class ExistingPreflight:
     census_token: tuple | None = None
     source_closure_plan: source_closure.SourceClosurePlan | None = None
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
+    unit_target_guards: tuple[vault.PathGuard, ...] = ()
+
+    @property
+    def before_hash(self) -> str:
+        return vault.content_hash(self.exact_before_source)
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -1060,7 +1077,7 @@ class ExistingPreflight:
             "transition_token": self.transition_token,
             "transition_hash": self.transition_hash,
             "relation_review_hash": self.transition_hash,
-            "before_hash": self.before.source_hash,
+            "before_hash": self.before_hash,
             "after_hash": self.after.source_hash,
             "mutated": self.mutated,
             "contract_result": _bounded_semantic_feedback(self.contract_result),
@@ -1377,6 +1394,7 @@ def _existing_transition_token(
 ) -> str:
     payload: dict[str, Any] = {
         "version": 1,
+        "history_at": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "transition_id": str(uuid.uuid4()),
         "operation": operation,
         "path": path,
@@ -1512,7 +1530,7 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
     }
     # `stamp` is optional so a token minted before this field existed still
     # decodes; a token that omits it simply cannot pin the writer's instant.
-    if type(value) is not dict or set(value) not in (required, required | {"stamp"}):
+    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at"})):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
@@ -1537,6 +1555,14 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
+    if "history_at" not in value:
+        moment = temporal.parse(value.get("stamp"))
+        value["history_at"] = (moment.instant if moment is not None and moment.instant is not None
+                               else dt.datetime(1970, 1, 1, tzinfo=dt.UTC)).isoformat()
+    try:
+        dt.datetime.fromisoformat(value["history_at"].replace("Z", "+00:00"))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise SemanticWriteError("LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid") from error
     return value
 
 
@@ -1909,19 +1935,14 @@ def _preflight_existing(
     path = vault.canonical_vault_rel(root, path)
     entry_generation = _entry_commit_generation(root)
     with mutation_timing_span(timings, "preflight.read_guarded"):
-        before_source, primary_guard = vault.read_guarded_text(root, root / path)
-    raw_before_hash = vault.content_hash(before_source)
-    # The parser/corpus and public content-hash contract normalize platform
-    # newlines. Keep the raw-byte PathGuard, but evaluate the same logical text
-    # on Windows so CRLF alone never looks like concurrent semantic drift.
-    before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
+        exact_before_source, primary_guard = vault.read_guarded_text(root, root / path)
+    raw_before_hash = vault.content_hash(exact_before_source)
+    # Evaluate the logical text so CRLF alone never looks like semantic drift.
+    # The PathGuard and the transition token bind the exact bytes instead.
+    before_source = exact_before_source.replace("\r\n", "\n").replace("\r", "\n")
     after_source = _place_origin_source(path, after_source, before_source=before_source)
     origin_inputs = _prepare_origin_inputs(root, path, after_source, before_source=before_source)
-    before_hash = vault.content_hash(before_source)
-    if expected_before_hash is not None and expected_before_hash not in {
-        raw_before_hash,
-        before_hash,
-    }:
+    if expected_before_hash is not None and expected_before_hash != raw_before_hash:
         raise SemanticWriteError("STALE_SEMANTIC_WRITE", "page changed before semantic preflight")
     # Tier-2 overwrite is the deliberate break-glass route for repairing a
     # malformed structured item that its typed adapter can no longer load.
@@ -1953,18 +1974,18 @@ def _preflight_existing(
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
         loaded_contracts = memory_schema.load_saved_contracts(root)
-        armed = connector_boundary.read_requirement(root) is not None
+        corpus_registry, corpus_language = semantic_contract.corpus_registry_overrides(
+            root, registry, language
+        )
     resolver_freshness_before = freshness.triple(root, "vault")
     with (
         _write_metric("exomem_write_corpus_context_ms", str(operation)),
         mutation_timing_span(timings, "preflight.corpus_context"),
     ):
         before_corpus, before_corpus_census = semantic_contract.build_corpus_context_with_census(
-            # Unarmed vaults use saved public definitions; redundant overrides bypass warm reuse.
-            # Armed vaults retain their explicit public corpus registry.
             root,
-            registry=registry if armed else None,
-            language_registry=language if armed else None,
+            registry=corpus_registry,
+            language_registry=corpus_language,
             status_basis=status_basis,
         )
     resolver_freshness_after = freshness.triple(root, "vault")
@@ -1975,7 +1996,7 @@ def _preflight_existing(
         before = semantic_contract.build_page_state(
             root,
             path,
-            before_source,
+            exact_before_source,
             relation_registry=registry,
             language_registry=language,
             status_basis=status_basis,
@@ -2029,14 +2050,29 @@ def _preflight_existing(
     before_review: semantic_contract.RelationReviewState | None = None
     after_review: semantic_contract.RelationReviewState | None = None
     if applicability == "full":
+        from . import vocabulary_auxiliaries
+
+        admission = None
+        if after.identity_kind == "exomem_id":
+            admission = vocabulary_auxiliaries.lifecycle_admission(
+                root,
+                primary_path=path,
+                current_source=before_source,
+                proposed_source=after_source,
+                primary_guard=primary_guard,
+            )
         with mutation_timing_span(timings, "preflight.relation_review"):
-            before_review = relation_review.load_relation_review(root, before, corpus=before_corpus)
-            after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
+            before_review = relation_review.load_relation_review(
+                root, before, corpus=before_corpus, admission=admission,
+            )
+            after_review = relation_review.load_relation_review(
+                root, after, corpus=after_corpus, admission=admission,
+            )
 
     token = transition_token or _existing_transition_token(
         operation=operation,
         path=path,
-        before_hash=before.source_hash,
+        before_hash=raw_before_hash,
         after_hash=after.source_hash,
         stamp=stamp,
     )
@@ -2045,14 +2081,14 @@ def _preflight_existing(
         transition_token is not None
         and token_value["operation"] == operation
         and token_value["path"] == path
-        and token_value["after_hash"] == before.source_hash
+        and token_value["after_hash"] == raw_before_hash
         and token_value["after_hash"] == after.source_hash
     )
     if (
         token_value["operation"] != operation
         or token_value["path"] != path
         or token_value["after_hash"] != after.source_hash
-        or (token_value["before_hash"] != before.source_hash and not committed_replay)
+        or (token_value["before_hash"] != raw_before_hash and not committed_replay)
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
@@ -2144,6 +2180,7 @@ def _preflight_existing(
         operation,
         path,
         before_source,
+        exact_before_source,
         after_source,
         before,
         after,
@@ -2214,6 +2251,7 @@ def _commit_existing_locked(
     root: Path,
     *,
     preflight: ExistingPreflight,
+    history_reason: str | None = None,
     auxiliaries: tuple[vault.PlannedWrite, ...],
     derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...],
     result: semantic_contract.SemanticContractResult,
@@ -2224,6 +2262,24 @@ def _commit_existing_locked(
     The batch's index fan-out runs as the namespace is released, so its report
     lands in `index_reports` after this returns; the caller attaches it.
     """
+    from . import vocabulary_auxiliaries
+
+    admission = None
+    if preflight.applicability == "full" and preflight.after.identity_kind == "exomem_id":
+        admission = vocabulary_auxiliaries.lifecycle_admission(
+            root, primary_path=preflight.path, current_source=preflight.before_source,
+            proposed_source=preflight.after_source, primary_guard=preflight.primary_guard,
+        )
+    from . import compiled_history
+
+    history_write = compiled_history.plan_entry(
+        root, preflight=preflight, token=_decode_existing_transition_token(preflight.transition_token),
+        reason=history_reason,
+    )
+    if history_write is not None:
+        auxiliaries = (*auxiliaries, history_write)
+        derived_auxiliaries = (*derived_auxiliaries, ("compiled-history", history_write))
+
     if preflight.committed_replay:
         if preflight.applicability != "full":
             return ExistingCommit(
@@ -2246,7 +2302,11 @@ def _commit_existing_locked(
                 "committed replay requires the exact stable resulting identity",
             )
         try:
-            prepared = relation_review.load_lifecycle_prepared(root, preflight.after.identity)
+            prepared = relation_review.load_lifecycle_prepared(
+                root, preflight.after.identity, admission=admission,
+            )
+            if prepared is not None:
+                relation_review._load_prepared_decision_guard(root, prepared, admission=admission)
         except relation_review.RelationReviewError as error:
             raise SemanticWriteError(error.code, error.reason) from error
         token_value = _decode_existing_transition_token(preflight.transition_token)
@@ -2276,6 +2336,8 @@ def _commit_existing_locked(
                 "LIFECYCLE_TRANSITION_MISMATCH",
                 "committed replay does not match the prepared transition",
             )
+        if admission is not None and not admission(prepared.reference):
+            raise ValueError("WRITE_REFUSED: target is unavailable")
         return ExistingCommit(
             preflight.applicability,
             preflight.operation,
@@ -2305,7 +2367,7 @@ def _commit_existing_locked(
                 operation=preflight.operation,
                 page_identity=preflight.after.identity,
                 before_path=preflight.before.path,
-                before_source_hash=preflight.before.source_hash,
+                before_source_hash=preflight.before_hash,
                 after_path=preflight.after.path,
                 after_source_hash=preflight.after.source_hash,
                 after_fingerprint=preflight.after.review_fingerprint,
@@ -2315,7 +2377,7 @@ def _commit_existing_locked(
             )
             current = relation_review.LifecyclePrimaryBinding(
                 preflight.before.path,
-                preflight.before.source_hash,
+                preflight.before_hash,
                 preflight.before.review_fingerprint,
             )
             lifecycle = relation_review.plan_lifecycle_transition(
@@ -2323,6 +2385,7 @@ def _commit_existing_locked(
                 decision=preflight.requested_decision,
                 prepared=prepared,
                 current=current,
+                admission=admission,
             )
         except relation_review.RelationReviewError as error:
             raise SemanticWriteError(error.code, error.reason) from error
@@ -2374,25 +2437,40 @@ def _commit_existing_locked(
             str(error),
         ) from error
     reports: list[Any] = [] if index_reports is None else index_reports
-    from . import vocabulary_auxiliaries
-
     manifest = vocabulary_auxiliaries.seal(
         root,
         primary=primary_write,
         derived=(*derived_auxiliaries, *(("lifecycle-review", item) for item in lifecycle_writes)),
     )
+    publication_entered = False
+
+    def validate_bindings() -> None:
+        nonlocal publication_entered
+        if preflight.origin_inputs is not None:
+            _validate_origin_inputs(root, preflight.origin_inputs)
+        if admission is not None:
+            if not admission(relation_review.lifecycle_prepared_path(root, preflight.after.identity).relative_to(root).as_posix()):
+                raise ValueError("WRITE_REFUSED: target is unavailable")
+            if publication_entered:
+                # The completion seam binds the after image, never the replaced before guard.
+                source, _ = vault.read_guarded_text(root, root / preflight.path)
+                if vault.content_hash(source) != vault.content_hash(preflight.after_source):
+                    raise ValueError("WRITE_REFUSED: target is unavailable")
+        publication_entered = True
+
     try:
-        written = vault.batch_atomic_write(
-            writes,
-            vault_root=root,
-            required_guards=(*required_guards, *origin_guards),
-            index_reports=reports,
-            semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
-            _vocabulary_auxiliaries=manifest,
-            _validate_prepared_bindings=(
-                lambda: _validate_origin_inputs(root, preflight.origin_inputs)
-            ) if preflight.origin_inputs is not None else None,
-        )
+        from . import reserved_paths
+
+        with reserved_paths._subsystem_authority_scope("compiled_history"):
+            written = vault.batch_atomic_write(
+                writes,
+                vault_root=root,
+                required_guards=(*required_guards, *origin_guards, *preflight.unit_target_guards),
+                index_reports=reports,
+                semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
+                _vocabulary_auxiliaries=manifest,
+                _validate_prepared_bindings=validate_bindings,
+            )
     except vault.PathGuardError:
         _recheck_origin_guards(root, origin_guards)
         raise
@@ -2445,7 +2523,7 @@ def _revalidate_existing_preflight(
         relation_review_hash = preflight.transition_hash
         relation_review_reason = preflight.requested_decision.reason
     with _write_phase("revalidate"):
-        return preflight_existing(
+        refreshed = preflight_existing(
             vault_root,
             path=preflight.path,
             after_source=preflight.after_source,
@@ -2457,6 +2535,7 @@ def _revalidate_existing_preflight(
             relation_review_reason=relation_review_reason,
             status_basis=status_basis,
         )
+        return replace(refreshed, unit_target_guards=preflight.unit_target_guards)
 
 
 def _prepare_markdown_catalog_publication(
@@ -2476,6 +2555,7 @@ def _prepare_markdown_catalog_publication(
     )
 
 
+@call_spans.timed("post_commit.structure_suggestion")
 def _structure_suggestion(
     state: Any,
     corpus: semantic_contract.SemanticCorpusContext | None = None,
@@ -2516,6 +2596,7 @@ def _records_routing_from_terms(
         return None
 
 
+@call_spans.timed("post_commit.records_routing")
 def _records_routing(vault_root: Path, state: Any) -> dict[str, Any] | None:
     """Collect only the written compiled page's declared routing vocabulary."""
     return _records_routing_from_terms(
@@ -2523,6 +2604,7 @@ def _records_routing(vault_root: Path, state: Any) -> dict[str, Any] | None:
     )
 
 
+@call_spans.timed("post_commit.records_delivery")
 def _records_routing_for_delivery(
     vault_root: Path,
     routing: Mapping[str, Any] | None,
@@ -2624,6 +2706,7 @@ def _records_routing_terms(state: Any) -> list[str]:
     return [str(getattr(state, "title", "") or ""), *page_tags, *unit_tags]
 
 
+@call_spans.timed("post_commit.observation_delta")
 def _observation_delta(
     vault_root: Path,
     state: Any,
@@ -2649,6 +2732,7 @@ def _observation_delta(
         log.debug("observation due-state delta failed (non-fatal)", exc_info=True)
 
 
+@call_spans.timed("post_commit.due_state")
 def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
     """Update the due-state projection for one written page and return its block.
 
@@ -2688,6 +2772,7 @@ def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
         return None
 
 
+@call_spans.timed("post_commit.capture_sweep")
 def _capture_sweep_block(
     vault_root: Path,
     state: Any,
@@ -2722,6 +2807,7 @@ def _capture_sweep_block(
         return None
 
 
+@call_spans.timed("post_commit.entity_candidate")
 def _entity_candidate_block(
     vault_root: Path,
     state: Any,
@@ -2779,6 +2865,7 @@ def commit_existing(
     vault_root: Path,
     *,
     preflight: ExistingPreflight,
+    history_reason: str | None = None,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
@@ -2797,6 +2884,7 @@ def commit_existing(
             preflight=preflight,
             auxiliary_writes=auxiliary_writes,
             derived_auxiliary_writes=derived_auxiliary_writes,
+            history_reason=history_reason,
             timings=timings,
             status_basis=status_basis,
         )
@@ -2833,6 +2921,7 @@ def _commit_existing(
     vault_root: Path,
     *,
     preflight: ExistingPreflight,
+    history_reason: str | None = None,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
@@ -2980,6 +3069,7 @@ def _commit_existing(
                     committed = _commit_existing_locked(
                         root,
                         preflight=preflight,
+                        history_reason=history_reason,
                         auxiliaries=auxiliaries,
                         derived_auxiliaries=derived_auxiliaries,
                         result=result,
@@ -3293,11 +3383,7 @@ def preflight_move(
         root, registry=registry, language_registry=language, status_basis=status_basis
     )
     before_moved = before_corpus.pages.get(old_path)
-    normalized_source = source.replace("\r\n", "\n").replace("\r", "\n")
-    if before_moved is None or before_moved.source_hash not in {
-        vault.content_hash(source),
-        vault.content_hash(normalized_source),
-    }:
+    if before_moved is None or before_moved.source_hash != vault.content_hash(source):
         raise SemanticWriteError(
             "STALE_SEMANTIC_WRITE", "move source changed during semantic preflight"
         )
@@ -3312,14 +3398,9 @@ def preflight_move(
                 "STALE_SEMANTIC_WRITE",
                 "inbound page changed during semantic move preflight",
             ) from error
-        normalized_before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
         if (
             before_rewrite is None
-            or before_rewrite.source_hash
-            not in {
-                vault.content_hash(before_source),
-                vault.content_hash(normalized_before_source),
-            }
+            or before_rewrite.source_hash != vault.content_hash(before_source)
             or write.guard.expected_content_hash != vault.content_hash(before_source)
         ):
             raise SemanticWriteError(
@@ -4213,6 +4294,44 @@ def preflight_creation(
     vocabulary_binding: Any | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> CreationPreflight:
+    # A fixed phase label. Its fields split out the two corpus-sized parts as
+    # whole milliseconds: `structural_ms` and `relation_review_ms`.
+    with call_spans.span("preflight.creation", {}) as measured:
+        return _preflight_creation(
+            vault_root,
+            measured,
+            path=path,
+            source=source,
+            operation=operation,
+            writer=writer,
+            draft_id=draft_id,
+            draft_token=draft_token,
+            registrations=registrations,
+            relation_disposition=relation_disposition,
+            predecessor_path=predecessor_path,
+            predecessor_content_hash=predecessor_content_hash,
+            vocabulary_binding=vocabulary_binding,
+            status_basis=status_basis,
+        )
+
+
+def _preflight_creation(
+    vault_root: Path,
+    measured: dict[str, int],
+    *,
+    path: str,
+    source: str,
+    operation: str,
+    writer: str,
+    draft_id: str | None,
+    draft_token: str,
+    registrations: tuple[DraftRegistration, ...],
+    relation_disposition: str | None,
+    predecessor_path: str | None,
+    predecessor_content_hash: str | None,
+    vocabulary_binding: Any | None,
+    status_basis: lifecycle_statuses.Basis | None,
+) -> CreationPreflight:
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     origin_inputs = _prepare_origin_inputs(root, path, source)
@@ -4246,24 +4365,36 @@ def preflight_creation(
             details=closure_plan.inspection.public_details(),
         )
     entry_generation = _entry_commit_generation(root)
-    result, state, corpus_census, before_corpus, source = _evaluate_structural(
-        root, destination=path, source=source, operation=operation, status_basis=status_basis
-    )
+    started = time.perf_counter()
+    try:
+        result, state, corpus_census, before_corpus, source = _evaluate_structural(
+            root, destination=path, source=source, operation=operation, status_basis=status_basis
+        )
+    finally:
+        measured["structural_ms"] = round((time.perf_counter() - started) * 1000.0)
     origin_inputs = _prepare_origin_inputs(root, path, source)
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
-        validation = relation_review.revalidate_prepared_creation_draft(
-            root,
-            path=path,
-            source=source,
-            draft_id=draft_id,
-            operation=operation,
-            draft_token=draft_token,
-            requested_disposition=relation_disposition,
-            predecessor_path=predecessor_path,
-            predecessor_content_hash=predecessor_content_hash,
-        )
+        started = time.perf_counter()
+        try:
+            attempt = relation_review.revalidate_prepared_creation_attempt(
+                root,
+                path=path,
+                source=source,
+                draft_id=draft_id,
+                operation=operation,
+                draft_token=draft_token,
+                requested_disposition=relation_disposition,
+                predecessor_path=predecessor_path,
+                predecessor_content_hash=predecessor_content_hash,
+            )
+        finally:
+            measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
+        validation = attempt.validation
+        # This stamp also guards the relation-review verdict: both evaluations
+        # read this page's definitions and the status basis after the entry
+        # generation, so a change between or after them leaves it stale.
         census_token = _capture_validity_stamp(
             root,
             entry_generation,
@@ -4292,6 +4423,7 @@ def preflight_creation(
                 vocabulary_binding.parent_guard,
             ) if vocabulary_binding is not None else (),
             origin_inputs,
+            relation_review.prevalidated_attempt(attempt, census_token),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4538,11 +4670,16 @@ def _commit_creation(
             preflight.contract_result.blocking_findings,
         )
     try:
-        closure_plan = preflight.source_closure_plan or source_closure.prepare_source_closure(
-            root,
-            preflight.source,
-            destination=preflight.destination,
-        )
+        # Fixed phase labels, timing only, for each step before the guard.
+        with call_spans.span("commit.source_closure"):
+            closure_plan = (
+                preflight.source_closure_plan
+                or source_closure.prepare_source_closure(
+                    root,
+                    preflight.source,
+                    destination=preflight.destination,
+                )
+            )
         auxiliaries = source_closure.merge_backref_writes(
             auxiliary_writes,
             closure_plan.backref_writes,
@@ -4563,23 +4700,28 @@ def _commit_creation(
         assert preflight.draft_id is not None
         # Pre-boundary: parse/canonicalize + the preliminary structural and
         # relation-review validation. Any failure here raises before the
-        # mutation boundary below is ever acquired.
-        prepared = relation_review.prepare_commit_creation_draft(
-            root,
-            path=preflight.destination,
-            source=preflight.source,
-            draft_id=preflight.draft_id,
-            operation=operation,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
+        # mutation boundary below is ever acquired. The span's one field
+        # names whether the preflight's relation review was reused, a count.
+        with call_spans.span("commit.relation_review_prepare", {}) as measured:
+            prepared = relation_review.prepare_commit_creation_draft(
+                root,
+                path=preflight.destination,
+                source=preflight.source,
+                draft_id=preflight.draft_id,
+                operation=operation,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
                 auxiliary_writes=auxiliaries,
                 derived_auxiliary_writes=derived_auxiliaries,
-            draft_token=preflight.draft_token,
-            predecessor_path=predecessor_path,
-            predecessor_content_hash=predecessor_content_hash,
-        )
-    _prewarm_embeddings()
+                draft_token=preflight.draft_token,
+                predecessor_path=predecessor_path,
+                predecessor_content_hash=predecessor_content_hash,
+                prevalidated=preflight.relation_attempt,
+            )
+            measured[prepared.preliminary_outcome] = 1
+    with call_spans.span("commit.embedding_prewarm"):
+        _prewarm_embeddings()
     from .writer_lease import active_manager, active_mutation_request_id
 
     with active_manager().mutation_guard(
@@ -4632,37 +4774,43 @@ def _commit_creation(
                         create_only=True,
                     )
                 )
-                catalog_target = _prepare_creation_catalog_publication(
-                    root,
-                    destination=preflight.destination,
-                    before_corpus=prepared.preliminary.before_corpus,
-                    semantic_state=prepared.preliminary.candidate,
-                    writes=catalog_writes,
-                )
+                with call_spans.span("commit.catalog_prepare"):
+                    catalog_target = _prepare_creation_catalog_publication(
+                        root,
+                        destination=preflight.destination,
+                        before_corpus=prepared.preliminary.before_corpus,
+                        semantic_state=prepared.preliminary.candidate,
+                        writes=catalog_writes,
+                    )
             except catalog_publication.CatalogPublicationError as error:
                 raise SemanticWriteError(
                     "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                     str(error),
                 ) from error
-            committed = relation_review.commit_prepared_creation_draft(
-                root,
-                prepared,
-                path=preflight.destination,
-                source=preflight.source,
-                operation=operation,
-                relation_disposition=relation_disposition,
-                relation_review_hash=relation_review_hash,
-                predecessor_path=predecessor_path,
-                predecessor_content_hash=predecessor_content_hash,
-                semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
-                extra_required_guards=vocabulary_guards,
-                origin_required_guards=_origin_commit_guards(
-                    root, preflight.origin_inputs, catalog_writes
-                ),
-                _validate_prepared_bindings=(
-                    lambda: _validate_origin_inputs(root, preflight.origin_inputs)
-                ) if preflight.origin_inputs is not None else None,
-            )
+            # Its in-lock revalidation reports its outcome on the nested
+            # `commit.relation_review_attempt` span.
+            with call_spans.span("commit.relation_review"):
+                committed = relation_review.commit_prepared_creation_draft(
+                    root,
+                    prepared,
+                    path=preflight.destination,
+                    source=preflight.source,
+                    operation=operation,
+                    relation_disposition=relation_disposition,
+                    relation_review_hash=relation_review_hash,
+                    predecessor_path=predecessor_path,
+                    predecessor_content_hash=predecessor_content_hash,
+                    semantic_state=semantic_index.from_semantic_page_state(
+                        preflight.semantic_state
+                    ),
+                    extra_required_guards=vocabulary_guards,
+                    origin_required_guards=_origin_commit_guards(
+                        root, preflight.origin_inputs, catalog_writes
+                    ),
+                    _validate_prepared_bindings=(
+                        lambda: _validate_origin_inputs(root, preflight.origin_inputs)
+                    ) if preflight.origin_inputs is not None else None,
+                )
             try:
                 catalog_publication.publish_markdown_batch(catalog_target)
             except catalog_publication.CatalogPublicationError as error:

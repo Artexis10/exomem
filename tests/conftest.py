@@ -25,6 +25,7 @@ from benchmark_capabilities import (
     has_posix_interval_timers,
     has_trusted_system_git,
 )
+from repository_docs_reads import RepositoryDocsReads
 
 from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
@@ -35,6 +36,10 @@ from exomem import semantic_contract as semantic_contract_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.pluginmanager.register(RepositoryDocsReads(), "repository-docs-reads")
 
 
 def initialize_vault_state_offline(vault_root: Path, *, source: str) -> None:
@@ -871,6 +876,24 @@ def _reset_corpus_context_cache():
     activation_manifest_module.reset_manifest_cache()
 
 
+@pytest.fixture
+def corpus_cache_on(monkeypatch: pytest.MonkeyPatch):
+    """Opt one test back into the corpus-context cache, cold and unseeded.
+
+    The suite defaults the cache off, so a memory reference read goes through
+    the scan. A test of the identity projection that the cache holds requests
+    this fixture, then makes the projection current itself.
+    """
+    from exomem import freshness
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract_module.reset_corpus_context_cache()
+    freshness.clear()
+    yield
+    semantic_contract_module.reset_corpus_context_cache()
+    freshness.clear()
+
+
 #: The single thread name every graph rebuild runs under, in both the
 #: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
 #: and the warming path (`epistemic_graph.schedule_background_rebuild`).
@@ -967,13 +990,37 @@ def _quiesce_graph_rebuilds():
     Deliberately not a convergence helper: a test that needs the graph to be
     current asserts that for itself with `graph_sync.await_active_rebuild`.
     This fixture only guarantees that nothing is still running.
+
+    Each test is one lifetime, as each service is. Every coordinator created
+    while the test runs is bound to the test's stop event, which teardown sets
+    before the drain. A rebuild then stops at its next cancellation point
+    instead of finishing a whole-vault walk that no assertion reads; joining
+    those walks was most of the teardown time in the suite's heaviest modules.
+    Coordinators created in module or session fixture setup stay unbound, so
+    their rebuilds are still joined and shared corpora still converge. A
+    service runtime the test starts binds its own lifetime over this one, as in
+    production. The patch uses a private MonkeyPatch, for the same reason as
+    `_isolate_state_root`: a test's `monkeypatch.undo()` must not unbind it.
     """
+    lifetime = threading.Event()
+    create_coordinator = graph_sync_module.GraphRebuildCoordinator.__init__
+
+    def _create_within_test_lifetime(coordinator, *args, **kwargs):
+        create_coordinator(coordinator, *args, **kwargs)
+        coordinator.bind_shutdown(lifetime)
+
+    private = pytest.MonkeyPatch()
+    private.setattr(
+        graph_sync_module.GraphRebuildCoordinator, "__init__", _create_within_test_lifetime
+    )
     yield
+    lifetime.set()
     try:
         _drain_background_threads()
     finally:
         with graph_sync_module._COORDINATORS_LOCK:
             graph_sync_module._COORDINATORS.clear()
+        private.undo()
 
 
 @pytest.fixture(autouse=True)

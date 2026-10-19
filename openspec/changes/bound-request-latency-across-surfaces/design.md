@@ -1,5 +1,35 @@
 # Design
 
+The programme uses one packaged MCP observer. The existing recall script delegates its MCP mode and retains its other diagnostics. Private positive cases declare read arguments, expected state, required references and material. FastMCP measures each call through parsed response validation. The observer reuses `latency_watch`, the packaged contract and one report schema.
+
+Case expectations retain the existing indexed-path representation and add a strict `response_schema` alternative. A case cannot mix the representations. The alternative uses the existing `jsonschema` dependency with Draft 2020-12 and validates the complete parsed response. The runner compiles validators before connecting and keeps response validation inside the measured interval. Schema resources use an empty `referencing` registry without retrieval; local references work, while unavailable external references fail locally. Conflicting dialect declarations in schema positions are invalid; dictionaries inside data-valued assertions retain their literal meaning.
+
+An independent source-only author establishes each key's source identity, state and material requirements. One witness must bind source identity and nonblank material to the same result or parent. Membership does not imply rank; keys require rank only when source truth establishes that contract. The author checks missing identity, wrong identity, blank material and material attached to another parent. Generic schema validation proves schema syntax and the supplied assertions, not that a key establishes these semantic obligations. Trusted private schemas retain synchronous evaluation; the asynchronous timeout does not establish a schema CPU deadline.
+
+Schema mismatches report `unexpected-response`. Schema execution or resolution errors report `invalid-expectation`, retain the parsed outcome and stop the series. Such an observer error leaves availability and coverage incomplete and fails the check; it does not establish a service outage. Reports and warnings omit private schemas, constants, responses and exception details. Existing legacy failure codes remain unchanged. Frozen keys and failed series remain unchanged; independently authored replacement keys start a new series and preserve unused cases' blindness.
+
+An attempt can retain `schema_failure` from the first mismatch in that same validation pass. It contains only the validator keyword and a SHA-256 of the schema path encoded as compact JSON. The fingerprint supports correlation within the frozen case and observer version. Different assertions can share a validator path through references or composition. The fingerprint does not identify a unique assertion, establish its product cause or enumerate every failure.
+
+Raw paths, instance paths, messages, schemas, constants and responses stay absent. Hashes permit correlation and do not guarantee secrecy. Unavailable diagnostic metadata cannot change an established mismatch.
+
+The command selects availability or acceptance. Availability checks every configured case once and requires positive coverage for each represented tool. Its successful result can coexist with insufficient latency evidence. Acceptance retains the declared sample, warmth, contention and deployment requirements. Observer identity remains separate from deployment identity. A deployment change invalidates previous acceptance.
+
+A standard systemd user timer runs the availability check through an explicitly selected installed observer. The observer remains independent of the worker interpreter and upgrade path. One bounded oneshot unit prevents overlap; the application adds no scheduler or repair loop. Private configuration supplies existing credentials. Missing authorization leaves installation unconfigured; installation never issues a grant. The latest report is atomic and owner-only.
+
+A failed unit, structured warning and offline doctor status provide local visibility. They do not deliver a push notification. Doctor distinguishes missing configuration, disabled scheduling, failed execution, stale evidence and fresh results. An old successful report cannot conceal a later failed execution. Notification delivery remains open until an authorized channel exists and delivery is verified. Production probes stay read-only. Natural write observations and disposable write acceptance retain separate provenance.
+
+## Ordinary write follow-through
+
+Write advice reuses the page delta's projection and serves only affected paths. Its optional `scope` is `affected_paths`; omission preserves historical global meaning. Global and affected-path blocks retain separate emission history. Delivered rows already carry their category and fingerprint, so first-surfaced recording uses those identities without scanning the projection.
+
+Flush receipt proof and pending publication newest-first before the outermost matching vault hold releases. Re-prove earlier session receipts whose paths overlap newer commits. Keep component waits and terminal persistence outside the hold. Record handoff failure as derived work pending, without changing the committed outcome. Direct leaves without a matching hold retain the guarded post-terminal path.
+
+Prime the broad writer resolver from the proven structural corpus after semantic warmup, with existing freshness checks. Ordinary recall retains its separate projection. Blocked edits never warm shared writer state. The existing cache and receipt machinery supply these capabilities; no new scheduler or readiness gate is needed.
+
+A carried corpus re-proves its retained census after the serving watcher seeds a new checkpoint. The existing warmer reuses unchanged pages and reconciles missed edits. An incremental publication captions the corpus only when retained history bridges its prior caption and covers every changed Markdown path.
+
+Manifest revisions refresh the touched claims projection before its served view is reused. Egress retains its independent release checks. Existing spans carry content-free CPU measurements where wall time alone cannot distinguish work from waiting.
+
 ## Context
 
 See `proposal.md` for the problem and `specs/request-latency-contract/spec.md` for the new behavior.
@@ -64,6 +94,13 @@ The closest maintained option is the existing `latency_watch` with its shared su
 
 Do not relabel a stored `duration_ms` or `total_ms`. If current producers stop before response construction, measure the remaining work and introduce the complete boundary explicitly. A timer cannot measure network delivery it never observes.
 
+The existing HTTP access event adds worker entry-to-access and entry-to-final-body intervals.
+A scope stamp precedes FastMCP authentication and carrier handling; the existing send wrapper records successful final-body handoff.
+The original access duration still ends when the inner ASGI application returns.
+Missing entry or final-send evidence remains null, and a completed final send remains known despite later cleanup failure.
+The intervals overlap and exclude manager forwarding and client receipt; streaming duration describes stream lifetime.
+Early refusals before access retain their existing lack of an access event.
+
 Use the existing request correlation context to distinguish intervals. MCP middleware owns its dispatch observation; nested activation owns only its leaf observation. REST activation likewise has different command and leaf intervals. A missing correlation field prevents a joined claim, not the request itself.
 
 ### 3. Extend the watch with honest coverage
@@ -96,6 +133,8 @@ detail levels through the same helper.
 
 The current activation index update already writes changed rows and signature vectors incrementally. `WorkingSetIndex._write()` still calls `_collect()` and enumerates/stats the corpus; optimize only the measured remaining work. `EmbeddingIndex.upsert_file()` and `_patch_cache()` already splice chunk data; `_unit_vectors()` still reloads the unit matrix after generation changes. `due_state.apply_write_delta()` already exists. Reuse these paths instead of introducing another delta system.
 
+Due advice reuses the existing bounded content-token memo. Projection emission and review first-surfacing metadata do not change its served content. Every other review field, including future fields, remains part of its identity. A miss binds rows to the validated review payload that it hashes. An invalid review store retains the existing silent advisory result. The memo records a file identity only when that identity stays unchanged across the read.
+
 The `service-v1` profile pins the required encoder even when model preload is disabled; matrix caches remain subject to idle reaping. `embeddings.py`, `warmup.py` and `model_reaper.py` implement this policy. Choose any residency adjustment from measured cold/warm cost, RSS and the served profile. Older idle-CPU and release-latency records cannot establish today's baseline. Live OAuth churn and its cost remain unverified until current attributed evidence exists.
 
 First prove provider/index rows and sampled identities, then public boundary coverage, then stage and CPU attribution. Retain `accelerate-governed-recall` task 6.1 as the recall gate work. Attribute remaining work with the existing instruments before making a targeted cost repair. Reuse exact durable receipts, async terminal custody and pending recall; defer only work their current contracts permit.
@@ -108,11 +147,87 @@ First localize the overdue interval through a bounded isolated reproduction. Reu
 
 Canonical commits remain immune to cancellation. All existing terminal, idempotency, fencing and committed-uncertain contracts apply. Preserve exact affected paths, required component sets, derived batch custody and pending-visibility rows. This change does not choose another acknowledgement framework or bypass a fail-closed read when visibility cannot be proven.
 
+New idempotency claims validate private runtime directories and SQLite artifacts without enumerating unrelated owner files. The private owner directory isolates those entries. Existing private lock creation, liveness checks, cleanup and legacy startup hardening remain unchanged.
+
 ### 6. Prove the delivered workflow with existing instruments
 
 Use isolated installed before/after arms on identical inputs and reference state. Bind every run to installed bytes, runtime/embedding profile, SQLite, corpus counts, auth population, CPU cap, memory and window. Verify counts and sampled identities from input to stored rows to returned packets before deriving percentiles. Record exclusions and contention under the owning contract.
 
 Report case-paired differences and their confidence intervals, plus CPU, RSS, failures, quality, freshness and packet/result identity separately. An interval including zero shows no measured change. Model-free CI proves its declared profile only. Runtime fixes require scoped regression checks; reuse the existing full corpus at product delivery. This artifact batch runs OpenSpec and privacy checks only.
+
+### 7. Bound the retrieval carry by the turn and the rarity cap
+
+Attribution put most abstaining activation time in the retrieval carry, and its cost grew with the knowledge base. Three mechanisms caused this, and each is now bounded without changing an answer:
+
+- A word's rarity count over the admitted pages stops at `cap + RETRIEVAL_CARRY_FETCH + 1` qualifying rows. Past that window no count changes a decision, so the scan no longer reads every page that holds a common word. Past the early stop, a page whose status label cannot be classified is no longer read, so it no longer raises `ReaderViewUnavailable`; the rarity decisions are unchanged.
+- Configuration decides which statistics a ranking uses (`RequestQueryContext.catalogue_ranking`, set by `working_set_runtime.request_admission`). The owner ranks on the catalogue's statistics only when `egress.release_walk_filter` returns `None`: no governance policy, collection-store marker, bound collection writer or lifecycle marker, and unrestricted owner access. That owner no longer rebuilds Okapi statistics from every admitted page after each catalogue write. A restricted reader, and the owner under any of those, filters and ranks on the admitted pages, as both rungs did for every reader before. Admission is still decided on every request.
+- A corroborated ranking checks rows in rank order and stops once it holds its rows. When phrase groups are the whole test, the index names the rows that can pass first, on `+fts.rowid` so that the bm25 figures stay those of the one MATCH.
+
+Every carry rung records a span with its admitted pages, scanned stem rows, examined candidates and a statistics-rebuild count. Every role lane records its catalogue rows, parsed pages and the time inside each read. These spans give the measurement for this decision.
+
+**Declared behaviour change.** A request whose admission withholds nothing now ranks both rungs on the catalogue's bm25 scores, not on Okapi scores over the admitted pages. The catalogue counts raw material and pages outside the knowledge base, and FTS5 floors the IDF of a term on more than half the rows. Scores move, so such a packet can differ in five ways:
+
+- the order of named domains, and therefore which three are carried, when more than three phrases each name one page;
+- the order of the pages an abstention lists at `retrieval_named`;
+- which current pages fit in a carry window crowded by retired pages, which can change whether a phrase names one page or two;
+- whether a single named page clears `RETRIEVAL_CARRY_MIN_SCORE`, which moves it between carried and listed;
+- which turn units the term budget keeps and which common words it drops, because the budget reads catalogue frequencies.
+
+The ranking mode never depends on which pages exist, so adding or removing a withheld page cannot switch it. Each withholding source was checked against the catalogue the statistics read:
+
+- Under a governance policy the owner's walk withholds by page content, with no owner-audience rule: a page with frontmatter shaped like a bridge but no approval, an unresolved scope membership, an undecodable page, or a file that vanished after the catalogue saw it. A rule for the owner therefore cannot be the test; the policy's presence is.
+- A deletion or recovery marker can leave the marked path's row in the catalogue, and an unreadable lifecycle state withholds every path. Any marker, or that state, ranks on admission.
+- A collection-store marker sends its owned paths, and any path it cannot place, through the full decision, which can withhold them. A marker ranks on admission.
+- The access policy's `excluded` folders never enter the catalogue, and a changed access policy makes the catalogue stale until it is rebuilt. `readonly` only refuses writes. Neither affects the mode, so an owner with only an access policy keeps the catalogue's statistics.
+
+In catalogue mode each snapshot still checks that the admission withholds no page row. The request's predicate there admits every path, so only a caller that builds a context claiming catalogue ranking with a narrower predicate can fail the check. It then ranks on the admitted pages and logs `catalogue_ranking_withheld_row`.
+
+A request that ranks on admission, owner or restricted, ranks the phrase rung as before. Its title rung now filters and ranks on the admitted pages too, where the owner's title rung used to rank on the unfiltered catalogue and leave withheld pages to the served guard.
+
+Some corpus-sized work remains, all of it in SQLite rather than in the carry's own loops. The request's admission reads every page row's path, the rarity window is 0.5% of the knowledge base, catalogue ranking reads every row that holds a turn word, and a write invalidates the catalogue's cached word counts.
+
+A request that ranks on admission reuses its statistics while the complete catalogue snapshot key holds. After that key changes, it reads every current admitted path and stem string in one SQL snapshot. A framed fingerprint of these complete inputs can authorize reuse for the same scope and admitted set. Changed inputs rebuild the statistics, including SQL-only repairs that leave canonical checkpoints unchanged. The existing four-entry bound remains. This saves token splitting and aggregation after an unrelated edit, but adds hashing and temporary raw strings on cache misses.
+
+Final cache installation replaces equivalent snapshot aliases under the cache lock.
+Aliases for one admitted corpus therefore do not evict another reader's unchanged statistics.
+Old snapshot readers retain their immutable statistics, but a later lookup may repeat the SQL read and hash.
+The four-entry bound can retain four distinct vocabulary maps; alias compaction adds no retained state.
+
+Under a governance policy its admission also decides every page on each request, which dominates its carry cost; this change leaves that cost as it was. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
+
+### 8. Release the page while optional inbound links recover
+
+Direct page reads must not build an inbound index before releasing their held page.
+The existing inbound index is the closest maintained option; its cold path currently scans every Markdown page.
+Reuse that index with a non-building lookup, rather than add a second graph or a request-owned worker.
+The added maintenance is current-proof acquisition and demand recovery on the existing watcher.
+
+Every link summary uses this lookup, including local and REST calls without an MCP budget.
+A complete result keeps its existing inbound and outbound lists.
+Unknown inbound information uses `inbound: null`; an empty list continues to mean a complete lookup found no links.
+Outbound targets come from the held caller-projected prose.
+Existing page release, exclusion, byte checks and terminal disclosure remain in force.
+Explicit inbound operations and mutation safety keep their complete synchronous lookup.
+
+The lookup requires live freshness, no external-pending epoch and a matching resident index.
+It copies candidates and basename evidence under the existing lock without waiting, then applies caller visibility outside the lock.
+It rechecks authority before claiming completeness; missing proof, contention or change yields unknown.
+It never derives freshness through a filesystem walk.
+Incremental updates withdraw data and advance its generation before mutation, including updates while the cache is cold.
+An update proves completeness only when retained history bridges its old checkpoint and the patch covers every changed path.
+Only a current complete build or patch can publish; correctness eviction retains demand but removes data.
+
+One existing watcher reconcile thread owns optional recovery after its required recovery and deferred work.
+Runtime activation arms that work after its worker starters; required warm-up must also have ended.
+Normal and quiet modes prime only requested or previously used state; performance mode can prime eagerly.
+The owner yields to foreground work, observes shutdown, and rejects partial or obsolete publication.
+No scheduler, registry, pool, request thread or readiness gate is added.
+
+Recovery follows the existing mode cadence and can take one interval plus higher-priority work.
+Disabled observation or continuous changes can leave inbound information unknown while page reads remain available.
+The correctness cost is explicit delayed link completeness; the benefit is preserving the page response during index recovery.
+No new numerical latency bar or production performance claim follows from the isolated workflow proof.
+
 
 ## Risks / Trade-offs
 

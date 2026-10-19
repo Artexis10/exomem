@@ -15,9 +15,10 @@ from datetime import timedelta
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
+from .alerts import AlertThresholds
 from .backup_window import parse_backup_window
 from .capacity import CapacityConfig, SharedWorkerPolicy
-from .decide import DEFAULT_RECONCILE_CONFIG, ReconcileConfig
+from .decide import ReconcileConfig
 from .k8s_client import ClusterClient
 from .manifests import ResourceSettings, check_model_env
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
@@ -69,10 +70,16 @@ def build_secrets_config() -> SecretsConfig:
 
 
 def build_reconcile_config() -> ReconcileConfig:
-    # D3/D6: the init/upgrade-readiness deadline stays a 10-minute default
-    # (not pinned exactly by the design), but is configurable per the
-    # coordinator's ruling rather than hardcoded.
-    kwargs: dict[str, object] = {}
+    # D6 step 4: the upgrade-readiness deadline is required configuration, rendered by the
+    # chart (cellctl.upgradeReadyDeadlineMinutes). A first start that rebuilds a large
+    # vault's catalogue can answer "warming" for many minutes, and a deadline missed
+    # restores the cell and pauses the rollout, so a guessed value would do harm. The
+    # chart owns the number and its bounds; cellctl refuses to start without it.
+    kwargs: dict[str, object] = {
+        "upgrade_ready_deadline": timedelta(minutes=_positive_integer_env("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"))
+    }
+    # D3: the init deadline stays a 10-minute default (not pinned exactly by the
+    # design), but is configurable per the coordinator's ruling rather than hardcoded.
     minutes_raw = os.environ.get("CELLCTL_INIT_DEADLINE_MINUTES")
     if minutes_raw is not None:
         kwargs["init_deadline"] = timedelta(minutes=int(minutes_raw))
@@ -95,8 +102,6 @@ def build_reconcile_config() -> ReconcileConfig:
             if amount <= 0:
                 raise ValueError(f"{variable} must be positive")
             kwargs[field] = timedelta(**{unit: amount})
-    if not kwargs:
-        return DEFAULT_RECONCILE_CONFIG
     return ReconcileConfig(**kwargs)
 
 
@@ -126,6 +131,28 @@ def build_alert_delivery_secret() -> tuple[str, str, str] | None:
     return parts
 
 
+def _positive_integer_env(name: str) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        raise ValueError(f"{name} is required: the chart renders it")
+    # Digits only: Helm prints a large number from JSON as 1.073741824e+09, which must not pass as a guess.
+    if not (raw.isascii() and raw.isdecimal()) or int(raw) <= 0:
+        raise ValueError(f"{name} must be a positive whole number, not {raw!r}")
+    return int(raw)
+
+
+def build_alert_thresholds() -> AlertThresholds:
+    """The cell alerts' thresholds, which the chart renders from the observability
+    contract (`alerts.pending_operation_warn_seconds`, `alerts.pvc_reserved_free_bytes`).
+    A missing or invalid value fails cellctl at startup: with no default in code, the
+    contract is the only place either number lives, and a guessed one would alert wrongly."""
+
+    return AlertThresholds(
+        unavailable_after=timedelta(seconds=_positive_integer_env("CELLCTL_PENDING_OPERATION_WARN_SECONDS")),
+        disk_free_floor_bytes=_positive_integer_env("CELLCTL_PVC_RESERVED_FREE_BYTES"),
+    )
+
+
 def build_cluster_config() -> ClusterConfig:
     model_env_raw = os.environ.get("CELLCTL_CELL_MODEL_ENV")
     job_egress_except_raw = os.environ.get("CELLCTL_JOB_EGRESS_EXCEPT")
@@ -134,6 +161,9 @@ def build_cluster_config() -> ClusterConfig:
     artifact_cell_ids = json.loads(os.environ.get("CELLCTL_ARTIFACT_BROKER_CELL_IDS", "[]"))
     if not isinstance(artifact_cell_ids, list):
         raise ValueError("artifact broker cell IDs must be a JSON array")
+    artifact_all_cells = json.loads(os.environ.get("CELLCTL_ARTIFACT_BROKER_ALL_CELLS", "false"))
+    if not isinstance(artifact_all_cells, bool):
+        raise ValueError("artifact broker all-cells switch must be a JSON boolean")
     dedicated_cell_ids = json.loads(os.environ.get("CELLCTL_DEDICATED_CELL_IDS", "[]"))
     if not isinstance(dedicated_cell_ids, list):
         raise ValueError("dedicated cell IDs must be a JSON array")
@@ -141,6 +171,9 @@ def build_cluster_config() -> ClusterConfig:
     if not isinstance(media_raw, dict) or not all(isinstance(ids, list) for ids in media_raw.values()):
         raise ValueError("media engine cell IDs must be a JSON object of engine to cell ID array")
     media_engine_cell_ids = {engine: tuple(ids) for engine, ids in media_raw.items()}
+    media_default_raw = json.loads(os.environ.get("CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT", "[]"))
+    if not isinstance(media_default_raw, list):
+        raise ValueError("media engine fleet default must be a JSON array of engine names")
     shared_raw = json.loads(os.environ.get("CELLCTL_SHARED_WORKER", '{"mode":"off"}'))
     if not isinstance(shared_raw, dict):
         raise ValueError("shared worker policy must be a JSON object")
@@ -169,10 +202,13 @@ def build_cluster_config() -> ClusterConfig:
         shared_worker=shared,
         artifact_broker_url=os.environ.get("CELLCTL_ARTIFACT_BROKER_URL", ""),
         artifact_broker_cell_ids=tuple(artifact_cell_ids),
+        artifact_broker_all_cells=artifact_all_cells,
         media_engine_cell_ids=media_engine_cell_ids,
+        media_engine_fleet_default=tuple(media_default_raw),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
         storage=build_storage_config(),
         alert_delivery_secret=build_alert_delivery_secret(),
+        alert_thresholds=build_alert_thresholds(),
         capacity=CapacityConfig(
             csi_driver=os.environ.get("CELLCTL_CSI_DRIVER", "csi.hetzner.cloud"),
             headroom=int(os.environ.get("CELLCTL_ATTACHMENTS_HEADROOM", "5")),

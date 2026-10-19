@@ -28,5 +28,5 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted refusal tables and t
 
 - [x] 4.1 Route the hosted capture box to `capture_source` instead of `remember` — this is the fix that makes a new user able to save at all
 - [x] 4.2 Make the authenticated first run connect-first: server URL, copy button, per-client paths; capture and search demoted below it
-- [x] 4.3 Replace the `home-client.tsx` placeholder "Kim prefers the morning train" — one of the four alpha invitees is named Kim
+- [x] 4.3 Replace the `home-client.tsx` placeholder with an invented example that names no alpha invitee.
 - [ ] 4.4 End-to-end acceptance on a fresh reviewer tenant: connect-first landing, one ordinary sentence saves, and `Find something` returns it

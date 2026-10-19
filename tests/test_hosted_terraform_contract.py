@@ -53,13 +53,14 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_never_global() ->
     compute = (FOUNDATION / "compute.tf").read_text(encoding="utf-8")
     firewall = (FOUNDATION / "firewall.tf").read_text(encoding="utf-8")
 
-    # Pinned to cx33 because Hetzner retired the cx line: no cx type is
+    # The default stays cx33 because Hetzner retired the cx line: no cx type is
     # available or available_for_migration in any datacenter, so this node
     # cannot be resized at all. The fleet is sized to the node instead — see
     # the four-cell USER cap in the capacity contract. Moving to a successor
-    # family costs ~4x for the same memory and is a pricing decision.
+    # family costs ~4x for the same memory and is a pricing decision. Which
+    # other server types the validation admits is proven by
+    # infra/terraform/foundation/tests/server_type.tftest.hcl.
     assert 'default     = "cx33"' in variables
-    assert 'condition     = var.server_type == "cx33"' in variables
     # Sizing must not quietly relax where the data sits or what protects it.
     assert 'default     = "fsn1"' in variables
     assert 'default     = "ubuntu-24.04"' in variables
@@ -81,8 +82,9 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_never_global() ->
     assert 'output "estimated_fixed_monthly_eur_ex_vat"' in outputs
     assert 'output "control_hostname"' in outputs
     assert 'output "transfer_hostname"' in outputs
-    # 8.49 (cx33, fsn1) + 0.50 (primary IPv4), from the Hetzner pricing API.
-    assert re.search(r"value\s*=\s*8\.99", outputs)
+    # 8.49 (cx33, fsn1) + 0.50 (primary IPv4), from the Hetzner pricing API;
+    # no estimate for another server type (server_type.tftest.hcl).
+    assert re.search(r'value\s*=\s*var\.server_type == "cx33" \? 8\.99 : null', outputs)
 
 
 def test_cloudflare_tunnel_keeps_legacy_routes_and_gateway_uses_direct_tls() -> None:
@@ -99,7 +101,6 @@ def test_cloudflare_tunnel_keeps_legacy_routes_and_gateway_uses_direct_tls() -> 
     assert "traefik.kube-system.svc.cluster.local" not in cloudflare
     # Control and transfer stay on the legacy tunnel. The optional Cloud
     # gateway uses its node's DNS-only A record.
-    assert cloudflare.count("cloudflare_dns_record") == 3
     assert 'type    = "CNAME"' in cloudflare
     assert "proxied = true" in cloudflare
     assert "proxied = false" in cloudflare

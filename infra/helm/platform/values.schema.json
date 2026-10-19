@@ -2,6 +2,10 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "required": ["platformJobs", "scheduler", "observability"],
+  "$defs": {
+    "mediaEngineName": {"enum": ["documents", "ocr", "speech"]}
+  },
+  "allOf": [{"if": {"required": ["memoryHealth"], "properties": {"memoryHealth": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"properties": {"cloudGateway": {"properties": {"image": {"$ref": "#/properties/cloudGateway/then/properties/image"}, "databaseEgressCidrs": {"minItems": 1}}}}}}],
   "properties": {
     "runtime": false,
     "platformJobs": {
@@ -29,13 +33,25 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["servesCloud"],
-              "properties": {"servesCloud": {"const": true}}
+              "properties": {"servesCloud": {"const": true}, "enabled": {"type": "boolean"}}
             },
             "exomem-reconcile": {
               "type": "object",
               "additionalProperties": false,
               "required": ["servesCloud"],
-              "properties": {"servesCloud": {"const": true}}
+              "properties": {"servesCloud": {"const": true}, "enabled": {"type": "boolean"}}
+            },
+            "exomem-health-control": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "servesCloud"],
+              "properties": {"servesCloud": {"const": true}, "enabled": {"type": "boolean"}}
+            },
+            "exomem-health-email": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "servesCloud"],
+              "properties": {"servesCloud": {"const": true}, "enabled": {"type": "boolean"}}
             }
           }
         }
@@ -53,7 +69,7 @@
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
+      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
         "sharedWorker": {
           "type": "object",
@@ -163,11 +179,15 @@
         },
         "mediaEngineCellIds": {
           "type": "object",
-          "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+          "propertyNames": {"$ref": "#/$defs/mediaEngineName"},
           "additionalProperties": {
             "type": "array", "maxItems": 1024, "uniqueItems": true,
             "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
           }
+        },
+        "mediaEngineFleetDefault": {
+          "type": "array", "uniqueItems": true,
+          "items": {"$ref": "#/$defs/mediaEngineName"}
         },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
@@ -179,6 +199,12 @@
         "b2AccountId": {"type": "string"},
         "b2Endpoint": {"type": "string"},
         "initDeadlineMinutes": {"type": "integer", "minimum": 1},
+        "upgradeReadyDeadlineMinutes": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 120,
+          "description": "Minutes cellctl waits for an upgraded cell to become ready before it restores the pre-upgrade snapshot and pauses the rollout. Below 5, a normal first start (image pull, migration, catalogue rebuild) misses it and rolls back a healthy image. Above 120, a broken image keeps the canary cell down for hours before the automatic restore."
+        },
         "exportDeadlineMinutes": {"type": "integer", "minimum": 1},
         "exportTtlHours": {"type": "integer", "minimum": 1},
         "databaseDsnSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
@@ -227,12 +253,13 @@
     "artifactBroker": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "endpoint", "cellIds", "publicKeySecretName", "publicKeySecretKey", "resources"],
+      "required": ["enabled", "image", "endpoint", "cellIds", "allCells", "publicKeySecretName", "publicKeySecretKey", "resources"],
       "properties": {
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
         "endpoint": {"type": "string", "pattern": "^(?:|http://(?:10\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|172\\.(?:1[6-9]|2[0-9]|3[01])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|192\\.168\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])):8767/?)$"},
         "cellIds": {"type": "array", "uniqueItems": true, "maxItems": 1024, "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}},
+        "allCells": {"type": "boolean"},
         "publicKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "publicKeySecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "resources": {
@@ -242,7 +269,8 @@
       },
       "allOf": [
         {"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"image": {"pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"}}}},
-        {"if": {"properties": {"cellIds": {"minItems": 1}}}, "then": {"properties": {"enabled": {"const": true}, "endpoint": {"minLength": 1}}}}
+        {"if": {"properties": {"cellIds": {"minItems": 1}}}, "then": {"properties": {"enabled": {"const": true}, "endpoint": {"minLength": 1}}}},
+        {"if": {"properties": {"allCells": {"const": true}}}, "then": {"properties": {"enabled": {"const": true}, "endpoint": {"minLength": 1}}}}
       ]
     },
     "cloudGateway": {
@@ -296,7 +324,7 @@
     "cellStorage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["domain", "local", "snapshotController"],
+      "required": ["domain", "local", "arrayExporter", "snapshotController"],
       "properties": {
         "domain": {"enum": ["hetzner", "local"]},
         "local": {
@@ -307,6 +335,14 @@
             "enabled": {"type": "boolean"},
             "backupConcurrencyPerNode": {"type": "integer", "minimum": 1},
             "maxCellGib": {"type": "integer", "minimum": 4}
+          }
+        },
+        "arrayExporter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image"],
+          "properties": {
+            "image": {"type": "string", "pattern": "^[^@\\s]+@sha256:[a-f0-9]{64}$"}
           }
         },
         "snapshotController": {
@@ -352,12 +388,32 @@
         "apiServerCidrs": {"type": "array", "items": {"type": "string"}}
       }
     },
+    "memoryHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "cellId", "databaseSecretName", "databaseSecretKey", "bearerSecretName", "bearerSecretKey", "page", "bodyTemplate", "timeoutMs", "activeDeadlineSeconds"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "cellId": {"type": "string"},
+        "databaseSecretName": {"type": "string"},
+        "databaseSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "bearerSecretName": {"type": "string"},
+        "bearerSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "page": {"type": "string"},
+        "bodyTemplate": {"type": "string", "maxLength": 32000},
+        "timeoutMs": {"type": "integer", "minimum": 100, "maximum": 20000},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 30}
+      },
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {"properties": {"cellId": {"pattern": "^[a-z2-7]{16}$", "$comment": "Cloud cell IDs follow the fixed 16-character base32 protocol."}, "databaseSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}, "bearerSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}, "page": {"minLength": 1}, "bodyTemplate": {"pattern": "\\{\\{nonce\\}\\}", "$comment": "The synthetic runner requires the fixed {{nonce}} protocol placeholder."}}}
+    },
     "cloudIngress": {
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled", "hostname", "acmeEmail", "cloudflareApiTokenSecretName", "cloudflareApiTokenSecretKey"],
       "properties": {
         "enabled": {"type": "boolean"},
+        "functionalHealthEnabled": {"type": "boolean"},
         "hostname": {"type": "string"},
         "acmeEmail": {"type": "string"},
         "cloudflareApiTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},

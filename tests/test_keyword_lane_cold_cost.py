@@ -136,7 +136,7 @@ def test_one_write_reconciles_keyword_catalog_in_proportion_to_the_change(
     monkeypatch.setattr(find_module, "_walk_md", counted_walk)
     monkeypatch.setattr(find_module._CACHE, "get", counted_get)
     monkeypatch.setattr(freshness, "recall_delta_since", counted_delta)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
     paths = find_module._keyword_match_paths(
@@ -220,7 +220,7 @@ def test_large_cold_keyword_catalog_returns_typed_warming_without_a_walk(
 
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
     monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming) as raised:
         find_module._keyword_match_paths(
@@ -264,7 +264,7 @@ def test_large_lazy_empty_query_returns_typed_warming_without_a_walk(
 
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
     monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming):
         find_module.find(tmp_path, query="", mode="keyword", scope="kb")
@@ -326,6 +326,7 @@ def test_active_catalog_warm_refuses_every_mode_before_a_cold_freshness_walk(
             f"preseedrace payload {index}",
         )
     walked = 0
+    repair_requests: list[Path] = []
 
     def forbidden_walk(_root: Path):
         nonlocal walked
@@ -336,6 +337,7 @@ def test_active_catalog_warm_refuses_every_mode_before_a_cold_freshness_walk(
     readiness.manage_runtime()
     readiness.begin_warm()
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(lexstore, "request_repair", repair_requests.append)
     monkeypatch.setattr(
         freshness,
         "recall_projection_snapshot",
@@ -355,6 +357,90 @@ def test_active_catalog_warm_refuses_every_mode_before_a_cold_freshness_walk(
         )
 
     assert walked == 0
+    assert repair_requests == []
+
+
+def test_failed_catalog_warm_retries_before_optional_preloads_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed required warm must not wait for unrelated model preloads to retry."""
+    repairs: list[Path] = []
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.finish_required_warm()
+    monkeypatch.setattr(lexstore, "request_repair", repairs.append)
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path, query="warm recovery", mode="keyword", scope="kb",
+            graph=False, temporal=False,
+        )
+
+    assert readiness.is_warming()
+    assert repairs == [tmp_path]
+
+
+@pytest.mark.parametrize("catalogue_state", ["published", "malformed"])
+def test_initial_warm_keeps_retained_catalogue_repair_with_the_warm_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, catalogue_state: str,
+) -> None:
+    """Restart recall must not start repair before the warm owner seeds projections."""
+    import sqlite3
+    from contextlib import closing
+
+    _write_page(tmp_path, "Knowledge Base/Notes/retained.md", "retainedwarmmarker")
+    _materialize_live_catalog(tmp_path, "retainedwarmmarker")
+    store = lexstore.get_store(tmp_path)
+    if catalogue_state == "malformed":
+        with closing(sqlite3.connect(store.path)) as connection:
+            connection.execute("PRAGMA writable_schema=ON")
+            connection.execute("UPDATE sqlite_schema SET sql = 'broken SQL' WHERE name = 'meta'")
+            connection.commit()
+    freshness.clear()
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    repairs: list[Path] = []
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda root, **_kwargs: repairs.append(root))
+
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        find_module.find(
+            tmp_path, query="retainedwarmmarker", mode="keyword", scope="kb",
+            graph=False, temporal=False,
+        )
+
+    assert raised.value.status == "warming"
+    assert repairs == []
+
+
+def test_initial_warm_refusal_stays_bound_when_warm_finishes_after_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completing startup must not let a request bypass retained selection."""
+    _write_page(tmp_path, "Knowledge Base/Notes/warm-transition.md", "warmtransitionmarker")
+    _materialize_live_catalog(tmp_path, "warmtransitionmarker")
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    required_finished = readiness.required_warm_finished
+
+    def finish_after_observation():
+        finished = required_finished()
+        readiness.finish_required_warm()
+        readiness.mark_ready("retrieval_catalog")
+        return finished
+
+    monkeypatch.setattr(readiness, "required_warm_finished", finish_after_observation)
+    timings = find_module.FindTimings()
+
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        find_module.find(
+            tmp_path, query="warmtransitionmarker", mode="keyword", scope="kb",
+            graph=False, temporal=False, timings=timings,
+        )
+
+    assert raised.value.status == "warming"
+    report = timings.as_dict()
+    assert report["profile"]["recall_projection"]["outcome"] == "warming"
+    assert report["stages"]["recall_projection"]["source"] == "declined"
 
 
 def test_catalog_proof_cannot_admit_runtime_without_live_projections(
@@ -425,7 +511,7 @@ def test_ready_runtime_losing_projection_demotes_without_walk(
         ),
     )
 
-    with pytest.raises(find_module.RetrievalIndexWarming):
+    with pytest.raises(find_module.RetrievalIndexWarming) as refusal:
         find_module.find(
             tmp_path,
             query="projectionloss",
@@ -435,47 +521,12 @@ def test_ready_runtime_losing_projection_demotes_without_walk(
             temporal=False,
         )
 
+    assert refusal.value.status == "temporarily_unavailable"
     assert scheduled == [tmp_path]
     assert readiness.retrieval_admission() == {
         "state": "unavailable",
         "admitted": False,
     }
-
-
-def test_unavailable_runtime_reproves_before_requesting_another_rebuild(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A real recall request self-recovers after a late catalog publish."""
-    admissions: list[Path | None] = []
-
-    def admission(root: Path | None = None) -> dict[str, object]:
-        admissions.append(root)
-        if root is None:
-            return {"state": "unavailable", "admitted": False}
-        return {"state": "ready", "admitted": True}
-
-    class ProofReached(RuntimeError):
-        pass
-
-    readiness.manage_runtime()
-    monkeypatch.setattr(readiness, "retrieval_admission", admission)
-    monkeypatch.setattr(
-        lexstore,
-        "runtime_retrieval_catalog_proof",
-        lambda _root: (_ for _ in ()).throw(ProofReached),
-    )
-
-    with pytest.raises(ProofReached):
-        find_module.find(
-            tmp_path,
-            query="latepublish",
-            mode="keyword",
-            scope="kb",
-            graph=False,
-            temporal=False,
-        )
-
-    assert admissions == [None, tmp_path]
 
 
 def test_unavailable_runtime_with_exact_catalog_serves_the_refused_read(
@@ -515,7 +566,7 @@ def test_read_only_recovery_probe_does_not_schedule_catalog_repair(
     monkeypatch.setattr(
         lexstore,
         "_schedule_runtime_catalog_repair",
-        lambda root: scheduled.append(root),
+        lambda root, **_kwargs: scheduled.append(root),
     )
     store = lexstore.get_store(tmp_path)
 
@@ -637,19 +688,12 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
         "strictresolverpropagation payload",
     )
     _seed_live(tmp_path)
+    assert lexstore.get_store(tmp_path).rebuild_atomic() is True
     readiness.manage_runtime()
     monkeypatch.setattr(
         readiness,
         "retrieval_admission",
         lambda _root=None: {"state": "ready", "admitted": True},
-    )
-    monkeypatch.setattr(
-        lexstore,
-        "runtime_retrieval_catalog_proof",
-        lambda _root: {
-            scope: freshness.live_recall_checkpoint(tmp_path, scope)
-            for scope in freshness.SCOPES
-        },
     )
     observed: list[tuple[bool, object]] = []
 
@@ -698,58 +742,6 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
     )
 
 
-def test_request_projection_cannot_advance_past_its_catalog_proof(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_page(
-        tmp_path,
-        "Knowledge Base/Notes/target.md",
-        "requestproof payload",
-    )
-    _seed_live(tmp_path)
-    readiness.manage_runtime()
-    readiness.begin_warm()
-    readiness.mark_ready("retrieval_catalog")
-    readiness.finish_warm()
-    proof_calls = 0
-
-    def proof(_root: Path):
-        nonlocal proof_calls
-        proof_calls += 1
-        checkpoints = {
-            scope: freshness.live_recall_checkpoint(tmp_path, scope)
-            for scope in freshness.SCOPES
-        }
-        added = _write_page(
-            tmp_path,
-            "Knowledge Base/Notes/racing.md",
-            "requestproof racing payload",
-        )
-        freshness.on_files_changed(tmp_path, changed=[added])
-        return checkpoints
-
-    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_proof", proof)
-    monkeypatch.setattr(
-        freshness,
-        "recall_projection_snapshot",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("advanced request must decline before projection fallback")
-        ),
-    )
-
-    with pytest.raises(find_module.RetrievalIndexWarming):
-        find_module.find(
-            tmp_path,
-            query="requestproof",
-            mode="vector",
-            scope="kb",
-            graph=False,
-            temporal=False,
-        )
-
-    assert proof_calls == 1
-
-
 def test_event_index_kill_switch_keeps_managed_runtime_on_lazy_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -775,7 +767,7 @@ def test_declined_projection_is_named_in_find_timings(tmp_path: Path) -> None:
     readiness.manage_runtime()
     readiness.begin_warm()
 
-    with pytest.raises(find_module.RetrievalIndexWarming):
+    with pytest.raises(find_module.RetrievalIndexWarming) as refusal:
         find_module.find(
             tmp_path,
             query="timingprojection",
@@ -786,6 +778,7 @@ def test_declined_projection_is_named_in_find_timings(tmp_path: Path) -> None:
             timings=timings,
         )
 
+    assert refusal.value.status == "warming"
     report = timings.as_dict()
     assert report["profile"]["recall_projection"]["outcome"] == "warming"
     assert report["stages"]["recall_projection"]["ms"] >= 0.0
@@ -874,7 +867,7 @@ def test_large_cold_hybrid_catalog_returns_typed_warming_without_a_walk(
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
     monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming) as raised:
         find_module.find(
@@ -1111,7 +1104,7 @@ def test_discovered_catalog_staleness_revokes_configured_runtime_admission(
     readiness.mark_ready("retrieval_catalog")
     readiness.finish_warm()
     store.path.unlink()
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming):
         find_module.find(tmp_path, query="laterstale", mode="keyword", scope="kb")
@@ -1188,7 +1181,7 @@ def test_large_cold_vault_widening_returns_typed_warming_without_a_walk(
         yield  # pragma: no cover - keep this a generator-shaped test double
 
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming):
         find_module.find(
@@ -1228,7 +1221,7 @@ def test_access_policy_change_is_not_served_from_a_delta(
         raise AssertionError("an access-policy transition must take the full path")
 
     monkeypatch.setattr(store, "_apply_delta_rows", forbidden_delta_apply)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
     checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
 
     paths = find_module._keyword_match_paths(
@@ -1287,7 +1280,7 @@ def test_nonrepairing_incomplete_delta_returns_warming_without_a_walk(
 
     monkeypatch.setattr(freshness, "recall_delta_since", incomplete)
     monkeypatch.setattr(find_module, "_walk_md", counted_walk)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
     checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
 
     with pytest.raises(find_module.RetrievalIndexWarming):

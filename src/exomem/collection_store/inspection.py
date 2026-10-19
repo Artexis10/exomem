@@ -154,24 +154,43 @@ class _CollectionState:
             self.findings[key] = findings
             self.size += sys.getsizeof(self.findings) - before + findings.size
 
+    def compact(self) -> None:
+        """Drop dictionary capacity left behind by removed release contributions."""
+        def compact_table(table):
+            current = {key: value for key, value in table.items()}
+            self.size += sys.getsizeof(current) - sys.getsizeof(table)
+            return current
+
+        self.rows = compact_table(self.rows)
+        self.frequencies = tuple(compact_table(counts) for counts in self.frequencies)
+        self.groups = compact_table(self.groups)
+        self.findings = compact_table(self.findings)
+
 
 class InspectionCache:
     """Reuse contributions only after fresh release selection by the caller."""
 
-    __slots__ = ("maximum_bytes", "states", "_bytes", "_rows")
+    __slots__ = ("maximum_bytes", "states", "_bytes", "_rows", "reserved_bytes")
 
     def __init__(self, maximum_bytes: int = 16 * 1024 * 1024):
         self.maximum_bytes = maximum_bytes
         self.states: OrderedDict[str, _CollectionState] = OrderedDict()
         self._bytes = 0
         self._rows = 0
+        self.reserved_bytes = 0
         self.clear()
 
     def clear(self) -> None:
         self.states.clear()
         self._bytes = sys.getsizeof(self) + sys.getsizeof(self.states)
         self._bytes += sys.getsizeof(self.maximum_bytes) + 2 * sys.getsizeof(0)
+        self._bytes += self.reserved_bytes
         self._rows = 0
+
+    def reserve(self, size):
+        """Charge handle-owned history windows to this same resident byte budget."""
+        self._bytes += size - self.reserved_bytes
+        self.reserved_bytes = size
 
     def discard(self, cid: str) -> None:
         before = sys.getsizeof(self.states)
@@ -223,7 +242,19 @@ class InspectionCache:
         state.overflow_limit = None
         if len(self.states) >= _MAX_COLLECTIONS:
             self.discard(next(iter(self.states)))
-        if self._bytes + state.size + _STATE_ADMISSION_BYTES > self.maximum_bytes:
+        compacted = False
+
+        def within_budget():
+            nonlocal compacted
+            if self._bytes + state.size + _STATE_ADMISSION_BYTES <= self.maximum_bytes:
+                return True
+            # Audience churn leaves dictionary capacity; compact once before exact fallback.
+            if not compacted:
+                state.compact()
+                compacted = True
+            return self._bytes + state.size + _STATE_ADMISSION_BYTES <= self.maximum_bytes
+
+        if not within_budget():
             return None
 
         contributions: list[formats.InspectionContribution] = []
@@ -249,14 +280,13 @@ class InspectionCache:
                     manifest, load_record(subject), state.observed_fields,
                 )
                 entry = state.add(subject, contribution, touched)
-                if self._bytes + state.size + _STATE_ADMISSION_BYTES > self.maximum_bytes:
+                if not within_budget():
                     return self._overflow(manifest, epoch, profile)
             contributions.append(entry.contribution)
 
         state.finish_groups(manifest, touched)
         # Reserve the maximum OrderedDict node/table growth at <=8 states.
-        if (self._bytes + state.size + _STATE_ADMISSION_BYTES > self.maximum_bytes
-                or self._rows + len(state.rows) > _MAX_ROWS):
+        if not within_budget() or self._rows + len(state.rows) > _MAX_ROWS:
             return self._overflow(manifest, epoch, profile)
         current = tuple(contributions)
         observed = formats.observed_values_from_counts({

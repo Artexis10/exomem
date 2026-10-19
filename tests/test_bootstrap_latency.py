@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from exomem import command_surface, commands, latency_watch, workflow_skills
+from exomem import (
+    command_surface,
+    commands,
+    latency_watch,
+    request_latency_contract,
+    workflow_skills,
+)
 
 T0 = 1_800_000_000.0
 AFTER_GRACE = T0 + latency_watch.STARTUP_GRACE_SECONDS + 1.0
@@ -56,7 +62,7 @@ def test_a_breaching_client_receives_the_profiles_latency_detail(
     assert row["samples"] == 25 and row["p90_ms"] == 3000 and row["ceiling_ms"] == 1000
     assert row["p50_ms"] == 3000
     assert row["bar_id"] == "watch-ordinary" and row["source"] == "live-ring"
-    assert row["contract_revision"] == "request-latency-v1"
+    assert row["contract_revision"] == request_latency_contract.load_contract().revision
     assert "client" not in row
     if profile == "compact":
         assert set(row) == {

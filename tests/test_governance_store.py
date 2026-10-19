@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import reserved_paths
+from exomem import reserved_paths, writer_lease
 from exomem.governance import compile as governance_compile
 from exomem.governance import policy, schema_v4, store, tokens
 
@@ -99,11 +99,43 @@ def test_open_connection_is_idempotent(vault: Path) -> None:
         second.close()
 
 
-def test_active_reader_closes_connection_when_owner_scope_exit_refuses(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("version", [3, 4])
+def test_schema_inspection_keeps_the_carried_private_inventory_valid(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
+) -> None:
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "lease-state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    connection = store.open_connection(vault)
+    try:
+        if version == 4:
+            schema_v4.migrate_v3_connection(connection, _legacy_expiry_migration_seed())
+        before = tuple(connection.iterdump())
+        reserved_paths._baseline_identity_catalogue(vault)
+        assert reserved_paths.identity_catalogue_refusal(vault) is None
+
+        assert store.authorization_session_schema_version(vault) == version
+
+        assert reserved_paths.identity_catalogue_refusal(vault) is None
+        assert tuple(connection.iterdump()) == before
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("reader", "version", "error"),
+    [
+        (store.open_active_governance_read_connection, 4, RuntimeError),
+        (store.open_readonly_connection, 3, None),
+        (store.authorization_session_schema_version, 4, store.GovernanceStoreUnreadable),
+    ],
+)
+def test_reader_closes_connection_when_owner_scope_exit_refuses(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, reader, version: int, error
 ) -> None:
     connection = store.open_connection(vault)
-    connection.execute("PRAGMA user_version=4")
+    connection.execute(f"PRAGMA user_version={version}")
     connection.close()
     connections: list[sqlite3.Connection] = []
     connect = sqlite3.connect
@@ -123,12 +155,16 @@ def test_active_reader_closes_connection_when_owner_scope_exit_refuses(
     monkeypatch.setattr(sqlite3, "connect", observe_connect)
     monkeypatch.setattr(reserved_paths, "_sqlite_owner_target_scope", refuse_on_exit)
 
-    with pytest.raises(RuntimeError, match="retained target changed"):
-        store.open_active_governance_read_connection(vault)
+    if error is None:
+        assert reader(vault) is None
+    else:
+        with pytest.raises(error):
+            reader(vault)
 
-    assert len(connections) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
-        connections[0].execute("SELECT 1")
+    assert connections
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connection.execute("SELECT 1")
     assert not reserved_paths.owner_authorized("governance-store")
     assert not reserved_paths._identity_coordination_active(vault)
 

@@ -24,6 +24,7 @@ from . import (
     activation,
     activation_manifest,
     call_spans,
+    foreground_priority,
     freshness,
     lifecycle_statuses,
     memory_refs,
@@ -112,6 +113,23 @@ def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bo
     if name.startswith(".lexical.sqlite.rebuild-"):
         return vault.is_lexical_rebuild_runtime_file_name(name)
     return False
+
+
+def identity_census_omits_scanned_pages(vault_root: Path) -> bool:
+    """Whether the Knowledge Base root holds a directory the census prunes but a scan reads.
+
+    `trash/` is the one such name today: the identity census never admits a
+    page there, while `vault.in_excluded_scan_dir` keeps it, so the memory
+    reference scan and sidecar still read its pages. A reader that must answer
+    as the scan does checks this vault-wide fact before it reads the census.
+    Any entry by that name counts, because taking the scan is always correct.
+    """
+    kb = vault.kb_root(Path(vault_root))
+    return any(
+        os.path.lexists(kb / name)
+        for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
+        if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+    )
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
@@ -217,6 +235,8 @@ class SemanticPageState:
     body: str = field(default="", repr=False)
     candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False)
     definitions: instances.PageDefinitions | None = field(default=None, repr=False)
+    # An explicit operation witness retains staged definitions in an unarmed corpus.
+    definitions_explicit: bool = False
     definitions_unavailable: bool = False
     neutral_document: SemanticUnitDocument | None = field(default=None, repr=False)
 
@@ -275,6 +295,11 @@ class StableIdentityCensus:
     entries: tuple[StableIdentityEntry, ...]
     paths_by_identity: Mapping[str, tuple[str, ...]] = field(init=False)
     _reference_paths: frozenset[str] = field(init=False, repr=False, compare=False)
+    # Every reference path holding each identity, duplicates included: the
+    # projection a reference read answers from without walking the vault.
+    _reference_owners: Mapping[str, tuple[str, ...]] = field(
+        init=False, repr=False, compare=False
+    )
     _canonical_refs_by_path: Mapping[str, str | None] = field(
         init=False, repr=False, compare=False
     )
@@ -321,6 +346,16 @@ class StableIdentityCensus:
             self,
             "_reference_paths",
             frozenset(entry.path for entry in reference_entries),
+        )
+        object.__setattr__(
+            self,
+            "_reference_owners",
+            MappingProxyType(
+                {
+                    identity: tuple(sorted(owners))
+                    for identity, owners in reference_owners.items()
+                }
+            ),
         )
         object.__setattr__(
             self,
@@ -454,6 +489,11 @@ class RelationFact:
     reviewer_accepted: bool
     target_status: str
     registry_instance: str = "core"
+    logical_source_ref: str | None = None
+    logical_target_ref: str | None = None
+    target_unit_status: str | None = None
+    target_unit_fingerprint: str | None = None
+    target_kind: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "authored_projects", tuple(sorted(set(self.authored_projects))))
@@ -485,6 +525,11 @@ class RelationFact:
             "reviewer_accepted": self.reviewer_accepted,
             "target_status": self.target_status,
             "registry_instance": self.registry_instance,
+            "logical_source_ref": self.logical_source_ref,
+            "logical_target_ref": self.logical_target_ref,
+            "target_unit_status": self.target_unit_status,
+            "target_unit_fingerprint": self.target_unit_fingerprint,
+            "target_kind": self.target_kind,
         }
 
 
@@ -1113,24 +1158,7 @@ class SemanticCorpusContext:
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
-        current = self.pages.get(state.path)
-        if current is not None and (
-            current.title,
-            current.identity_kind,
-            current.identity,
-            current.page_type,
-            current.projects,
-            current.language_registry_hash,
-            current.relation_registry_hash,
-        ) == (
-            state.title,
-            state.identity_kind,
-            state.identity,
-            state.page_type,
-            state.projects,
-            state.language_registry_hash,
-            state.relation_registry_hash,
-        ):
+        if _stable_topology_replacement(self, state):
             return _context_with_stable_topology_candidate(self, state)
         pages = dict(self.pages)
         pages[state.path] = state
@@ -1225,6 +1253,7 @@ def build_page_state(
     complete_authored_effects: bool = False,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
+    page_definitions: instances.PageDefinitions | None = None,
 ) -> SemanticPageState:
     """Parse and classify a target before evaluating lifecycle-dependent obligations."""
     state = _parse_page_state(
@@ -1243,6 +1272,7 @@ def build_page_state(
         type_basis,
         relation_definitions=relation_registry,
         language=language_registry,
+        page_definitions=page_definitions,
     )
 
 
@@ -1259,23 +1289,47 @@ def enrich_page_state(
     relation_definitions: relation_registry.RelationRegistry | None = None,
     language: semantic_language_registry.SemanticLanguageRegistry | None = None,
     require_status: bool = True,
+    page_definitions: instances.PageDefinitions | None = None,
+    definitions_selection: instances.DefinitionsSelection | None = None,
 ) -> SemanticPageState:
     """Interpret detached facts with this page's admitted instance, lifecycle and note types.
 
     The operation's own page requires its class. Other corpus pages pass
     ``require_status=False``: an unavailable class marks the page instead of
     refusing the corpus, and only a decision that reads it refuses.
+    ``definitions_selection`` is a corpus build's one selection of
+    ``_PAGE_DEFINITION_SUBJECTS``, shared by every page that build interprets.
     """
     type_basis = type_basis or note_types.Basis(root)
-    definitions = None
+    definitions = page_definitions or (state.definitions if state.definitions_explicit else None)
+    definitions_explicit = definitions is not None
     unavailable = False
+    if definitions is not None:
+        if (definitions.path != state.path or definitions.frontmatter != state.frontmatter
+                or not set(_PAGE_DEFINITION_SUBJECTS) <= definitions.snapshots.keys()
+                or (instances.page_scope(root, state.path, dict(state.frontmatter))
+                    or instances.PUBLIC_INSTANCE) != definitions.instance_id):
+            raise ValueError("REGISTRY_UNAVAILABLE: staged page definitions do not match the page")
+        from .vocabulary import registry_spec
+
+        for subject, snapshot in definitions.snapshots.items():
+            spec = instances.select(root, registry_spec(subject), definitions.instance_id)
+            if (spec.binding_revision != definitions.binding_revision
+                    or snapshot.registry != subject or snapshot.instance_id != spec.instance_id):
+                raise ValueError("REGISTRY_UNAVAILABLE: staged page definitions changed selection")
+            instances.recheck(root, spec)
     try:
-        definitions = instances.page_definitions(
-            root, state.path, dict(state.frontmatter), _PAGE_DEFINITION_SUBJECTS,
-        )
-        if definitions.binding_revision is not None or relation_definitions is None:
+        if definitions is None:
+            definitions = (
+                definitions_selection.page_definitions(state.path, dict(state.frontmatter))
+                if definitions_selection is not None
+                else instances.page_definitions(
+                    root, state.path, dict(state.frontmatter), _PAGE_DEFINITION_SUBJECTS,
+                )
+            )
+        if definitions_explicit or definitions.binding_revision is not None or relation_definitions is None:
             relation_definitions = definitions.snapshots["relations"].typed
-        if definitions.binding_revision is not None or language is None:
+        if definitions_explicit or definitions.binding_revision is not None or language is None:
             language = definitions.snapshots["categories"].typed
     except ValueError:
         # Core meanings remain public; missing assignment never makes an overlay public.
@@ -1323,6 +1377,7 @@ def enrich_page_state(
         language_registry_hash=language_hash,
         relation_registry_hash=relation_hash,
         definitions=definitions,
+        definitions_explicit=definitions_explicit,
         definitions_unavailable=unavailable,
         eligible_governed=governed and live,
         eligible_compiled=compiled and live,
@@ -1489,17 +1544,20 @@ _CORPUS_CONTEXT_EVENT_CHECKPOINTS: dict[
 ] = {}
 _CORPUS_CONTEXT_LANGUAGE_HASHES: dict[tuple[str, str], str] = {}
 _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
-# Enrichment for a caller who admits every page, per structural cache key:
-# (structural context, (status, note-type, page-definition) dependencies consulted,
-# enriched context, enriched states). Bases that re-admit to the same dependencies,
-# under unchanged page definitions, reuse the whole context when the structural
-# object is unchanged, and otherwise reuse each page whose structural state object
-# is unchanged, so a write re-enriches only the pages it changed.
+# Enrichment for a caller who admits every page, per structural cache key and
+# per whether the caller supplied registries: (structural context, (status,
+# note-type, page-definition, supplied-registry) dependencies consulted, enriched
+# context, enriched states). Bases that re-admit to the same dependencies, under
+# unchanged page definitions and supplied registry identities, reuse the whole
+# context when the structural object is unchanged, and otherwise reuse each page
+# whose structural state object is unchanged, so a write re-enriches only the
+# pages it changed. The supplied slot serves armed vaults, whose writers keep an
+# explicit public corpus registry (`corpus_registry_overrides`).
 _ENRICHED_CONTEXT_MEMO: dict[
-    tuple[str, str],
+    tuple[tuple[str, str], bool],
     tuple[
         SemanticCorpusContext,
-        tuple[tuple[str, str], tuple[str, str], tuple],
+        tuple[tuple[str, str], tuple[str, str], tuple, tuple],
         SemanticCorpusContext,
         dict[str, SemanticPageState],
     ],
@@ -1515,10 +1573,8 @@ _CORPUS_CONTEXT_CACHE_MAX_VAULTS = 2
 #: individually bounded, so this is amplification rather than livelock, but at
 #: thousands of pages it is the dominant cost moved onto writers.
 #:
-#: Single-flight collapses the concurrent case: a second publisher that finds
-#: the same cold key returns instead of starting a second whole-vault build.
+#: The shared corpus flight collapses concurrent publishers and warmers.
 _CORPUS_POPULATE_LOCK = threading.Lock()
-_CORPUS_POPULATE_IN_FLIGHT: set[tuple[str, str]] = set()
 
 #: The memo collapses the sequential case, and is deliberately measured in the
 #: cost of the attempt that just failed rather than in a fixed number of
@@ -1540,15 +1596,44 @@ _CORPUS_POPULATE_MEMO_MAX_SECONDS = 30.0
 
 @dataclass(slots=True)
 class _CorpusContextFlight:
-    census: tuple
+    census: tuple | None
     registry_identity: tuple[Any, ...]
     language_identity: tuple[Any, ...]
     done: threading.Event = field(default_factory=threading.Event)
     result: SemanticCorpusContext | None = None
     error: BaseException | None = None
+    discarded: bool = False
 
 
 _CORPUS_CONTEXT_FLIGHTS: dict[tuple[str, str], _CorpusContextFlight] = {}
+
+
+def _claim_corpus_context_flight(
+    cache_key: tuple[str, str],
+    census: tuple | None,
+    relation_definitions: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[_CorpusContextFlight, bool]:
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        flight = _CORPUS_CONTEXT_FLIGHTS.get(cache_key)
+        if flight is not None:
+            return flight, False
+        flight = _CorpusContextFlight(
+            census,
+            (relation_definitions.core_version, relation_definitions.extension_hash),
+            (language.schema_version, language.content_hash),
+        )
+        _CORPUS_CONTEXT_FLIGHTS[cache_key] = flight
+        return flight, True
+
+
+def _finish_corpus_context_flight(
+    cache_key: tuple[str, str], flight: _CorpusContextFlight
+) -> None:
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
+            del _CORPUS_CONTEXT_FLIGHTS[cache_key]
+    flight.done.set()
 
 #: A waiter owns an interactive request budget, not the owner's vault-sized
 #: build duration.  Two seconds is fixed and deliberately non-configurable: it
@@ -1568,6 +1653,9 @@ class ReferenceIdentitySnapshot:
     checkpoint: freshness.FreshnessCheckpoint
     reference_paths: frozenset[str]
     canonical_refs_by_path: Mapping[str, str | None]
+    # Identity -> every reference path holding it. Unlike
+    # `canonical_refs_by_path`, a duplicated identity keeps all its owners.
+    reference_owners: Mapping[str, tuple[str, ...]]
     _cache_context_identity: object = field(repr=False, compare=False)
 
 
@@ -1589,7 +1677,8 @@ def _forget_corpus_entry_locked(cache_key: tuple[str, str]) -> bool:
     removed = _CORPUS_CONTEXT_CACHE.pop(cache_key, None) is not None
     _drop_corpus_caption_locked(cache_key)
     _CORPUS_CONTEXT_LANGUAGE_HASHES.pop(cache_key, None)
-    _ENRICHED_CONTEXT_MEMO.pop(cache_key, None)
+    for supplied in (False, True):
+        _ENRICHED_CONTEXT_MEMO.pop((cache_key, supplied), None)
     return removed
 
 
@@ -1612,7 +1701,6 @@ def reset_corpus_context_cache() -> None:
     """Drop every cached corpus context; intentionally public for tests."""
     with _CORPUS_POPULATE_LOCK:
         _CORPUS_POPULATE_MEMO.clear()
-        _CORPUS_POPULATE_IN_FLIGHT.clear()
     with _CORPUS_CONTEXT_CACHE_LOCK:
         _CORPUS_CONTEXT_CACHE.clear()
         _CORPUS_CONTEXT_EVENT_TOKENS.clear()
@@ -1630,33 +1718,48 @@ def evict_corpus_context(vault_root: Path) -> bool:
 
 def current_reference_identity_snapshot(
     vault_root: Path,
+    *,
+    declined: dict[str, int] | None = None,
 ) -> ReferenceIdentitySnapshot | None:
-    """Return the current cached identity authority without filesystem corpus work."""
+    """Return the current cached identity authority without filesystem corpus work.
+
+    ``declined`` receives the first proof failure for the caller's existing span.
+    """
+    # Decline keys name this proof's closed branches, never source content.
+    def decline(reason: str) -> None:
+        if declined is not None:
+            declined[f"declined_{reason}"] = 1
+
     root = Path(vault_root)
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
-            return None
+        if freshness.external_pending(root):
+            return decline("external_pending")
+        if not freshness.is_live(root, "vault"):
+            return decline("events_not_live")
         checkpoint = freshness.consumer_checkpoint(root, "vault")
         if checkpoint.triple is None:
-            return None
+            return decline("checkpoint_absent")
         try:
             cache_key = _corpus_cache_key(root)
         except Exception:  # noqa: BLE001 - an unkeyable root has no authority
-            return None
+            return decline("unkeyable")
         with _CORPUS_CONTEXT_CACHE_LOCK:
             entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
             caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
-            if entry is None or caption != checkpoint:
-                return None
+            if entry is None:
+                return decline("corpus_absent")
+            if caption != checkpoint:
+                return decline("checkpoint_differs")
             identity = entry[1].identity_census
             snapshot = ReferenceIdentitySnapshot(
                 checkpoint,
                 identity._reference_paths,
                 identity._canonical_refs_by_path,
+                identity._reference_owners,
                 entry[1],
             )
         if freshness.external_pending(root):
-            return None
+            return decline("changed_during_proof")
         return snapshot
 
 
@@ -1684,6 +1787,8 @@ def reference_identity_snapshot_is_current(
                 and entry[1].identity_census._reference_paths is snapshot.reference_paths
                 and entry[1].identity_census._canonical_refs_by_path
                 is snapshot.canonical_refs_by_path
+                and entry[1].identity_census._reference_owners
+                is snapshot.reference_owners
             )
 
 
@@ -1691,6 +1796,7 @@ def current_writer_resolver_entries(
     vault_root: Path,
     *,
     freshness_key: tuple[int, int, str] | None = None,
+    declined: dict[str, int] | None = None,
 ) -> tuple[tuple[str, str], ...] | None:
     """Return broad resolver entries from an exactly current resident corpus.
 
@@ -1699,27 +1805,39 @@ def current_writer_resolver_entries(
     broad Markdown membership still all identify the same corpus.  This is
     intentionally read-only: a miss must leave both corpus and resolver caches
     untouched for the existing disk fallback to handle.
+
+    A caller passing `declined` learns which proof failed, as one closed
+    `declined_<reason>` counter for its timing span.
     """
+
+    def decline(reason: str) -> None:
+        if declined is not None:
+            declined[f"declined_{reason}"] = 1
+
     root = Path(vault_root)
     try:
         cache_key = _corpus_cache_key(root)
     except Exception:  # noqa: BLE001 - an unkeyable root has no authority
-        return None
+        return decline("unkeyable")
 
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
-            return None
+        if freshness.external_pending(root):
+            return decline("external_pending")
+        if not freshness.is_live(root, "vault"):
+            return decline("events_not_live")
         checkpoint = freshness.consumer_checkpoint(root, "vault")
-        if checkpoint.triple is None or (
-            freshness_key is not None and freshness_key != checkpoint.triple
-        ):
-            return None
+        if checkpoint.triple is None:
+            return decline("checkpoint_absent")
+        if freshness_key is not None and freshness_key != checkpoint.triple:
+            return decline("freshness_differs")
         with _CORPUS_CONTEXT_CACHE_LOCK:
             entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
             caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
             language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
-            if entry is None or caption != checkpoint or language_hash is None:
-                return None
+            if entry is None or language_hash is None:
+                return decline("corpus_absent")
+            if caption != checkpoint:
+                return decline("checkpoint_differs")
             census, context = entry
             entries = context.resolver_entries
 
@@ -1731,7 +1849,7 @@ def current_writer_resolver_entries(
             sorted(path.relative_to(root).as_posix() for path in vault.walk_vault_md(root))
         )
     except Exception:  # noqa: BLE001 - an incomplete proof must decline reuse
-        return None
+        return decline("proof_failed")
 
     if (
         configuration is None
@@ -1748,23 +1866,25 @@ def current_writer_resolver_entries(
         or tuple(path for path, _title in entries) != membership
         or _config_census(root) != configuration
     ):
-        return None
+        return decline("identity_changed")
 
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
-            return None
-        if freshness.consumer_checkpoint(root, "vault") != checkpoint:
-            return None
+        if (
+            freshness.external_pending(root)
+            or not freshness.is_live(root, "vault")
+            or freshness.consumer_checkpoint(root, "vault") != checkpoint
+        ):
+            return decline("changed_during_proof")
         with _CORPUS_CONTEXT_CACHE_LOCK:
             current = _CORPUS_CONTEXT_CACHE.get(cache_key)
-            return (
-                entries
-                if current is not None
+            if (
+                current is not None
                 and current[1] is context
                 and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key) == checkpoint
                 and _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key) == language_hash
-                else None
-            )
+            ):
+                return entries
+            return decline("changed_during_proof")
 
 
 def _resolve_reference_wikilink_from_context(
@@ -2399,7 +2519,8 @@ def _reconcile_markdown_delta(
     validation types instead of blessing partial state.
     """
     states = dict(context.pages)
-    identities = {entry.path: entry for entry in context.identity_census.entries}
+    previous_identities = {entry.path: entry for entry in context.identity_census.entries}
+    identities = dict(previous_identities)
     kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
     for rel_path in changed_paths:
         source_path = root / rel_path
@@ -2437,6 +2558,19 @@ def _reconcile_markdown_delta(
             identities[rel_path] = StableIdentityCensus.from_states((state,)).entries[0]
         else:
             identities.pop(rel_path, None)
+
+    # A governed commit, and most watcher events, edit one page in place. When
+    # its title, identity and registries hold, the resolver still holds, so
+    # re-derive that page and the pages that link into it, not the corpus.
+    if len(changed_paths) == 1:
+        rel_path = changed_paths[0]
+        state = states.get(rel_path)
+        if (
+            state is not None
+            and identities.get(rel_path) == previous_identities.get(rel_path)
+            and _stable_topology_replacement(context, state)
+        ):
+            return _context_with_stable_topology_candidate(context, state)
 
     return _context_from_state_map(
         root,
@@ -2611,6 +2745,7 @@ def _patch_corpus_files_changed_locked(
     cache_key = _corpus_cache_key(root)
     with _CORPUS_CONTEXT_CACHE_LOCK:
         entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        cached_checkpoint = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
     if entry is None:
         return _CORPUS_PATCH_MISS
     if _config_census(root) != _stored_config_census(entry[0]):
@@ -2654,6 +2789,22 @@ def _patch_corpus_files_changed_locked(
     reconcile_paths = tuple(sorted(set(changed_paths) | set(deleted_paths)))
     if not reconcile_paths:
         return _CORPUS_PATCH_UNCHANGED
+    bridge = (
+        freshness.delta_since(root, "vault", cached_checkpoint)
+        if cached_checkpoint is not None else None
+    )
+    # A seed can hide earlier edits. Named events prove the whole context only
+    # when retained history covers its caption and every touched Markdown path.
+    caption_current = (
+        bridge is not None
+        and bridge.complete
+        and bridge.to == event_checkpoint
+        and {
+            relative(path)
+            for path in bridge.changed | bridge.deleted
+            if PurePosixPath(path).suffix.casefold() == ".md"
+        }.issubset(reconcile_paths)
+    )
     relation_definitions = relation_registry.core_registry()
     language = semantic_language_registry.core_registry()
     context = _reconcile_markdown_delta(
@@ -2675,7 +2826,10 @@ def _patch_corpus_files_changed_locked(
             _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
                 f"{language.schema_version}:{language.content_hash}"
             )
-            _caption_corpus_context_locked(cache_key, event_checkpoint)
+            if caption_current:
+                _caption_corpus_context_locked(cache_key, event_checkpoint)
+            else:
+                _drop_corpus_caption_locked(cache_key)
     return _CORPUS_PATCH_APPLIED
 
 
@@ -2730,7 +2884,7 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
     behavior.
 
     Single-flighted, and memoized whenever an attempt did not stamp: see
-    ``_CORPUS_POPULATE_IN_FLIGHT`` and ``_CORPUS_POPULATE_MEMO`` for why the
+    ``_CORPUS_CONTEXT_FLIGHTS`` and ``_CORPUS_POPULATE_MEMO`` for why the
     unbounded version made writers pay for builds that could not land (#539).
 
     Neither bound can make the cache wrong. Both only ever decline to *start*
@@ -2757,12 +2911,9 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
         for key, deadline in list(_CORPUS_POPULATE_MEMO.items()):
             if started >= deadline:
                 del _CORPUS_POPULATE_MEMO[key]
-        if cache_key in _CORPUS_POPULATE_IN_FLIGHT:
-            return
         if cache_key in _CORPUS_POPULATE_MEMO:
             return
-        _CORPUS_POPULATE_IN_FLIGHT.add(cache_key)
-    admitted = False
+    admitted: bool | None = False
     try:
         admitted = _build_and_admit_corpus_context(root, cache_key)
     except Exception:  # noqa: BLE001 - the publish itself already succeeded
@@ -2770,87 +2921,95 @@ def _populate_corpus_context_after_miss(root: Path) -> None:
     finally:
         elapsed = time.monotonic() - started
         with _CORPUS_POPULATE_LOCK:
-            _CORPUS_POPULATE_IN_FLIGHT.discard(cache_key)
-            if admitted:
+            if admitted is True:
                 _CORPUS_POPULATE_MEMO.pop(cache_key, None)
-            else:
+            elif admitted is False:
                 _CORPUS_POPULATE_MEMO[cache_key] = time.monotonic() + min(
                     _CORPUS_POPULATE_MEMO_MAX_SECONDS,
                     max(_CORPUS_POPULATE_MEMO_MIN_SECONDS, elapsed),
                 )
 
 
-def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> bool:
+def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> bool | None:
     """The L2 body of :func:`_populate_corpus_context_after_miss`.
 
-    Returns whether this call stamped a context. A discard is not an error --
+    Returns whether this call stamped a context, or None when another build owns it.
+    A discard is not an error --
     it is the admission proof correctly refusing a build the vault moved out
     from under -- but the caller has to tell a discard apart from a stamp to
     know whether retrying immediately would be productive.
     """
     relation_definitions = relation_registry.core_registry()
     language = semantic_language_registry.core_registry()
-    # L2/L3: the admission decision is made against this, captured before the
-    # walk it has to vouch for.
-    before = freshness.consumer_checkpoint(root, "vault")
-    census = _timed_corpus_census(root, "populate")
-    if census is None:
-        return False
-    # The registries were loaded BEFORE this walk, and the walk stats the two
-    # `_Schema` files at its END. A registry rewritten in between therefore
-    # produces a census that records the NEW file while the build below would
-    # use the OLD registry — and the census-reuse path admits on census
-    # equality alone (the registry identity is only re-checked on the
-    # event-hit path), so that entry would be served as current. Every other
-    # install site guards with this; so does this one. The window from here to
-    # the stamp is closed by the census re-confirm under the lock, which sees
-    # the same two files.
-    if not _registries_match_disk(root, relation_definitions, language):
-        log.info("semantic corpus populate discarded: registry moved during the walk")
-        return False
-    started = time.perf_counter()
-    context = _build_corpus_context_uncached(
-        root,
-        candidate=None,
-        relation_definitions=relation_definitions,
-        language=language,
+    # Reserve before the census so skipped publishers do no whole-vault work.
+    flight, owns_flight = _claim_corpus_context_flight(
+        cache_key, None, relation_definitions, language
     )
-    build_ms = (time.perf_counter() - started) * 1000.0
-    # Its own outcome, not "rebuild": this build is paid by the PUBLISHER, so
-    # a writer suddenly wearing a full corpus build has to be visible as that.
-    metrics.observe_duration_ms(
-        "exomem_corpus_build_ms",
-        build_ms,
-        {"caller": current_call_context(), "outcome": "populate"},
-    )
-    with _census_walk_log() as walk_log, _CORPUS_CONTEXT_UPDATE_LOCK:
-        after = freshness.consumer_checkpoint(root, "vault")
-        if after != before:
-            log.info("semantic corpus populate discarded: registry advanced mid-walk")
-            return False
+    if not owns_flight:
+        return None
+    try:
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
-                return False
-        if _deferred_corpus_census(root, walk_log, "census") != census:
-            log.info("semantic corpus populate discarded: corpus moved mid-build")
+                return None
+        # L2/L3: capture the checkpoint before the walk it has to vouch for.
+        before = freshness.consumer_checkpoint(root, "vault")
+        census = _timed_corpus_census(root, "populate")
+        if census is None:
             return False
-        with _CORPUS_CONTEXT_CACHE_LOCK:
-            if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+        # Registries loaded before the walk must still match its schema files.
+        # The final census confirmation closes the remaining admission window.
+        if not _registries_match_disk(root, relation_definitions, language):
+            log.info("semantic corpus populate discarded: registry moved during the walk")
+            return False
+        flight.census = census
+        started = time.perf_counter()
+        context = _build_corpus_context_uncached(
+            root,
+            candidate=None,
+            relation_definitions=relation_definitions,
+            language=language,
+        )
+        build_ms = (time.perf_counter() - started) * 1000.0
+        # Keep the publisher's full-build cost visible independently of warmup.
+        metrics.observe_duration_ms(
+            "exomem_corpus_build_ms",
+            build_ms,
+            {"caller": current_call_context(), "outcome": "populate"},
+        )
+        with _census_walk_log() as walk_log, _CORPUS_CONTEXT_UPDATE_LOCK:
+            after = freshness.consumer_checkpoint(root, "vault")
+            if after != before:
+                log.info("semantic corpus populate discarded: registry advanced mid-walk")
                 return False
-            _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
-            _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
-                f"{language.schema_version}:{language.content_hash}"
-            )
-            # L4: no candidate is ever involved here, and a token of None
-            # pops rather than leaving a stale caption behind.
-            _caption_corpus_context_locked(cache_key, after)
-            _trim_corpus_cache_locked(cache_key)
-    log.info(
-        "semantic corpus context populated on miss pages=%d build_ms=%.1f",
-        len(context.pages),
-        build_ms,
-    )
-    return True
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+                    return False
+            if _deferred_corpus_census(root, walk_log, "census") != census:
+                log.info("semantic corpus populate discarded: corpus moved mid-build")
+                return False
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if _CORPUS_CONTEXT_CACHE.get(cache_key) is not None:
+                    return False
+                _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+                _CORPUS_CONTEXT_LANGUAGE_HASHES[cache_key] = (
+                    f"{language.schema_version}:{language.content_hash}"
+                )
+                # L4: None withdraws any old caption instead of retaining it.
+                _caption_corpus_context_locked(cache_key, after)
+                _trim_corpus_cache_locked(cache_key)
+        flight.result = context
+        log.info(
+            "semantic corpus context populated on miss pages=%d build_ms=%.1f",
+            len(context.pages),
+            build_ms,
+        )
+        return True
+    except BaseException as error:
+        flight.error = error
+        raise
+    finally:
+        flight.discarded = flight.result is None and flight.error is None
+        _finish_corpus_context_flight(cache_key, flight)
 
 
 @call_spans.timed("corpus_context.build")
@@ -2882,9 +3041,35 @@ def build_corpus_context(
     return context
 
 
+def corpus_registry_overrides(
+    vault_root: Path,
+    registry: relation_registry.RelationRegistry,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[
+    relation_registry.RelationRegistry | None,
+    semantic_language_registry.SemanticLanguageRegistry | None,
+]:
+    """The registries a writer hands its corpus build: none in an unarmed vault.
+
+    Unarmed, every page selects the saved public definitions, which are the
+    registries a writer loads, so handing them over changes no meaning and only
+    splits the warm enrichment memo. An armed vault keeps its explicit public
+    corpus registry.
+    """
+    from .governance import connector_boundary
+
+    if connector_boundary.read_requirement(Path(vault_root)) is None:
+        return None, None
+    return registry, language_registry
+
+
 def warm_corpus_context(vault_root: Path) -> None:
     """Fill the shared structural corpus cache without classifying for any caller."""
-    _build_corpus_context_with_census(Path(vault_root))
+    _context, census = _build_corpus_context_with_census(Path(vault_root), warm=True)
+    if corpus_context_cache_enabled() and census is None:
+        raise OpError(
+            "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
+        )
 
 
 def build_corpus_context_with_census(
@@ -2912,14 +3097,20 @@ def build_corpus_context_with_census(
         registry=relation_registry.core_registry(),
         language_registry=semantic_language_registry.core_registry(),
     )
-    # Supplied registries replace the page's own definitions, so they bypass the memo.
+    # A supplied registry is the meaning of every page without its own binding,
+    # so its identity is a dependency of each enriched page.
+    supplied = (
+        None if registry is None else (registry.core_version, registry.extension_hash),
+        None if language_registry is None
+        else (language_registry.schema_version, language_registry.content_hash),
+    )
     memo_key = (
-        _corpus_cache_key(root)
-        if candidate is None and registry is None and language_registry is None
-        and corpus_context_cache_enabled()
+        (_corpus_cache_key(root), supplied != (None, None))
+        if candidate is None and corpus_context_cache_enabled()
         else None
     )
     writer_visibility = vault.writer_link_visibility(root)
+    selection = instances.DefinitionsSelection(root, _PAGE_DEFINITION_SUBJECTS)
     definitions = None
     with egress.disclosure_boundary(root, "semantic_corpus_admission"):
         visible = egress.restricted_release_filter(root)
@@ -2927,12 +3118,12 @@ def build_corpus_context_with_census(
             memo_key = None
         memo = None
         if memo_key is not None:
-            definitions = instances.definitions_dependency(root, _PAGE_DEFINITION_SUBJECTS)
+            definitions = selection.dependency()
             with _CORPUS_CONTEXT_CACHE_LOCK:
                 memo = _ENRICHED_CONTEXT_MEMO.get(memo_key)
             if memo is not None and not (
                 basis.matches(memo[1][0]) and type_basis.matches(memo[1][1])
-                and memo[1][2] == definitions
+                and memo[1][2] == definitions and memo[1][3] == supplied
             ):
                 memo = None
             if memo is not None and memo[0] is context:
@@ -2944,7 +3135,8 @@ def build_corpus_context_with_census(
                 reused[path]
                 if previous.get(path) is state
                 else enrich_page_state(root, state, basis, type_basis, relation_definitions=registry,
-                                       language=language_registry, require_status=False)
+                                       language=language_registry, require_status=False,
+                                       definitions_selection=selection)
                 if visible is None or visible(path)
                 else state
             )
@@ -2955,6 +3147,7 @@ def build_corpus_context_with_census(
         states[candidate.path] = enrich_page_state(
             root, candidate, basis, type_basis,
             relation_definitions=registry, language=language_registry,
+            definitions_selection=selection,
         )
     identity = (
         context.identity_census.with_page(candidate, casefold_paths=vault.vault_casefolds(root))
@@ -2969,21 +3162,39 @@ def build_corpus_context_with_census(
             unarmed = False
         # Unarmed, the public overlay is every page's meaning. Armed, each visible
         # page carries its own instance and every other page keeps core meaning.
-        corpus_registry = relation_registry.load_registry(root) if unarmed else context.registry
-    # Enrichment reparses units under each page's definitions, so relation facts
-    # and the resolver follow the enriched states, not the structural context.
-    enriched = _context_from_state_map(
-        root, states, corpus_registry, identity, writer_visibility=writer_visibility,
-    )
+        corpus_registry = (
+            selection.snapshot("relations").typed if unarmed else context.registry
+        )
+    # Enrichment changes interpretation, not titles, paths or structural census inputs.
+    if candidate is None:
+        resolver = _WikilinkResolverView(
+            full_paths=context.resolver_full_paths,
+            kb_stripped=context.resolver_kb_stripped,
+            stems=context.resolver_stems,
+            titles=context.resolver_titles,
+        )
+        facts = _derive_relation_facts(root, states, resolver, corpus_registry)  # type: ignore[arg-type]
+        enriched = _context_from_resolved_state(
+            root, states, corpus_registry, identity,
+            entries=context.resolver_entries,
+            resolver=resolver,  # type: ignore[arg-type]
+            facts=facts,
+            writer_visibility=writer_visibility,
+            validated_census=context.activation_census,
+        )
+    else:
+        enriched = _context_from_state_map(
+            root, states, corpus_registry, identity, writer_visibility=writer_visibility,
+        )
     if memo_key is not None:
         with _CORPUS_CONTEXT_CACHE_LOCK:
-            cached = _CORPUS_CONTEXT_CACHE.get(memo_key)
+            cached = _CORPUS_CONTEXT_CACHE.get(memo_key[0])
             if cached is not None and cached[1] is context:
                 _ENRICHED_CONTEXT_MEMO[memo_key] = (
                     context,
                     # The reused states keep this basis object, so record the
                     # dependency it will have once a later read loads it.
-                    (basis.dependency, type_basis.loaded_dependency(), definitions),
+                    (basis.dependency, type_basis.loaded_dependency(), definitions, supplied),
                     enriched,
                     states,
                 )
@@ -2996,6 +3207,8 @@ def _build_corpus_context_with_census(
     candidate: SemanticPageState | None = None,
     registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    warm: bool = False,
+    join_deadline: float | None = None,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """``build_corpus_context`` plus the exact census that validated it.
 
@@ -3133,19 +3346,13 @@ def _build_corpus_context_with_census(
             relation_definitions.extension_hash,
         )
         language_identity = (language.schema_version, language.content_hash)
-        with _CORPUS_CONTEXT_CACHE_LOCK:
-            flight = _CORPUS_CONTEXT_FLIGHTS.get(cache_key)
-            if flight is None:
-                flight = _CorpusContextFlight(
-                    census,
-                    registry_identity,
-                    language_identity,
-                )
-                _CORPUS_CONTEXT_FLIGHTS[cache_key] = flight
-                owns_flight = True
-            else:
-                owns_flight = False
+        flight, owns_flight = _claim_corpus_context_flight(
+            cache_key, census, relation_definitions, language
+        )
         if not owns_flight:
+            initial_join = join_deadline is None
+            if not warm and initial_join:
+                join_deadline = time.monotonic() + _CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
             same_inputs = (
                 flight.census == census
                 and flight.registry_identity == registry_identity
@@ -3153,8 +3360,26 @@ def _build_corpus_context_with_census(
             )
             completed = flight.done.is_set()
             if not completed:
-                completed = flight.done.wait(timeout=_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS)
-            if not completed:
+                if warm:
+                    # Startup owns the build lifetime, not an interactive budget.
+                    completed = flight.done.wait()
+                else:
+                    assert join_deadline is not None
+                    # Recursive handoffs share one interactive waiting budget.
+                    remaining = (
+                        _CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
+                        if initial_join
+                        else max(0.0, join_deadline - time.monotonic())
+                    )
+                    # Any thread may own the flight, a bulk pass included.
+                    with foreground_priority.awaiting_bulk():
+                        completed = flight.done.wait(timeout=remaining)
+            if not completed or (
+                not warm
+                and (not same_inputs or flight.discarded)
+                and join_deadline is not None
+                and time.monotonic() >= join_deadline
+            ):
                 raise OpError(
                     "MUTATION_WARMING",
                     "semantic corpus context is still being built",
@@ -3164,15 +3389,27 @@ def _build_corpus_context_with_census(
                         "retry_after_ms": 2000,
                     },
                 )
-            if not same_inputs:
+            if not same_inputs or flight.discarded:
                 return _build_corpus_context_with_census(
                     root,
                     candidate=candidate,
                     registry=registry,
                     language_registry=language_registry,
+                    warm=warm,
+                    join_deadline=join_deadline,
                 )
             if flight.error is not None:
                 raise flight.error
+            if warm:
+                # Recheck admitted cache state; a foreign census is not this warmer's proof.
+                return _build_corpus_context_with_census(
+                    root,
+                    candidate=candidate,
+                    registry=registry,
+                    language_registry=language_registry,
+                    warm=True,
+                    join_deadline=join_deadline,
+                )
             assert flight.result is not None
             # Not `census`: that is this WAITER's own pre-wait walk, pinned
             # only to confirm it is chasing the same flight (`same_inputs`
@@ -3183,6 +3420,23 @@ def _build_corpus_context_with_census(
             return flight.result, None
 
     try:
+        if flight is not None:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                late_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            if late_entry is not None and late_entry[0] == census:
+                # A publisher filled the cache before this claim. Reuse its
+                # entry through the maintained lookup, without another parse.
+                redundant_flight, flight = flight, None
+                redundant_flight.discarded = True
+                _finish_corpus_context_flight(cache_key, redundant_flight)
+                return _build_corpus_context_with_census(
+                    root,
+                    candidate=candidate,
+                    registry=registry,
+                    language_registry=language_registry,
+                    warm=warm,
+                    join_deadline=join_deadline,
+                )
         started = time.perf_counter()
         context = _build_corpus_context_uncached(
             root,
@@ -3247,17 +3501,11 @@ def _build_corpus_context_with_census(
     except BaseException as error:
         if flight is not None:
             flight.error = error
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
-                    del _CORPUS_CONTEXT_FLIGHTS[cache_key]
-            flight.done.set()
+            _finish_corpus_context_flight(cache_key, flight)
         raise
     if flight is not None:
         flight.result = context
-        with _CORPUS_CONTEXT_CACHE_LOCK:
-            if _CORPUS_CONTEXT_FLIGHTS.get(cache_key) is flight:
-                del _CORPUS_CONTEXT_FLIGHTS[cache_key]
-        flight.done.set()
+        _finish_corpus_context_flight(cache_key, flight)
     return context, (census if stored else None)
 
 
@@ -3426,8 +3674,11 @@ def _build_identity_census(
                     code,
                     f"could not safely inspect stable identity at {rel}",
                 ) from error
+            # Newlines as `_parse_page_state` and the reference scan read them:
+            # on raw bytes a CR-only page shows no frontmatter, so no identity.
+            logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
             try:
-                frontmatter, _, _ = vault.parse_frontmatter(source, strict=True)
+                frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
             except vault.FrontmatterError as error:
                 raise activation_manifest.ActivationManifestError(
                     error.code,
@@ -3509,32 +3760,98 @@ def _context_from_state_map(
     )
 
 
+def _stable_topology_replacement(
+    context: SemanticCorpusContext, state: SemanticPageState
+) -> bool:
+    """Whether `state` can replace its page by re-deriving it and the pages that link into it.
+
+    Relation fact identities count occurrences per authored identity across the
+    whole corpus, so a page that shares its `exomem_id` with another page is
+    never re-derived alone.
+    """
+    current = context.pages.get(state.path)
+    if current is None:
+        return False
+    # The same page set the occurrence count runs over, not the KB-only census.
+    if state.identity_kind == "exomem_id" and any(
+        page.identity_kind == "exomem_id"
+        and page.identity == state.identity
+        and page.path != state.path
+        for page in context.pages.values()
+    ):
+        return False
+    return (
+        current.title,
+        current.identity_kind,
+        current.identity,
+        current.page_type,
+        current.projects,
+        current.language_registry_hash,
+        current.relation_registry_hash,
+    ) == (
+        state.title,
+        state.identity_kind,
+        state.identity,
+        state.page_type,
+        state.projects,
+        state.language_registry_hash,
+        state.relation_registry_hash,
+    )
+
+
 def _context_with_stable_topology_candidate(
     context: SemanticCorpusContext,
     state: SemanticPageState,
 ) -> SemanticCorpusContext:
-    """Replace one page without re-resolving every authored corpus fact."""
+    """Replace one page and refresh facts that bind its current units."""
     pages = dict(context.pages)
     pages[state.path] = state
-    resolver = vault.WikilinkResolver.from_entries(context.vault_root, context.resolver_entries)
+    resolver = _WikilinkResolverView(
+        full_paths=context.resolver_full_paths,
+        kb_stripped=context.resolver_kb_stripped,
+        stems=context.resolver_stems,
+        titles=context.resolver_titles,
+    )
+    # Incoming exact endpoints depend on the target's anchors and fingerprints.
+    affected = {state.path} | {
+        fact.authored_path for fact in context.relation_facts
+        if fact.resolved_target_path is not None
+        and fact.resolved_target_path.split("#", 1)[0] == state.path
+    }
+    # Sorted, as in a full build: fact identities count occurrences per authored
+    # identity, so pages that share an id must be derived in the same order.
     candidate_facts = _derive_relation_facts(
         context.vault_root,
-        {state.path: state},
-        resolver,
+        {path: pages[path] for path in sorted(affected)},
+        resolver,  # type: ignore[arg-type]
         context.registry,
         target_states=pages,
     )
-    retained_facts = (fact for fact in context.relation_facts if fact.authored_path != state.path)
+    retained_facts = (fact for fact in context.relation_facts if fact.authored_path not in affected)
     facts = tuple(sorted((*retained_facts, *candidate_facts), key=lambda item: item.identity))
+    current = context.pages[state.path]
+    census = None
+    if current.structurally_compiled and state.structurally_compiled:
+        census = context.activation_census._with_replaced_candidate(
+            activation_manifest.ActivationCandidate(
+                state.path,
+                state.source_hash,
+                state.identity if state.identity_kind == "exomem_id" else None,
+                activation_manifest.recorded_status(state.frontmatter.get("status")),
+            )
+        )
+    elif not current.structurally_compiled and not state.structurally_compiled:
+        census = context.activation_census
     return _context_from_resolved_state(
         context.vault_root,
         pages,
         context.registry,
         context.identity_census,
         entries=context.resolver_entries,
-        resolver=resolver,
+        resolver=resolver,  # type: ignore[arg-type]
         facts=facts,
         writer_visibility=context.writer_visibility,
+        validated_census=census,
     )
 
 
@@ -3548,6 +3865,7 @@ def _context_from_resolved_state(
     resolver: vault.WikilinkResolver,
     facts: tuple[RelationFact, ...],
     writer_visibility: Any = _DECIDE,
+    validated_census: activation_manifest.ActivationCensus | None = None,
 ) -> SemanticCorpusContext:
     inbound: dict[str, list[RelationFact]] = {}
     outbound: dict[str, list[RelationFact]] = {}
@@ -3561,16 +3879,18 @@ def _context_from_resolved_state(
     full_paths, kb_stripped, stems, titles = _resolver_snapshot(resolver)
     # The census is structural and records raw labels unclassified, so it is the
     # same for every caller and may live in the shared cache.
-    census = activation_manifest.ActivationCensus.from_candidates(
-        activation_manifest.ActivationCandidate(
-            state.path,
-            state.source_hash,
-            state.identity if state.identity_kind == "exomem_id" else None,
-            activation_manifest.recorded_status(state.frontmatter.get("status")),
+    census = validated_census
+    if census is None:
+        census = activation_manifest.ActivationCensus.from_candidates(
+            activation_manifest.ActivationCandidate(
+                state.path,
+                state.source_hash,
+                state.identity if state.identity_kind == "exomem_id" else None,
+                activation_manifest.recorded_status(state.frontmatter.get("status")),
+            )
+            for state in ordered_pages.values()
+            if state.structurally_compiled
         )
-        for state in ordered_pages.values()
-        if state.structurally_compiled
-    )
     return SemanticCorpusContext(
         vault_root=root,
         pages=MappingProxyType(ordered_pages),
@@ -3658,8 +3978,14 @@ def _resolve_target(
     raw_target: str,
     resolver: vault.WikilinkResolver,
     visible: Callable[[str], bool] | None = None,
+    *,
+    source_path: str | None = None,
 ) -> tuple[str, str | None, str | None, str | None]:
-    _, authored_anchor, alias = _target_parts(raw_target)
+    page_part, authored_anchor, alias = _target_parts(raw_target)
+    if not page_part and authored_anchor and source_path:
+        if visible is not None and not visible(source_path):
+            return "unresolved", None, authored_anchor, alias
+        return "resolved", f"{source_path}#{authored_anchor}", authored_anchor, alias
     try:
         normalized, _ = vault.normalize_wikilink(
             raw_target, root, resolver=resolver, strict=True, visible=visible
@@ -3737,8 +4063,11 @@ def _authored_relations(
     unavailable keeps core meaning only. Otherwise the vault is unarmed and the
     corpus registry, which a caller may supply, is the public instance.
     """
-    if state is not None and state.definitions is not None and state.definitions.binding_revision is not None:
-        return state.definitions.snapshots["relations"].typed
+    if (state is not None and state.definitions is not None
+            and (state.definitions.binding_revision is not None or state.definitions_explicit)):
+        selected = state.definitions.snapshots["relations"].typed
+        if state.relation_registry_hash == f"{selected.core_version}:{selected.extension_hash}":
+            return selected
     if state is not None and state.definitions_unavailable:
         return relation_registry.core_registry()
     return registry
@@ -3841,10 +4170,27 @@ def _derive_relation_facts(
             writer_view[1]
             if writer_view is not None and state.path == writer_view[0]
             else None,
+            source_path=state.path,
         )
         resolved_base = resolved_target.split("#", 1)[0] if resolved_target else None
         target_state = resolved_states.get(resolved_base or "")
         target_kind = "file" if target_state is not None else "unresolved"
+        source_ref = raw["element_identity"] if raw["origin"] == "semantic_relation" else None
+        source_ref = source_ref or state.document.parent_ref
+        target_ref = target_state.document.parent_ref if target_state is not None else None
+        target_unit_status = None
+        target_unit_fingerprint = None
+        if target_anchor and target_state is not None:
+            unit_resolution = target_state.document.resolve_fragment(target_anchor)
+            target_unit_status = (
+                "unavailable" if target_state.definitions_unavailable
+                and unit_resolution.status == "missing" else unit_resolution.status
+            )
+            target_ref = None
+            if unit_resolution.unit is not None:
+                target_ref = unit_resolution.unit.unit_ref
+                target_unit_fingerprint = unit_resolution.unit.fingerprint
+                target_kind = unit_resolution.unit.kind
         resolution = _registry_resolution(
             selected_registry,
             raw["raw_relation"],
@@ -3891,6 +4237,11 @@ def _derive_relation_facts(
                 identity=_fact_identity(identity_payload),
                 logical_source_path=logical_source,
                 logical_target_path=logical_target,
+                logical_source_ref=target_ref if raw["reverse"] else source_ref,
+                logical_target_ref=source_ref if raw["reverse"] else target_ref,
+                target_unit_status=target_unit_status,
+                target_unit_fingerprint=target_unit_fingerprint,
+                target_kind=target_kind,
                 raw_target=str(raw["raw_target"]),
                 resolved_target_path=resolved_target,
                 target_anchor=target_anchor,
@@ -3976,7 +4327,9 @@ def _structural_relation_reasons(
             reasons.append("ineligible_target")
         if fact.logical_target_path not in target_paths and not mutual_supersession:
             reasons.append("ineligible_target")
-        if fact.logical_source_path == fact.logical_target_path:
+        source_endpoint = fact.logical_source_ref or fact.logical_source_path
+        target_endpoint = fact.logical_target_ref or fact.logical_target_path
+        if source_endpoint == target_endpoint:
             reasons.append("self_target")
     if definition is None:
         reasons.append("unregistered_relation")
@@ -3990,7 +4343,7 @@ def _structural_relation_reasons(
             page_type=fact.authored_page_type,
             source_kind=fact.source_kind,
             target_kind=(
-                "file"
+                fact.target_kind or "file"
                 if fact.target_status == "resolved" and resolved_base in corpus.pages
                 else "unresolved"
             ),

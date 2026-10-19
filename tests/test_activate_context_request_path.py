@@ -12,8 +12,10 @@ span.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_working_set_index import _seed_planning, _seed_structure
@@ -474,6 +476,100 @@ def test_a_normal_budget_leaves_activation_unchanged(
     assert packet["abstained"] is False
     assert packet["units"]
     assert budget.skipped == []
+    assert "request_budget" not in packet
+
+
+def test_an_unrelated_abstention_does_not_claim_a_borrowed_budget_omission(
+    activation_vault: Path, bind_budget, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior omission must not turn a later freshness error into a budget cause."""
+    budget = bind_budget(50.0)
+    budget.note_skipped("working_set.conversation")
+
+    _assert_generic_freshness_failure_abstains_immediately(activation_vault, monkeypatch)
+
+    assert request_budget.current() is budget
+
+
+@pytest.mark.parametrize("headroom", [0.05, 1.2])
+def test_relevant_due_advice_respects_the_fixed_request_deadline(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, headroom: float,
+) -> None:
+    """Optional advice needs headroom and must withdraw after a late source read."""
+    import datetime as dt
+
+    from exomem import due_state
+    from exomem.governance import egress
+
+    page = "Knowledge Base/Products/Cargo Sled.md"
+    target = activation_vault / page
+    target.write_text(
+        target.read_text(encoding="utf-8")
+        + "\n## Prediction\n\n- id: capacity-check\n- check_by: "
+        + (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        + "\n\nThe runners withstand the planned load.\n",
+        encoding="utf-8",
+    )
+    due_state.reconcile(activation_vault)
+    lexstore.ensure_fresh(activation_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    baseline = commands.op_activate_context(activation_vault, turn=TURN, anchor=page)
+    assert baseline["abstained"] is False and baseline["relevant_due_refs"]
+    # The late read below must happen: drop the parse the baseline left behind.
+    due_state.reset_serve_cache()
+
+    clock = [time.monotonic()]
+    budget = request_budget.RequestBudget(seconds=50, entry=clock[0] - 47)
+    deadline = budget.deadline
+    guard = egress.guard_working_set
+    read = vault_module.read_bytes_without_pinning
+    projection = due_state.state_path(activation_vault)
+    projection_reads: list[float] = []
+
+    def slow_guard(*args, **kwargs):
+        packet = guard(*args, **kwargs)
+        pause = budget.remaining() - headroom
+        assert pause > 0, "the completed guard must leave the intended headroom"
+        clock[0] += pause
+        return packet
+
+    def slow_projection(path, *args, **kwargs):
+        if path == projection:
+            projection_reads.append(budget.remaining())
+            clock[0] += budget.remaining() + 0.03
+        return read(path, *args, **kwargs)
+
+    monkeypatch.setattr(egress, "guard_working_set", slow_guard)
+    monkeypatch.setattr(vault_module, "read_bytes_without_pinning", slow_projection)
+    # Charge only injected stage delays; runner load must not erase the chosen headroom.
+    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    token = request_budget.set_current(budget)
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN, anchor=page)
+        returned = request_budget.time.monotonic()
+        assert request_budget.current() is budget
+    finally:
+        request_budget.reset_current(token)
+
+    assert budget.deadline == deadline
+    assert packet["abstained"] is False
+    assert packet["anchors"] == baseline["anchors"]
+    assert packet["units"] == baseline["units"]
+    assert packet.get("current_state") == baseline.get("current_state")
+    assert "relevant_due_refs" not in packet
+    assert packet["request_budget"]["applied"] is True
+    assert packet["request_budget"]["skipped"] == budget.skipped
+    assert packet["request_budget"]["truncated"] == budget.truncated
+    if headroom < request_budget.ACTIVATION_STAGE_RESERVE_SECONDS:
+        assert projection_reads == []
+        assert budget.skipped == ["working_set.relevant_due"]
+        assert budget.truncated == []
+    else:
+        assert projection_reads
+        assert returned > deadline
+        assert budget.skipped == []
+        assert budget.truncated == ["working_set.relevant_due"]
 
 
 # --------------------------------------------------------------------------- #
@@ -961,3 +1057,255 @@ def test_a_named_anchor_still_wins_through_the_whole_door(
     assert [(a["status"], a["kind"]) for a in carried] == [("resolved", "page")]
     assert packet["generation"]["also_carried"] == "retrieval"
     assert not packet.get("ambiguity")
+
+
+def test_first_activation_after_an_edit_serves_current_units_before_its_own_refresh(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
+) -> None:
+    """A request's refresh must not withdraw the current units it just compiled."""
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem.governance import egress
+    from exomem.governance.principal import request_scope
+
+    page = "Knowledge Base/Products/Cargo Sled.md"
+    hidden = activation_vault / "Knowledge Base/Notes/Patterns/withheld-refresh-unit.md"
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    hidden.write_text(
+        "---\ntype: note\ntags: [hub]\nstatus: active\n---\n\n"
+        "# WITHHELDREFRESH\n\nConfidential refresh payload.\n", encoding="utf-8",
+    )
+    target = activation_vault / page
+    target.write_text(target.read_text(encoding="utf-8") + "\n## Related\n\nRelated: [[withheld-refresh-unit]]\n", encoding="utf-8")
+    write_scope(activation_vault)
+    write_rule(activation_vault, ceiling=0)
+    _seed_live_recall(activation_vault)
+    stamp = working_set_runtime._key_text(
+        find_module.FreshnessSnapshot(activation_vault).projection_key("kb")
+    )
+    index = working_set_index.WorkingSetIndex(activation_vault)
+    index.update(freshness_stamp=stamp)
+    old_token = index.token()
+    commands.op_edit(
+        activation_vault, path=page, why="Correct the operating constraint",
+        old_string="Never exceed 400 kg.", new_string="Never exceed 275 kg.",
+    )
+    lexstore.ensure_fresh(activation_vault)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    started = threading.Event()
+    publish = threading.Event()
+    finished = threading.Event()
+    guarded = threading.Event()
+    publication_after_guard: list[bool] = []
+    workers: list[threading.Thread] = []
+
+    class ControlledWorker(threading.Thread):
+        def start(self):
+            workers.append(self)
+            super().start()
+            assert started.wait(5), "the real refresh worker did not start"
+
+        def run(self):
+            started.set()
+            try:
+                if publish.wait(10):
+                    super().run()
+                    publication_after_guard.append(guarded.is_set())
+            finally:
+                finished.set()
+
+    # Patch this module's namespace, never threading.Thread shared by other workers.
+    monkeypatch.setattr(working_set_runtime, "threading", SimpleNamespace(Thread=ControlledWorker))
+    real_compile = working_set.compile_packet
+    compiled = []
+
+    def compile_with_publication_window(*args, **kwargs):
+        packet = real_compile(*args, **kwargs)
+        compiled.append(packet)
+        if started.is_set():
+            # Before the repair, readiness dispatched this worker. Publish only
+            # after readiness captured its evidence token and compilation ran.
+            publish.set()
+            assert finished.wait(10), "the real refresh did not publish"
+        return packet
+
+    real_guard = egress.guard_working_set
+
+    def observe_guard(*args, **kwargs):
+        packet = real_guard(*args, **kwargs)
+        guarded.set()
+        return packet
+
+    monkeypatch.setattr(working_set, "compile_packet", compile_with_publication_window)
+    monkeypatch.setattr(egress, "guard_working_set", observe_guard)
+    try:
+        with request_scope(_external()):
+            first = commands.op_activate_context(activation_vault, turn=TURN)
+        assert first["abstained"] is False, first.get("abstention")
+        assert any(unit["text"] == "Never exceed 275 kg." for unit in first["units"]), first["units"]
+        assert "WITHHELDREFRESH" not in str(first)
+        assert "withheld-refresh-unit" not in str(first)
+        assert "Confidential refresh payload." not in str(first)
+        assert len(compiled) == 1, "the first response must not retry compilation"
+        assert first["generation"].get("index_stale") is True
+        assert guarded.is_set() and started.is_set() and not finished.is_set()
+        assert index.token() == old_token
+    finally:
+        publish.set()
+        for worker in workers:
+            worker.join(10)
+            assert not worker.is_alive(), "the owned refresh worker did not finish"
+
+    assert publication_after_guard == [True]
+    assert index.token() != old_token
+    with request_scope(_external()):
+        current = commands.op_activate_context(activation_vault, turn=TURN)
+    assert current["abstained"] is False
+    assert "index_stale" not in current["generation"]
+    assert any(unit["text"] == "Never exceed 275 kg." for unit in current["units"])
+
+
+def test_an_independent_publication_still_withdraws_compiled_units_without_a_privacy_oracle(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
+) -> None:
+    """Deferral owns only this request's worker; another publisher still invalidates it."""
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem.governance.principal import request_scope
+
+    page = "Knowledge Base/Products/Cargo Sled.md"
+    hidden = activation_vault / "Knowledge Base/Notes/Patterns/withheld-refresh-unit.md"
+    target = activation_vault / page
+    target.write_text(target.read_text(encoding="utf-8") + "\n## Related\n\nRelated: [[withheld-refresh-unit]]\n", encoding="utf-8")
+    write_scope(activation_vault)
+    write_rule(activation_vault, ceiling=0)
+    real_compile = working_set.compile_packet
+    responses = []
+    for private_present, old_limit, new_limit in ((False, 400, 275), (True, 275, 200)):
+        if private_present:
+            hidden.parent.mkdir(parents=True, exist_ok=True)
+            hidden.write_text(
+                "---\ntype: note\ntags: [hub]\nstatus: active\n---\n\n"
+                "# WITHHELDREFRESH\n\nConfidential refresh payload.\n", encoding="utf-8",
+            )
+        _seed_live_recall(activation_vault)
+        lexstore.ensure_fresh(activation_vault)
+        stamp = working_set_runtime._key_text(
+            find_module.FreshnessSnapshot(activation_vault).projection_key("kb")
+        )
+        index = working_set_index.WorkingSetIndex(activation_vault)
+        index.update(freshness_stamp=stamp)
+        before = index.token()
+        publish = threading.Event()
+        finished = threading.Event()
+        errors: list[Exception] = []
+        compiled = []
+
+        def independent_publisher(
+            publish=publish, finished=finished, errors=errors,
+            old_limit=old_limit, new_limit=new_limit,
+        ):
+            try:
+                if publish.wait(10):
+                    commands.op_edit(
+                        activation_vault, path=page, why="Correct the operating constraint",
+                        old_string=f"Never exceed {old_limit} kg.",
+                        new_string=f"Never exceed {new_limit} kg.",
+                    )
+                    working_set_index.WorkingSetIndex(activation_vault).update()
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        publisher = threading.Thread(target=independent_publisher, name="test-independent-publisher")
+        publisher.start()
+
+        def compile_before_independent_publication(
+            *args, compiled=compiled, publish=publish, finished=finished, **kwargs
+        ):
+            packet = real_compile(*args, **kwargs)
+            compiled.append(packet)
+            publish.set()
+            assert finished.wait(10), "the independent publisher did not finish"
+            return packet
+
+        with monkeypatch.context() as request:
+            request.setattr(readiness, "runtime_managed", lambda: True)
+            request.setattr(working_set, "compile_packet", compile_before_independent_publication)
+            try:
+                with request_scope(_external()):
+                    packet = commands.op_activate_context(activation_vault, turn=TURN)
+            finally:
+                publish.set()
+                publisher.join(10)
+                assert not publisher.is_alive(), "the owned publisher did not finish"
+        assert errors == []
+        assert index.token() != before
+        assert any(unit["text"] == f"Never exceed {old_limit} kg." for unit in compiled[0]["units"]), [unit["text"] for unit in compiled[0]["units"]]
+        assert packet.get("abstention") == {"reason": "unavailable"}
+        assert packet["generation"]["lexical_evidence"] == "stale"
+        assert all(packet[section] == [] for section in (
+            "anchors", "units", "pointers", "roles", "current_state", "missing", "ambiguity",
+        ))
+        # Continuity contains a fresh random thread, not evidence or diagnostics.
+        packet.pop("continuity", None)
+        responses.append(packet)
+
+    assert responses[0] == responses[1]
+    assert "WITHHELDREFRESH" not in str(responses)
+    assert "withheld-refresh-unit" not in str(responses)
+
+
+def test_nested_refresh_deferral_dispatches_once_after_an_exception_and_preserves_its_stamp(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Queueing reserves no build, and scope exit preserves the single-flight owner's key."""
+    index = working_set_index.WorkingSetIndex(activation_vault)
+    workers: list[threading.Thread] = []
+
+    class ObservedWorker(threading.Thread):
+        def start(self):
+            workers.append(self)
+            super().start()
+
+    monkeypatch.setattr(working_set_runtime, "threading", SimpleNamespace(Thread=ObservedWorker))
+    original = ValueError("original activation failure")
+    try:
+        with pytest.raises(ValueError) as raised:
+            with working_set_runtime.defer_index_refreshes():
+                working_set_runtime._schedule_build(activation_vault, freshness_stamp="first")
+                with working_set_runtime.defer_index_refreshes():
+                    working_set_runtime._schedule_build(activation_vault / ".", freshness_stamp="later")
+                assert activation_vault.absolute() not in working_set_runtime._BUILDS
+                assert workers == []
+                raise original
+        assert raised.value is original
+    finally:
+        for worker in workers:
+            worker.join(10)
+            assert not worker.is_alive(), "the owned refresh worker did not finish"
+    assert len(workers) == 1
+    assert index.freshness_stamp() == "first"
+
+    # A real readiness abstention must flush its queued warm, too.
+    index.reset()
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    try:
+        cold = commands.op_activate_context(activation_vault, turn=TURN)
+        assert cold["abstention"] == {"reason": "index_warming"}
+    finally:
+        for worker in workers[1:]:
+            worker.join(10)
+            assert not worker.is_alive(), "the abstained request's refresh did not finish"
+    assert len(workers) == 2 and index.anchors()
+
+    def failed_dispatch(*args, **kwargs):
+        raise RuntimeError("optional refresh could not start")
+
+    with pytest.raises(ValueError) as raised:
+        with working_set_runtime.defer_index_refreshes():
+            working_set_runtime._schedule_build(activation_vault, freshness_stamp="unused")
+            monkeypatch.setattr(working_set_runtime, "_schedule_build", failed_dispatch)
+            raise original
+    assert raised.value is original

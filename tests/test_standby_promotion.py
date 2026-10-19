@@ -602,6 +602,77 @@ def test_a_promotion_carries_the_standbys_finished_warm_forward(monkeypatch, tmp
     assert record["carried_from_standby"] == sorted(carried)
 
 
+@pytest.mark.parametrize("catch_up", [False, True])
+def test_carried_corpus_reproves_reference_owners_after_watcher_seed(
+    monkeypatch, tmp_path: Path, catch_up: bool
+) -> None:
+    """A new watcher baseline must not leave reads cold or bless unwatched edits."""
+    import threading
+
+    from exomem import file_watcher, freshness, memory_refs, mode, semantic_contract, warmup
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+    freshness.clear()
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    page, other = notes / "one.md", notes / "two.md"
+    old_id = "00000000-0000-0000-0000-000000000001"
+    new_id = "00000000-0000-0000-0000-000000000002"
+    absent_id = "00000000-0000-0000-0000-000000000003"
+    page.write_text(f"---\nexomem_id: {old_id}\n---\n\nOriginal.\n", encoding="utf-8")
+    other.write_text("# Other\n", encoding="utf-8")
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(mode, "preload_cpu_caches", lambda: False)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda root: True)
+    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    try:
+        freshness.rebaseline(tmp_path)
+        service_standby.enter_standby()
+        readiness.mark_ready("lexical")
+        service_standby.register_activation(_Activation())
+        assert service_standby.prove_graph_snapshot(tmp_path)
+        assert service_standby.build_semantic_corpus(tmp_path)
+        assert service_standby.promote(tmp_path, migrated=False)["snapshot"] == "current"
+        if catch_up:
+            page.write_text(f"---\nexomem_id: {new_id}\n---\n\nUnwatched edit.\n", encoding="utf-8")
+        watcher = object.__new__(file_watcher.FileWatcher)
+        watcher._vault_root = tmp_path
+        watcher._kb_root = tmp_path / "Knowledge Base"
+        watcher._stop = threading.Event()
+        assert watcher._reconcile_once(seed=True)
+        if catch_up:
+            other.write_text("# Other\n\nObserved edit.\n", encoding="utf-8")
+            semantic_contract.publish_corpus_files_changed(tmp_path, changed=(other,))
+            # Startup catch-up precedes warm_all and cannot prove the unseen edit.
+            assert semantic_contract.current_reference_identity_snapshot(tmp_path) is None
+
+        def no_cold_build(*args, **kwargs):
+            pytest.fail("carried corpus must reconcile without a second cold parse")
+
+        monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", no_cold_build)
+        warmup.warm_all(tmp_path)
+        assert readiness.is_ready("semantic_corpus")
+        assert semantic_contract.current_reference_identity_snapshot(tmp_path) is not None
+
+        def no_scan(*args, **kwargs):
+            pytest.fail("post-warm reference lookup scanned the vault")
+
+        monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+        owners = memory_refs.paths_for_ids_read_only(tmp_path, (old_id, new_id, absent_id))
+        rel = page.relative_to(tmp_path).as_posix()
+        assert owners == {
+            old_id: () if catch_up else (rel,),
+            new_id: (rel,) if catch_up else (),
+            absent_id: (),
+        }
+    finally:
+        semantic_contract.reset_corpus_context_cache()
+        freshness.clear()
+
+
 def test_a_component_the_standby_never_finished_is_not_carried(monkeypatch, tmp_path) -> None:
     """Carrying is a claim about work this process did, never about work it skipped."""
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
@@ -806,9 +877,9 @@ def test_a_standby_over_an_older_schema_catalogue_is_cutover_ready_without_writi
     The serving worker's catalogue carries an earlier release's schema, and
     that worker keeps it current for its own code, so no amount of waiting
     makes it current for this one. The standby builds this release's catalogue
-    into a rebuild temp instead. Every byte the serving worker owns -- the vault
-    and every file already in the vault's state directory -- is unchanged; the
-    only new files are the temp family, which the promotion adopts.
+    into a rebuild temp instead. Source, catalogue content and publication state
+    stay unchanged. SQLite may update its reader coordination; only the held
+    temp receives catalogue construction writes.
     """
     from exomem import lexstore, state_paths
 
@@ -827,12 +898,15 @@ def test_a_standby_over_an_older_schema_catalogue_is_cutover_ready_without_writi
     assert service_standby.cutover_components()["lexical"] == "ready"
     assert service_standby.cutover_ready() is True
     after_state = _bytes_census(state)
+    # SQLite owns this exact reader-coordination path; content and publications stay covered.
+    coordination_path = f"{lexstore.lexical_path(vault).relative_to(state).as_posix()}-shm"
     assert _bytes_census(vault) == before_vault
     changed = sorted(
-        name for name, digest in before_state.items() if after_state.get(name) != digest
+        name for name, digest in before_state.items()
+        if name != coordination_path and after_state.get(name) != digest
     )
     assert changed == [], f"a standby changed live state: {changed}"
-    created = sorted(set(after_state) - set(before_state))
+    created = sorted(set(after_state) - set(before_state) - {coordination_path})
     live_name = lexstore.lexical_path(vault).name
     assert created and all(
         name.startswith(f"{live_name}.rebuild-") for name in created
@@ -840,17 +914,11 @@ def test_a_standby_over_an_older_schema_catalogue_is_cutover_ready_without_writi
     lexstore.discard_detached_catalogs()
 
 
-def test_a_same_schema_stale_catalogue_still_leaves_lexical_waiting(
+def test_a_same_schema_stale_catalogue_prepares_without_admitting_retrieval(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Only an incompatible catalogue is the standby's to rebuild.
-
-    A catalogue at this release's schema and identity that merely lags the
-    corpus is the serving worker's repair owner's to catch up, exactly as
-    before: the standby builds nothing and `lexical` stays the waiting
-    component.
-    """
-    from exomem import lexstore
+    """An unfixed serving owner cannot hold its compatible successor forever."""
+    from exomem import lexstore, state_paths
 
     vault = _catalogue_vault(tmp_path, monkeypatch)
     (vault / "Knowledge Base" / "Notes" / "note-3.md").write_text(
@@ -862,13 +930,31 @@ def test_a_same_schema_stale_catalogue_still_leaves_lexical_waiting(
     monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
     _stub_adoption(monkeypatch)
     live = lexstore.lexical_path(vault)
+    before = live.read_bytes()
+    state = state_paths.vault_state_dir(vault)
+    before_state = _bytes_census(state)
+    before_vault = _bytes_census(vault)
 
     service_standby.enter_standby()
     service_standby.warm(vault)
 
-    assert service_standby.waiting_component() == "lexical"
-    assert service_standby.cutover_ready() is False
-    assert sorted(live.parent.glob(f"{live.name}.rebuild-*")) == []
+    assert service_standby.cutover_components()["lexical"] == "ready"
+    assert readiness.is_ready("retrieval_catalog") is False
+    assert live.read_bytes() == before
+    assert _bytes_census(vault) == before_vault
+    after_state = _bytes_census(state)
+    # The exact SHM path belongs to SQLite's reader coordination, never catalogue content.
+    coordination_path = f"{live.relative_to(state).as_posix()}-shm"
+    assert all(
+        after_state.get(path) == digest for path, digest in before_state.items()
+        if path != coordination_path
+    )
+    assert all(
+        path.startswith(f"{live.name}.rebuild-")
+        for path in set(after_state) - set(before_state) - {coordination_path}
+    )
+    assert len(list(live.parent.glob(f"{live.name}.rebuild-*.tmp"))) == 1
+    service_standby.discard()
 
 
 def _promotion_vault(tmp_path: Path, monkeypatch) -> Path:

@@ -110,6 +110,17 @@ spec:
   headers:
     customRequestHeaders:
       {{ .Values.cloudGateway.trustedIngressSourceHeader }}: {{ .Values.cloudGateway.trustedIngressSourceValue | quote }}
+{{- if .Values.cloudIngress.functionalHealthEnabled }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: exomem-cloud-functional-health
+  namespace: {{ $edge }}
+spec:
+  replacePath:
+    path: /healthz/canary
+{{- end }}
 ---
 # D2: Traefik watches only the edge namespace, so the route names the
 # gateway through this ExternalName Service instead of a cross-namespace
@@ -137,7 +148,7 @@ spec:
   tls:
     secretName: exomem-cloud-gateway-tls
   routes:
-    # Only the Cloud MCP path and its protected-resource metadata are public.
+    # The optional GET health route reads proof; direct pod probes stay private.
     # The gateway also serves the hosted MCP path, which must stay unreachable
     # through the Cloud hostname.
     - kind: Rule
@@ -147,4 +158,14 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+{{- if .Values.cloudIngress.functionalHealthEnabled }}
+    - kind: Rule
+      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/healthz`) && Method(`GET`)
+      middlewares:
+        - name: exomem-cloud-functional-health
+        - name: exomem-cloud-trusted-ingress
+      services:
+        - name: exomem-cloud-gateway
+          port: 8080
+{{- end }}
 {{- end }}

@@ -7,29 +7,29 @@ target the **filename**, not the frontmatter title. `ls` and `grep -l` print
 filenames too.
 
 Today every derived filename is the whole title kebab-slugged, capped at
-`SLUG_MAX_LENGTH = 100` (`vault.py:61`). Observed on a real vault (#598):
+`SLUG_MAX_LENGTH = 100` (`vault.py:61`). These invented examples show its shape:
 
 ```
-96  yadm-dotfiles-repo-clone-it-rather-than-worktree-it-and-diff-test-failures-against-a-baseline.md
-70  zellij-session-serialization-what-cold-recovery-can-and-cannot-know.md
+80  support-billing-review-the-missing-credit-and-the-case-204-component-mapping-gap.md
+41  quarterly-audit-summary-checks-120-to-128.md
 ```
 
-against a second tool writing the same titles into the same vault:
+The same invented titles under a readable filename style:
 
 ```
-91  Non-billed GGR — the missing-brand-deal control and the BO-2697 sub-product blind spot.md
-58  Exomem first-run defect inventory — issues 477 to 485.md
+82  Support billing review — the missing credit and the CASE-204 component mapping gap.md
+43  Quarterly audit summary — checks 120 to 128.md
 ```
 
-Both are long. Only one is scannable. The pair with identical content makes it
-plainest — same title, same day, same vault:
+The numbers count characters in each filename stem. The shorter pair shows
+the same title under each style:
 
 ```
-exomem: exomem-first-run-defect-inventory-issues-477-to-485.md
-other : Exomem first-run defect inventory — issues 477 to 485.md
+slug : quarterly-audit-summary-checks-120-to-128.md
+title: Quarterly audit summary — checks 120 to 128.md
 ```
 
-A 96-character kebab string is a fine permalink and a poor thing to pick out of a
+A long kebab string is a fine permalink and a poor thing to pick out of a
 list of a hundred.
 
 ## What the issue got wrong, and why it matters here
@@ -54,7 +54,7 @@ Two facts make it tractable anyway:
 
 - `WikilinkResolver` already resolves by frontmatter **title** as well as by path
   and stem (`vault.py:4812`), with the documented precedent that
-  `[[North-Led Content Manual]]` resolves to a file whose stem does not match its
+  `[[Test Content Manual]]` resolves to a file whose stem does not match its
   title. A link written as the human title keeps working under either style.
 - The style only has to apply to **newly derived** names. Nothing requires
   renaming what is already on disk.

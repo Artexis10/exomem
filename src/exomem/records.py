@@ -60,6 +60,7 @@ _LIFECYCLE_RECEIPT_VERSION = 2
 _LIFECYCLE_REQUEST_DOMAIN = b"exomem-record-lifecycle-request:v2\0"
 _LIFECYCLE_GAP_DOMAIN = b"exomem-record-gap:v2\0"
 _LIFECYCLE_CHECKPOINT_DOMAIN = b"exomem-record-checkpoint:v2\0"
+_EXPORT_CHECKPOINT_DOMAIN = b"exomem-collection-store-export-checkpoint:v1\0"
 #: Identity stand-in for the pre-commit round-trip probe. The probe proves the
 #: caller's values survive serialization; the real key is assigned later and is
 #: never what the comparison looks at.
@@ -2181,6 +2182,7 @@ def create_collection(
             raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
+        _refresh_manifest_due_state(root, manifest)
         return _result(
             operation="create",
             manifest=manifest,
@@ -2369,6 +2371,176 @@ def rebaseline_collection(
     )
 
 
+def _refresh_manifest_due_state(root: Path, manifest: Any, *, snapshot: Any = None) -> None:
+    """A failed advisory refresh never changes a committed manifest outcome."""
+    try:
+        from . import due_state
+
+        due_state.apply_manifest_write_delta(root, manifest, snapshot=snapshot)
+    except Exception:  # noqa: BLE001 -- the canonical manifest is already committed
+        log.debug("manifest due-state refresh failed", exc_info=True)
+
+
+def export_checkpoint_payload_hash(
+    *, store_id: str, collection_head: str, store_head: tuple[int, str]
+) -> str:
+    """Bind a reverse-export checkpoint to the store state it summarizes, without content."""
+    return hashlib.sha256(
+        _EXPORT_CHECKPOINT_DOMAIN
+        + _canonical_json(
+            {
+                "collection_head": collection_head,
+                "store_head": {"commit_seq": store_head[0], "head_hash": store_head[1]},
+                "store_id": store_id,
+            }
+        )
+    ).hexdigest()
+
+
+def export_checkpoint(
+    vault_root: Path,
+    manifest_path: str,
+    *,
+    manifest_text: str,
+    transition_id: str,
+    parent_id: str,
+    gap_code: str,
+    payload_hash: str,
+    why: str,
+    deferred: list[tuple[list[Path], list[Any]]] | None = None,
+) -> dict[str, Any]:
+    """Publish the reverse export's one content-free checkpoint for a collection.
+
+    The collection store's export has already written the collection's items back
+    from the store, and ``manifest_text``, the store's manifest, at ``manifest_path``.
+    This explains that state to the legacy chain: one v2 ``rebaseline`` event with
+    continuity false over ``parent_id``, the legacy head the store imported (or
+    ``baseline``), whose one gap code names the store transitions it summarizes.
+    Inspection then reads ``acknowledged_gap``. Every hash derives from
+    ``manifest_text`` and the items, so a retry after a cut between the manifest and
+    log flips publishes the same event; a log that already holds it is left alone.
+    A caller that holds the vault boundary across collections passes ``deferred``: the
+    written paths and their publication intents land there for its own index fan-out.
+    """
+    root = Path(vault_root)
+    _validate_why(why)
+    codes = _validate_gap_codes((gap_code,))
+    with writer_lease.active_manager().mutation_guard(root, operation="record_export_checkpoint"):
+        # The vault's marker still routes this collection, so file-mode resolution would hide
+        # it; the caller names its manifest exactly and owns the authority to write it.
+        data, manifest_guard = _read_record_bytes(root, manifest_path)
+        current_text = data.decode("utf-8")
+        current = collections.parse_manifest_bytes(root, root / manifest_path, data)
+        before = collections.parse_manifest_bytes(
+            root, root / current.path, manifest_text.encode("utf-8")
+        )
+        marked_text = record_formats.render_manifest_audit_head(
+            manifest_text,
+            transition_id,
+            semantic_profile=before.semantic_profile,
+            reader_version=2,
+        )
+        if current_text not in (manifest_text, marked_text):
+            raise collections.CollectionError(
+                "STALE_RECORD", "the manifest changed during the export"
+            )
+        snapshot = record_formats.load_adapter(root, current).read()
+        _require_unambiguous_snapshot(snapshot)
+        after = collections.parse_manifest_bytes(
+            root, root / current.path, marked_text.encode("utf-8")
+        )
+        before_container_hash = _container_hash_with_replacements(before, snapshot, {})
+        after_container_hash = _container_hash_with_replacements(after, snapshot, {})
+        gap_fingerprint = lifecycle_gap_fingerprint(
+            prior_head=parent_id,
+            acknowledged_gap_codes=codes,
+            before_manifest_hash=before.manifest_version.hash,
+            before_container_hash=before_container_hash,
+        )
+        # As a rebaseline does, over the state it acknowledges: the items under the store's manifest.
+        checkpoint_fingerprint = lifecycle_checkpoint_fingerprint(
+            ((before.path, before.manifest_version.hash),)
+            + tuple((version.path, version.hash) for version in snapshot.source_versions[1:])
+        )
+        event = _lifecycle_audit_body(
+            transition_id=transition_id,
+            parent_id=parent_id,
+            operation="rebaseline",
+            manifest=before,
+            before_manifest_hash=before.manifest_version.hash,
+            after_manifest_hash=after.manifest_version.hash,
+            before_container_hash=before_container_hash,
+            after_container_hash=after_container_hash,
+            payload_hash=payload_hash,
+            why=why,
+            continuity=False,
+            acknowledged_gap_codes=codes,
+            gap_fingerprint=gap_fingerprint,
+            checkpoint_snapshot_hash=checkpoint_fingerprint,
+        )
+        history = _audit_events(root, semantic_profile=before.semantic_profile)
+        if not history.parsed:
+            raise collections.CollectionError(
+                "RECORD_AUDIT_UNAVAILABLE", "the activity log could not be read"
+            )
+        prefix = profile_for(before.semantic_profile).activity_prefix
+        recorded = [
+            found for found in history.events if found["transition_id"] == transition_id
+        ]
+        if recorded and recorded != [json.loads(event.removeprefix(prefix))]:
+            raise collections.CollectionError(
+                "STALE_RECORD", "another event holds the export checkpoint's identity"
+            )
+        log_writes = (
+            ()
+            if recorded
+            else _plan_required_audit(root, before, "collection", event, after_container_hash).writes
+        )
+        writes = [
+            *(
+                (vault.PlannedWrite(root / current.path, marked_text, guard=manifest_guard),)
+                if current_text != marked_text
+                else ()
+            ),
+            *log_writes,
+        ]
+        if writes:
+            intents: list[Any] = []
+            try:
+                written = vault.batch_atomic_write(
+                    writes,
+                    vault_root=root,
+                    required_guards=(
+                        *snapshot.path_guards,
+                        *snapshot.directory_guards,
+                        *history.required_guards,
+                    ),
+                    post_commit_fanout=deferred is None,
+                    publication_intents_out=None if deferred is None else intents,
+                )
+            except vault.BatchWriteError:
+                raise
+            except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
+                raise _publication_error(error) from error
+            if deferred is not None:
+                deferred.append((list(written), intents))
+        return _lifecycle_result(
+            operation="rebaseline",
+            manifest=before,
+            before_manifest_hash=before.manifest_version.hash,
+            after_manifest_hash=after.manifest_version.hash,
+            before_container_hash=before_container_hash,
+            after_container_hash=after_container_hash,
+            payload_hash=payload_hash,
+            audit_correlation=transition_id,
+            continuity=False,
+            acknowledged_gap_codes=codes,
+            gap_fingerprint=gap_fingerprint,
+            checkpoint_snapshot_hash=checkpoint_fingerprint,
+            affected_paths=(current.path,),
+        )
+
+
 def _lifecycle_mutation(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -2547,6 +2719,7 @@ def _lifecycle_mutation(
             raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
+        _refresh_manifest_due_state(root, after, snapshot=snapshot)
         return _lifecycle_result(
             operation=action,
             manifest=current,
@@ -2998,6 +3171,14 @@ def agent_audit_history(
     authorize_path: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Return the bounded agent-mutation chain without canonical item values."""
+    from .collection_store.preview import selected_writer
+
+    writer = selected_writer(vault_root, collection)
+    if writer is not None:
+        from .collection_store.history import agent_history
+
+        with writer.read_collection(collection) as manifest:
+            return agent_history(writer, manifest)
     chain = _inspect_audit_chain(Path(vault_root), collection, authorize_path=authorize_path)
     events = chain.events[:_MAX_AGENT_AUDIT_HISTORY]
     return {
@@ -3237,7 +3418,15 @@ def _reconstruct_captured_audit_chain(
             if not _event_matches_transition(cursor, manifest):
                 gaps.append("invalid-transition:" + cursor["transition_id"])
                 break
+            discontinuous = cursor.get("operation") in {
+                "rebaseline",
+                "plan_rebaseline",
+            } and cursor.get("continuity") is False
             if cursor["parent_id"] in {"baseline", "absent"}:
+                # A checkpoint over a collection with no earlier history (the reverse
+                # export's, on a baseline collection) still records its discontinuity.
+                if discontinuous:
+                    discontinuities.append(_discontinuity(cursor))
                 break
             depth += 1
             if depth > 2048:
@@ -3247,20 +3436,8 @@ def _reconstruct_captured_audit_chain(
             if predecessor is None:
                 gaps.append("missing-parent:" + cursor["parent_id"])
                 break
-            if cursor.get("operation") in {"rebaseline", "plan_rebaseline"} and cursor.get(
-                "continuity"
-            ) is False:
-                discontinuities.append(
-                    {
-                    "provenance_continuity": False,
-                    "prior_head": cursor["parent_id"],
-                    "acknowledged_gap_codes": list(cursor["acknowledged_gap_codes"]),
-                    "rationale": cursor["rationale"],
-                    "checkpoint_transition": cursor["transition_id"],
-                    "gap_fingerprint": cursor["gap_fingerprint"],
-                    "checkpoint_snapshot_hash": cursor["checkpoint_snapshot_hash"],
-                    }
-                )
+            if discontinuous:
+                discontinuities.append(_discontinuity(cursor))
             elif (
                 cursor["before_container_hash"] != predecessor["after_container_hash"]
                 or cursor["before_manifest_hash"] != predecessor["after_manifest_hash"]
@@ -3293,6 +3470,19 @@ def _reconstruct_captured_audit_chain(
         discontinuities=tuple(discontinuities[:16]),
         required_guards=history.required_guards,
     )
+
+
+def _discontinuity(event: Mapping[str, Any]) -> dict[str, Any]:
+    """The public record of one acknowledged discontinuity, as inspection reports it."""
+    return {
+        "provenance_continuity": False,
+        "prior_head": event["parent_id"],
+        "acknowledged_gap_codes": list(event["acknowledged_gap_codes"]),
+        "rationale": event["rationale"],
+        "checkpoint_transition": event["transition_id"],
+        "gap_fingerprint": event["gap_fingerprint"],
+        "checkpoint_snapshot_hash": event["checkpoint_snapshot_hash"],
+    }
 
 
 def _audit_influencing_events(

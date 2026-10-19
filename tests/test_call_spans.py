@@ -13,6 +13,8 @@ import pytest
 
 from exomem import call_ledger, call_spans, command_surface
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 @pytest.fixture(autouse=True)
 def _isolate_spans():
@@ -88,6 +90,133 @@ def test_a_phase_that_raised_is_still_recorded(token) -> None:
     assert [s["name"] for s in call_spans.pop_call_spans(token)] == ["phase.explodes"]
 
 
+def test_span_distinguishes_thread_cpu_from_elapsed_wait(token, monkeypatch) -> None:
+    """A long wall interval must not be reported as CPU consumed by its thread."""
+    ticks = iter((1_000_000, 3_500_000))
+    monkeypatch.setattr(time, "thread_time_ns", lambda: next(ticks))
+    with call_spans.span("phase.waits"):
+        time.sleep(0.01)
+
+    row = call_spans.pop_call_spans(token)[0]
+    assert row["fields"]["thread_cpu_us"] == 2500
+    assert row["ms"] >= 10
+
+
+
+def test_recall_stages_record_cpu_and_counts_when_a_stage_refuses(token, monkeypatch) -> None:
+    """Slow or refused recall keeps CPU separate from wall time and caller counts."""
+    from exomem.find_types import FindTimings
+
+    ticks = iter((1_000_000, 3_500_000, 5_000_000, 6_500_000))
+    monkeypatch.setattr(time, "thread_time_ns", lambda: next(ticks))
+    timings = FindTimings()
+    measured = {"candidates": 3}
+    for _ in range(2):
+        with pytest.raises(ValueError), timings.span("semantic.search", measured=measured):
+            raise ValueError("refused")
+
+    row = call_spans.pop_call_spans(token)[0]
+    assert row["name"] == "recall.semantic.search"
+    assert row["count"] == 2
+    assert row["fields"] == {"candidates": 6, "thread_cpu_us": 4000}
+    assert measured == {"candidates": 3}
+    # CPU is private ledger metadata; public wall-time attribution keeps its shape.
+    assert set(timings.as_dict()["stages"]["semantic.search"]) == {"ms", "source", "calls"}
+
+
+def test_recall_stage_outside_mcp_never_samples_thread_cpu(monkeypatch) -> None:
+    """Offline recall keeps its timing budget and does not create MCP measurements."""
+    from exomem.find_types import FindTimings
+
+    def unexpected_cpu_clock():
+        raise AssertionError("offline recall sampled an MCP CPU clock")
+
+    monkeypatch.setattr(time, "thread_time_ns", unexpected_cpu_clock)
+    with FindTimings().span("semantic.search"):
+        pass
+
+    assert not call_spans._SPANS
+
+
+def test_cpu_attribution_preserves_the_carry_rebuild_sentinel(
+    token, tmp_path, monkeypatch
+) -> None:
+    import json
+
+    from exomem import working_set
+
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path))
+    call_ledger.reset_chain_cache()
+    with call_spans.meter(*working_set.CARRY_SPAN_FIELDS) as measured:
+        with call_spans.span("recall.working_set.carry.phrase", measured):
+            call_spans.measure(call_spans.STATS_REBUILT, 1)
+
+    call_ledger.record_call(
+        request_id="carry-cpu", tool="activate_context", outcome="ok", duration_ms=1.0,
+        spans=call_spans.pop_call_spans(token),
+    )
+    stored = json.loads((tmp_path / "ledger.jsonl").read_text().splitlines()[-1])
+    row = stored["spans"][0]
+    assert row["fields"][call_spans.STATS_REBUILT] == 1
+    assert set(working_set.CARRY_SPAN_FIELDS) <= row["fields"].keys()
+    assert row["fields"][call_spans.THREAD_CPU_US] >= 0
+    assert call_ledger.verify() == []
+
+
+def test_direct_read_exposes_dispatcher_stages_without_changing_the_page(vault, token) -> None:
+    """A fast page timer must not hide preparation, filtering or receipt cost."""
+    from exomem import commands, writer_lease
+    from exomem.governance.principal import library_scope
+
+    (vault / "timed-read.md").write_text("# Example\n\nVisible example text.\n")
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "read_memory")
+    with library_scope():
+        result = writer_lease.invoke_command(command, vault, path="timed-read.md")
+
+    assert "Visible example text." in result["body"]
+    stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    for name in (
+        "command.body", "command.terminal_filter", "command.disclosure_receipt",
+        "read.prepare.resolve_path", "read.prepare.resolve_physical",
+        "read.prepare.inspect", "read.prepare.held_read",
+    ):
+        assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
+        assert stages[name]["fields"]["thread_cpu_us"] >= 0
+
+
+def test_missing_read_keeps_its_refusal_and_failed_stage_timings(vault, token) -> None:
+    """A failed read must retain timings and the terminal error filter."""
+    from exomem import commands, writer_lease
+    from exomem.governance.principal import library_scope
+
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "read_memory")
+    with library_scope(), pytest.raises(ValueError, match="^NOT_FOUND:"):
+        writer_lease.invoke_command(command, vault, path="absent-example.md")
+
+    stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    for name in ("command.body", "command.terminal_filter", "command.disclosure_receipt"):
+        assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
+        assert stages[name]["fields"]["thread_cpu_us"] >= 0
+
+
+def test_idempotency_claim_is_visible_without_repeating_the_write(tmp_path, token) -> None:
+    """A slow claim must not disappear into the command body or replay its write."""
+    from exomem.writer_lease import IdempotencyStore
+
+    store = IdempotencyStore(tmp_path / "claim-state" / "idempotency.sqlite")
+    result = {"saved": True}
+
+    assert store.run("capture", "digest", lambda: result) == result
+    assert store.run(
+        "capture", "digest", lambda: pytest.fail("a replay repeated the write")
+    ) == result
+
+    stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    claim = stages["mutation.idempotency_claim"]
+    assert claim["count"] == 2 and claim["ms"] >= 0
+    assert claim["fields"]["thread_cpu_us"] >= 0
+
+
 def test_span_measures_real_elapsed_time(token) -> None:
     with call_spans.span("phase.sleeps"):
         time.sleep(0.02)
@@ -97,11 +226,15 @@ def test_span_measures_real_elapsed_time(token) -> None:
 
 
 def test_a_call_generating_names_is_truncated_not_unbounded(token) -> None:
-    """Exceeding the name budget is a caller bug; it must not grow the row."""
+    """Exceeding the name budget is a caller bug; it must not grow the row,
+    and the spans it could not name are summed rather than dropped unseen."""
     for index in range(call_spans.MAX_NAMES_PER_CALL + 50):
         call_spans.record_span(f"generated.{index}", 1.0)
 
-    assert len(call_spans.pop_call_spans(token)) == call_spans.MAX_NAMES_PER_CALL
+    spans = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    assert len(spans) == call_spans.MAX_NAMES_PER_CALL
+    assert spans[call_spans.OVERFLOW_SPAN]["count"] == 51
+    assert spans[call_spans.OVERFLOW_SPAN]["ms"] == 51.0
 
 
 def test_a_missed_pop_cannot_leak_indefinitely() -> None:
@@ -170,13 +303,20 @@ def test_an_uninstrumented_call_records_an_empty_span_list(tmp_path, monkeypatch
 
 
 def test_the_row_bounds_spans_independently_of_the_producer() -> None:
-    """The row is hash-chained, so it cannot trust a caller to have bounded itself."""
-    shaped = call_ledger._clip_spans(
-        [{"name": f"phase.{i}", "count": 1, "ms": float(i)} for i in range(200)]
-    )
+    """The row is hash-chained, so it cannot trust a caller to have bounded
+    itself, and a row that dropped spans says how many it dropped."""
+    def row(count: int) -> dict:
+        return call_ledger.build_row(
+            sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id="request",
+            tool="read_memory", outcome="ok", duration_ms=1.0,
+            spans=[{"name": f"phase.{i}", "count": 1, "ms": float(i)} for i in range(count)],
+        )
 
-    assert len(shaped) == call_ledger._MAX_SPANS
-    assert shaped[0]["ms"] > shaped[-1]["ms"], "kept the slowest, not the first"
+    clipped = row(200)
+    assert len(clipped["spans"]) == call_ledger._MAX_SPANS
+    assert clipped["spans"][0]["ms"] > clipped["spans"][-1]["ms"], "kept the slowest"
+    assert clipped["spans_truncated"] == 200 - call_ledger._MAX_SPANS
+    assert "spans_truncated" not in row(call_ledger._MAX_SPANS)
 
 
 def test_the_row_rebuilds_span_fields_rather_than_passing_them_through() -> None:
@@ -277,6 +417,7 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "index.full_refresh_store",
         "advisory.best_cosine",
         "advisory.overlap_groups",
+        "command.refusal_floor",
         # The write-stage collector's own names, emitted into the ledger
         # unconditionally by `MutationTimings.emit_call_spans`. Recorded
         # through a variable at that seam, so the source pin below finds
@@ -296,6 +437,31 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "preflight.registries",
         "preflight.relation_review",
         "preflight.validity_token",
+        # A page creation's own stages, and the blocks every write attaches
+        # after its commit, recorded directly rather than by the collector.
+        "writer.resolver_snapshot",
+        "preflight.creation",
+        "commit.source_closure",
+        "commit.relation_review_prepare",
+        "commit.catalog_prepare",
+        "commit.relation_review",
+        "commit.relation_review_attempt",
+        "post_commit.structure_suggestion",
+        "post_commit.records_routing",
+        "post_commit.observation_delta",
+        "post_commit.records_delivery",
+        "post_commit.due_state",
+        "post_commit.capture_sweep",
+        "post_commit.entity_candidate",
+        "advisory.default_sweep",
+        "command.body",
+        "command.terminal_filter",
+        "egress.cross_check",
+        "egress.scrub",
+        "spans.overflow",
+        "recall.working_set.carry.phrase",
+        "recall.working_set.carry.title",
+        "runtime.gc",
     }
 )
 

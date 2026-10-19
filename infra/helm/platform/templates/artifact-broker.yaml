@@ -111,7 +111,26 @@ spec:
     matchLabels:
       app.kubernetes.io/name: exomem-artifact-broker
   policyTypes: [Ingress, Egress]
-  {{- if .Values.artifactBroker.cellIds }}
+  {{- if .Values.artifactBroker.allCells }}
+  ingress:
+    - from:
+        # Every cell runtime, including cells created later: the same labels
+        # that the gateway's egress rule to cell pods selects. The listed
+        # cells are a subset, so the list adds no peer here.
+        - namespaceSelector:
+            matchExpressions:
+              - key: exomem.io/cloud-cell
+                operator: Exists
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+            matchExpressions:
+              - key: exomem.io/cell-job
+                operator: DoesNotExist
+      ports:
+        - protocol: TCP
+          port: 8767
+  {{- else if .Values.artifactBroker.cellIds }}
   ingress:
     - from:
         {{- range .Values.artifactBroker.cellIds }}

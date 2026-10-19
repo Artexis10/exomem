@@ -136,7 +136,12 @@ def _mcp_read(mcp, ref: str, who: principal_module.RequestPrincipal) -> tuple[st
             )
         except Exception as exc:  # noqa: BLE001 - the refusal IS the observation
             return type(exc).__name__, str(exc)
-    return "result", json.dumps(result.structured_content, sort_keys=True)
+    # Both channels a client reads, so a difference in either is an oracle.
+    seen = {
+        "content": [block.text for block in result.content],
+        "structured": result.structured_content,
+    }
+    return "result", json.dumps(seen, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +177,11 @@ def test_mcp_unit_read_of_a_withheld_page_answers_like_an_absent_page(vault: Pat
     _reset_caches()
     absent = [_mcp_read(mcp, ref, _oauth_principal()) for ref in refs]
 
-    assert absent[0][0] != "result"
-    assert "NOT_FOUND" in absent[0][1]
+    kind, body = absent[0]
+    assert kind == "result", body
+    refusal = json.loads(body)["structured"]
+    assert refusal["success"] is False
+    assert "NOT_FOUND" in refusal["error"]["code"]
     assert len(set(withheld + absent)) == 1, withheld + absent
     for _, text in withheld:
         assert "SENTINEL" not in text
@@ -250,6 +258,6 @@ def test_mcp_owner_still_reads_the_unit(vault: Path) -> None:
     kind, text = _mcp_read(mcp, real, principal_module.owner_principal(surface="mcp"))
 
     assert kind == "result", text
-    payload = json.loads(text)
+    payload = json.loads(text)["structured"]
     assert payload.get("result", payload)["status"] == "found"
     assert "SENTINEL-UNIT-7" in text

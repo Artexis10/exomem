@@ -72,7 +72,7 @@ def test_preserve_bytes_writes_file(vault) -> None:
     payload = b"\x89PNG\r\n\x1a\nrealbytes"
     result = preserve_module.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="01 - Check-in",
         filename="shot.png",
         data=payload,
@@ -102,7 +102,7 @@ def test_preserve_stream_writes_exact_bytes(vault) -> None:
     payload = b"\x00\x01\x02binary-stream" * 1000
     result = preserve_module.preserve_stream(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="01 - Check-in",
         filename="clip.bin",
         stream=io.BytesIO(payload),

@@ -1,21 +1,25 @@
 from __future__ import annotations
 
-import heapq
 import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 import yaml
+from pytest_split.algorithms import Algorithms
 
 ROOT = Path(__file__).parents[1]
 
 FULL_CI_JOBS = {
+    "frozen-verifier",
+    "cloud-cellctl",
     "retrieval-quality",
     "retrieval-latency",
     "governance-projection-wire",
@@ -31,14 +35,26 @@ FULL_CI_JOBS = {
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
     ("core-tests", 12, "core"),
-    ("harness-tests", 4, "harness"),
+    ("harness-tests", 6, "harness"),
 )
 
-#: Session caps per tier; the headroom test derives the floor from the durations file.
+#: Session caps per tier; the partition test derives headroom from current collection.
 CORE_SESSION_TIMEOUT = 1400
 HARNESS_SESSION_TIMEOUT = 900
 HARNESS_MODULES_FILE = ROOT / "tests" / "harness_modules.txt"
 NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
+
+#: The test jobs the release PR skips. Lint, build, specs, capabilities, the
+#: wheel onboarding gate and release evidence still run on it; the full run at
+#: its base is its test proof.
+RELEASE_PR_SKIPPED_JOBS = {
+    "timing-tests",
+    "core-tests",
+    "harness-tests",
+    "windows-held-filesystem",
+    "tui",
+    "product-e2e",
+}
 
 
 def _triggers(workflow: dict) -> dict:
@@ -104,7 +120,8 @@ def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
     )
     assert junit_step["with"]["path"] == (
         f"test-results/junit-{tier}-"
-        "${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml"
+        "${{ matrix.python-version }}-shard-${{ matrix.shard }}"
+        f"{'*' if tier == 'core' else ''}.xml"
     )
     assert junit_step["with"]["if-no-files-found"] == "warn"
 
@@ -118,9 +135,8 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     matrix = job["strategy"]["matrix"]
 
     # PRs pay for the newest runtime only; the compatibility runtime joins on
-    # nightly/manual full runs. The release PR runs this same PR tier — the
-    # release-please clause is deliberately gone (see
-    # test_expensive_ci_runs_nightly_and_manually_only).
+    # nightly/manual full runs. The runtime matrix never names the release
+    # branch (see test_expensive_ci_runs_nightly_and_manually_only).
     versions = " ".join(str(matrix["python-version"]).split())
     assert "github.event_name == 'schedule'" in versions
     assert "github.event_name == 'workflow_dispatch'" in versions
@@ -138,8 +154,9 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     command = _run_step(job)["run"]
     assert f"--splits={shards}" in command
     assert "--group=${{ matrix.shard }}" in command
-    assert "--splitting-algorithm=least_duration" in command
-    assert "--durations-path=.test_durations.json" in command
+    algorithm = "least_duration" if tier == "core" else "duration_based_chunks"
+    assert f"--splitting-algorithm={algorithm}" in command
+    assert '--durations-path="$EXOMEM_DURATIONS_PATH"' in command
 
     # The tier suites share the environment the lean lane always had: full
     # history for the benchmark contract receipts, the pinned Bun runtime,
@@ -183,7 +200,7 @@ def test_nightly_full_runs_store_and_upload_refreshed_durations(
     store = " ".join(command.split())
     assert (
         "${{ (github.event_name == 'schedule' || "
-        "github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}"
+        "github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}"
     ) in store
 
     durations_step = next(
@@ -197,7 +214,7 @@ def test_nightly_full_runs_store_and_upload_refreshed_durations(
         f"test-durations-{tier}-py${{{{ matrix.python-version }}}}"
         "-shard-${{ matrix.shard }}"
     )
-    assert durations_step["with"]["path"] == ".test_durations.json"
+    assert durations_step["with"]["path"] == _run_step(job)["env"]["EXOMEM_DURATIONS_PATH"]
 
     assert (ROOT / "scripts/refresh_test_durations.py").is_file()
 
@@ -237,7 +254,16 @@ def test_harness_module_list_is_pinned_to_the_import_derivation() -> None:
         assert (ROOT / module_path).is_file(), f"{module_path} is listed but does not exist"
 
 
-def _collect_node_ids(label: str, tier: str | None, extra_args: list[str]) -> set[str]:
+class _CollectedItem(NamedTuple):
+    nodeid: str
+    display: str
+
+    def __str__(self) -> str:
+        # pytest-split uses the real item's display string to break duration ties.
+        return self.display
+
+
+def _collect_items(label: str, tier: str | None, extra_args: list[str]) -> list[_CollectedItem]:
     env = os.environ.copy()
     env.pop("EXOMEM_TEST_TIER", None)
     env.pop("EXOMEM_VAULT_PATH", None)
@@ -246,8 +272,19 @@ def _collect_node_ids(label: str, tier: str | None, extra_args: list[str]) -> se
     result = subprocess.run(
         [
             sys.executable,
-            "-m",
-            "pytest",
+            "-c",
+            """
+import json
+import sys
+import pytest
+
+class Collection:
+    def pytest_collection_finish(self, session):
+        items = [(item.nodeid, str(item)) for item in session.items]
+        print("EXOMEM_COLLECTION_ITEMS=" + json.dumps(items))
+
+raise SystemExit(pytest.main(sys.argv[1:], plugins=[Collection()]))
+""",
             "--collect-only",
             "-q",
             "--no-header",
@@ -265,13 +302,17 @@ def _collect_node_ids(label: str, tier: str | None, extra_args: list[str]) -> se
         f"{label} collection failed (rc={result.returncode}):\n"
         f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
     )
-    nodes = {
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.startswith("tests/") and "::" in line
-    }
-    assert nodes, f"{label} collection yielded no test nodes"
-    return nodes
+    rows = next(
+        (
+            json.loads(line.removeprefix("EXOMEM_COLLECTION_ITEMS="))
+            for line in result.stdout.splitlines()
+            if line.startswith("EXOMEM_COLLECTION_ITEMS=")
+        ),
+        [],
+    )
+    items = [_CollectedItem(*row) for row in rows]
+    assert items, f"{label} collection yielded no test nodes"
+    return items
 
 
 @pytest.mark.timeout(1800)
@@ -284,12 +325,50 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     pytest collections — the same mechanism CI runs — rather than over the
     module lists that configure them, so a tier-selection defect in
     tests/conftest.py fails here and not in coverage.
+    Each session cap must also hold 1.5x its predicted busiest shard, using
+    the workflow's installed algorithm on those same ordered collections.
     """
-    full = _collect_node_ids("full lean suite", None, [])
-    core = _collect_node_ids("core tier", "core", [])
-    harness = _collect_node_ids("harness tier", "harness", [])
-    latency = _collect_node_ids("nightly latency file", None, [NIGHTLY_OWNED_MODULE])
+    full_items = _collect_items("full lean suite", None, [])
+    workflow = _workflow()
+    core_job = workflow["jobs"]["core-tests"]
+    timing_job = workflow["jobs"]["timing-tests"]
+    # Job-level environment values select timing cases; runtime defaults live on the steps.
+    assert timing_job["env"] == core_job["env"]
+    assert timing_job["strategy"]["matrix"] == {
+        "python-version": core_job["strategy"]["matrix"]["python-version"]
+    }
+    assert "needs" not in timing_job, "timing checks must overlap the worker pools"
+    serial_selections = list(core_job["env"].values())
+    pooled_exclusions = []
+    for variable, selection in core_job["env"].items():
+        # Pytest separates a node ID from its module path with ::.
+        option = "--deselect" if "::" in selection else "--ignore"
+        assert f'{option}="${variable}"' in _run_step(core_job)["run"]
+        pooled_exclusions.append(f"{option}={selection}")
+    serial_step = _run_step(timing_job)
+    assert all(f'"${variable}"' in serial_step["run"] for variable in timing_job["env"])
+    assert serial_step["if"] == "steps.scope.outputs.docs_only != 'true'"
+    assert "--splits" not in serial_step["run"]
+    assert "-n " not in serial_step["run"]
+    assert "-serial.xml" in serial_step["run"]
+    assert serial_step["env"] == _run_step(core_job)["env"]
+    assert any(
+        step.get("with", {}).get("name") == "core-py${{ matrix.python-version }}-serial-junit"
+        and step.get("if") == "always()"
+        for step in timing_job["steps"]
+    )
+    core_items = _collect_items("pooled core tier", "core", pooled_exclusions)
+    serial_items = _collect_items("serial core checks", "core", serial_selections)
+    serial = {item.nodeid for item in serial_items}
+    harness_items = _collect_items("harness tier", "harness", [])
+    latency_items = _collect_items("nightly latency file", None, [NIGHTLY_OWNED_MODULE])
+    full, core, harness, latency = (
+        {item.nodeid for item in items}
+        for items in (full_items, core_items, harness_items, latency_items)
+    )
 
+    assert not core & serial, "the serial checks also run in the worker pool"
+    core |= serial
     assert core | harness | latency == full, (
         f"tier union misses {len(full - (core | harness | latency))} node(s) and "
         f"adds {len((core | harness | latency) - full)} node(s)"
@@ -297,6 +376,30 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     assert not core & harness, f"{len(core & harness)} node(s) collected by both PR tiers"
     assert not core & latency, "the core tier still collects the nightly-owned latency file"
     assert not harness & latency, "the harness tier collects the nightly-owned latency file"
+
+    # Use the installed algorithms on current ordered items, including their
+    # missing-duration fallback; stale duration entries do not belong to a tier.
+    durations = json.loads((ROOT / ".test_durations.json").read_text(encoding="utf-8"))
+    for job_id, items in (("core-tests", core_items), ("harness-tests", harness_items)):
+        job = workflow["jobs"][job_id]
+        command = _run_step(job)["run"]
+        options = dict(
+            token.removeprefix("--").split("=", 1)
+            for token in shlex.split(command)
+            if token.startswith("--") and "=" in token
+        )
+        groups = Algorithms[options["splitting-algorithm"]].value(
+            int(options["splits"]), items, durations
+        )
+        predicted = max(group.duration for group in groups)
+        timeout = int(options["session-timeout"])
+        assert timeout >= 1.5 * predicted, (
+            f"{job_id}: --session-timeout={timeout}s is under 1.5x the predicted "
+            f"busiest shard ({predicted:.0f}s); rebalance the shards"
+        )
+        assert timeout < job["timeout-minutes"] * 60, (
+            f"{job_id}: the session timeout must stay inside the job budget"
+        )
 
 
 def test_an_unknown_test_tier_fails_collection_loudly() -> None:
@@ -328,54 +431,6 @@ def test_an_unknown_test_tier_fails_collection_loudly() -> None:
     )
     assert result.returncode != 0, "an unknown tier value collected anyway"
     assert "not a CI tier" in result.stdout + result.stderr
-
-
-def _predicted_max_shard_seconds(
-    durations: dict[str, float], members: set[str], splits: int
-) -> float:
-    """pytest-split least_duration over the recorded durations of one tier."""
-    items = sorted(
-        ((node, seconds) for node, seconds in durations.items() if node.split("::", 1)[0] in members),
-        key=lambda pair: pair[1],
-        reverse=True,
-    )
-    assert items, "no recorded durations matched the tier; the prediction would be vacuous"
-    heap: list[tuple[float, int]] = [(0.0, index) for index in range(splits)]
-    heapq.heapify(heap)
-    for _node, seconds in items:
-        total, index = heapq.heappop(heap)
-        heapq.heappush(heap, (total + seconds, index))
-    return max(total for total, _index in heap)
-
-
-def test_session_timeouts_carry_headroom_over_predicted_tier_runtime() -> None:
-    """Each tier's --session-timeout holds ≥1.5x its predicted busiest shard.
-
-    Derived from the canonical inputs — the refreshed durations file, the
-    harness module list, and the shard counts in ci.yml — rather than
-    restated, so re-sharding or a durations refresh that outgrows the timeout
-    fails here instead of as a mid-run session kill.
-    """
-    durations = json.loads((ROOT / ".test_durations.json").read_text(encoding="utf-8"))
-    harness_members = set(_harness_modules_from_file())
-    all_members = {node.split("::", 1)[0] for node in durations}
-    core_members = all_members - harness_members - {NIGHTLY_OWNED_MODULE}
-
-    workflow = _workflow()
-    for job_id, shards, tier in PR_TIER_JOBS:
-        command = _run_step(workflow["jobs"][job_id])["run"]
-        match = re.search(r"--session-timeout=(\d+)", command)
-        assert match, f"{job_id} sets no --session-timeout"
-        timeout = int(match.group(1))
-        members = harness_members if tier == "harness" else core_members
-        predicted = _predicted_max_shard_seconds(durations, members, shards)
-        assert timeout >= 1.5 * predicted, (
-            f"{job_id}: --session-timeout={timeout}s is under 1.5x the predicted "
-            f"busiest shard ({predicted:.0f}s); raise the timeout or add shards"
-        )
-        assert timeout < workflow["jobs"][job_id]["timeout-minutes"] * 60, (
-            f"{job_id}: the session timeout must stay inside the job budget"
-        )
 
 
 def test_every_package_install_is_bounded_and_retried() -> None:
@@ -589,9 +644,10 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
     which re-ran the full 46-job tier on every push to main (release-please
     force-updates its PR each time): 61% of a measured day's runner-minutes
     went to those stampedes while ordinary PRs queued behind a 20-concurrent-
-    job account cap. The release PR now runs the normal PR tier like any other
-    PR; release evidence is one green manually-dispatched full run on main,
-    documented as a required step in docs/release.md.
+    job account cap. Release evidence is one green dispatched full run on
+    main, documented as a required step in docs/release.md, and the release PR
+    itself runs no test job: its diff is version strings, the changelog and the
+    regenerated Cloud archives.
     """
     workflow = _workflow()
     triggers = _triggers(workflow)
@@ -612,22 +668,29 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
     assert "head_ref" not in condition
     assert "release-please" not in condition
 
-    # The clause must not creep back into the expensive tier: its only
-    # permitted appearance in the whole workflow is the release-evidence
-    # job's own guard (pinned exactly in
-    # test_release_evidence_is_enforced_on_the_release_pr) — a seconds-class
-    # API check, not a stampede.
-    assert _workflow_text().count("release-please--branches--main") == 1
+    # The clause must not creep back into the expensive tier. It appears
+    # twice: the release-evidence job's own guard (pinned exactly in
+    # test_release_evidence_is_enforced_on_the_release_pr) and the one anchor
+    # that keeps the release PR off the test jobs.
+    assert _workflow_text().count("release-please--branches--main") == 2
 
     # quality is the shared engineering-practices check, kept out of the required gate so the
     # required checks stay unchanged; the merge guard reads it.
     fast_jobs = (
         set(jobs)
         - FULL_CI_JOBS
-        - {"gate", "release-evidence", "release-evidence-landed", "quality"}
+        - {
+            "gate",
+            "release-evidence",
+            "release-evidence-landed",
+            "cancel-superseded-push-run",
+            "quality",
+        }
     )
-    assert fast_jobs
-    assert all("if" not in jobs[name] for name in fast_jobs)
+    assert RELEASE_PR_SKIPPED_JOBS < fast_jobs
+    (skip,) = {jobs[name]["if"] for name in RELEASE_PR_SKIPPED_JOBS}
+    assert "github.head_ref != 'release-please--branches--main'" in skip
+    assert all("if" not in jobs[name] for name in fast_jobs - RELEASE_PR_SKIPPED_JOBS)
 
 
 def _scope_fixture_git(repository: Path, *args: str) -> None:
@@ -649,41 +712,49 @@ def _scope_fixture_git(repository: Path, *args: str) -> None:
     )
 
 
-def _installed_journey_scope(repository: Path, event: str) -> tuple[str, str]:
-    scope = next(
-        step
-        for step in _workflow()["jobs"]["product-e2e"]["steps"]
-        if step.get("id") == "journey-scope"
-    )
+#: Jobs whose tests a docs-only pull request narrows (scripts/ci_change_scope.py).
+SCOPED_JOBS = ("core-tests", "harness-tests", "product-e2e")
+
+
+def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
     output = repository / "scope-output"
     summary = repository / "scope-summary"
     subprocess.run(
-        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", scope["run"]],
+        [sys.executable, str(ROOT / "scripts" / "ci_change_scope.py"), "the example check"],
         cwd=repository,
-        env={**os.environ, "EVENT_NAME": event, "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)},
+        env={
+            **os.environ,
+            "EVENT_NAME": event,
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_STEP_SUMMARY": str(summary),
+        },
         capture_output=True,
         text=True,
         check=True,
     )
     decision = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    return decision["run_journey"], summary.read_text() if summary.exists() else ""
+    return decision, summary.read_text() if summary.exists() else ""
 
 
 @pytest.mark.parametrize(
-    "old_path,new_path,earlier_runtime,expected",
+    "old_path,new_path,earlier_runtime,docs_only",
     [
-        ("openspec/spec.md", "openspec/spec.md", False, "false"),
-        ("openspec/spec.md", None, False, "false"),
-        ("src/example.py", "src/example.py", False, "true"),
-        ("src/example.py", None, False, "true"),
-        ("src/example.py", "openspec/moved.py", False, "true"),
-        ("openspec/spec.md", "src/moved.md", False, "true"),
-        ("openspec/spec.md", "openspec/spec.md", True, "true"),
+        ("openspec/spec.md", "openspec/spec.md", False, True),
+        ("openspec/spec.md", None, False, True),
+        ("docs/guide.md", "docs/guide.md", False, True),
+        ("NOTES.md", "NOTES.md", False, True),
+        # The sdist readme is a package input.
+        ("README.md", "README.md", False, False),
+        ("tests/fixtures/note.md", "tests/fixtures/note.md", False, False),
+        ("src/example.py", "src/example.py", False, False),
+        ("src/example.py", None, False, False),
+        ("src/example.py", "openspec/moved.py", False, False),
+        ("openspec/spec.md", "src/moved.md", False, False),
+        ("openspec/spec.md", "openspec/spec.md", True, False),
     ],
 )
-@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
-def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
-    tmp_path: Path, old_path: str, new_path: str | None, earlier_runtime: bool, expected: str
+def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
+    tmp_path: Path, old_path: str, new_path: str | None, earlier_runtime: bool, docs_only: bool
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -711,11 +782,13 @@ def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
     _scope_fixture_git(repository, "checkout", "main")
     _scope_fixture_git(repository, "merge", "--no-ff", "--no-edit", "topic")
 
-    decision, summary = _installed_journey_scope(repository, "pull_request")
-    assert decision == expected
-    if expected == "false":
-        assert "Installed journey not run" in summary
+    decision, summary = _change_scope(repository, "pull_request")
+
+    if docs_only:
+        assert decision == {"docs_only": "true", "pytest_args": "-m reads_repository_docs"}
+        assert "Docs-only change: the example check did not run" in summary
     else:
+        assert decision == {"docs_only": "false", "pytest_args": ""}
         assert not summary
 
 
@@ -723,8 +796,7 @@ def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
     "event,has_parent",
     [("pull_request", False), ("push", True), ("schedule", True), ("workflow_dispatch", True)],
 )
-@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
-def test_installed_e2e_scope_retains_execution_for_unknown_history_and_non_pr_events(
+def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
     tmp_path: Path, event: str, has_parent: bool
 ) -> None:
     repository = tmp_path / "repository"
@@ -739,23 +811,25 @@ def test_installed_e2e_scope_retains_execution_for_unknown_history_and_non_pr_ev
         path.write_text("changed\n")
         _scope_fixture_git(repository, "commit", "-am", "spec change")
 
-    decision, summary = _installed_journey_scope(repository, event)
-    assert decision == "true"
+    decision, summary = _change_scope(repository, event)
+
+    assert decision == {"docs_only": "false", "pytest_args": ""}
     assert not summary
 
 
-def test_installed_e2e_scope_uses_merge_checkout_and_omits_only_an_explicit_false() -> None:
-    job = _workflow()["jobs"]["product-e2e"]
+@pytest.mark.parametrize("job_id", SCOPED_JOBS)
+def test_change_scope_compares_the_merge_commit_with_its_base(job_id: str) -> None:
+    """A checkout of the PR head would compare only its last commit."""
+    job = _workflow()["jobs"][job_id]
     checkout = next(step for step in job["steps"] if step.get("uses") == "actions/checkout@v4")
-    assert checkout["with"]["fetch-depth"] == 2
     assert "ref" not in checkout["with"]
-    scope = next(step for step in job["steps"] if step.get("id") == "journey-scope")
+    assert checkout["with"]["fetch-depth"] in (0, 2)
+    scope = next(step for step in job["steps"] if step.get("id") == "scope")
+    assert "scripts/ci_change_scope.py" in scope["run"]
     assert scope["env"]["EVENT_NAME"] == "${{ github.event_name }}"
-    journey = next(step for step in job["steps"] if "scripts/e2e_product_loop.py" in step.get("run", ""))
-    assert journey["if"] == "steps.journey-scope.outputs.run_journey != 'false'"
 
 
-def test_installed_e2e_scope_relies_on_openspec_being_outside_package_inputs() -> None:
+def test_change_scope_relies_on_docs_paths_being_outside_package_inputs() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     build = project["tool"]["hatch"]["build"]
     wheel = build["targets"]["wheel"]
@@ -785,7 +859,11 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
         "github.event.pull_request.head.ref == 'release-please--branches--main' }}"
     )
 
-    (step,) = job["steps"]
+    checkout, scope, step = job["steps"]
+    # The scope check runs first, from the base revision, under pipefail.
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert scope["shell"] == "bash"
+    assert "scripts/check_release_pr_files.py" in scope["run"]
     assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
     base = " ".join(str(step["env"]["BASE_SHA"]).split())
     assert base == "${{ github.event.pull_request.base.sha || '' }}"
@@ -824,10 +902,12 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> No
     assert gate["if"] == "${{ !cancelled() }}"
     # release-evidence-landed runs after the gate and depends on it.
     # quality is the shared engineering-practices check, kept out of the required gate so the
-    # required checks stay unchanged; the merge guard reads it.
+    # required checks stay unchanged; the merge guard reads it. The push-run
+    # cancel is a best-effort saving that must not decide evidence.
     assert set(gate["needs"]) == set(workflow["jobs"]) - {
         "gate",
         "release-evidence-landed",
+        "cancel-superseded-push-run",
         "quality",
     }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])

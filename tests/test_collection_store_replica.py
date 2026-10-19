@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -16,7 +17,7 @@ import pytest
 
 from exomem import held_fs, reserved_paths
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection, replica, schema, snapshot, tokens
+from exomem.collection_store import authority, connection, replica, schema, snapshot, tokens
 from exomem.kbdir import kb_dirname
 
 
@@ -105,6 +106,34 @@ def test_first_and_successive_publish_are_reopenable_business_snapshots(store):
 
 
 @pytest.mark.parametrize("concurrent", [False, True])
+def test_a_new_lease_epoch_is_published_without_a_business_commit(store, concurrent):
+    root, writer = store
+    with writer.transaction() as conn:
+        conn.execute("INSERT INTO store_meta VALUES (?,?)", (schema.META_LEASE_EPOCH, "3"))
+    assert _publish(root, writer).status == "published"
+    with writer.transaction() as conn:
+        conn.execute("UPDATE store_meta SET value=? WHERE key=?", ("4", schema.META_LEASE_EPOCH))
+
+    if concurrent:
+        @contextmanager
+        def step(_patience, _cancelled):
+            yield writer, lambda: True
+
+        result = replica.publish_replica_concurrently(
+            root, step=step, deadline=time.monotonic() + 10
+        )
+    else:
+        result = _publish(root, writer)
+
+    assert result.status == "published"
+    assert (result.commit_seq, result.head_hash) == (0, None)
+    with closing(connection.open_reader(replica.replica_path(root))) as reader:
+        assert reader.execute(
+            "SELECT value FROM store_meta WHERE key=?", (schema.META_LEASE_EPOCH,)
+        ).fetchone() == ("4",)
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
 def test_matching_installed_copy_retires_the_still_owned_redundant_stage(
     store, monkeypatch, concurrent
 ):
@@ -190,7 +219,8 @@ def test_displacement_crash_with_missing_stage_restores_predecessor_then_flushes
     store, monkeypatch
 ):
     root, writer = store
-    assert _publish(root, writer).status == "published"
+    initial = _publish(root, writer)
+    assert initial.status == "published", initial
     target = replica.replica_path(root)
     old_digest = hashlib.sha256(target.read_bytes()).hexdigest()
     expected = _commit(writer)
@@ -209,7 +239,9 @@ def test_displacement_crash_with_missing_stage_restores_predecessor_then_flushes
             _publish(root, writer)
     pending = json.loads(_metadata(writer)[schema.META_PENDING_REPLICA_PUBLICATION])
     assert not target.exists()
-    assert not (target.parent / pending["workspace_leaf"] / pending["stage_leaf"]).exists()
+    stage = target.parent / pending["workspace_leaf"] / pending["stage_leaf"]
+    assert stage.exists()  # The durable intent owns scratch after the snapshot closes.
+    stage.unlink()  # Reproduce recovery after the still-needed stage disappears.
     assert _metadata(writer)[schema.META_LAST_PUBLISHED_REPLICA_SHA256] == old_digest
     restored = _recover(root, writer)
     assert (restored.commit_seq, restored.head_hash) == (0, None)
@@ -219,12 +251,18 @@ def test_displacement_crash_with_missing_stage_restores_predecessor_then_flushes
     assert (result.commit_seq, result.head_hash) == expected
 
 
-def test_foreign_replacement_is_protected_and_business_writes_are_fenced(store):
+@pytest.mark.parametrize("read_only", [False, pytest.param(True, marks=pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="requires unprivileged POSIX permissions"
+))])
+def test_foreign_replacement_is_protected_and_business_writes_are_fenced(store, read_only):
     root, writer = store
     assert _publish(root, writer).status == "published"
     target = replica.replica_path(root)
     _commit(writer)
     target.write_bytes(b"foreign replica")
+    if read_only:
+        target.chmod(0o444)
+        assert not os.access(target, os.W_OK)
     result = _publish(root, writer)
     assert result.status == "diverged"
     preserved = list(target.parent.glob(".foreign-*"))
@@ -747,15 +785,23 @@ def test_matching_replacement_requires_actual_file_flush_before_success(
 
 
 def _crash_staging(root, boundary):
+    diagnostic_prefix = "staging-boundary "
     script = """
 import os, sys, time
+started = time.monotonic()
+def note(phase):
+    print(sys.argv[3] + phase + ' ' + str(time.monotonic() - started), file=sys.stderr, flush=True)
+note('entry')
 from pathlib import Path
 from contextlib import contextmanager
 from exomem import held_fs
 from exomem.collection_store import connection, replica, snapshot
+note('imports-returned')
 root, boundary = Path(sys.argv[1]), sys.argv[2]
+note('filesystem-enter')
 with held_fs.acquire(root).require() as fs:
     filesystem_type = type(fs)
+note('filesystem-returned')
 original_parent = filesystem_type.parent
 def parent(fs, relative, **kwargs):
     allocating = kwargs.get('exclusive') and kwargs.get('create')
@@ -769,19 +815,33 @@ filesystem_type.parent = parent
 original_snapshot = snapshot.staged_snapshot
 @contextmanager
 def staged(*args, **kwargs):
+    note('snapshot-enter')
     # Old publication has no operation directory; still die before backup.
     if boundary != 'ready':
         os._exit(73)
     with original_snapshot(*args, **kwargs) as artifact:
+        note('snapshot-ready')
         os._exit(73)
         yield artifact
 snapshot.staged_snapshot = staged
+note('writer-enter')
 with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as writer:
+    note('writer-returned')
+    note('replica-enter')
     replica.publish_replica(root, writer, authority_check=lambda: True, deadline=time.monotonic()+10)
 """
-    child = subprocess.run(
-        [sys.executable, "-c", script, str(root), boundary], capture_output=True, timeout=15
-    )
+    try:
+        child = subprocess.run(
+            [sys.executable, "-c", script, str(root), boundary, diagnostic_prefix],
+            capture_output=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = error.stderr or b""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        # The prefix fixes this test's boundary protocol; unrelated stderr stays out of this report.
+        notes = [line for line in output.splitlines() if line.startswith(diagnostic_prefix)]
+        raise AssertionError(f"staging child exceeded its 15-second bound; boundaries={notes}") from error
     assert child.returncode == 73, child.stderr.decode()
 
 
@@ -853,3 +913,239 @@ def test_staging_cleanup_interruption_keeps_intent_until_directory_removal_is_du
         assert _metadata(reopened)[schema.META_PENDING_REPLICA_PUBLICATION] == raw
         assert _recover(root, reopened).status == "retry_pending"
         assert schema.META_PENDING_REPLICA_PUBLICATION not in _metadata(reopened)
+
+
+def _complete_ready_in_another_process(root, *, advance=False):
+    script = """
+import hashlib, json, sys, time
+from pathlib import Path
+from exomem.collection_store import connection, replica
+sys.path.insert(0, sys.argv[3])
+from test_collection_store_replica import _commit
+root = Path(sys.argv[1])
+with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as writer:
+    result = replica.recover_replica(root, writer, authority_check=lambda: True,
+                                    deadline=time.monotonic()+10)
+    assert result.status in {'published', 'retry_pending'}, result
+    if sys.argv[2] == 'advance':
+        assert result.status == 'published', result
+        _commit(writer)
+        result = replica.publish_replica(root, writer, authority_check=lambda: True,
+                                        deadline=time.monotonic()+10)
+        assert result.status == 'published', result
+    print(json.dumps({'metadata': dict(writer.connection.execute('SELECT key,value FROM store_meta')),
+                      'sha256': hashlib.sha256(replica.replica_path(root).read_bytes()).hexdigest()}))
+"""
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(root), "advance" if advance else "finish",
+         str(Path(__file__).resolve().parent)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert child.returncode == 0, child.stderr
+    return json.loads(child.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows defers displaced-file deletion while A retains its handle")
+def test_a_resumed_publisher_preserves_an_independent_processes_newer_head(store, monkeypatch):
+    root, writer = store
+    assert _publish(root, writer).status == "published"
+    _commit(writer)
+
+    def interrupted(_publisher, _pending, **_kwargs):
+        raise SystemExit("ready copy awaiting another process")
+
+    with monkeypatch.context() as injection:
+        injection.setattr(replica._Publisher, "resolve", interrupted)
+        with pytest.raises(SystemExit):
+            _publish(root, writer)
+    writer.close()
+    completed = None
+    original = snapshot._file_sha256
+
+    def complete_while_verifying(descriptor, check=None):
+        nonlocal completed
+        if completed is None:
+            completed = _complete_ready_in_another_process(root, advance=True)
+        return original(descriptor, check)
+
+    @contextmanager
+    def step(_patience, _cancelled):
+        with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as current:
+            yield current, lambda: True
+
+    monkeypatch.setattr(snapshot, "_file_sha256", complete_while_verifying)
+    result = replica.publish_replica_concurrently(root, step=step, deadline=time.monotonic() + 20)
+    assert result.status == "retry_pending" and completed is not None
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as current:
+        assert _metadata(current) == completed["metadata"]
+    assert hashlib.sha256(replica.replica_path(root).read_bytes()).hexdigest() == completed["sha256"]
+
+
+def test_cancellation_closes_snapshot_owners_without_deleting_an_independently_installed_inode(
+    store, monkeypatch
+):
+    root, writer = store
+    assert _publish(root, writer).status == "published"
+    _commit(writer)
+    writer.close()
+    completed = None
+    original = snapshot._file_sha256
+
+    def install_while_verifying_predecessor(descriptor, check=None):
+        nonlocal completed
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
+        raw = metadata.get(schema.META_PENDING_REPLICA_PUBLICATION)
+        pending = json.loads(raw) if raw else None
+        if completed is None and pending is not None and pending["phase"] == "ready":
+            aside = (replica.replica_path(root).parent / pending["workspace_leaf"]
+                     / f".exomem-collection-replica-aside-{pending['token']}")
+            if aside.exists() and aside.stat().st_ino == os.fstat(descriptor).st_ino:
+                completed = _complete_ready_in_another_process(root)
+                assert completed["sha256"] == pending["sha256"]
+        return original(descriptor, check)
+
+    @contextmanager
+    def step(_patience, _cancelled):
+        with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as current:
+            yield current, lambda: True
+
+    monkeypatch.setattr(snapshot, "_file_sha256", install_while_verifying_predecessor)
+    result = replica.publish_replica_concurrently(
+        root, step=step, deadline=time.monotonic() + 20, cancelled=lambda: completed is not None
+    )
+    assert completed is not None and result.status == "retry_pending"
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as current:
+        assert _metadata(current) == completed["metadata"]
+        # Windows may defer workspace removal until this publisher closes its readers.
+        assert _recover(root, current).status == "published"
+    target = replica.replica_path(root)
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == completed["sha256"]
+    assert not list(target.parent.glob(".exomem-collection-replica-work-*"))
+
+
+def test_replacement_after_outside_fsync_requires_flushing_the_replacement(store, monkeypatch):
+    root, writer = store
+    assert _publish(root, writer).status == "published"
+    target = replica.replica_path(root)
+    original_inode = target.stat().st_ino
+    replacement_inode = None
+    flushed = set()
+    fsync = os.fsync
+
+    def replace_after_fsync(descriptor):
+        nonlocal replacement_inode
+        inode = os.fstat(descriptor).st_ino
+        result = fsync(descriptor)
+        flushed.add(inode)
+        if inode == original_inode and replacement_inode is None:
+            incoming = target.with_name("incoming")
+            incoming.write_bytes(target.read_bytes())
+            incoming.replace(target)
+            replacement_inode = target.stat().st_ino
+        return result
+
+    @contextmanager
+    def step(_patience, _cancelled):
+        yield writer, lambda: True
+
+    monkeypatch.setattr(os, "fsync", replace_after_fsync)
+    before = _metadata(writer)
+    result = replica.publish_replica_concurrently(root, step=step, deadline=time.monotonic() + 10)
+    assert result.status == "retry_pending" and replacement_inode is not None
+    assert _metadata(writer) == before and replacement_inode not in flushed
+    assert replica.publish_replica_concurrently(
+        root, step=step, deadline=time.monotonic() + 10
+    ).status == "published"
+    assert replacement_inode in flushed
+
+
+@pytest.mark.skipif(os.name != "posix", reason="ancestor ABA uses POSIX directory rename semantics")
+def test_cold_recovery_reads_the_verified_database_when_its_ancestor_is_temporarily_replaced(
+    store, tmp_path, monkeypatch
+):
+    root, writer = store
+    raw_a, raw_b = '{"request_id":"copy-a"}', '{"request_id":"copy-b"}'
+    with writer.transaction() as conn:
+        conn.execute("INSERT INTO store_meta VALUES (?,?)", (authority.PENDING_CREATE, raw_a))
+    bookkeeping = replica._Publisher.bookkeeping
+
+    def before_promotion(publisher, values):
+        if schema.META_PUBLISHED_REPLICA_HEAD in values:
+            raise SystemExit("installed ready copy awaiting recovery")
+        return bookkeeping(publisher, values)
+
+    with monkeypatch.context() as injection:
+        injection.setattr(replica._Publisher, "bookkeeping", before_promotion)
+        with pytest.raises(SystemExit):
+            _publish(root, writer)
+    target = replica.replica_path(root)
+    expected_sha = hashlib.sha256(target.read_bytes()).hexdigest()
+    alternate, retained = tmp_path / "alternate", tmp_path / "retained"
+    shutil.copytree(target.parent, alternate)
+    with closing(sqlite3.connect(alternate / target.name)) as conn:
+        conn.execute("UPDATE store_meta SET value=? WHERE key=?", (raw_b, authority.PENDING_CREATE))
+        conn.commit()
+    with closing(connection.open_reader(target)) as original_reader:
+        original_metadata = dict(original_reader.execute("SELECT key,value FROM store_meta"))
+    with closing(connection.open_reader(alternate / target.name)) as alternate_reader:
+        alternate_metadata = dict(alternate_reader.execute("SELECT key,value FROM store_meta"))
+    for key in (schema.META_STORE_ID, schema.META_INSTANCE_ID, schema.META_COMMIT_SEQ,
+                schema.META_STORE_HEAD_HASH, schema.META_LEASE_EPOCH):
+        assert original_metadata.get(key) == alternate_metadata.get(key)
+    assert original_metadata[authority.PENDING_CREATE] != alternate_metadata[authority.PENDING_CREATE]
+    open_read_only = connection._open_read_only
+    swapped = False
+
+    def swap_ancestor_at_sqlite_open(path, busy_timeout_ms):
+        nonlocal swapped
+        if swapped:
+            return open_read_only(path, busy_timeout_ms)
+        swapped = True
+        target.parent.rename(retained)
+        alternate.rename(target.parent)
+        try:
+            return open_read_only(path, busy_timeout_ms)
+        finally:
+            target.parent.rename(alternate)
+            retained.rename(target.parent)
+
+    monkeypatch.setattr(connection, "_open_read_only", swap_ancestor_at_sqlite_open)
+    result = _recover(root, writer)
+    assert result.status == "published" and swapped
+    metadata = _metadata(writer)
+    assert metadata[schema.META_PUBLISHED_INTENT_SHA256] == hashlib.sha256(raw_a.encode()).hexdigest()
+    assert metadata[schema.META_LAST_PUBLISHED_REPLICA_SHA256] == expected_sha
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == expected_sha
+
+
+def test_abandoned_predecessor_aside_releases_owners_before_workspace_removal(store, monkeypatch):
+    root, writer = store
+    assert _publish(root, writer).status == "published"
+    predecessor = _metadata(writer)[schema.META_LAST_PUBLISHED_REPLICA_SHA256]
+    _commit(writer)
+    filesystem_type = _filesystem_type(root)
+    rename = filesystem_type.rename
+
+    def interrupted(filesystem, source, parent, leaf, **kwargs):
+        result = rename(filesystem, source, parent, leaf, **kwargs)
+        if "replica-aside" in leaf:
+            raise SystemExit("predecessor captured before adoption")
+        return result
+
+    with monkeypatch.context() as injection:
+        injection.setattr(filesystem_type, "rename", interrupted)
+        with pytest.raises(SystemExit):
+            _publish(root, writer)
+    raw = _metadata(writer)[schema.META_PENDING_REPLICA_PUBLICATION]
+    pending = json.loads(raw)
+    workspace = replica.replica_path(root).parent / pending["workspace_leaf"]
+    assert (workspace / f".exomem-collection-replica-aside-{pending['token']}").is_file()
+    # Adopt-local drops this intent before retiring its predecessor and owned stage.
+    with writer.transaction() as conn:
+        conn.execute("DELETE FROM store_meta WHERE key=?", (schema.META_PENDING_REPLICA_PUBLICATION,))
+    result = replica.discard_abandoned_publication(
+        root, writer, raw, predecessor=predecessor, authority_check=lambda: True,
+        deadline=time.monotonic() + 10,
+    )
+    assert result is None and not workspace.exists()

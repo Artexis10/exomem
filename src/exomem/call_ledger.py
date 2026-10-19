@@ -58,14 +58,26 @@ import datetime as dt
 import hashlib
 import json
 import os
-import re
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+from . import call_spans
+
+#: Version 2 adds the content-free `access` and `item_count`. A version 1 row
+#: lacks both; every reader treats them as unknown there, and `verify` re-hashes
+#: each row as stored, so v1 rows keep verifying. Optional `app_id` is additive
+#: within version 2; older rows stay byte-exact and verify without that field.
+SCHEMA_VERSION = 2
+
+#: The earliest moment this process could have recorded a row: before it, the
+#: ledger says nothing about calls this process served.
+WRITER_STARTED_AT = dt.datetime.now(dt.UTC)
+
+#: The closed set `access` may record; anything else is written as null.
+_ACCESS = frozenset({"read", "write"})
 
 #: The closed set `principal_kind` may record; anything else is written as null.
 _PRINCIPAL_KINDS = frozenset(
@@ -92,9 +104,15 @@ _MAX_TARGET_PATHS = 32
 _LEDGER_FILENAME = "ledger.jsonl"
 _ARCHIVE_DIRNAME = "ledger-archive"
 
+_GAP_MARKER_FILENAME = "ledger.gap"
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+
 _lock = threading.Lock()
 #: Chain head, cached in-process. `None` means "not yet loaded from disk".
 _state: dict[str, Any] = {"sequence": None, "prev_hash": None, "path": None}
+#: When this process last failed to append a call's row. A call with no row
+#: leaves no gap in the sequence, so only this record shows it is missing.
+_append_failure: dict[str, dt.datetime | None] = {"at": None}
 
 
 def enabled() -> bool:
@@ -124,6 +142,51 @@ def ledger_path() -> Path:
 
 def archive_dir() -> Path:
     return ledger_dir() / _ARCHIVE_DIRNAME
+
+
+def gap_marker_path() -> Path:
+    """An empty file whose modification time is no earlier than the latest failed
+    append that could mark it, beside the ledger, for a reader in another process."""
+    return ledger_dir() / _GAP_MARKER_FILENAME
+
+
+def _note_append_failure() -> None:
+    """Record that a call has no row: in memory, and beside the ledger if possible.
+
+    Memory keeps the latest failure time. The marker's modification time is set
+    explicitly to the failure time rounded up to the next millisecond, unless it
+    already holds a later time: Linux stamps a plain touch from a coarse clock,
+    which can be earlier than the failure. The marker write is best effort;
+    design.md states what a reader in another process misses when it fails too.
+    """
+    at = dt.datetime.now(dt.UTC)
+    with _lock:
+        seen = _append_failure["at"]
+        _append_failure["at"] = at if seen is None else max(seen, at)
+    try:
+        path = gap_marker_path()
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))  # keeps an existing time
+        microseconds = (at - _EPOCH) // dt.timedelta(microseconds=1)
+        marked_ns = -(-microseconds // 1000) * 1_000_000
+        if path.stat().st_mtime_ns < marked_ns:
+            os.utime(path, ns=(marked_ns, marked_ns))
+    except Exception:  # noqa: BLE001 - this process still holds the time in memory
+        pass
+
+
+def last_append_failure() -> dt.datetime | None:
+    """The latest failed append that this process saw or that any process marked.
+
+    Raises `OSError` when the marker exists but cannot be stat'ed: a reader then
+    cannot know whether a call is missing.
+    """
+    with _lock:
+        seen = _append_failure["at"]
+    try:
+        marked = _EPOCH + dt.timedelta(microseconds=gap_marker_path().stat().st_mtime_ns // 1000)
+    except FileNotFoundError:
+        return seen
+    return marked if seen is None else max(seen, marked)
 
 
 def canonical_json(payload: dict[str, Any]) -> bytes:
@@ -201,93 +264,148 @@ def _target_paths(
         # target paths at all, the same way mutation_journal keeps only
         # `target_count` (see its docstring).
         return [], False
-    found: list[str] = []
-    for name in _TARGET_ARG_NAMES:
-        value = arguments.get(name)
-        if isinstance(value, str) and value.strip():
-            found.append(_clip(value.strip()))
-        elif isinstance(value, (list, tuple)):
-            found.extend(_clip(item) for item in value if isinstance(item, str) and item.strip())
     # An artifact write addresses no path-shaped argument: its destination is
     # assembled from `scope`/`category` and a filename the server derives, so
     # every `preserve_artifacts` row said `target_paths: []` and the ledger
     # could not state what landed. The outcome knows; the arguments never did.
-    for value in committed or ():
-        if isinstance(value, str) and value.strip():
-            found.append(_clip(value.strip()))
-    deduplicated = list(dict.fromkeys(found))
-    truncated = len(deduplicated) > _MAX_TARGET_PATHS
-    return deduplicated[:_MAX_TARGET_PATHS], truncated
+    targets = _distinct([*_addressed_targets(arguments), *(committed or ())])
+    return [_clip(target) for target in targets[:_MAX_TARGET_PATHS]], (
+        len(targets) > _MAX_TARGET_PATHS
+    )
 
 
-#: Committed target paths for one in-flight call, keyed by the call token.
+def _addressed_targets(arguments: dict[str, Any]) -> list[object]:
+    """What the call's arguments name as targets: paths or page references."""
+    found: list[object] = []
+    for name in _TARGET_ARG_NAMES:
+        value = arguments.get(name)
+        found.extend(value if isinstance(value, (list, tuple)) else [value])
+    return found
+
+
+def _distinct(values: Iterable[object]) -> list[str]:
+    """Distinct non-empty target strings, compared whole. A display bound applied
+    first would merge distinct long paths into one."""
+    return list(
+        dict.fromkeys(value.strip() for value in values if isinstance(value, str) and value.strip())
+    )
+
+
+#: Facts about one in-flight call, keyed by the call token: committed target
+#: paths, the access the dispatcher classified, and the items a read released.
 #: Bridged through the token for the same reason `call_spans` is: these are
 #: recorded deep inside the synchronous tool wrapper on FastMCP's threadpool,
 #: and a ContextVar mutation there never propagates back to the middleware that
 #: writes the row.
-_targets_lock = threading.Lock()
-_committed_targets: dict[str, dict[str, Any]] = {}
+_facts_lock = threading.Lock()
+_call_facts: dict[str, dict[str, Any]] = {}
 #: Calls tracked at once, so a missed pop cannot leak indefinitely, and how long
 #: an unpopped entry survives. The same two independent guards `call_spans` uses,
 #: for the same reason: the middleware pops unconditionally, but a direct test
 #: harness or an abandoned call never reaches it. Eviction is by age, not by
-#: insertion order, so a long-running call's targets are not dropped to make
+#: insertion order, so a long-running call's facts are not dropped to make
 #: room for a short one that arrived later.
 _MAX_TRACKED_CALLS = 256
-_TARGETS_TTL_SECONDS = 300.0
+_FACTS_TTL_SECONDS = 300.0
 
 
-def _sweep_targets_locked(now: float) -> None:
+def _sweep_facts_locked(now: float) -> None:
     for token in [
         token
-        for token, entry in _committed_targets.items()
-        if now - float(entry["at"]) > _TARGETS_TTL_SECONDS
+        for token, entry in _call_facts.items()
+        if now - float(entry["at"]) > _FACTS_TTL_SECONDS
     ]:
-        _committed_targets.pop(token, None)
+        _call_facts.pop(token, None)
 
 
-def note_committed_targets(paths: Iterable[Any]) -> None:
-    """Record the vault-relative paths this call actually committed.
-
-    Structural paths only -- the same thing `target_paths` already carries for a
-    note write. A no-op outside an MCP call, so CLI, watcher and test paths that
-    mint no token are unaffected. Never raises into the call path.
-    """
+def _note_call_fact(record: Callable[[dict[str, Any]], None]) -> None:
+    """Apply `record` to this call's entry. A no-op outside an MCP call, so CLI,
+    watcher and test paths that mint no token are unaffected. Never raises into
+    the call path."""
     try:
         from . import call_spans
 
         token = call_spans.MCP_CALL_TOKEN.get()
         if token is None:
             return
-        clean = [
-            _clip(value.strip())
-            for value in paths
-            if isinstance(value, str) and value.strip()
-        ]
         now = time.monotonic()
-        with _targets_lock:
-            _sweep_targets_locked(now)
-        if not clean:
-            return
-        with _targets_lock:
-            if token not in _committed_targets and len(_committed_targets) >= _MAX_TRACKED_CALLS:
-                oldest = min(_committed_targets, key=lambda key: _committed_targets[key]["at"])
-                _committed_targets.pop(oldest, None)
-            entry = _committed_targets.setdefault(token, {"at": now, "paths": []})
-            slot: list[str] = entry["paths"]
-            slot.extend(clean[: _MAX_TARGET_PATHS - len(slot)])
+        with _facts_lock:
+            _sweep_facts_locked(now)
+            if token not in _call_facts and len(_call_facts) >= _MAX_TRACKED_CALLS:
+                oldest = min(_call_facts, key=lambda key: _call_facts[key]["at"])
+                _call_facts.pop(oldest, None)
+            record(
+                _call_facts.setdefault(
+                    token, {"at": now, "paths": [], "access": None, "released": None}
+                )
+            )
     except Exception:  # noqa: BLE001 - the ledger must never break a call
         pass
 
 
-def pop_committed_targets(token: str | None) -> list[str]:
-    """Pop this call's committed targets. Unconditional, like the span pop."""
+def note_committed_targets(paths: Iterable[Any]) -> None:
+    """Record the vault-relative paths this call actually committed.
+
+    Structural paths only -- the same thing `target_paths` already carries for a
+    note write. Kept whole, so the row's `item_count` is not a capped count; the
+    row's `target_paths` applies its own bound.
+    """
+    try:
+        clean = _distinct(paths)
+    except Exception:  # noqa: BLE001 - the ledger must never break a call
+        return
+    if clean:
+        _note_call_fact(lambda entry: entry["paths"].extend(clean))
+
+
+def note_call_access(read_only: bool) -> None:
+    """Record how the dispatcher classified this invocation: `read` or `write`."""
+    access = "read" if read_only else "write"
+    _note_call_fact(lambda entry: entry.update(access=access))
+
+
+def note_released_items(count: int | None) -> None:
+    """Record how many distinct items this read's disclosure boundary released.
+
+    The outermost boundary of a call finishes last, so its count is the one kept.
+    """
+    _note_call_fact(lambda entry: entry.update(released=None if count is None else int(count)))
+
+
+def pop_call_facts(token: str | None) -> dict[str, Any]:
+    """Pop this call's facts. Unconditional, like the span pop."""
+    empty: dict[str, Any] = {"paths": [], "access": None, "released": None}
     if token is None:
-        return []
-    with _targets_lock:
-        _sweep_targets_locked(time.monotonic())
-        entry = _committed_targets.pop(token, None)
-    return list(entry["paths"]) if entry else []
+        return empty
+    with _facts_lock:
+        _sweep_facts_locked(time.monotonic())
+        entry = _call_facts.pop(token, None)
+    return {**empty, **entry} if entry else empty
+
+
+def _item_count(
+    access: str | None,
+    outcome: str,
+    released: int | None,
+    arguments: dict[str, Any],
+    committed: Sequence[str],
+) -> int | None:
+    """Items a successful call touched: released for a read, pages for a write.
+
+    A write counts the distinct pages its commit reported. Only when the commit
+    reported none does it count the distinct targets its arguments name: an
+    argument may name a committed page by its reference, and adding the two
+    would count one page twice. `None` is unknown, never zero: a call that
+    failed touched nothing it can vouch for, and a write that names no page and
+    reported none has nothing to count.
+    """
+    if outcome != "ok":
+        return None
+    if access == "read":
+        return released
+    if access == "write":
+        return len(_distinct(committed) or _distinct(_addressed_targets(arguments))) or None
+    return None
 
 
 def build_row(
@@ -303,6 +421,7 @@ def build_row(
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
     principal_kind: str | None = None,
+    app_id: str | None = None,
     client_name: str | None = None,
     client_version: str | None = None,
     transport: str | None = None,
@@ -312,8 +431,11 @@ def build_row(
     activation_result: Mapping[str, Any] | None = None,
     timestamp: str | None = None,
     committed_targets: Sequence[str] | None = None,
+    access: str | None = None,
+    released_items: int | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
+    from .cloud_cell import canonical_app_id
     from .privacy_log import log_client_label, log_client_version, log_session_ref
 
     # Caller-chosen header and handshake text: bounded under content-private
@@ -323,6 +445,7 @@ def build_row(
     client_version = log_client_version(client_version)
     arg_names, args, args_truncated = _argument_shape(arguments or {})
     targets, targets_truncated = _target_paths(arguments or {}, committed_targets)
+    shaped_spans = _shaped_spans(spans)
     row: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "sequence": sequence,
@@ -333,6 +456,9 @@ def build_row(
         "session_id": _clip(session_id) if session_id else None,
         "client_name": _clip(client_name) if client_name else None,
         "client_version": _clip(client_version) if client_version else None,
+        # A content-free gateway grant UUID survives content-private logging.
+        # It identifies an actor for the owner and grants no authority.
+        "app_id": canonical_app_id(app_id),
         "transport": _clip(transport) if transport else None,
         "caller_principal_hash": _clip(caller_principal_hash)
         if caller_principal_hash
@@ -369,14 +495,25 @@ def build_row(
         # contention and left 21 seconds unattributed. These are the spans that
         # would have named them. Empty for an uninstrumented path -- absence
         # means "nothing reported", never "nothing happened".
-        "spans": _clip_spans(spans),
+        "spans": shaped_spans[:_MAX_SPANS],
         # What the request deadline cost this call, when it cost anything.
         # `None` on every unbudgeted row, so "the budget was not reached" and
         # "there was no budget" are the same absence — which is correct: both
         # mean the caller got the whole answer it asked for.
         "budget": _clip_budget(budget),
         "truncated": bool(args_truncated or targets_truncated),
+        # Content-free, so they survive content-private logging: how the
+        # dispatcher classified the call, and how many items it touched (see
+        # `_item_count`). Null is unknown, never zero.
+        "access": access if access in _ACCESS else None,
+        "item_count": _item_count(
+            access, outcome, released_items, arguments or {}, committed_targets or ()
+        ),
     }
+    if len(shaped_spans) > _MAX_SPANS:
+        # A partial `spans` says so. Absent when nothing was dropped, so every
+        # complete row keeps the shape it has always had.
+        row["spans_truncated"] = len(shaped_spans) - _MAX_SPANS
     from .activation_result import project_block
 
     observation = project_block(activation_result)
@@ -389,11 +526,19 @@ def build_row(
 #: Phases kept in one row. The producer already bounds distinct names per call;
 #: this is the independent bound, because the row is hash-chained and an
 #: unbounded field would let one pathological call dominate the ledger file.
+#: Not raised to the producer's bound: rotation keeps `ROTATE_KEEP_ROWS_DEFAULT`
+#: rows within `ROTATE_BYTES_DEFAULT`, about 4 KB a row, and 32 spans that carry
+#: fields already fill that. A row that drops spans counts them instead.
 _MAX_SPANS = 32
 
 
 def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    """Normalize reported phases into a bounded, canonical shape.
+    """Normalize reported phases into a bounded, canonical shape (`_shaped_spans`)."""
+    return _shaped_spans(spans)[:_MAX_SPANS]
+
+
+def _shaped_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Every well-formed reported phase in canonical shape, slowest first.
 
     Slowest first, so truncation drops what matters least. Rebuilt field by
     field rather than passed through, because these rows are hashed: an
@@ -423,13 +568,13 @@ def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
             row["fields"] = fields
         shaped.append(row)
     shaped.sort(key=lambda item: item["ms"], reverse=True)
-    return shaped[:_MAX_SPANS]
+    return shaped
 
 
 #: Named integer measurements one span may carry beside its duration. Bounded
 #: like `_MAX_SPANS`, and integers only: a hash-chained row must not grow a key
 #: whose meaning a later reader has to guess.
-_MAX_SPAN_FIELDS = 4
+_MAX_SPAN_FIELDS = call_spans.MAX_FIELDS_PER_SPAN
 
 
 #: A field key is a measurement name, never a value. Enforced here as well as at
@@ -437,7 +582,7 @@ _MAX_SPAN_FIELDS = 4
 #: before a hash-chained row: a key shaped like a path, title or identifier
 #: cannot pass either gate, and a producer that bypassed the first still cannot
 #: write content into a row through the second.
-_SPAN_FIELD_KEY = re.compile(r"^[a-z_]{1,32}$")
+_SPAN_FIELD_KEY = call_spans.FIELD_KEY_PATTERN
 
 
 def _clip_span_fields(fields: object) -> dict[str, int]:
@@ -446,8 +591,9 @@ def _clip_span_fields(fields: object) -> dict[str, int]:
         return {}
     shaped: dict[str, int] = {}
     for key in sorted(str(name) for name in fields):
-        if len(shaped) >= _MAX_SPAN_FIELDS:
-            break
+        measurements = len(shaped) - int(call_spans.THREAD_CPU_US in shaped)
+        if key != call_spans.THREAD_CPU_US and measurements >= _MAX_SPAN_FIELDS:
+            continue
         if not _SPAN_FIELD_KEY.match(key):
             continue
         try:
@@ -590,6 +736,7 @@ def record_call(
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
     principal_kind: str | None = None,
+    app_id: str | None = None,
     client_name: str | None = None,
     client_version: str | None = None,
     transport: str | None = None,
@@ -606,7 +753,7 @@ def record_call(
     """
     from . import call_spans
 
-    committed_targets = pop_committed_targets(call_spans.MCP_CALL_TOKEN.get())
+    facts = pop_call_facts(call_spans.MCP_CALL_TOKEN.get())
     if not enabled():
         return None
     try:
@@ -630,6 +777,7 @@ def record_call(
                 arguments=arguments,
                 caller_principal_hash=caller_principal_hash,
                 principal_kind=principal_kind,
+                app_id=app_id,
                 client_name=client_name,
                 client_version=client_version,
                 transport=transport,
@@ -637,12 +785,15 @@ def record_call(
                 spans=spans,
                 budget=budget,
                 activation_result=activation_result,
-                committed_targets=committed_targets,
+                committed_targets=facts["paths"],
+                access=facts["access"],
+                released_items=facts["released"],
             )
             append_row(row, path=path)
             _state.update(sequence=row["sequence"], prev_hash=row["row_hash"])
             return row
     except Exception:  # noqa: BLE001 - a ledger write must never break a call
+        _note_append_failure()
         return None
 
 
@@ -655,9 +806,11 @@ def _int_env(name: str, default: int) -> int:
 
 
 def reset_chain_cache() -> None:
-    """Drop the in-process chain head. For tests that move the ledger path."""
+    """Drop the in-process chain head and failed-append time, as a fresh process
+    has them. For tests that move the ledger path or start a new process."""
     with _lock:
         _state.update(sequence=None, prev_hash=None, path=None)
+        _append_failure["at"] = None
 
 
 def verify(path: Path | None = None) -> list[str]:

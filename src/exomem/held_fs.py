@@ -99,6 +99,16 @@ class StableIdentity:
     link_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class FileVersion:
+    """A held identity and platform change witness for ordinary concurrent writes."""
+
+    identity: StableIdentity
+    size: int
+    mtime_ns: int
+    change_time_ns: int
+
+
 def _same_file_identity(first: StableIdentity, second: StableIdentity) -> bool:
     return (
         first.device == second.device
@@ -144,6 +154,9 @@ class HeldFile:
     def close(self) -> None:
         raise NotImplementedError
 
+    def version(self) -> FileVersion:
+        raise NotImplementedError
+
 
 class HeldFilesystem:
     """A retained vault-root anchor with handle-relative leaf operations."""
@@ -186,7 +199,7 @@ class HeldFilesystem:
     ) -> HeldResult[None]:
         raise NotImplementedError
 
-    def read(self, file: HeldFile) -> HeldResult[bytes]:
+    def read(self, file: HeldFile, *, max_bytes: int | None = None) -> HeldResult[bytes]:
         raise NotImplementedError
 
     def write(self, file: HeldFile, data: bytes | Chunks) -> HeldResult[None]:
@@ -232,6 +245,7 @@ class HeldFilesystem:
         source: HeldFile,
         destination_parent: HeldDirectory,
         destination_leaf: str,
+        *, max_bytes: int | None = None, deadline: float | None = None,
     ) -> HeldResult[None]:
         raise NotImplementedError
 
@@ -377,6 +391,7 @@ def publish_bytes(
     *,
     expected_identity: StableIdentity | None = None,
     expected_sha256: str | None = None,
+    validate_existing: Callable[[HeldFile], None] | None = None,
     prepare: Callable[[HeldFile], None] | None = None,
 ) -> HeldResult[StableIdentity]:
     """Atomically publish bytes, or `Chunks` of them, under one held parent.
@@ -388,6 +403,8 @@ def publish_bytes(
     With no expected identity the publish is create-only and uses a no-replace
     hard-link installation. With an expected identity, that exact destination
     stays held while a native relative replacement installs the staged bytes.
+    ``validate_existing`` checks that borrowed handle before and after staging;
+    the callback must neither close nor mutate it.
     """
 
     if not isinstance(data, bytes | Chunks):
@@ -433,6 +450,8 @@ def publish_bytes(
                             "IDENTITY_CHANGED", "held filesystem content changed"
                         )
                     )
+            if validate_existing is not None:
+                validate_existing(existing)
 
         created = filesystem.file(
             parent,
@@ -512,6 +531,9 @@ def publish_bytes(
                             "IDENTITY_CHANGED", "held filesystem content changed"
                         )
                     )
+            if validate_existing is not None:
+                assert existing is not None
+                validate_existing(existing)
             replaced = filesystem.rename(staged, parent, leaf, replace=True)
             if not replaced.ok:
                 return publication_error(replaced.error)

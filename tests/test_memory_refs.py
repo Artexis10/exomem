@@ -8,7 +8,17 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import add, commands, link, memory_refs, note, preserve
+from exomem import (
+    add,
+    call_spans,
+    commands,
+    freshness,
+    link,
+    memory_refs,
+    note,
+    preserve,
+    semantic_contract,
+)
 from exomem import vault as vault_module
 
 TODAY = dt.date(2026, 7, 9)
@@ -17,6 +27,33 @@ TODAY = dt.date(2026, 7, 9)
 def _page(identity: str | None, body: str = "# Page\n") -> str:
     id_line = f"\nexomem_id: {identity}" if identity is not None else ""
     return f"---\ntype: insight\ncreated: 2026-07-09{id_line}\n---\n\n{body}"
+
+
+def test_a_legacy_bom_negative_row_rebuilds_without_rewriting_the_page(tmp_path: Path) -> None:
+    import hashlib
+    import sqlite3
+
+    path = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    path.parent.mkdir(parents=True)
+    identity = memory_refs.new_id()
+    raw = ("\ufeff" + _page(identity)).encode("utf-8")
+    path.write_bytes(raw)
+    rel = path.relative_to(tmp_path).as_posix()
+    index = memory_refs.ReferenceIndex(tmp_path)
+    index.rebuild_all()
+    with sqlite3.connect(index.path) as connection:
+        # Version 3 could record a BOM page as missing while retaining its exact byte hash.
+        connection.execute("UPDATE ref_meta SET value='3' WHERE key='schema_version'")
+        connection.execute(
+            "UPDATE identities SET exomem_id=NULL,raw_id='',status='missing' WHERE path=?",
+            (rel,),
+        )
+
+    assert memory_refs.holds_content_identities(
+        tmp_path, {rel: hashlib.sha256(raw).hexdigest()}
+    ) == {rel: False}
+    assert index.ref_for_path(rel) == memory_refs.memory_ref(identity)
+    assert path.read_bytes() == raw
 
 
 def test_reference_round_trip_and_incremental_move(tmp_path: Path) -> None:
@@ -41,6 +78,26 @@ def test_reference_round_trip_and_incremental_move(tmp_path: Path) -> None:
     index.refresh_paths([new])
     index.delete_paths(["Knowledge Base/Notes/old.md"])
     assert index.resolve(identity) == "Knowledge Base/Notes/new.md"
+
+
+def test_a_crlf_page_is_held_at_the_digest_of_its_bytes(tmp_path: Path) -> None:
+    """Recall custody proves a page by its byte digest; CRLF must not change the answer."""
+    import hashlib
+
+    vault = tmp_path / "vault"
+    page = vault / "Knowledge Base" / "Evidence" / "capture.md"
+    page.parent.mkdir(parents=True)
+    identity = memory_refs.new_id()
+    page.write_bytes(_page(identity).replace("\n", "\r\n").encode("utf-8"))
+    rel = "Knowledge Base/Evidence/capture.md"
+
+    index = memory_refs.ReferenceIndex(vault)
+    assert index.rebuild_all()["indexed"] == 1
+    digest = hashlib.sha256(page.read_bytes()).hexdigest()
+
+    assert memory_refs.holds_content_identities(vault, {rel: digest}) == {rel: True}
+    assert index.resolve(identity) == rel
+    assert memory_refs.drift(vault) == []
 
 
 def test_bulk_reference_lookup_uses_index_and_refreshes_only_missing_paths(tmp_path: Path) -> None:
@@ -112,12 +169,12 @@ def test_bulk_reference_lookup_answers_phantom_casing_in_the_callers_form(
     The casefold is modelled here so the contract is pinned on Linux CI too.
     """
     vault = tmp_path / "vault"
-    folder = vault / "Knowledge Base" / "Notes" / "POLLY"
+    folder = vault / "Knowledge Base" / "Notes" / "ACME"
     folder.mkdir(parents=True)
     identity = memory_refs.new_id()
     (folder / "terms.md").write_text(_page(identity), encoding="utf-8")
-    on_disk = "Knowledge Base/Notes/POLLY/terms.md"
-    phantom = "Knowledge Base/Notes/Polly/terms.md"
+    on_disk = "Knowledge Base/Notes/ACME/terms.md"
+    phantom = "Knowledge Base/Notes/Acme/terms.md"
 
     index = memory_refs.ReferenceIndex(vault)
     assert index.rebuild_all() == {"indexed": 1, "duplicates": 0, "malformed": 0}
@@ -139,12 +196,12 @@ def test_bulk_reference_lookup_answers_phantom_casing_in_the_callers_form(
 def test_delete_paths_removes_the_canonical_row_for_phantom_casing(tmp_path: Path) -> None:
     """A delete addressed with the caller's casing must not orphan the real row.
 
-    On NTFS `.../Polly/terms.md` and `.../POLLY/terms.md` open one file, but the
+    On NTFS `.../Acme/terms.md` and `.../ACME/terms.md` open one file, but the
     sidecar keys rows as case-sensitive text: a stale row survives the delete and
     then reads back as a second owner of the identity.
     """
     vault = tmp_path / "vault"
-    folder = vault / "Knowledge Base" / "Notes" / "POLLY"
+    folder = vault / "Knowledge Base" / "Notes" / "ACME"
     folder.mkdir(parents=True)
     identity = memory_refs.new_id()
     page = folder / "terms.md"
@@ -152,10 +209,10 @@ def test_delete_paths_removes_the_canonical_row_for_phantom_casing(tmp_path: Pat
 
     index = memory_refs.ReferenceIndex(vault)
     assert index.rebuild_all() == {"indexed": 1, "duplicates": 0, "malformed": 0}
-    assert index.resolve(identity) == "Knowledge Base/Notes/POLLY/terms.md"
+    assert index.resolve(identity) == "Knowledge Base/Notes/ACME/terms.md"
 
     page.unlink()
-    index.delete_paths(["Knowledge Base/Notes/Polly/terms.md"])
+    index.delete_paths(["Knowledge Base/Notes/Acme/terms.md"])
 
     with pytest.raises(memory_refs.ReferenceError) as excinfo:
         index.resolve(identity)
@@ -512,9 +569,31 @@ def test_read_and_edit_accept_canonical_reference(vault: Path) -> None:
         status="draft",
         today=TODAY,
     )
-    fetched = commands.op_get(vault, path=created.ref)
+    token = call_spans.MCP_CALL_TOKEN.set("reference-read-diagnostics")
+    try:
+        fetched = commands.op_get(vault, path=created.ref)
+        spans = {
+            span["name"]: span
+            for span in call_spans.pop_call_spans("reference-read-diagnostics")
+        }
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(token)
     assert fetched["path"] == created.path
     assert fetched["ref"] == created.ref
+    assert {
+        "read.resolve_identifier", "read.prepare", "read.page",
+        "read.reference", "read.release", "memory_refs.identity_census",
+    } <= spans.keys()
+    census = spans["memory_refs.identity_census"]["fields"]
+    # The suite runs with the corpus cache off, so the scan answered.
+    assert census["snapshot"] == 0
+    assert census["pages"] >= 1
+    assert census["cpu_ms"] >= 0
+    assert all(
+        isinstance(value, int)
+        for span in spans.values()
+        for value in span.get("fields", {}).values()
+    )
 
     edited = commands.op_edit(
         vault,
@@ -649,3 +728,329 @@ def test_an_unchunked_lookup_would_bind_every_path(tmp_path: Path) -> None:
         memory_refs.ReferenceIndex._refs_from_connection = original
 
     assert max(binds) == 10, binds
+
+
+# --------------------------------------------------------------------------
+# Resolution from the server's current identity projection
+# --------------------------------------------------------------------------
+
+
+def _withhold_hidden_notes_from_external(root: Path) -> None:
+    """Release `Notes/Open/**` to `external`; withhold `Notes/Hidden/**` (ceiling 0)."""
+    base = root / "Knowledge Base" / "_Governance"
+    (base / "scopes").mkdir(parents=True, exist_ok=True)
+    (base / "rules").mkdir(parents=True, exist_ok=True)
+    (base / "scopes" / "open.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FE1\n"
+        'name: open\npaths: ["Notes/Open/**"]\n',
+        encoding="utf-8",
+    )
+    (base / "rules" / "open.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FE2\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FE1"]\naudience: external\nceiling: 6\n',
+        encoding="utf-8",
+    )
+    (base / "scopes" / "hidden.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FE3\n"
+        'name: hidden\npaths: ["Notes/Hidden/**"]\n',
+        encoding="utf-8",
+    )
+    (base / "rules" / "hidden.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FE4\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FE3"]\naudience: external\nceiling: 0\n',
+        encoding="utf-8",
+    )
+
+
+def _write_page(root: Path, relative: str, markdown: str) -> None:
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(markdown, encoding="utf-8")
+
+
+def test_the_projection_resolves_twins_exactly_as_the_scan_does(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A duplicated identity keeps every owner in the projection.
+
+    The projection's canonical refs drop a duplicated id altogether. Answering
+    from them would turn a visible page with a hidden twin into "not found",
+    which tells the caller that a hidden page shares the id, and would turn two
+    visible twins into "not found" instead of ambiguous.
+    """
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    hidden_twin = memory_refs.new_id()
+    visible_twins = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/Open/shown.md", _page(hidden_twin))
+    _write_page(tmp_path, "Knowledge Base/Notes/Hidden/withheld.md", _page(hidden_twin))
+    _write_page(tmp_path, "Knowledge Base/Notes/Open/first.md", _page(visible_twins))
+    _write_page(tmp_path, "Knowledge Base/Notes/Open/second.md", _page(visible_twins))
+    _withhold_hidden_notes_from_external(tmp_path)
+    external = RequestPrincipal(audience_id="external", surface="mcp")
+
+    def resolve(identity: str) -> str | dict[str, str]:
+        try:
+            return egress.resolve_visible_identifier(
+                tmp_path, memory_refs.memory_ref(identity), principal=external
+            )
+        except memory_refs.ReferenceError as error:
+            return error.as_dict()
+
+    # No projection is current yet, so these read through the scan.
+    through_scan = {identity: resolve(identity) for identity in (hidden_twin, visible_twins)}
+
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+
+    def no_scan(vault_root: Path) -> list:
+        raise AssertionError("a current projection must answer without a scan")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    through_projection = {
+        identity: resolve(identity) for identity in (hidden_twin, visible_twins)
+    }
+
+    assert through_projection == through_scan
+    assert through_projection[hidden_twin] == "Knowledge Base/Notes/Open/shown.md"
+    assert through_projection[visible_twins] == {
+        "code": "AMBIGUOUS_REFERENCE",
+        "reason": f"memory id {visible_twins} appears in 2 pages",
+    }
+
+
+def test_artifact_redaction_borrows_the_current_identity_projection(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two release passes preserve redaction without reparsing the corpus per token."""
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    visible, hidden, twin, absent = (memory_refs.new_id() for _ in range(4))
+    for path, identity in (
+        ("Notes/Open/shown.md", visible), ("Notes/Hidden/withheld.md", hidden),
+        ("Notes/Open/twin.md", twin), ("Notes/Hidden/twin.md", twin),
+    ):
+        _write_page(tmp_path, f"Knowledge Base/{path}", _page(identity))
+    _withhold_hidden_notes_from_external(tmp_path)
+    refs = [memory_refs.memory_ref(identity) for identity in (visible, hidden, twin, absent)]
+    payload = {"handoff_prompt": " ".join([*refs, "exomem://memory/invalid"])}
+    external = RequestPrincipal(audience_id="external", surface="mcp")
+    with request_scope(external):
+        through_scan = egress.postfilter(
+            "ask_memory", egress.postfilter("ask_memory", payload, tmp_path), tmp_path,
+        )
+
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+
+    def no_scan(root: Path) -> list:
+        raise AssertionError("artifact release must borrow the current identity projection")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    with request_scope(external):
+        through_projection = egress.postfilter(
+            "ask_memory", egress.postfilter("ask_memory", payload, tmp_path), tmp_path,
+        )
+    assert through_projection == through_scan
+    assert refs[1] not in through_projection["handoff_prompt"]
+    assert all(ref in through_projection["handoff_prompt"] for ref in (refs[0], refs[2], refs[3]))
+    assert "exomem://memory/invalid" in through_projection["handoff_prompt"]
+
+
+def test_through_the_projection_a_hidden_only_id_reads_as_an_absent_one(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two vaults that differ only by one withheld page answer the same."""
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    identity = memory_refs.new_id()
+    held = tmp_path / "held"
+    empty = tmp_path / "empty"
+    for root in (held, empty):
+        _write_page(root, "Knowledge Base/Notes/Open/other.md", _page(memory_refs.new_id()))
+        _withhold_hidden_notes_from_external(root)
+    _write_page(held, "Knowledge Base/Notes/Hidden/withheld.md", _page(identity))
+    for root in (held, empty):
+        freshness.rebaseline(root)
+        semantic_contract.build_corpus_context(root)
+
+    def no_scan(vault_root: Path) -> list:
+        raise AssertionError("a current projection must answer without a scan")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    external = RequestPrincipal(audience_id="external", surface="mcp")
+    answers = []
+    for root in (held, empty):
+        with pytest.raises(memory_refs.ReferenceError) as caught:
+            egress.resolve_visible_identifier(
+                root, memory_refs.memory_ref(identity), principal=external
+            )
+        answers.append(caught.value.as_dict())
+
+    assert answers[0] == answers[1] == {
+        "code": "REFERENCE_NOT_FOUND",
+        "reason": f"memory id not found: {identity}",
+    }
+
+
+def test_a_projection_behind_an_external_edit_falls_back_to_the_scan(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page written behind the server resolves once the change is pending.
+
+    The projection was built before the page existed, so only the scan can
+    answer for it.
+    """
+    known = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/known.md", _page(known))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    late = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/late.md", _page(late))
+    freshness.mark_external_pending(tmp_path)
+
+    scans: list[str] = []
+    real = memory_refs._scan_pages
+
+    def counted(vault_root: Path) -> list:
+        scans.append(str(vault_root))
+        return real(vault_root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", counted)
+    resolved = memory_refs.paths_for_ids_read_only(tmp_path, [known, late])
+
+    assert resolved == {
+        known: ("Knowledge Base/Notes/known.md",),
+        late: ("Knowledge Base/Notes/late.md",),
+    }
+    assert len(scans) == 1
+
+
+def test_the_projection_and_the_scan_resolve_upper_case_and_cr_only_pages_alike(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both sources read a `.MD` page and a page with CR-only line endings.
+
+    The scan once matched `*.md` case-sensitively on POSIX, and the census read
+    raw bytes, where a CR-only page shows no frontmatter. Either gap made the
+    same reference resolve through one source and read as absent through the
+    other.
+    """
+    upper = memory_refs.new_id()
+    carriage = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/Upper.MD", _page(upper))
+    cr_only = tmp_path / "Knowledge Base" / "Notes" / "carriage.md"
+    cr_only.write_bytes(_page(carriage).replace("\n", "\r").encode("utf-8"))
+    expected = {
+        upper: ("Knowledge Base/Notes/Upper.MD",),
+        carriage: ("Knowledge Base/Notes/carriage.md",),
+    }
+
+    # No projection is current yet, so this reads through the scan.
+    assert memory_refs.paths_for_ids_read_only(tmp_path, [upper, carriage]) == expected
+
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+
+    def no_scan(vault_root: Path) -> list:
+        raise AssertionError("a current projection must answer without a scan")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    assert memory_refs.paths_for_ids_read_only(tmp_path, [upper, carriage]) == expected
+
+
+def test_a_vault_with_a_trash_directory_resolves_through_the_scan(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page under `Knowledge Base/trash/` keeps the ref it is handed today.
+
+    The identity census never admits that directory, while the scan reads it
+    and a read by path returns the page's ref. A current projection would read
+    that ref as absent, so the vault takes the scan even with one available.
+    """
+    live = memory_refs.new_id()
+    trashed = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/live.md", _page(live))
+    _write_page(tmp_path, "Knowledge Base/trash/gone.md", _page(trashed))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    assert semantic_contract.current_reference_identity_snapshot(tmp_path) is not None
+
+    scans: list[str] = []
+    real = memory_refs._scan_pages
+
+    def counted(vault_root: Path) -> list:
+        scans.append(str(vault_root))
+        return real(vault_root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", counted)
+    resolved = memory_refs.paths_for_ids_read_only(tmp_path, [live, trashed])
+
+    assert resolved == {
+        live: ("Knowledge Base/Notes/live.md",),
+        trashed: ("Knowledge Base/trash/gone.md",),
+    }
+    assert len(scans) == 1
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        ("warm", None),
+        ("unobserved", "events_not_live"),
+        ("cold", "corpus_absent"),
+        ("pending", "external_pending"),
+        ("moved", "checkpoint_differs"),
+        ("namespace", "namespace_differs"),
+        ("revalidation", "snapshot_changed"),
+    ],
+)
+def test_identity_resolution_names_the_reason_for_a_full_scan(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch,
+    state: str, reason: str | None,
+) -> None:
+    """A slow reference read must distinguish why it could not reuse its snapshot."""
+    identity = memory_refs.new_id()
+    relative = "Knowledge Base/Notes/known.md"
+    page = tmp_path / relative
+    _write_page(tmp_path, relative, _page(identity))
+    if state != "unobserved":
+        freshness.rebaseline(tmp_path)
+    if state not in ("cold", "unobserved"):
+        semantic_contract.build_corpus_context(tmp_path)
+    if state == "pending":
+        freshness.mark_external_pending(tmp_path)
+    elif state == "moved":
+        page.write_text(_page(identity, "# Changed\n"), encoding="utf-8")
+        freshness.on_files_changed(tmp_path, changed=(page,))
+    elif state == "namespace":
+        (tmp_path / "Knowledge Base/trash").mkdir()
+    elif state == "revalidation":
+        acquire = semantic_contract.current_reference_identity_snapshot
+
+        def changed_snapshot(root: Path, **kwargs):
+            snapshot = acquire(root, **kwargs)
+            freshness.mark_external_pending(root)
+            return snapshot
+
+        monkeypatch.setattr(
+            semantic_contract, "current_reference_identity_snapshot", changed_snapshot
+        )
+
+    token = "identity-scan-reason"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        assert memory_refs.paths_for_ids_read_only(tmp_path, [identity]) == {
+            identity: (relative,),
+        }
+        rows = call_spans.pop_call_spans(token)
+        fields = next(row["fields"] for row in rows if row["name"] == "memory_refs.identity_census")
+        assert fields["snapshot"] == int(reason is None)
+        declines = {key: value for key, value in fields.items() if key.startswith("declined_")}
+        assert declines == ({} if reason is None else {f"declined_{reason}": 1})
+    finally:
+        call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)

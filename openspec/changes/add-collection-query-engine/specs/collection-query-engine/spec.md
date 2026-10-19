@@ -241,6 +241,29 @@ The system SHALL expose compose, explain, safe cost preview, dry-run and executi
 - **WHEN** a saved or ad hoc query is dry-run
 - **THEN** binding/governance/cost and preparation findings are returned without result iteration, schema changes, collection writes or audit effects
 
+### Requirement: Dataset intake serves people through a generic agent contract
+
+The system SHALL use shared storage and import contracts for supported datasets, independent of provider or domain. Source structure and validated mappings SHALL determine row handling. The default user explanation SHALL describe the source, proposed import, progress and material ambiguities in plain language. Technical mappings, schemas, indexes and diagnostics SHALL be available on request rather than required for ordinary intake.
+
+Agents MAY use model judgement to propose mappings from source evidence. Exomem SHALL validate those candidates through existing parsers, schemas, source bindings and mutation checks. Inferred and declared facts SHALL remain distinguishable. A proposed mapping SHALL NOT invent missing units, timezones or authority. Clarification SHALL concern material meaning or authority that available evidence and existing decisions cannot resolve.
+
+The intake flow SHALL preserve the source, inspect a bounded sample, validate the mapping, stream resumable batches and verify stored counts and values. Query answers SHALL retain source and completeness information. Partial, unsupported and failed portions SHALL remain visible. A paused import SHALL NOT require a blanket pause of unrelated authorized reads and writes.
+
+#### Scenario: Different export shapes share one intake flow
+- **WHEN** an agent imports supported log, platform and time-series sources with different fields and nested values
+- **THEN** it uses the same discovery, mapping, import and query tools with source-specific declarations
+- **AND** the user receives a plain-language proposal and honest progress without requiring database terminology
+- **AND** stored values and sourced answers match independent source truth
+
+#### Scenario: Mapping evidence leaves a material ambiguity
+- **WHEN** source inspection and existing decisions cannot establish a field's unit or time basis
+- **THEN** the agent preserves that uncertainty and asks a focused question only if the requested interpretation requires it
+- **AND** it does not invent a conversion or block unrelated authorized work
+
+#### Scenario: A user requests technical details
+- **WHEN** the user asks how an import maps fields or stores data
+- **THEN** the agent explains the actual mapping and measured storage behavior, distinguishing verified results from pending work
+
 ### Requirement: Large collections use compact typed storage and streaming ingest
 
 Large declared collections SHALL support a migration-managed canonical typed-column encoding in the single per-vault store, retaining stable identities, immutable version/source history, logical hashing/audit, governance and the explicit items/summary query/render/edit-back contracts in the MODIFIED structured-collections requirements. Declared dense scalars SHALL not require a full JSON row plus duplicate JSON projection; sparse residual objects MAY retain bounded JSON. Existing JSON encoding SHALL remain readable and migration SHALL prove logical parity before publishing. Optional bulky-text compression SHALL be lossless, versioned and bounded at decode; indexed scalar fields SHALL remain directly comparable.
@@ -471,6 +494,57 @@ Canonical typed-v1 SHALL preserve the full accepted integer/finite-number domain
 #### Scenario: New history rejects mutation and orphan sources
 - **WHEN** a caller updates/deletes a typed_versions or version_identity row, or inserts a source without its (row_id,row_version) identity
 - **THEN** the triggers/FK abort and immutable version/source/audit history is unchanged
+
+### Requirement: Native typed storage preserves immutable encoding bindings
+
+Canonical `typed-v2` SHALL preserve every accepted value, scalar subtype, identity spelling, payload hash and source reference. It SHALL store dense values once and derive comparison operands from the versioned field codecs. Authoritative numeric overflow frames SHALL bind a pinned number-key encoder/inverse version and the caller's decoding budget. The collection descriptor SHALL freeze UUID16 for canonical UUID-only identities or UTF-8 BLOBs for opaque identities, preserving existing BINARY ordering. Codec selection SHALL follow the future ingress contract and a complete retained-identity scan, never a sample.
+
+UUID16 SHALL require both canonical retained identities and a canonical UUID guarantee from every supported future insertion path. Collections with an ingress that accepts opaque identities SHALL use UTF-8 from the outset. Ordinary append SHALL NOT switch the published codec or trigger collection-wide recoding or public cursor invalidation.
+
+The descriptor SHALL reference generation-scoped append-only epoch and reconstruction-format metadata without changing its identity when new metadata appears. The first present timestamp SHALL initialize its epoch and payload atomically, including after publication. Readers SHALL resolve metadata under their snapshot and bound cache retention. Schema 11 SHALL bind each typed version identity to its original payload generation and retain ready and retired history protections. JSON history SHALL retain its original payload binding. Query-only rebuilds SHALL NOT mint a payload generation or historical version. Bounded candidate construction and atomic publication SHALL preserve the old ready pair on failure. Existing admission, cursor freshness, deadlines and public preview gates SHALL remain unchanged.
+
+A frozen field codec SHALL preserve values admitted by legal later schema revisions. Values outside that codec's representable domain SHALL use one reserved, versioned JSON escape frame with bounded decoding. Malformed metadata, failed encoding and exceeded budgets SHALL remain errors rather than escape conditions. Selected reads SHALL enforce admission inside escaped containers. Comparison semantics SHALL follow the logical query kind, independently of the payload codec. Existing projected type-change restrictions SHALL remain unchanged.
+
+Each native payload SHALL retain its canonical values byte extent, measured before compaction and protected with the payload. Full reconstruction SHALL use that extent and verify exact consumption. Selected reads SHALL use their caller's existing budget without requiring the full row to fit. This encoding SHALL NOT impose the import source-row limit on existing Records.
+
+Native generated comparison operands SHALL bind a fixed function version, immutable payload generation and physical file role. Integer-to-number widening SHALL preserve the existing generated expressions. Metadata reads SHALL use the executing snapshot without a cache that survives rollback or connection rebinding. Missing metadata SHALL refuse the affected comparison. Numeric operands SHALL preserve exact ordering across ordinary and overflow bands. Scoped temporary relations SHALL retain only released operands and row identity/version.
+
+#### Scenario: Late metadata survives rollback and reopening
+- **GIVEN** a published native index with no present timestamp and a query generation different from its payload generation
+- **WHEN** the first timestamp commits, another format rolls back, and a different format reuses that identifier
+- **THEN** indexed and unindexed comparison agree after reopening, including when the derived file has another attachment alias
+
+#### Scenario: Widening and changed shapes retain exact comparisons
+- **WHEN** an indexed integer widens to number, or a new index addresses a legally revised nested field
+- **THEN** fractional and exact large values compare correctly, while older incompatible shapes retain missing-path semantics
+
+#### Scenario: A small field remains readable inside a large record
+- **WHEN** a valid record exceeds the import source-row limit through individually accepted values and migrates to native storage
+- **THEN** reopening, an unrelated update and a legal revision preserve its full values, history, hashes and measured extent
+- **AND** a small admitted selection remains readable while an oversized selection retains the existing query refusal
+- **AND** a compact amplification frame cannot expand beyond its independently measured extent
+
+#### Scenario: A legal field revision preserves frozen payloads
+- **WHEN** an unprojected optional string field containing null and missing values becomes numeric and gains its first index
+- **AND** writes add signed zero and an integer above signed-64 range before index publication
+- **THEN** reopening preserves exact reads, numeric filtering and order, historical values, hashes and sources
+- **AND** revision and append leave the payload descriptor unchanged
+
+#### Scenario: An opaque identity remains distinct
+- **WHEN** a collection contains canonical, uppercase or unhyphenated UUID-looking keys and other accepted opaque identities, then it migrates and reopens
+- **THEN** every identity retains its exact spelling, uniqueness and BINARY order through the frozen UTF-8 codec, with honest capacity accounting
+
+#### Scenario: A timestamp first appears after publication
+- **WHEN** a timestamp field is absent through publication, then an import adds its first value, an earlier value and a new accepted spelling
+- **THEN** metadata and payload commit together, the epoch and previous cells remain unchanged, and snapshot decoding reconstructs every original value
+
+#### Scenario: Query generations do not change history
+- **WHEN** a typed collection rebuilds its query indexes, appends a version and reopens after retaining older JSON and typed versions
+- **THEN** current queries use the published query generation while each historical version retains its original encoding, payload generation, hash and sources
+
+#### Scenario: Failed publication retains the serving pair
+- **WHEN** a native migration fails during catch-up or publication, or the store reopens after its schema rebuild
+- **THEN** the old ready pair remains authoritative, immutable history stays unchanged, and repaired triggers accept complete new versions while refusing orphan payloads
 
 ### Requirement: Import jobs retain continuing source and target authority
 

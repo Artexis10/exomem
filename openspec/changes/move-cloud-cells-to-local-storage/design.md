@@ -103,6 +103,10 @@ Each hourly backup is a new hold kind, `snapshot-backup`, that does not stop the
   - cleanup: 1.6–2.2 s.
   The cost is per cell, not per byte, so one node can back up about 200 lightly changed cells an hour, one at a time. The repository sat on the runner's disk, so upload to B2 is not in these numbers; the drill measures it. A second slot keeps one slow cell from delaying the rest.
 - **Alerting:** cellctl raises one platform alert while any serving cell's last successful backup is older than two hours. It posts the same content-free transition as the hosted scheduler evaluator to the existing alert receiver, which emails only on a change of state. The Role `cellctl-alert-delivery` lets cellctl read that receiver's URL from its one Secret. The stale cells go to cellctl's log by id.
+  Two dedicated-host alerts go the same way: `cell-array-degraded` while an md array is inactive, has a failed member, or has fewer active members than it requires (task 5.5), and `thin-pool-high` while a thin pool's data or metadata use is at 80% or more (task 5.6).
+  Their sources are node-exporter's mdadm collector alone, run unprivileged on the nodes where TopoLVM's node plugin runs because `/proc/mdstat` is not namespaced, and that plugin's `topolvm_thinpool_data_percent` and `topolvm_thinpool_metadata_percent`.
+  cellctl lists those pods by label, reads each pod's `/metrics` by pod IP once a minute, and parses the text with a Prometheus parser.
+  An alert is true when any expected node reads bad, unknown (nothing sent, never resolved) when any expected node cannot be read, and false only when every expected node reads clean. The expected nodes are the ones that publish a local pool, so a node with a pool and no md array, such as the Cloud recovery agent (D8), must be excluded from the array alert's expected nodes.
 - **Cells on Hetzner volumes:** those volumes can't take CSI snapshots, and cells stay on them until their own migration, which waits on the hardware purchase. A cell whose class has no snapshot support therefore keeps the nightly stopped backup, its window, concurrency 1 and its prune, and its backup-age alert fires at 26 hours.
 
 **Targets:**
@@ -132,10 +136,16 @@ TopoLVM's controller would delete every claim on a deleted Node when it finalize
 
 **No fresh claim over a recorded volume:** while a row records a volume, cellctl never creates a fresh claim for it, on any storage class. A missing claim then sets the row to `VOLUME_MISSING`, and the cell stays stopped until an operator acts. The one exception is relocation, which restores into its new claim before the cell starts. An operator who has found a volume lost, for example after an etcd restore, marks the cell's namespace with `exomem.io/volume-lost=<volume id>`; a missing claim with that mark relocates the cell from its backup. The empty-vault guard (D5) stays as the second line: it covers a claim that exists over an empty volume.
 
-**The removal refusal while a cell's volume is on the target:** until the removal playbook relocates cells itself (task 6.4), `remove-agent.yml` refuses while a local cell PV is still pinned to the target and bound. A retained PV left by a finished relocation does not block it. Maintenance holds block a removal only on cells whose volume is on the target.
+**Cells on the target of a removal:** the operator cordons the target and moves each cell whose local PV is pinned to it through the planned move (D7), accepting each before the next. Acceptance needs the old volume as a rollback copy, and the playbook's drain, stop and Node deletion end that copy, so acceptance comes before the playbook runs. Cell upgrades stay paused while the target is cordoned: an unmoved cell there cannot start again. `remove-agent.yml` then cordons the target if it is not cordoned already, skips cells already bound elsewhere, and moves any cell still pinned to it and bound, one at a time, as a fallback whose acceptance comes after the removal. A failed move stops the removal with the target still in the cluster and cordoned. A retained PV left by a finished relocation or move holds no live cell. Maintenance holds block a removal only on cells whose live volume is on the target: a cell moved off it keeps only its retained volume there, and backs up on its new node. A target that is not Ready cannot take a move's stopped backup, so the removal refuses while such a target still holds a live cell volume:
 
-- **What it prevents:** deleting the Node of an agent that still holds a cell's only current volume. cellctl would then relocate that cell from its last backup and lose up to an hour of its writes, although the node may have been healthy.
-- **Cost when it fires wrongly:** the removal waits until the cell is relocated, or its volume released.
+- **What it prevents:** deleting the Node of an agent that still holds a cell's only current volume. cellctl would then relocate that cell from its last backup and lose up to an hour of its writes.
+- **Cost when it fires wrongly:** the removal waits until the cell is relocated under node loss, or its volume released.
+- **Who pays:** the operator. Tenants are not affected.
+
+Before the cordon, the removal also refuses when a cell it would move has nowhere to land. Each cell counts against the storage it uses. A cell on an attachable volume counts against the remaining attachment slots, as before. A live cell on the target's local storage needs one remaining general node whose published free bytes cover its claim size and still hold the D6 snapshot reserve: twice the largest cell, for each backup the node may run at once. cellctl applies the same rule to a cell's growth (D10), through `capacity.pool_takes`. The playbook cannot import cellctl, so it applies a copy of that rule and of cellctl's general-node rule. One file of shared cases holds what both must decide, and a test on each side checks it. A cellctl test also checks that the playbook's reserve inputs match the chart's. The playbook places the largest cell first, each on the node with the most room, and moves the cells in that order, so an early small cell cannot take the room a later large one needs. The placement can refuse a fit only another packing finds, but it never passes one that does not fit.
+
+- **What it prevents:** a move whose new claim has nowhere to land. The cell would stay stopped until the move's 70-minute wait ran out.
+- **Cost when it fires wrongly:** the operator adds a node or frees room before removing the agent.
 - **Who pays:** the operator. Tenants are not affected.
 
 **Recovery order after a node loss:**
@@ -232,6 +242,14 @@ The Hetzner class stays the configured cell storage domain until the dedicated a
 
 The retained Hetzner volumes are deleted after a 7-day soak.
 
+**The planned move:** steps 1 to 4 are one cellctl operation, which agent removal (task 6.4) also uses.
+
+- **Trigger:** the operator marks the cell's namespace with `exomem.io/move-volume=<the row's volume_id>`, as for `volume-lost` (D4). A mark naming any other volume is stale and moves nothing, so a mark left after the move never moves the cell again. With no local class configured, a mark moves nothing.
+- **First step:** a `move` hold, which the row records as `backup`. It stops the cell and runs the stopped backup's Job on the old volume, with no prune. Only once that backup succeeds does the hold become the relocation's restore hold (D4), with that backup, not the last hourly one, as its restore point. A failed backup leaves the cell stopped on its untouched claim with `MOVE_BACKUP_FAILED`, recorded on the hold so the backup is not run again; removing the mark starts the cell on its volume as before. A backup that succeeded is restored whatever happens next: removing the mark does not stop the move, and a node lost after that backup restores it, not the last hourly one. The cell's pod was gone before the backup ran, so nothing wrote the volume after it.
+- **Holds:** a move starts only on a cell with no other hold, and a deletion supersedes it, as it supersedes every hold.
+- **Claim class:** the old claim keeps its class while it exists, because `storageClassName` is immutable. The new claim takes the local class, as a relocation's does. The pass that deletes the old claim does not apply the claim again: it would render the old class, and the unused claim is deleted at once, so that apply would recreate it on the old class.
+- **Placement:** the new claim binds where its restore Job schedules (WaitForFirstConsumer). A cell leaving a Hetzner volume cannot bind back: its node has no local pool. To leave a local node, the operator or the removal playbook cordons it first. A backup Job of a local volume therefore tolerates its node's cordon: its PV already pins it there. The restore Job does not, so the new claim binds elsewhere. Admission admits that one toleration on a Job, and none on a cell's pod.
+
 ### D8. Dedicated agents join over a private link; a Cloud recovery agent stays available
 
 **Join:** a dedicated agent joins over a private link with the existing agent hardening, the CA-pinned agent token and the inter-node firewall. The link depends on the provider:
@@ -274,6 +292,15 @@ A 4 GiB default only holds if a cell that fills grows without an operator. cellc
 - **Recorded on the row:** cellctl records the grown size on the cell's row, in a column it owns, and renders the claim at the larger of that and `storage_gib`. A later pass therefore never renders a smaller claim, which Kubernetes refuses. The column needs a Substrate migration.
 - **Capacity:** a grown cell consumes `ceil(size / default)` slots, as any larger cell does (D6), so admission sees the growth on the next capacity pass.
 - **Not shrunk:** a cell never shrinks automatically. Kubernetes cannot shrink a claim, and a smaller size needs a backup and a restore.
+
+### D11. Capacity grows by adding mid-sized nodes on demand
+
+Cells are created automatically on any node with a free slot. Nodes are added by the operator when demand needs them, not by an autoscaler, because a dedicated server is a monthly commitment.
+
+- **Node shape:** any provider's server with a mirrored NVMe pair qualifies. It joins over vSwitch on Hetzner, or over WireGuard elsewhere (D8). Nodes stay mid-sized, because node-loss recovery time grows with the cells a node holds (D4). Capacity grows by adding nodes, not by building bigger ones.
+- **When to add one:** the operator orders the next node while a few free places remain, not when none do, because the join and its checks take days on new hardware. A signal for low free places belongs where free places are computed, with the operator's other alerts; it is outside this change.
+- **Bursts:** before the cutover, a Hetzner Cloud node can serve as temporary overflow on the Hetzner class. Its cells move to a local node by the per-cell migration (D7), and the overflow node is then removed. After the cutover only local-storage nodes publish slots (D7).
+- **A tenant that needs more:** a cell grows its storage online (D10). A cell that needs a node to itself uses the existing per-cell reservation: an agent labelled and tainted `exomem.io/dedicated-cell` with the cell's id publishes no general slots.
 
 ### Archive order
 

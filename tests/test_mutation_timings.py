@@ -28,7 +28,15 @@ from pathlib import Path
 
 import pytest
 
-from exomem import activation_manifest, semantic_contract, semantic_writes, writer_lease
+from exomem import (
+    activation_manifest,
+    compiled_history,
+    memory_refs,
+    registry_history,
+    semantic_contract,
+    semantic_writes,
+    writer_lease,
+)
 from exomem import edit as edit_module
 from exomem import metrics as metrics_module
 from exomem import mutation_timings as mutation_timings_module
@@ -57,13 +65,24 @@ _ALWAYS_TAKEN_STAGES = (
 )
 
 
-def _canonical(payload: object) -> str:
-    """JSON with the one legitimately per-call value pinned.
+def _canonical(payload: dict, root: Path) -> str:
+    """Compare the receipt and retained history, pinning only per-call identity.
 
-    A transition token carries a fresh `transition_id` UUID per mint, so two
-    otherwise identical writes never serialize the same bytes. Everything
-    else in the envelope must.
+    Each transition mints a token and a timestamped history version. Validate
+    that exact retained path before pinning it; compare its semantic content too.
     """
+    parent_ref = memory_refs.memory_ref(PAGE_ID)
+    directory = compiled_history.history_dir(parent_ref)
+    kept, = (root / directory).glob("*.json")
+    history = json.loads(kept.read_text(encoding="utf-8"))
+    assert history["parent_ref"] == parent_ref and history["path"] == PAGE
+    version = registry_history.version_id(
+        dt.datetime.fromisoformat(history["at"]), history["transition_id"]
+    )
+    assert kept.name == version + ".json"
+    history_path = kept.relative_to(root).as_posix()
+    semantic = payload.get("semantic", payload)
+    assert history_path in semantic["written_paths"]
 
     def scrub(value: object) -> object:
         if isinstance(value, dict):
@@ -73,9 +92,15 @@ def _canonical(payload: object) -> str:
             }
         if isinstance(value, list):
             return [scrub(item) for item in value]
+        if value == history_path:
+            return f"{directory}/<version>.json"
         return value
 
-    return json.dumps(scrub(payload), sort_keys=True)
+    return json.dumps({
+        "response": scrub(payload),
+        "retained_history": {key: value for key, value in history.items()
+                             if key not in {"at", "transition_id"}},
+    }, sort_keys=True)
 
 
 def _normalize_advisory_vault(payload: dict, root: Path) -> None:
@@ -173,7 +198,9 @@ def test_write_response_is_byte_identical_without_the_flag(
     del instrumented["timings"]
     _normalize_advisory_vault(control["semantic"], tmp_path / "control")
     _normalize_advisory_vault(instrumented["semantic"], tmp_path / "instrumented")
-    assert _canonical(instrumented) == _canonical(control)
+    assert _canonical(instrumented, tmp_path / "instrumented") == _canonical(
+        control, tmp_path / "control"
+    )
 
 
 def test_semantic_write_payloads_ignore_the_timings_kwarg(tmp_path: Path) -> None:
@@ -190,7 +217,7 @@ def test_semantic_write_payloads_ignore_the_timings_kwarg(tmp_path: Path) -> Non
     for payload, name in ((control, "control"), (timed, "timed")):
         _normalize_advisory_vault(payload, tmp_path / name)
 
-    assert _canonical(timed) == _canonical(control)
+    assert _canonical(timed, tmp_path / "timed") == _canonical(control, tmp_path / "control")
 
 
 def test_stale_commit_generation_forces_a_timed_revalidate(tmp_path: Path) -> None:
@@ -959,7 +986,11 @@ def test_completion_and_fallback_work_have_exact_timing_spans(
     clock = [100.0]
     monkeypatch.setattr(
         call_spans, "time",
-        SimpleNamespace(perf_counter=lambda: clock[0], monotonic=lambda: clock[0]),
+        SimpleNamespace(
+            perf_counter=lambda: clock[0],
+            monotonic=lambda: clock[0],
+            thread_time_ns=call_spans.time.thread_time_ns,
+        ),
     )
     monkeypatch.setattr(file_watcher, "register_self_write", lambda *a, **kw: ([], False))
     monkeypatch.setattr(graph_sync, "register_outer_fanout_failure", lambda *a: None)

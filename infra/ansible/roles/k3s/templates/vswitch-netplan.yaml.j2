@@ -7,7 +7,7 @@ network:
     vlan{{ k3s_vswitch.vlan_id }}:
       id: {{ k3s_vswitch.vlan_id }}
       link: {{ (k3s_vswitch_parent_interface or ansible_facts['default_ipv4']['interface']) | to_json }}
-      mtu: 1400
+      mtu: {{ k3s_vswitch_mtu }}
       addresses: [{{ k3s_vswitch.address | to_json }}]
       routes:
         - to: {{ k3s_vswitch.network | to_json }}

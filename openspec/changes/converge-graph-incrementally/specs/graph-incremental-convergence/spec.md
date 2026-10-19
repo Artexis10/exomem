@@ -289,6 +289,15 @@ A batch truncated by the drain limit, a batch left over from an earlier generati
 a full-scope marker SHALL each acknowledge nothing and leave the work queued for the
 drain that does cover it.
 
+A drain SHALL NOT acknowledge or publish the availability marker while graph repair
+outside its batch is still owed: a queued receipt for another page, a whole-vault
+marker, or a queue it cannot read. This holds even when the batch covers the committed
+checkpoint. The marker and the acknowledgement describe the whole graph, and that
+page's rows may be stale. The drain that leaves nothing queued publishes. An
+acknowledgement that is still behind afterwards is closed by one bounded drain of the
+committed checkpoint. While a drain clears receipts and leaves work queued, barrier
+recovery SHALL wait for the queue rather than run a whole-vault pass.
+
 Coverage SHALL be membership in the processed batch rather than in the indexed set. A
 deletion named by a checkpoint is processed by removing its rows and has no source bytes
 to index, so an indexed-set test would stall every generation containing one
@@ -297,7 +306,8 @@ proof.
 
 #### Scenario: A covering drain makes the epoch current
 
-- **WHEN** a drain processes every path named by the committed checkpoint
+- **WHEN** a drain processes every path named by the committed checkpoint, and no
+  repair outside its batch is queued
 - **THEN** the graph sync epoch reports the committed generation as current
 - **AND** the graph reports itself available
 
@@ -306,6 +316,14 @@ proof.
 - **WHEN** a drain processes only some of the paths the committed checkpoint names
 - **THEN** the epoch is not advanced to that generation
 - **AND** the remaining paths stay queued
+
+#### Scenario: A batch that covers the newest checkpoint leaves older repair queued
+
+- **WHEN** a drain batch holds every page of the committed checkpoint while receipts
+  for other pages remain queued
+- **THEN** the graph is not reported current and the epoch is not advanced
+- **AND** the drains that empty the queue make the graph current with no whole-vault
+  pass
 
 ### Requirement: A queued repair is not rescheduled as a whole-vault rebuild
 
@@ -371,13 +389,51 @@ marker's raise count as well as its value, so any debt raised after that
 observation survives, including a repeat that leaves the value unchanged. The
 full-marker dispatcher SHALL clear its marker by the same comparison.
 
-A whole-vault pass publishes only when no write lands while it runs, so the
-drain SHALL hold a whole-vault attempt until the vault has been quiet since the
-last write's debt signal for one measured whole-vault pass, or for a 5 s floor
+A whole-vault pass publishes as current only when no write lands while it runs,
+so the drain SHALL hold a whole-vault attempt until the vault has been quiet since
+the last write's debt signal for one measured whole-vault pass, or for a 5 s floor
 before any pass has been measured. The hold SHALL NOT exceed 120 s past the first
 debt signal the attempt was held for; after that the attempt runs, paced by the
 no-progress backoff. A debt signal the drain raises itself SHALL NOT start the
 window, and per-path repair and its drain SHALL NOT be held.
+
+A pass that writes land in SHALL NOT run the whole vault again when the registry
+recorded every change the pass saw. When its caller can report the graph as
+pending (the drain, barrier recovery, a registered rebuild, or the background
+rebuild), and the pass's rows agree with its resolver except for pages that
+resolver never held, the pass SHALL publish behind:
+
+- It drops the rows of those created pages.
+- It publishes with the availability marker withdrawn and the read barrier set.
+- It stores the recall checkpoint that its resolver was proved against, and that
+  resolver's topology.
+- It keeps the live graph_sync acknowledgement.
+- Under the publication hold and before the replacement, it queues the movement:
+  every page that the registry's complete history names since that checkpoint,
+  every page that a standing scoped watcher mark names, every row whose page may
+  have moved since the pass bound its bytes, and every created page.
+- It retires only the whole-vault marker it observed before its epoch sample.
+
+The drain then converges that graph to exactly what a fresh rebuild derives,
+without another whole-vault pass. Until then the graph reports itself not current.
+
+A pass that read a retitled page, or found no file for a page its resolver held,
+SHALL NOT publish behind and SHALL re-target as before. A drain widens a queued
+page by the title and existence that its row stores, so such a graph could serve
+a stale edge as current. A caller whose contract is a converged graph SHALL NOT
+publish behind. A registered rebuild that publishes behind SHALL report its
+waiters pending with `GRAPH_SYNC_REPAIR_QUEUED`, never converged.
+
+A pass SHALL also re-target as before, without preparing a behind publication, when
+its ticket would be refused for a reason that no fresh pass in the run is likely to
+change:
+
+- there is no acknowledgement to keep;
+- an unscoped external mark stands;
+- the recall policy moved;
+- the registry history no longer reaches the pass's recall checkpoint.
+
+A refusal found only at the ticket would start a whole new publication attempt.
 
 #### Scenario: A publication retires the debt it observed and nothing newer
 
@@ -397,6 +453,27 @@ window, and per-path repair and its drain SHALL NOT be held.
   120 s of the first debt signal it was held for, and later attempts follow the
   no-progress backoff
 
+#### Scenario: A body edit or a create during a pass publishes behind and converges
+
+- **WHEN** a governed write edits a page's body, or creates a page, while a
+  whole-vault pass that the drain started is running
+- **THEN** the pass publishes once, with reads refused and the moved page queued
+- **AND** the drain converges the queue with no second whole-vault pass, to rows
+  equal to a fresh rebuild
+
+#### Scenario: A retitle the pass read is never published behind
+
+- **WHEN** a page is retitled after the pass built its resolver and before the
+  pass read that page
+- **THEN** the pass does not publish behind and re-targets
+- **AND** no edge derived under the old title is served as current
+
+#### Scenario: A page removed before the pass read it is never published behind
+
+- **WHEN** a page that the pass's resolver held is removed before the pass reads it
+- **THEN** the pass does not publish behind and re-targets
+- **AND** no edge that resolved to the removed page is served as current
+
 ### Requirement: A drain keeps the queue converging under a steady writer
 
 A drain SHALL record the resolver topology fingerprint it derived its rows under, in the
@@ -408,10 +485,30 @@ projection moved elsewhere during its pass, and retire their receipts; its marke
 lineage and acknowledgement wait for a drain the projection holds still for. A page the
 drain indexed moving under it SHALL roll the pass back.
 
+Those bytes SHALL be bytes that the recall checkpoint its resolver was sampled at
+describes. A write's bytes land before its corpus publication does, so a drain that runs
+in between would derive rows under a resolver that never saw them. A page recall does
+not admit counts as described only when the checkpoint does not list it either. A drain
+whose batch holds a page that the checkpoint does not record as the disk has it SHALL
+land nothing, retire no receipt and report the batch moved. The check at publish SHALL
+decide this, because a page can change after the check before the pass and before the
+pass reads it. Each of the batch's receipts SHALL then drain alone under the same proof,
+so an unrecorded page holds back only its own receipt.
+
 A write's incremental refresh that finds its own generation already acknowledged -- a
 drain derived its batch first -- and the availability marker current SHALL do nothing
 rather than fall back: nothing is owed, and the fallback would withdraw a current marker.
-When the marker is not current -- the write's registry update landed after the drain
+The write's graph dispatch SHALL reach that no-op when it finds the graph readable and
+its pages are exactly the acknowledged checkpoint's batch with rows that already reflect
+them. A caller whose pages' rows are not current, such as a reconcile reprojection of
+unchanged pages, SHALL keep the refresh that repairs them.
+The no-op SHALL also require the stored resolver topology to equal the topology of the
+resident resolver at the live checkpoint. A drain that rewrote a retitled page only as
+affected acknowledges without owning that retitle, and the stale topology it leaves
+fails closed at the next topology-changing write. The late refresh is that write, so it
+SHALL take the whole-vault repair. A refresh with no resident resolver SHALL queue its
+pages, and a caller that cannot report pending SHALL still get a converged graph.
+When the marker is not current -- a registry update landed after the drain
 acknowledged -- the refresh SHALL queue its paths, so a per-path drain republishes the
 marker without a whole-vault rebuild.
 
@@ -429,15 +526,45 @@ marker without a whole-vault rebuild.
 #### Scenario: A late refresh of an acknowledged generation is a no-op
 
 - **WHEN** a drain has acknowledged a write's generation before that write's own refresh
-  runs, and the marker is current
+  runs, and the marker and the stored resolver topology are current
 - **THEN** the refresh returns without work and the graph stays readable
 
 #### Scenario: A late refresh behind a late registry update queues its page
 
-- **WHEN** a drain acknowledges a write's generation, the write's registry update lands
-  after it, and the write's own refresh then runs
+- **WHEN** a drain acknowledges a write's generation, a registry update lands after it,
+  and the write's own refresh then runs
 - **THEN** the refresh queues the page, one per-path drain makes the graph readable again,
   and no whole-vault pass runs
+
+#### Scenario: A drain that runs before its writer's corpus publication lands nothing
+
+- **WHEN** a write's bytes and receipts land, a drain samples its resolver before the
+  write's corpus publication, and the publication lands during the drain's pass
+- **THEN** the drain lands no rows and retires no receipt
+- **AND** after the write's own refresh, a retitle leaves the graph equal to a fresh
+  rebuild, and a created page converges with no whole-vault pass
+
+#### Scenario: A write whose generation a drain acknowledged first rebuilds nothing
+
+- **WHEN** a write's corpus publication lands, a drain derives and acknowledges its
+  generation, and the write's graph dispatch then finds the graph readable
+- **THEN** the dispatch reaches the acknowledged no-op, the graph stays readable, and no
+  whole-vault pass runs
+- **AND** a reconcile reprojection of the same pages whose unit rows are stale still
+  repairs them
+
+#### Scenario: A late refresh behind a drain that did not own the topology rebuilds
+
+- **WHEN** a drain of one queued page rewrites a retitled page only as affected,
+  acknowledges the write's generation, and that write's own dispatch then runs
+- **THEN** the refresh takes the whole-vault repair, and the graph equals a fresh rebuild
+
+#### Scenario: An unrecorded page holds back only its own receipt
+
+- **WHEN** a batch holds one page whose edit the registry has not recorded, beside pages
+  it has
+- **THEN** the recorded pages drain and the unrecorded page's receipt stays queued until
+  the registry records the edit
 
 ### Requirement: An underivable receipt is quarantined, not rotated forever
 

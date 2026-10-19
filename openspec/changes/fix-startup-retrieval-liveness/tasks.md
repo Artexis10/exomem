@@ -20,4 +20,4 @@
 
 - [x] 3.1 Run focused retrieval, warmup, and readiness tests plus strict OpenSpec validation.
 - [ ] 3.2 Run the lean suite, lint and types, latency gate, packaging checks, and review the actual diff.
-- [ ] 3.3 Deploy the patch release to personal and POLLY, then verify cold and hot public recall, graph recovery, and memory telemetry.
+- [ ] 3.3 Deploy the patch release to the personal cell and the client cell, then verify cold and hot public recall, graph recovery, and memory telemetry.

@@ -135,8 +135,8 @@
 - [x] 7.2 `ruff check` clean on changed files.
 - [x] 7.3 `npm exec --yes @fission-ai/openspec -- validate --changes --strict` passes for
       `add-docker-distribution`.
-- [x] 7.4 Desk-side: local `docker build`/`docker compose config` per 2.3/3.2 (needs a
-      local Docker daemon — **Hugo runs**).
+- [ ] 7.4 Desk-side: local `docker build`/`docker compose config` per 2.3/3.2
+      remains deferred. No operator local-build evidence is recorded.
 - [x] 7.5 CI-only: the `docker` job's build+smoke (4.1-4.3) is exercised by CI on the PR
       that implements this change, not by a local command — noted here so it isn't
       mistaken for a gap in local verification.

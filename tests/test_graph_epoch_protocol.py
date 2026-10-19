@@ -730,6 +730,16 @@ def test_oversized_sqlite_checkpoint_meta_fails_closed_without_parsing(
     assert graph_sync.acknowledgement_state(tmp_path) == ("malformed", None)
 
 
+def test_checkpoint_parser_refuses_text_past_its_format_bound(monkeypatch) -> None:
+    """A snapshot reads checkpoint text under the larger row bound; the parser keeps its own."""
+    monkeypatch.setattr(graph_sync, "_CHECKPOINT_READ_LIMIT", 128)
+    monkeypatch.setattr(
+        graph_sync.json, "loads", lambda *_a, **_k: pytest.fail("oversized text was parsed")
+    )
+
+    assert graph_sync.GraphSyncCheckpoint.parse("x" * 129) is None
+
+
 def test_checkpoint_parser_rejects_duplicate_closed_json_fields() -> None:
     checkpoint = graph_sync.GraphSyncCheckpoint.create(
         generation=4,

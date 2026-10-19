@@ -14,10 +14,11 @@ from __future__ import annotations
 import fnmatch
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from .. import find_corpus, memory_refs
+from .. import find_corpus, memory_refs, reserved_paths
 from ..find_types import ParsedPage
 from ..kbdir import kb_dirname
 from . import companions
@@ -54,6 +55,7 @@ class MembershipOutcome:
     scope_ids: frozenset[str]
     reason: Literal[
         "companion_required",
+        "metadata_required",
         "artifact_unsafe",
         "companion_unsafe",
         "descriptor_missing",
@@ -74,13 +76,18 @@ def clear_memo() -> None:
     _MEMO.clear()
     _SNAPSHOT_MEMO.clear()
     _PATH_MEMO.clear()
+    _normalized_refs.cache_clear()
 
 
 def _kb_relative(rel_path: str) -> str:
     """Strip a leading KB dirname so both authored path forms compare equal."""
+    return _relative_to_kb(rel_path, kb_dirname())
+
+
+def _relative_to_kb(rel_path: str, dirname: str) -> str:
     rel = rel_path.replace("\\", "/").strip("/")
     parts = rel.split("/")
-    if parts and parts[0].casefold() == kb_dirname().casefold():
+    if parts and parts[0].casefold() == dirname.casefold():
         return "/".join(parts[1:])
     return rel
 
@@ -100,12 +107,22 @@ class MetadataSubject:
     classes: tuple[str, ...] = ()
 
 
-def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
-    kb_rel = _kb_relative(rel_path)
+@lru_cache(maxsize=128)
+def _normalized_refs(values: tuple[str, ...], dirname: str) -> frozenset[str]:
+    # Cache only configured selector data; current subject and authorization decisions stay fresh.
     normalized: set[str] = set()
     for v in values:
         normalized.add(v)
-        normalized.add(_kb_relative(v))
+        normalized.add(_relative_to_kb(v, dirname))
+    return frozenset(normalized)
+
+
+def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
+    if not values:
+        return False
+    dirname = kb_dirname()
+    kb_rel = _relative_to_kb(rel_path, dirname)
+    normalized = _normalized_refs(values, dirname)
     return rel_path in normalized or kb_rel in normalized
 
 
@@ -158,13 +175,13 @@ def _needs_frontmatter(scope: Scope) -> bool:
     return bool(scope.projects or scope.tags or scope.types or scope.classes)
 
 
-def _registry_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
+def _registry_scopes(vault_root: Path | None, rel_path: str, policy: Policy) -> frozenset[str]:
     from ..vocabulary import instances
 
-    if page.vault_root is None:
+    if vault_root is None:
         return frozenset()
     try:
-        return instances.bound_scopes(page.vault_root, page.rel_path, policy) or frozenset()
+        return instances.bound_scopes(vault_root, rel_path, policy) or frozenset()
     except ValueError as error:
         raise MembershipUnresolved("registry binding is unavailable") from error
 
@@ -233,7 +250,10 @@ def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) 
 
 
 def evaluate_path_only(
-    vault_root: Path, rel_path: str, policy: Policy, *, proposed_companion: companions.BoundCompanion | None = None
+    vault_root: Path, rel_path: str, policy: Policy, *,
+    proposed_companion: companions.BoundCompanion | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+    resolve_bytes: bool = True,
 ) -> MembershipOutcome:
     """Classify a non-Markdown item's path/ref membership without reading it.
 
@@ -250,6 +270,9 @@ def evaluate_path_only(
     membership. A still-undecided semantic selector is evaluated only from the
     closed, byte-bound companion registry. Missing, stale, ambiguous, or unsafe
     companion state remains unresolved instead of becoming an empty scope set.
+
+    `resolve_bytes=False` proves only metadata-free selectors. Unknown identity
+    or semantic selectors, including exclusions, retain explicit uncertainty.
     """
     if policy.empty or not policy.scopes:
         return MembershipOutcome("classified", frozenset())
@@ -264,6 +287,26 @@ def evaluate_path_only(
     undecided: list[tuple[str, Scope]] = []
     for scope_id, scope in policy.scopes.items():
         if _path_ref_excludes(scope, rel_path):
+            continue
+        if not resolve_bytes:
+            if scope_id in matched:
+                continue
+            positive = _path_ref_matches(scope, rel_path)
+            identity_positive = any(
+                memory_refs.parse_memory_ref(ref) is not None for ref in scope.refs
+            )
+            if not (positive or _needs_frontmatter(scope) or identity_positive):
+                continue
+            semantic_exclusion = bool(
+                scope.exclude_projects or scope.exclude_tags or scope.exclude_types
+                or scope.exclude_classes
+                or any(
+                    memory_refs.parse_memory_ref(ref) is not None for ref in scope.exclude_refs
+                )
+            )
+            if not positive or semantic_exclusion:
+                return MembershipOutcome("unresolved", frozenset(matched), "metadata_required")
+            matched.add(scope_id)
             continue
         if _path_ref_matches(scope, rel_path):
             matched.add(scope_id)
@@ -283,7 +326,7 @@ def evaluate_path_only(
             if identity.kind == "directory":
                 return MembershipOutcome("classified", frozenset(matched))
         try:
-            companion = proposed_companion if proposed_companion is not None else companions.classify(vault_root, rel_path)
+            companion = proposed_companion if proposed_companion is not None else companions.classify(vault_root, rel_path, artifact_copy=artifact_copy)
         except companions.CompanionClassificationError as error:
             # A portable assignment supplies registry metadata only when no
             # companion exists; malformed or conflicting companion data still refuses.
@@ -337,7 +380,7 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
         raise MembershipUnresolved(
             f"cannot stat {page.rel_path!r} to resolve scope membership: {exc}"
         ) from exc
-    assigned = _registry_scopes(page, policy)
+    assigned = _registry_scopes(page.vault_root, page.rel_path, policy)
     key = (policy.fingerprint, page.rel_path, mtime_ns, size, page.frontmatter_valid,
            str(page.vault_root), assigned)
     cached = _MEMO.get(key)
@@ -350,6 +393,24 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     while len(_MEMO) > _MEMO_MAX:
         _MEMO.popitem(last=False)
     return result
+
+
+def _snapshot_key(
+    vault_root: Path | None, rel_path: str, policy: Policy, content_hash: str,
+) -> tuple[str, str, str, str, frozenset[str]]:
+    assigned = _registry_scopes(vault_root, rel_path, policy)
+    return (policy.fingerprint, rel_path, content_hash, str(vault_root), assigned)
+
+
+def cached_snapshot_membership(
+    vault_root: Path, rel_path: str, policy: Policy, *, content_hash: str,
+) -> frozenset[str] | None:
+    """Reuse byte-bound membership, with current registry assignment, or miss."""
+    if policy.empty or not policy.scopes:
+        return None
+    key = _snapshot_key(vault_root, rel_path, policy, content_hash)
+    # Membership is immutable; later eviction cannot invalidate this result.
+    return _SNAPSHOT_MEMO.get(key)
 
 
 def evaluate_snapshot(
@@ -365,13 +426,12 @@ def evaluate_snapshot(
     """
     if policy.empty or not policy.scopes:
         return frozenset()
-    assigned = _registry_scopes(page, policy)
-    key = (policy.fingerprint, page.rel_path, content_hash, str(page.vault_root), assigned)
+    key = _snapshot_key(page.vault_root, page.rel_path, policy, content_hash)
     cached = _SNAPSHOT_MEMO.get(key)
     if cached is not None:
         _SNAPSHOT_MEMO.move_to_end(key)
         return cached
-    result = _evaluate_markdown_scopes(page, policy) | assigned
+    result = _evaluate_markdown_scopes(page, policy) | key[-1]
     _SNAPSHOT_MEMO[key] = result
     _SNAPSHOT_MEMO.move_to_end(key)
     while len(_SNAPSHOT_MEMO) > _MEMO_MAX:

@@ -5,23 +5,28 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
-import re
 import sqlite3
 import threading
+import time
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 from urllib.parse import unquote
 
-from . import reserved_paths
+from . import call_spans, reserved_paths
 from . import vault as vault_module
 from .kbdir import kb_dirname
 
+if TYPE_CHECKING:
+    from .pending_recall import ReferenceProjection
+    from .semantic_contract import ReferenceIdentitySnapshot
+
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+# Cached negative rows must rebuild when frontmatter recognition changes.
+SCHEMA_VERSION = 4
 REF_PREFIX = "exomem://memory/"
 ID_FIELD = "exomem_id"
 _REFERENCE_REBUILD_LOCK = threading.Lock()
@@ -99,12 +104,9 @@ def _pending_reference_projection(vault_root: Path):
     None when no committed mutation is still awaiting derived convergence, so
     the settled path stays exactly as it was.
     """
-    try:
-        from . import pending_recall
+    from . import pending_recall
 
-        return pending_recall.reference_projection(Path(vault_root))
-    except Exception:  # noqa: BLE001 - identity resolution must not depend on it
-        return None
+    return pending_recall.reference_projection(Path(vault_root))
 
 
 def _note_pending_reference_publication(vault_root: Path, rel_paths: list[str]) -> None:
@@ -812,7 +814,7 @@ class ReferenceIndex:
 
 
 def _apply_pending_identity(
-    vault_root: Path, exomem_id: str, rows: list[str]
+    vault_root: Path, exomem_id: str, rows: list[str], *, projection=None,
 ) -> list[str]:
     """Resolve one identity against pending custody before the persistent rows.
 
@@ -821,10 +823,20 @@ def _apply_pending_identity(
     back a path the canonical tree no longer has. Both are exact: the projection
     only holds generations whose after state was proven.
     """
-    projection = _pending_reference_projection(vault_root)
+    projection = projection if projection is not None else _pending_reference_projection(vault_root)
     if projection is None or projection.empty:
         return rows
-    surviving = [path for path in rows if path not in projection.absent_paths]
+    if projection.blocked_paths:
+        # Unknown pending identities can conceal a duplicate of any identifier.
+        # Refusing exact resolution costs a retry; claiming uniqueness can send
+        # a governed mutation to the wrong page. Path-based recall stays usable.
+        from .find import RetrievalIndexWarming
+
+        call_spans.measure("pending_identity_unknown")
+        raise RetrievalIndexWarming(
+            site="pending_visibility_incomplete", status="temporarily_unavailable"
+        )
+    surviving = [path for path in rows if path not in projection.refs_by_path]
     pending_paths = projection.paths_by_id.get(memory_ref(exomem_id), ())
     for path in pending_paths:
         if path not in surviving:
@@ -832,17 +844,36 @@ def _apply_pending_identity(
     return sorted(surviving)
 
 
+@overload
 def paths_for_ids_read_only(
-    vault_root: Path, ids: Iterable[Any]
-) -> dict[str, tuple[str, ...]]:
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
+    _optional: Literal[False] = False,
+) -> dict[str, tuple[str, ...]]: ...
+
+
+@overload
+def paths_for_ids_read_only(
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
+    _optional: bool,
+) -> dict[str, tuple[str, ...]] | None: ...
+
+
+def paths_for_ids_read_only(
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
+    _optional: bool = False,
+) -> dict[str, tuple[str, ...]] | None:
     """Resolve many memory ids to every page holding each, writing nothing.
 
     The reverse direction of `refs_for_paths`, and read-only in the strict
     sense that separates it from every other resolver here: it never creates,
-    rebuilds, or refreshes the sidecar, so a caller that must leave the vault
-    byte-identical can use it. `.refs.sqlite` is registered internal state and
-    a canonical byte census skips it, which is exactly why an accidental
-    rebuild inside a read has to be impossible rather than merely unlikely.
+    fills, rebuilds, or refreshes the sidecar or any cache, so a caller that
+    must leave the vault byte-identical can use it. `.refs.sqlite` is
+    registered internal state and a canonical byte census skips it, which is
+    exactly why an accidental rebuild inside a read has to be impossible
+    rather than merely unlikely.
 
     Every path holding an id is returned, so a duplicated identity reads as a
     tuple of length two. This function never raises `AMBIGUOUS_REFERENCE`: that
@@ -850,44 +881,209 @@ def paths_for_ids_read_only(
     release decision over those pages, so a caller forbidden to disclose the
     count cannot afford to catch the exception and must see the shape instead.
 
-    Cost is one whole-corpus scan for the entire batch — never one per id, and
-    never a scan chosen by what any faster source already answered. That last
-    point is a disclosure property rather than an optimisation, and it is why
-    there is no sidecar fast path here: work that varies with which ids exist
-    lets a caller infer, from the work performed, that some page carries an id
-    it is not allowed to see. The scan is the same fallback
-    `ReferenceIndex.resolve` takes when the sidecar is absent or incompatible.
-    """
-    wanted: list[str] = []
-    seen: set[str] = set()
-    for value in ids:
-        normalized = normalize_id(value)
-        if normalized is not None and normalized not in seen:
-            seen.add(normalized)
-            wanted.append(normalized)
-    if not wanted:
-        return {}
+    Governed callers may exclude pending paths their release policy proves
+    hidden through `admit_pending_paths`. They must retain unresolved pages;
+    those pages can still hold an unknown visible duplicate.
 
-    # One walk, unconditionally, for the whole batch.
+    The internal optional mode reports incomplete current coverage as None,
+    including empty batches, so optional origins cannot cancel admitted material.
+    Exact callers retain the strict default and its empty-batch fast path.
+
+    The answer comes from one of two sources, and the choice is made from
+    vault-wide state alone, before any id is looked up: the server's current
+    in-process identity projection when one exists and is still current
+    afterwards, otherwise one whole-corpus scan for the entire batch. Which
+    ids were asked for, which of them exist, and who may see the pages holding
+    them never choose the source, because work that varies with those lets a
+    caller infer, from the work performed, that some page carries an id it is
+    not allowed to see. Both sources apply one membership rule, so the answer
+    does not depend on which of them ran. A vault whose Knowledge Base root
+    holds a directory that the identity census prunes but the scan reads
+    (`trash/`) always takes the scan, so its answers stay the scan's.
+    """
+    view = _reference_owner_view_read_only(
+        vault_root, ids, admit_pending_paths=admit_pending_paths, _optional=_optional,
+    )
+    return (
+        view.optional_current_paths(Path(vault_root)) if _optional
+        else view.current_paths(Path(vault_root))
+    )
+
+
+def paths_for_optional_references_read_only(
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]],
+) -> dict[str, tuple[str, ...] | None]:
+    """Return redaction evidence, never current identifier resolution.
+
+    None requires uniform omission when servable custody leaves potentially
+    visible identity unknown. Raw owners on unprovable paths preserve existing
+    redaction only; they cannot restore a current mapping or prove uniqueness.
+    Unknown authoritative custody still raises from the maintained projection.
+    """
+    view = _reference_owner_view_read_only(
+        vault_root, ids, admit_pending_paths=admit_pending_paths,
+    )
+    current = view.optional_current_paths(Path(vault_root))
+    if current is None:
+        # Optional citation loss costs less than cancelling admitted material.
+        # Apply the same omission to every id, independent of membership.
+        return dict.fromkeys(view.owners)
+    return {
+        identifier: tuple(sorted({
+            *paths,
+            *(path for path in view.owners[identifier] if path in view.unprovable_paths),
+        }))
+        for identifier, paths in current.items()
+    }
+
+
+@dataclass(frozen=True)
+class _ReferenceOwnerView:
+    owners: Mapping[str, tuple[str, ...]]
+    projection: ReferenceProjection | None
+    unprovable_paths: frozenset[str]
+
+    def optional_current_paths(self, root: Path) -> dict[str, tuple[str, ...]] | None:
+        if self.projection is not None and self.projection.blocked_paths:
+            return None
+        return self.current_paths(root)
+
+    def current_paths(self, root: Path) -> dict[str, tuple[str, ...]]:
+        if self.projection is None:
+            return dict(self.owners)
+        return {
+            identifier: tuple(
+                _apply_pending_identity(root, identifier, list(paths), projection=self.projection)
+            )
+            for identifier, paths in self.owners.items()
+        }
+
+
+@dataclass(frozen=True)
+class _ReferenceOwners:
+    root: Path
+    owners: Mapping[str, tuple[str, ...]]
+    snapshot: ReferenceIdentitySnapshot | None
+
+    def snapshot_is_current(self) -> bool:
+        from . import semantic_contract
+
+        return self.snapshot is None or (
+            not semantic_contract.identity_census_omits_scanned_pages(self.root)
+            and semantic_contract.reference_identity_snapshot_is_current(self.root, self.snapshot)
+        )
+
+
+def _normalized_reference_ids(ids: Iterable[Any]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        identifier for value in ids if (identifier := normalize_id(value)) is not None
+    ))
+
+
+def _reference_owners_read_only(
+    vault_root: Path, ids: Iterable[Any], *,
+    _optional: bool = False,
+) -> _ReferenceOwners:
+    """Acquire raw owners for the entire batch without pending or policy decisions."""
+    wanted = _normalized_reference_ids(ids)
+    root = Path(vault_root)
+    if not wanted and not _optional:
+        return _ReferenceOwners(root.resolve(), {}, None)
+
+    # Lazy: `semantic_contract` imports this module.
+    from . import semantic_contract
+
+    # The source is chosen before any lookup, from vault-wide state alone.
     #
     # A sidecar fast path was tried and removed. Consulting it and scanning
     # only for the ids it could not answer made the corpus walk conditional on
     # whether ANY page — released or not — carried the cited identity: the
     # response stayed byte-identical while a caller who timed the call learned
     # whether a hidden page held the id, needing no authoring prerequisite at
-    # all. Scanning only when no sidecar exists closes that channel but reads a
-    # page written outside a governed write as absent, which is most of an
-    # ordinary vault.
+    # all. The sidecar also reads a page written outside a governed write as
+    # absent, which is most of an ordinary vault.
     #
-    # So the work is a function of the batch alone: how many well-formed ids
-    # were asked for, never which of them exist or who may see them. The cost
-    # is one walk per call for a deliberate, on-demand read.
-    by_id: dict[str, set[str]] = {}
-    for path, exomem_id, _raw, _hash, status in _scan_pages(vault_root):
-        if status == "valid" and exomem_id is not None:
-            by_id.setdefault(exomem_id, set()).add(path)
+    # The identity projection has neither defect. Governed writes patch it as
+    # they publish their changes, and an edit made behind the server stops it
+    # being current once the watcher reports that edit; until then the read
+    # answers from the projection's last observed state. Whether it is
+    # current is one fact about the vault, the same for every id in every
+    # batch. It answers every id; if it stopped being current during the
+    # lookup, the whole batch falls back to the scan. Either way the work is a
+    # function of vault state and of the batch's size, never of which ids
+    # exist or who may see them. The read only borrows a projection the
+    # server already holds: it never builds, fills, or refreshes one.
+    #
+    # The census never admits a page under the Knowledge Base `trash/`
+    # directory, while the scan reads it and the sidecar hands out its refs.
+    # A vault that holds that directory therefore always scans: its presence
+    # is one more vault-wide fact, and the scan keeps those refs resolving.
+    with call_spans.span("memory_refs.identity_census", {}) as measured:
+        started = time.thread_time_ns()
+        resolved: dict[str, tuple[str, ...]] | None = None if wanted else {}
+        snapshot = None
+        if wanted:
+            if semantic_contract.identity_census_omits_scanned_pages(root):
+                if measured is not None:
+                    measured["declined_namespace_differs"] = 1
+            else:
+                snapshot = semantic_contract.current_reference_identity_snapshot(
+                    root, declined=measured
+                )
+        if snapshot is not None:
+            owners = snapshot.reference_owners
+            answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
+            if semantic_contract.reference_identity_snapshot_is_current(root, snapshot):
+                resolved = answered
+            else:
+                snapshot = None
+                if measured is not None:
+                    measured["declined_snapshot_changed"] = 1
+        if measured is not None:
+            measured["snapshot"] = int(bool(wanted) and resolved is not None)
+        if resolved is None:
+            pages = _scan_pages(root)
+            scanned: dict[str, set[str]] = {}
+            for path, exomem_id, _raw, _hash, status in pages:
+                if status == "valid" and exomem_id is not None:
+                    scanned.setdefault(exomem_id, set()).add(path)
+            resolved = {
+                identifier: tuple(sorted(scanned.get(identifier, ())))
+                for identifier in wanted
+            }
+            if measured is not None:
+                measured["pages"] = len(pages)
+        if measured is not None:
+            measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
+    return _ReferenceOwners(root.resolve(), resolved, snapshot)
 
-    return {identifier: tuple(sorted(by_id.get(identifier, ()))) for identifier in wanted}
+
+def _reference_owner_view_read_only(
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None,
+    _optional: bool = False,
+    _prepared_owners: _ReferenceOwners | None = None,
+) -> _ReferenceOwnerView:
+    """Apply fresh pending custody to exactly this root and normalized batch."""
+    root = Path(vault_root)
+    wanted = _normalized_reference_ids(ids)
+    if _prepared_owners is None:
+        _prepared_owners = _reference_owners_read_only(root, wanted, _optional=_optional)
+    elif _prepared_owners.root != root.resolve() or set(_prepared_owners.owners) != set(wanted):
+        raise ValueError("prepared reference owners do not cover this root and batch")
+    if not wanted and not _optional:
+        return _ReferenceOwnerView({}, None, frozenset())
+    projection = _pending_reference_projection(root)
+    unprovable = frozenset() if projection is None else projection.blocked_paths
+    if projection is not None and admit_pending_paths is not None and projection.blocked_paths:
+        # Hidden pages cannot affect governed uniqueness. Keep every
+        # footprint withdrawal, and exclude only proven hidden uncertainty.
+        projection = replace(
+            projection,
+            blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
+        )
+    return _ReferenceOwnerView(_prepared_owners.owners, projection, unprovable)
 
 
 def resolve_identifier(vault_root: Path, value: str) -> str:
@@ -940,7 +1136,7 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
 
 def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str, str]:
     """Add an identity without reserializing or reordering existing frontmatter."""
-    fm, body, fm_text = vault_module.parse_frontmatter(markdown)
+    fm, _body, fm_text = vault_module.parse_frontmatter(markdown)
     if fm_text is None:
         raise ReferenceError("MISSING_FRONTMATTER", "cannot add exomem_id without frontmatter")
     if ID_FIELD in fm:
@@ -951,13 +1147,11 @@ def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str
     identity = normalize_id(exomem_id) if exomem_id else new_id()
     if identity is None:
         raise ReferenceError("INVALID_REFERENCE", f"invalid memory id: {exomem_id!r}")
-    new_fm = fm_text.rstrip() + f"\n{ID_FIELD}: {identity}"
-    blank_line = bool(
-        re.match(r"^---\r?\n.*?\r?\n---\r?\n\r?\n", markdown, re.DOTALL)
-    )
-    rendered = vault_module.render_frontmatter_document(
-        new_fm, body, newline=vault_module.document_newline(markdown), blank_line=blank_line
-    )
+    match = vault_module._FM_PATTERN.match(markdown)
+    assert match is not None
+    insertion = match.end(1)
+    newline = "\r\n" if markdown.startswith("\r\n", insertion) else "\n"
+    rendered = markdown[:insertion] + f"{newline}{ID_FIELD}: {identity}" + markdown[insertion:]
     return rendered, identity
 
 
@@ -975,8 +1169,8 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:
             if rel is None:
                 continue
             try:
-                raw = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
+                raw, guard = vault_module.read_guarded_text(vault_root, path)
+            except (OSError, UnicodeDecodeError, vault_module.PathGuardError) as exc:
                 skipped.append({"path": rel, "reason": str(exc)})
                 continue
             fm, _, fm_text = vault_module.parse_frontmatter(raw)
@@ -990,7 +1184,12 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:
             updated, identity = add_id_to_markdown(raw)
             missing.append(rel)
             assigned[rel] = memory_ref(identity)
-            writes.append(vault_module.PlannedWrite(path=path, content=updated))
+            writes.append(
+                vault_module.PlannedWrite(
+                    path=path, content=updated, guard=guard,
+                    expected_hash=vault_module.content_hash(raw),
+                )
+            )
     duplicates = [item for item in identity_issues if item["kind"] == "duplicate"]
     if duplicates and not dry_run:
         duplicate_ids = sorted({item["value"] for item in duplicates})
@@ -1154,10 +1353,13 @@ def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, 
     if rel is None or not path.exists():
         return None
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    fm, _, _ = vault_module.parse_frontmatter(raw)
+    # Parse what text mode reads (universal newlines) but hash the bytes as
+    # stored: recall custody proves a page by the digest of its bytes, so a
+    # CRLF page hashed after newline translation could never be proven.
+    fm, _, _ = vault_module.parse_frontmatter(raw.replace("\r\n", "\n").replace("\r", "\n"))
     value = fm.get(ID_FIELD)
     raw_id = "" if value is None else str(value)
     normalized = normalize_id(value)
@@ -1170,7 +1372,10 @@ def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]
     kb = Path(vault_root) / kb_dirname()
     if not kb.is_dir():
         return entries
-    for path in sorted(kb.rglob("*.md")):
+    # Any-case suffix, as `_relative_markdown` and the identity census accept:
+    # `rglob("*.md")` matches case-sensitively on POSIX and skipped `.MD` pages.
+    markdown = (path for path in kb.rglob("*") if path.suffix.lower() == ".md")
+    for path in sorted(markdown):
         row = _read_identity(vault_root, path)
         if row is not None:
             entries.append(row)

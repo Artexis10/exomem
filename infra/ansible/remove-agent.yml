@@ -3,6 +3,9 @@
 #   ansible-playbook remove-agent.yml -e k3s_remove_node=<inventory name>
 # Run it BEFORE removing the agent's entry from k3s_agent_nodes. Pass
 # -e k3s_remove_host_gone=true only after verifying the server is destroyed.
+# With --tags preflight it runs only its reads and refusals, and changes
+# nothing: every task that cordons, moves, drains, stops or deletes is
+# untagged, so that run skips it.
 - name: Guard, preflight, cordon and drain the agent
   hosts: hosted_nodes:!k3s_agents
   become: true
@@ -14,11 +17,13 @@
 
   tasks:
     - name: Resolve the one K3s server
+      tags: [preflight]
       ansible.builtin.set_fact:
         k3s_server_hosts: >-
           {{ groups['hosted_nodes'] | default([]) | difference(groups['k3s_agents'] | default([])) }}
 
     - name: Refuse anything but one inventoried agent
+      tags: [preflight]
       ansible.builtin.assert:
         that:
           - k3s_remove_node is defined
@@ -28,6 +33,7 @@
         fail_msg: k3s_remove_node must name exactly one host in k3s_agents, never the server.
 
     - name: Look up the agent's Kubernetes node
+      tags: [preflight]
       ansible.builtin.command:
         argv:
           - /usr/local/bin/k3s
@@ -42,6 +48,7 @@
       changed_when: false
 
     - name: Record whether the node is present and Ready
+      tags: [preflight]
       ansible.builtin.set_fact:
         k3s_remove_present: "{{ k3s_remove_lookup.stdout | length > 0 }}"
         k3s_remove_node_doc: "{{ k3s_remove_lookup.stdout | from_json if k3s_remove_lookup.stdout | length > 0 else {} }}"
@@ -50,6 +57,7 @@
       when: k3s_remove_present | bool
       block:
         - name: Refuse a node that is not an agent
+          tags: [preflight]
           ansible.builtin.assert:
             that:
               - (k3s_remove_node_doc.metadata.labels | default({}))['exomem.io/node-pool'] | default('') == 'agent'
@@ -57,6 +65,7 @@
             fail_msg: "{{ k3s_remove_node }} is not labelled as an agent, or is a control-plane node."
 
         - name: Read the cluster state the preflight measures
+          tags: [preflight]
           ansible.builtin.command:
             argv: "{{ ['/usr/local/bin/k3s', 'kubectl', 'get'] + item.args + ['-o', 'json'] }}"
           loop:
@@ -66,12 +75,14 @@
             - {name: pvs, args: [persistentvolumes]}
             - {name: pvcs, args: [persistentvolumeclaims, --all-namespaces]}
             - {name: statefulsets, args: [statefulsets, --all-namespaces]}
+            - {name: storageclasses, args: [storageclasses]}
           loop_control:
             label: "{{ item.name }}"
           register: k3s_remove_reads
           changed_when: false
 
         - name: Parse the cluster state
+          tags: [preflight]
           ansible.builtin.set_fact:
             k3s_remove_nodes_doc: "{{ k3s_remove_reads.results[0].stdout | from_json }}"
             k3s_remove_csinodes_doc: "{{ k3s_remove_reads.results[1].stdout | from_json }}"
@@ -79,11 +90,15 @@
             k3s_remove_pvs_doc: "{{ k3s_remove_reads.results[3].stdout | from_json }}"
             k3s_remove_pvcs_doc: "{{ k3s_remove_reads.results[4].stdout | from_json }}"
             k3s_remove_statefulsets_doc: "{{ k3s_remove_reads.results[5].stdout | from_json }}"
+            k3s_remove_storageclasses_doc: "{{ k3s_remove_reads.results[6].stdout | from_json }}"
 
         - name: Refuse unless the cells fit the remaining nodes
+          tags: [preflight]
           ansible.builtin.include_role:
             name: k3s
             tasks_from: remove_preflight.yml
+            apply:
+              tags: [preflight]
 
         - name: Cordon the agent
           ansible.builtin.command:
@@ -94,6 +109,18 @@
               - "{{ k3s_remove_node }}"
           register: k3s_remove_cordon
           changed_when: "'already cordoned' not in k3s_remove_cordon.stdout"
+
+        # move-cloud-cells-to-local-storage 6.4: after the cordon, so no moved
+        # cell's new claim binds back onto the agent. One cell at a time, the
+        # largest claim first (the preflight orders them), and a failed move
+        # stops the removal with the agent still in the cluster.
+        - name: Move each cell off the agent's local storage
+          ansible.builtin.include_role:
+            name: k3s
+            tasks_from: remove_move.yml
+          loop: "{{ k3s_remove_moves }}"
+          loop_control:
+            loop_var: k3s_remove_move_namespace
 
         - name: Drain the agent without force
           ansible.builtin.command:

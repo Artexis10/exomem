@@ -8,16 +8,18 @@ change, so it is registry data. Code knows only how to look for each evidence ki
 from __future__ import annotations
 
 from collections.abc import Mapping
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .vault import kb_root
 from .vocabulary import registry
 
-#: How custody looks for a provider; collection_store.custody implements each kind.
-# nosemgrep: ep-word-set -- The custody detector implements exactly these evidence kinds.
+#: Closed detector operations implemented by custody and conflict-copy classification.
+# nosemgrep: ep-word-set -- These are detector protocol operations, not provider names or semantic categories.
 EVIDENCE_KINDS = frozenset({
     "root-entry", "root-file", "root-journal-prefix", "path-component",
     "platform-env", "windows-folder", "vault-core-plugin", "vault-community-plugin",
+    "conflict-copy-glob",
 })
 PACK = "sync-providers.yaml"
 
@@ -77,3 +79,9 @@ def evidence(vault_root: Path) -> dict[str, tuple[str, ...]]:
     for entry in snapshot.active:
         found[entry.attributes["evidence"]].append(entry.attributes["value"])
     return {kind: tuple(values) for kind, values in found.items()}
+
+
+def is_conflict_copy(vault_root: Path, name: str) -> bool:
+    """Match provider-authored filename patterns with the policy detector's case handling."""
+    return any(fnmatchcase(name.lower(), pattern.lower())
+               for pattern in evidence(vault_root)["conflict-copy-glob"])

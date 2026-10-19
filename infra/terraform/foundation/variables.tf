@@ -94,13 +94,23 @@ variable "server_type" {
   # and an approved saved plan before any new server purchase or resize.
   # Capacity acceptance uses measured warm platform/cell usage, not old cold
   # memory estimates or volume-attachment counts alone.
-  description = "Existing shared-x86 alpha instance, intentionally pinned to CX33."
+  description = "Fleet server type: cx33 (shared x86, the existing alpha) or a Hetzner CAX (Arm64) type."
   type        = string
   default     = "cx33"
 
   validation {
-    condition     = var.server_type == "cx33"
-    error_message = "The private alpha is intentionally pinned to cx33."
+    # Hetzner names its Arm64 (Ampere) family CAX, so the prefix is the
+    # architecture check; the CAX size stays the capacity decision above.
+    # Exomem Cloud images run on both architectures, one per cluster.
+    condition     = var.server_type == "cx33" || startswith(var.server_type, "cax")
+    error_message = "The fleet server is cx33 (x86) or a Hetzner CAX (Arm64) type."
+  }
+
+  validation {
+    # One cluster runs one CPU architecture, and every agent type the
+    # k3s-agents module admits is x86, so an Arm64 fleet server runs alone.
+    condition     = var.server_type == "cx33" || length(var.k3s_agent_nodes) == 0
+    error_message = "A CAX (Arm64) fleet server takes no agents: agent types are x86, and one cluster runs one CPU architecture."
   }
 }
 

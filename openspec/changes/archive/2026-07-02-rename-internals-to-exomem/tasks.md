@@ -35,7 +35,7 @@
 - [x] 5.2 `ruff check` — no net-new findings vs origin/main; leak guard green.
 - [x] 5.3 `openspec validate rename-internals-to-exomem --strict` passes.
 - [x] 5.4 `uv build` — wheel contains both `exomem/` and `kb_mcp/`.
-- [ ] 5.5 Box ops after merge (Hugo/desk-side): re-register service as `exomem`
+- [ ] 5.5 Box ops after merge (operator): re-register service as `exomem`
       (`install-service.ps1`), rename deploy checkout, optionally migrate its `.env` keys.
 
 ## 6. Follow-ups (non-blocking)

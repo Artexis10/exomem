@@ -274,7 +274,6 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     [command] = [cmd for cmd in commands_module.PRODUCT_COMMANDS if cmd.name == "process_media"]
     operation_param = next(param for param in command.params if param.name == "operation")
     assert set(schema["properties"]) == {
-        "authorization_session_credential",
         "path",
         "paths",
         "operation",

@@ -22,6 +22,13 @@ The lifecycle domains are deliberately split:
 - `cellctl`: the Exomem Cloud cell controller.
 - `scripts`: non-printing validation, saved-plan, and secret handoff tooling.
 
+Cell controller PostgreSQL tests read the canonical paid-storage migration and grants from the revision in
+`cellctl/tests/fixtures/substrate-contract.json`. CI checks out that revision through the shared
+`substrate-test-contract` action. For local PostgreSQL tests, set `CELLCTL_SUBSTRATE_CONTRACT_ROOT` to a
+Substrate Git checkout that contains the pinned commit. The fixture reads committed SQL blobs; it does
+not read dirty files or fetch the contract while collecting pure tests. Update the manifest when adopting
+a new companion SQL contract.
+
 No production apply is implicit. Planning produces a mode `0600` saved plan,
 the JSON policy inspector rejects unapproved replacement/destruction, and apply
 accepts only that reviewed saved plan.

@@ -2,6 +2,7 @@
 
 import pytest
 from test_collection_store_governance import inspection_token, redeem, session
+from test_collection_store_service import service as service
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, _through_dispatcher, write_rule, write_scope
@@ -40,6 +41,7 @@ def test_projected_page_cannot_drop_canonical_restricted_tags(store, kind):
     else:
         receipt = store.append_record(CID, item=item, item_key=KEY, why="capture")
         path = receipt["affected_paths"][0]
+        store.reconcile_views()
         page = store.root / path
         frontmatter, body, _ = vault.parse_frontmatter(page.read_text(), strict=True)
         assert frontmatter["tags"] == ["secret"]
@@ -61,6 +63,7 @@ def test_current_projection_is_returned_from_physical_bytes(store):
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY,
                                   body="Canonical body\n", why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     with preview_store(store.root, store.handle), request_scope(_external()):
         page = _through_dispatcher(store.root, "get", path=path, include_raw=True)
     assert page["content"] == (store.root / path).read_text()
@@ -73,6 +76,7 @@ def test_canonical_inspection_versions_do_not_depend_on_unaccepted_view_edits(st
     store.create_collection(manifest_path(profile), manifest_text(profile), why="create")
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
         before = _through_dispatcher(store.root, command, action="inspect", collection=CID)
         assert path in {version["path"] for version in before["source_versions"]}
@@ -95,6 +99,7 @@ def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store):
     store.create_collection(manifest_path(), manifest_text(), why="create")
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     path = first["affected_paths"][0]
+    store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     command = next(command for command in commands.COMMANDS if command.name == "record_memory")
@@ -114,6 +119,7 @@ def test_canonical_metadata_does_not_authorize_the_same_resource_reference(store
     store.create_collection(manifest_path(), text, why="create")
     store.append_record(CID, item={"title": "Current", "resource": f"Read [[{path}]] next."},
                         item_key=KEY, why="capture")
+    store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
@@ -135,6 +141,7 @@ def test_admitted_source_versions_still_scrub_and_filter_ordinary_copies(store):
     store.create_collection(manifest_path(), manifest_text(), why="create")
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
@@ -166,6 +173,7 @@ def test_source_version_extra_fields_keep_generic_filtering_and_scrub_collisions
     store.create_collection(manifest_path(), manifest_text(), why="create")
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
@@ -201,6 +209,56 @@ def test_terminal_inspection_refuses_a_changed_basis_or_payload(store, change):
             egress.postfilter("record_memory", result, store.root)
 
 
+@pytest.mark.parametrize("change", ["restrict", "invalid"])
+def test_inspection_cannot_release_a_connector_change_during_notice_assembly(store, tmp_path, monkeypatch, change):
+    """A loop-local connector input cannot carry old counts through fresh terminal admission."""
+    import json
+
+    from exomem.cli_ops import OpError
+    from exomem.collection_store import governance
+    from exomem.governance import policy
+    from exomem.governance.principal import ClientBinding, OriginSessionBinding, RequestPrincipal
+
+    store.create_collection(manifest_path(), manifest_text(), why="create")
+    store.append_record(CID, item={"title": "Allowed"}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "Protected canary"}, item_key=OTHER, why="capture")
+    write_scope(store.root, paths=f"Records/**/{OTHER}.md")
+    scope_id = next(iter(policy.load(store.root).scopes))
+    config = tmp_path / "connector.json"
+    document = {"version": 1, "default_denied_scope_ids": [scope_id], "clients": [{
+        "issuer": "urn:fixture:issuer", "client_id": "configured-client", "denied_scope_ids": [],
+    }]}
+    config.write_text(json.dumps(document))
+    monkeypatch.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
+    who = RequestPrincipal("owner", surface="mcp", issuer_family="mcp-oauth:fixture", remote_owner=True,
+        client_binding=ClientBinding("urn:fixture:issuer", "configured-client"),
+        origin_session=OriginSessionBinding("fixture-session", "fixture-generation", "fixture-audience"))
+    with preview_store(store.root, store.handle), request_scope(who):
+        assert _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)["coverage"]["committed"] == 2
+        original_key = governance.OperationAuthorization._decision_key
+        changed = False
+
+        def change_connector(operation, subject, **options):
+            nonlocal changed
+            key = original_key(operation, subject, **options)
+            if not changed and options.get("connector_identity") is not None:
+                changed = True
+                document["clients"][0]["denied_scope_ids"] = [scope_id]
+                config.write_text(json.dumps(document) if change == "restrict" else "{")
+            return key
+
+        with monkeypatch.context() as racing:
+            racing.setattr(governance.OperationAuthorization, "_decision_key", change_connector)
+            with pytest.raises((collections.CollectionError, OpError)) as refused:
+                _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
+            assert refused.value.code == "COLLECTION_NOT_FOUND"
+        assert changed
+        config.write_text(json.dumps(document))
+        current = _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
+        assert current["coverage"]["committed"] == 1
+        assert "Protected canary" not in str(current)
+
+
 def test_partial_log_inspection_preserves_visible_metadata_across_hidden_edit(store):
     """A shared log name is not a grant to read its withheld sibling's bytes."""
     store.create_collection(manifest_path(), _log_manifest(), why="create")
@@ -231,6 +289,7 @@ def test_terminal_filter_rechecks_distinct_views_after_bytes_and_policy_change(s
         store.append_record(CID, item={"title": title}, item_key=key, why="capture")
         for title, key in (("One", KEY), ("Two", OTHER))
     ]
+    store.reconcile_views()
     paths = [receipt["affected_paths"][0] for receipt in receipts]
     payload = {"items": [{"path": path} for path in paths]}
     with preview_store(store.root, store.handle), request_scope(_external()):
@@ -249,6 +308,7 @@ def test_terminal_filter_observes_a_new_deletion_tombstone(store):
     store.create_collection(manifest_path(), manifest_text(), why="create")
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     write_scope(store.root, paths=path.removeprefix("Knowledge Base/"))
     write_rule(store.root, ceiling=0)
     payload = {"items": [{"path": path}]}
@@ -266,6 +326,7 @@ def test_current_row_grant_cannot_release_unproven_projection_bytes(store, monke
     store.create_collection(manifest_path(), manifest_text(), why="create")
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     path = first["affected_paths"][0]
+    store.reconcile_views()
     page = store.root / path
     original = page.read_bytes()
     if stale:
@@ -276,6 +337,10 @@ def test_current_row_grant_cannot_release_unproven_projection_bytes(store, monke
     with preview_store(store.root, store.handle):
         token = inspection_token(store, who)
         assert redeem(store, who, token)["status"] == "committed"
+        if stale:
+            with request_scope(who), pytest.raises(ValueError, match="NOT_FOUND"):
+                _through_dispatcher(store.root, "get", path=path)
+            store.reconcile_views()
         with request_scope(who):
             assert _through_dispatcher(store.root, "get", path=path)["frontmatter"]["title"] == (
                 "Two" if stale else "One"
@@ -291,6 +356,7 @@ def test_current_projection_preserves_partial_release_levels(store, level):
     receipt = store.append_record(CID, item={"title": "Private title"}, item_key=KEY,
                                   body="Permitted excerpt\n", why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     write_scope(store.root, paths="Records/**/Items/**")
     write_rule(store.root, ceiling=level, extra='options:\n  notice: "Limited"\n' if level == 1 else "")
     with preview_store(store.root, store.handle), request_scope(_external()):
@@ -376,56 +442,34 @@ def test_owner_walk_treats_an_unbound_projection_directory_as_absent(store):
         }
 
 
-def test_owner_walk_on_an_empty_policy_decides_only_marker_owned_paths(tmp_path, monkeypatch):
-    import json
-
+def test_owner_walk_on_an_empty_policy_decides_only_canonical_owned_paths(service, monkeypatch):
     from exomem import find_corpus
-    from exomem.collection_store import authority
 
-    root = tmp_path / "vault"
+    root = service.root
     ordinary = "Knowledge Base/Notes/plain.md"
     owned = "Knowledge Base/Records/Work/Items/item.md"
     for path in (ordinary, owned):
         (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text("---\ntype: insight\nstatus: active\n---\n\nBody.\n")
-    sid = "11111111-1111-4111-8111-111111111111"
-    marker = authority.marker_path(root)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({
-        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
-        "authority_epoch": 1,
-        "collections": [{"collection_id": CID, "manifest_path": "Knowledge Base/Records/Work/_collection.md",
-                         "authority": "store", "store_id": sid,
-                         "source_path": "Knowledge Base/Records/Work/Items", "layout": "markdown-items"}],
-        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
-    }))
     # A walk over ordinary files keeps the empty-policy answer and parses nothing;
     # parsing each page cost the owner's carry rarity seconds per activation.
     monkeypatch.setattr(find_corpus, "parse_page", lambda *a, **kw: pytest.fail("parsed an ordinary page"))
     with request_scope(owner_principal()):
         keep = egress.release_walk_filter(root)
         assert keep(ordinary)
-        # A marker-owned path still needs the store, which no service serves here.
+        # Unregistered bytes inside a canonical namespace cannot become ordinary files.
         assert not keep(owned)
 
 
-def test_a_restricted_walk_on_an_empty_policy_agrees_with_the_read_door_outside_the_marker(
-    tmp_path, monkeypatch
+def test_a_restricted_walk_agrees_with_the_read_door_outside_canonical_ownership(
+    service, monkeypatch
 ):
-    """A caller under RAW protection walks an ordinary page exactly as a direct read serves it.
-
-    A collection-store marker made such a caller's walk decide every path in full:
-    it withheld a bridge-shaped page outside the marker that the read door serves,
-    and it parsed each page to do so.
-    """
-    import json
-
+    """An empty policy keeps ordinary bridges readable beside a canonical collection without parsing each page."""
     from test_governance_bridges import BRIDGE_PATH, SOURCE_PATH, _bridge_source_text, _bridge_text
 
     from exomem import commands, find_corpus
-    from exomem.collection_store import authority
 
-    root = tmp_path / "vault"
+    root = service.root
     owned = "Knowledge Base/Records/Work/Items/item.md"
     for path, text in (
         (SOURCE_PATH, _bridge_source_text()),
@@ -434,22 +478,11 @@ def test_a_restricted_walk_on_an_empty_policy_agrees_with_the_read_door_outside_
     ):
         (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text(text)
-    sid = "11111111-1111-4111-8111-111111111111"
-    marker = authority.marker_path(root)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({
-        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
-        "authority_epoch": 1,
-        "collections": [{"collection_id": CID, "manifest_path": "Knowledge Base/Records/Work/_collection.md",
-                         "authority": "store", "store_id": sid,
-                         "source_path": "Knowledge Base/Records/Work/Items", "layout": "markdown-items"}],
-        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
-    }))
     with request_scope(_external()):
         assert commands.op_get(root, path=BRIDGE_PATH).get("body")
         with monkeypatch.context() as walk:
             walk.setattr(find_corpus, "parse_page", lambda *a, **kw: pytest.fail("parsed an ordinary page"))
             keep = egress.release_walk_filter(root)
             assert keep(BRIDGE_PATH)
-        # A marker-owned path still needs the store, which no service serves here.
+        # Unregistered bytes inside a canonical namespace cannot become ordinary files.
         assert not keep(owned)

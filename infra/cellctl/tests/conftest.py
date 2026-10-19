@@ -10,21 +10,25 @@ down at the end of the test session.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import asyncpg
 import pytest
 
+from cellctl.control_test_contract import control_test_sql, export_test_sql, import_test_sql
+
 FIXTURES = Path(__file__).parent / "fixtures"
-SCHEMA_SQL = (FIXTURES / "exomem_cloud_schema.sql").read_text(encoding="utf-8")
-GRANTS_SQL = (FIXTURES / "exomem_cloud_grants.sql").read_text(encoding="utf-8")
+CONTRACT_ALERTS = json.loads(
+    (Path(__file__).resolve().parents[3] / "infra/contracts/observability-v1.json").read_text(encoding="utf-8")
+)["alerts"]
 
 # Migration 0056 references exomem_tenants(id), which an earlier Substrate
 # migration owns. The fixtures carry only the Cloud files, so the suite
@@ -72,7 +76,8 @@ def _free_port() -> int:
 class PostgresServer:
     host: str
     port: int
-    admin_dsn: str
+    # An external test server may require a password; pytest displays fixture representations.
+    admin_dsn: str = field(repr=False)
 
     def dsn(self, *, role: str | None = None, database: str = "postgres") -> str:
         user = role or "postgres"
@@ -187,16 +192,11 @@ async def _create_cell_db(server: PostgresServer) -> str:
     owner_connection = await asyncpg.connect(owner_dsn)
     try:
         await owner_connection.execute(TENANTS_STANDIN_SQL)
-        await owner_connection.execute(SCHEMA_SQL)
-        await owner_connection.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-        # C5's canonical migration also seeds the CLI client. Earlier OAuth migrations own this table.
-        await owner_connection.execute("CREATE TABLE exomem_oauth_clients (client_id text PRIMARY KEY, "
-                                       "admission_mode text, enabled boolean, redirect_uris jsonb, "
-                                       "redirect_uris_digest bytea)")
-        await owner_connection.execute((FIXTURES / "exomem_cloud_imports.sql").read_text())
-        await owner_connection.execute((FIXTURES / "exomem_cloud_import_cleanup.sql").read_text())
-        await owner_connection.execute((FIXTURES / "exomem_cloud_exports.sql").read_text())
-        await owner_connection.execute(GRANTS_SQL)
+        schema_sql, grants_sql = control_test_sql(FIXTURES)
+        await owner_connection.execute(schema_sql)
+        await owner_connection.execute(import_test_sql(FIXTURES))
+        await owner_connection.execute(export_test_sql(FIXTURES))
+        await owner_connection.execute(grants_sql)
     finally:
         await owner_connection.close()
     return name
@@ -231,3 +231,13 @@ def cell_db(postgres_server: PostgresServer) -> Iterator[CellDatabase]:
         yield CellDatabase(server=postgres_server, name=name)
     finally:
         asyncio.run(_drop_cell_db(postgres_server, name))
+
+
+@pytest.fixture(autouse=True)
+def alert_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """cellctl refuses to start without the thresholds the chart renders from
+    the observability contract (main.build_alert_thresholds), so a test that
+    builds a config gets the contract's own values."""
+
+    monkeypatch.setenv("CELLCTL_PENDING_OPERATION_WARN_SECONDS", str(CONTRACT_ALERTS["pending_operation_warn_seconds"]))
+    monkeypatch.setenv("CELLCTL_PVC_RESERVED_FREE_BYTES", str(CONTRACT_ALERTS["pvc_reserved_free_bytes"]))

@@ -188,6 +188,34 @@ def test_ref_selector_resolves_membership(vault: Path) -> None:
     assert "01ARZ3NDEKTSV4RRFFQ69G5FB4" in membership.evaluate(parsed, pol)
 
 
+@pytest.mark.parametrize("excluded", [False, True])
+def test_metadata_refs_follow_directory_and_selector_changes_without_clearing(monkeypatch, excluded):
+    """A warm selector must not retain membership from another KB name or policy edit."""
+    from dataclasses import replace
+
+    subject = membership.MetadataSubject("Notes/entry.md")
+    values = ("Notebook/Notes/entry.md",)
+    scope = policy.Scope(
+        id="explicit", source="fixture",
+        paths=("Notes/**",) if excluded else (),
+        refs=() if excluded else values,
+        exclude_refs=values if excluded else (),
+    )
+    pol = policy.Policy(fingerprint="fixture", scopes={scope.id: scope})
+    expected = frozenset({scope.id})
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Knowledge Base")
+    assert membership.evaluate_metadata(subject, pol) == (expected if excluded else frozenset())
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Notebook")
+    assert membership.evaluate_metadata(subject, pol) == (frozenset() if excluded else expected)
+    changed = ("Notebook/Notes/other.md",)
+    edited = replace(scope, **{"exclude_refs" if excluded else "refs": changed})
+    assert membership.evaluate_metadata(subject, replace(pol, scopes={scope.id: edited})) == (
+        expected if excluded else frozenset()
+    )
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Knowledge Base")
+    assert membership.evaluate_metadata(subject, pol) == (expected if excluded else frozenset())
+
+
 def test_exclude_selector_removes_membership(vault: Path) -> None:
     _write_scope(
         vault,
@@ -375,6 +403,60 @@ def test_path_only_non_markdown_membership_is_classified_empty(vault: Path) -> N
     assert type(outcome).__name__ == "MembershipOutcome"
     assert outcome.state == "classified"
     assert outcome.scope_ids == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("selectors", "expected"),
+    [
+        ({"paths": ["Notes/**"]}, "classified"),
+        ({"paths": ["Notes/**"], "exclude": {"tags": ["restricted"]}}, "unresolved"),
+        (
+            {
+                "paths": ["Notes/**"],
+                "exclude": {"refs": ["exomem://memory/12345678-1234-4234-8234-123456789012"]},
+            },
+            "unresolved",
+        ),
+        ({"refs": ["exomem://memory/12345678-1234-4234-8234-123456789012"]}, "unresolved"),
+        ({"tags": ["restricted"]}, "unresolved"),
+        ({"paths": ["Private/**"]}, "classified"),
+        (
+            {"paths": ["Notes/**"], "exclude": {"paths": ["Notes/**"]}, "tags": ["restricted"]},
+            "classified",
+        ),
+    ],
+)
+def test_no_byte_membership_retains_unknown_selectors_without_reading_artifact(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selectors: dict,
+    expected: str,
+) -> None:
+    scope_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    _write_scope(
+        vault, "pending", yaml.safe_dump({"governance_version": 1, "id": scope_id, **selectors})
+    )
+    compiled = policy.load(vault)
+    path = "Knowledge Base/Notes/pending.md"
+    artifact = _write_page(vault, path, "type: insight")
+    original = Path.read_bytes
+
+    def read(target):
+        assert target != artifact, "metadata-only membership opened its artifact"
+        return original(target)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    monkeypatch.setattr(
+        membership.companions,
+        "classify",
+        lambda *_args, **_kwargs: pytest.fail("no-byte membership tried companion hydration"),
+    )
+    outcome = membership.evaluate_path_only(vault, path, compiled, resolve_bytes=False)
+    assert outcome.state == expected
+    if expected == "classified":
+        assert outcome.scope_ids == (
+            frozenset((scope_id,)) if selectors == {"paths": ["Notes/**"]} else frozenset()
+        )
 
 
 def test_path_exclusion_proves_non_markdown_scope_is_excluded(vault: Path) -> None:

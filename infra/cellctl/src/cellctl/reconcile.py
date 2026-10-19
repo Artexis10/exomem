@@ -43,7 +43,9 @@ from .decide import (
     decide,
     hourly_backup_due,
     nightly_backup_due,
+    planned_move_volume,
     relocation_volume,
+    storage_receipt,
 )
 from .exports import (
     EXPORT_UPLOAD_FAILED,
@@ -92,6 +94,7 @@ from .state import (
     CANARY_PARKED,
     GROWTH_NOT_NEEDED,
     MANIFEST_IMMUTABLE,
+    MOVE,
     RELOCATION_REFUSED,
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
@@ -99,12 +102,16 @@ from .state import (
     CellRow,
     ClusterObservation,
     Decision,
+    row_hold_kind,
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
 from .storage.topolvm import LocalVolumeState, cell_data_absent
 from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
 logger = logging.getLogger("cellctl")
+
+# Engine names are a value of the comma-separated cell variable, so a name holds no comma.
+_MEDIA_ENGINE_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 # D4 amendment (2026-10-05): a pass follows the last one after the fast
 # interval while anything is in transition, and after the idle interval once
@@ -270,10 +277,23 @@ class LoopMemory:
     alert_delivered: dict[str, bool] = field(default_factory=dict)
     alert_retry_at: dict[str, datetime] = field(default_factory=dict)
     stale_backups: list[str] = field(default_factory=list)
+    # The cell-unavailable alert's clock: when this process first saw each
+    # serving cell, with no hold, not ready. A restart forgets every clock; the
+    # cost is a later alert, never a false one (alerts.cells_unavailable).
+    unready_since: dict[str, datetime] = field(default_factory=dict)
+    # The cell-disk-low alert's readings: each cell's free bytes (total minus
+    # used) from its latest backup report, and the cells last logged for each alert.
+    free_bytes: dict[str, int] = field(default_factory=dict)
+    unavailable_cells: list[str] = field(default_factory=list)
+    low_disk_cells: list[str] = field(default_factory=list)
     # D10: what each local cell's latest measured hourly backup found (a
     # GROWTH_ value). A restart forgets them, and the growth alert waits until
     # every serving local cell has been measured again.
     growth_verdicts: dict[str, str] = field(default_factory=dict)
+    # Tasks 5.5 and 5.6: when the dedicated hosts were last read, and the
+    # (bad, unreadable) nodes each host alert last logged: the email names none.
+    host_alerts_at: datetime | None = None
+    host_alert_nodes: dict[str, tuple[list[str], list[str]]] = field(default_factory=dict)
     # D4: when this process first saw each node absent from the API, until it
     # is seen present again. A restart restarts every clock.
     node_absent_since: dict[str, datetime] = field(default_factory=dict)
@@ -402,15 +422,26 @@ class ClusterConfig:
     isolation_binding_name: str = DEFAULT_ISOLATION_BINDING_NAME
     artifact_broker_url: str = ""
     artifact_broker_cell_ids: tuple[str, ...] = ()
+    # serve-cloud-artifact-handles: one switch for every cell, so a cell created
+    # later needs no edit. The list stays as the canary that precedes it.
+    artifact_broker_all_cells: bool = False
     dedicated_cell_ids: tuple[str, ...] = ()
     # cloud-multimodal-processing D7: engine name -> the cells it is switched on in.
     # A selection, not a chart-wide value, so an engine can canary in one cell.
     media_engine_cell_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Engines every cell runs, including a cell created later. The operator sets an engine
+    # here only after it is on in each existing cell through the selection above, so the
+    # default changes no existing cell's render. An empty default renders as before.
+    media_engine_fleet_default: tuple[str, ...] = ()
     shared_worker: SharedWorkerPolicy | None = None
     storage: StorageConfig = DEFAULT_STORAGE
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
     # Secret. None leaves the backup-age alert to the log.
     alert_delivery_secret: tuple[str, str, str] | None = None
+    # The observability contract's thresholds for the cell-unavailable and
+    # cell-disk-low alerts. main.py always sets them (it refuses to start
+    # without); None, for a caller that builds a config by hand, evaluates neither.
+    alert_thresholds: alerts.AlertThresholds | None = None
 
     def __post_init__(self) -> None:
         cell_ids = self.dedicated_cell_ids
@@ -430,20 +461,26 @@ class ClusterConfig:
             or len(cell_ids) > 1024
             or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
             or len(set(cell_ids)) != len(cell_ids)
-            or (cell_ids and not self.artifact_broker_url)
+            or ((cell_ids or self.artifact_broker_all_cells) and not self.artifact_broker_url)
         ):
             raise ValueError("artifact broker activation requires a literal endpoint and unique base32 cell IDs")
         for engine, cell_ids in self.media_engine_cell_ids.items():
             if (
                 not isinstance(engine, str)
-                # Engine names are a value of the comma-separated cell variable.
-                or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", engine)
+                or not _MEDIA_ENGINE_NAME.fullmatch(engine)
                 or not isinstance(cell_ids, tuple)
                 or len(cell_ids) > 1024
                 or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
                 or len(set(cell_ids)) != len(cell_ids)
             ):
                 raise ValueError("a media engine selection maps lower-case engine names to unique base32 cell IDs")
+        default = self.media_engine_fleet_default
+        if (
+            not isinstance(default, tuple)
+            or any(not isinstance(engine, str) or not _MEDIA_ENGINE_NAME.fullmatch(engine) for engine in default)
+            or len(set(default)) != len(default)
+        ):
+            raise ValueError("a media engine fleet default is a list of unique lower-case engine names")
 
     def workload_for_cell(self, cell_id: str) -> tuple[ResourceSettings, dict]:
         if cell_id in self.dedicated_cell_ids:
@@ -459,11 +496,17 @@ class ClusterConfig:
         return self.resources, {}
 
     def artifact_broker_for_cell(self, cell_id: str) -> str:
-        return self.artifact_broker_url if cell_id in self.artifact_broker_cell_ids else ""
+        selected = self.artifact_broker_all_cells or cell_id in self.artifact_broker_cell_ids
+        return self.artifact_broker_url if selected else ""
 
     def media_engines_for_cell(self, cell_id: str) -> str:
-        """The value of the cell's media engine switch; "" when no engine selects it."""
-        return ",".join(sorted(engine for engine, ids in self.media_engine_cell_ids.items() if cell_id in ids))
+        """The value of the cell's media engine switch; "" when nothing selects an engine for it.
+
+        The cell's own entries and the fleet default form one sorted set, so the same set
+        renders the same value however it is spelled and never re-renders a running cell.
+        """
+        own = {engine for engine, ids in self.media_engine_cell_ids.items() if cell_id in ids}
+        return ",".join(sorted(own | set(self.media_engine_fleet_default)))
 
 
 class ClusterGateway:
@@ -494,6 +537,7 @@ class ClusterGateway:
     ) -> CapacityObservation: ...  # pragma: no cover
     def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation: ...  # pragma: no cover
     def read_secret_value(self, namespace: str, name: str, key: str) -> str: ...  # pragma: no cover
+    def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -862,7 +906,8 @@ def _compute_render_digest(
         material["artifact_broker_url"] = endpoint
     engines = cluster_config.media_engines_for_cell(row.cell_id)
     if engines:
-        # Only a selected cell's digest moves, so a canary restarts one cell.
+        # Only a cell whose engine set changes sees its digest move: a canary restarts
+        # one cell, and a default that names what a cell already runs restarts none.
         material["media_engines"] = engines
     if cluster_config.storage.is_local(storage_class):
         # Only a node-local cell's render depends on its class, so a cell on
@@ -874,8 +919,11 @@ def _compute_render_digest(
 
 def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation, *, relocating: bool = False) -> str:
     storage = cluster_config.storage
-    if (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
-        # D4: a relocated cell's new claim is local, whatever the domain.
+    new_claim = observation.pvc_storage_class not in storage.classes
+    if new_claim and (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
+        # D4: a relocated or moved cell's new claim is local, whatever the
+        # domain. Its old claim keeps its own class until it is gone, since
+        # storageClassName is immutable: a planned move leaves a Hetzner one.
         return storage.local.class_name
     return storage.claim_class(observation.pvc_storage_class)
 
@@ -930,10 +978,13 @@ def _select_backup_candidates(
                 chosen.add(row.cell_id)
         rows = [row for row in rows if not local(row)]
 
+    # A move's stopped backup counts as the backup it is, by the same mapping
+    # the row's hold column records it with.
     active = sum(
         1
         for row in rows
-        if _active_hold(row, observations[row.cell_id]) == "backup" and row.cell_id not in statefulset_blocked
+        if row_hold_kind(_active_hold(row, observations[row.cell_id])) == "backup"
+        and row.cell_id not in statefulset_blocked
     )
     # A row that could not be observed this pass counts by its hold column.
     active += sum(1 for row in unobserved if row.hold_kind == "backup")
@@ -1120,6 +1171,8 @@ async def reconcile_once(
     observations = _with_lost_nodes(observations, memory, now)
     await _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
     await _growth_alert(cluster, cluster_config, rows, observations, now, memory)
+    await _cell_health_alerts(cluster, cluster_config, rows, observations, now, memory)
+    await _host_alerts(cluster, cluster_config, now, memory)
     storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
@@ -1366,6 +1419,65 @@ async def _growth_alert(
         await _deliver_alert(cluster, cluster_config, memory, alerts.GROWTH_ALERT, firing, now)
 
 
+# The dedicated hosts change slowly and each read is a pod listing and one HTTP
+# request per node, so they are read at most this often, not on every pass.
+HOST_ALERT_INTERVAL = timedelta(minutes=1)
+
+
+async def _host_alerts(
+    cluster: ClusterGateway, cluster_config: ClusterConfig, now: datetime, memory: LoopMemory
+) -> None:
+    """Tasks 5.5 and 5.6: one platform alert while a dedicated host's md array
+    has lost a member, and one while its thin pool's data or metadata use has
+    reached 80%. A host that cannot be read sends nothing (alerts.host_alert_firing).
+    Nothing is read where local storage is not configured, or with no receiver
+    to tell. The nodes go to the log, because the email names none."""
+
+    local = cluster_config.storage.local
+    if local is None or cluster_config.alert_delivery_secret is None:
+        return
+    if memory.host_alerts_at is not None and now - memory.host_alerts_at < HOST_ALERT_INTERVAL:
+        return
+    memory.host_alerts_at = now
+    try:
+        # The nodes that publish a pool are the dedicated hosts, and the Cloud
+        # recovery agent (task 6.3) when it exists. That agent has no md array,
+        # so it must be left out of the array alert's nodes before it is built.
+        observed = await asyncio.to_thread(cluster.local_capacity_inputs, local)
+    except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
+        logger.error("cellctl: the dedicated hosts could not be listed, so no host alert is read: %s", _describe_error(error))
+        return
+    expected = sorted(node for node, free in observed.free_bytes.items() if free is not None)
+
+    async def scrape(selector: str, port: int) -> dict[str, str]:
+        try:
+            return await asyncio.to_thread(cluster.scrape_pod_metrics, local.metrics_namespace, selector, port)
+        except Exception as error:  # noqa: BLE001 - every node then reads as unreadable
+            logger.error("cellctl: the host metrics pods could not be listed: %s", _describe_error(error))
+            return {}
+
+    pool_scrapes = await scrape(local.thin_pool_selector, local.thin_pool_port)
+    array_scrapes = await scrape(local.array_selector, local.array_port)
+    # Parsing is quadratic in a line's length, so it runs off the event loop.
+    readings = (
+        (alerts.THIN_POOL_ALERT, await asyncio.to_thread(
+            alerts.thin_pool_states, expected, pool_scrapes, device_class=local.device_class)),
+        (alerts.ARRAY_ALERT, await asyncio.to_thread(alerts.array_states, expected, array_scrapes)),
+    )
+    for alert, states in readings:
+        bad = sorted(node for node, state in states.items() if state)
+        unreadable = sorted(node for node, state in states.items() if state is None)
+        if (bad, unreadable) != memory.host_alert_nodes.get(alert, ([], [])):
+            memory.host_alert_nodes[alert] = (bad, unreadable)
+            if bad:
+                logger.warning("cellctl: %s on node(s): %s", alert, ", ".join(bad))
+            if unreadable:
+                logger.warning("cellctl: %s could not be read on node(s): %s", alert, ", ".join(unreadable))
+        firing = alerts.host_alert_firing(states)
+        if firing is not None:
+            await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)
+
+
 async def _backup_age_alert(
     cluster: ClusterGateway,
     cluster_config: ClusterConfig,
@@ -1388,8 +1500,88 @@ async def _backup_age_alert(
     await _deliver_alert(cluster, cluster_config, memory, alerts.BACKUP_ALERT, bool(stale), now)
 
 
+async def _cell_health_alerts(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    now: datetime,
+    memory: LoopMemory,
+) -> None:
+    """Two platform alerts with the observability contract's thresholds: a
+    serving cell that stayed unready for pending_operation_warn_seconds
+    (cell-unavailable), and one whose volume has less than
+    pvc_reserved_free_bytes free (cell-disk-low). The cells go to the log, by
+    id, because the email names none."""
+
+    thresholds = cluster_config.alert_thresholds
+    if thresholds is None:
+        return
+    _note_cell_health(memory, rows, observations, now)
+
+    unavailable = alerts.unavailable_cells(memory.unready_since, now, after=thresholds.unavailable_after)
+    seconds = int(thresholds.unavailable_after.total_seconds())
+    if unavailable != memory.unavailable_cells:
+        if unavailable:
+            logger.warning("cellctl: %s: %d serving cell(s) have been unready for %d seconds or more: %s",
+                           alerts.UNAVAILABLE_ALERT, len(unavailable), seconds, ", ".join(unavailable))
+        else:
+            logger.info("cellctl: %s: no serving cell has been unready for %d seconds", alerts.UNAVAILABLE_ALERT, seconds)
+        memory.unavailable_cells = unavailable
+    firing = alerts.cells_unavailable(rows, observations, memory.unready_since, now, after=thresholds.unavailable_after)
+    if firing is not None:
+        await _deliver_alert(cluster, cluster_config, memory, alerts.UNAVAILABLE_ALERT, firing, now)
+
+    floor = thresholds.disk_free_floor_bytes
+    low = alerts.low_disk_cells(rows, memory.free_bytes, floor=floor)
+    if low != memory.low_disk_cells:
+        if low:
+            logger.warning("cellctl: %s: %d serving cell(s) had less than %d bytes free at their last backup: %s",
+                           alerts.DISK_LOW_ALERT, len(low), floor, ", ".join(low))
+        else:
+            logger.info("cellctl: %s: every measured serving cell has at least %d bytes free", alerts.DISK_LOW_ALERT, floor)
+        memory.low_disk_cells = low
+    firing = alerts.disk_low(rows, memory.free_bytes, floor=floor)
+    if firing is not None:
+        await _deliver_alert(cluster, cluster_config, memory, alerts.DISK_LOW_ALERT, firing, now)
+
+
+def _note_cell_health(
+    memory: LoopMemory, rows: list[CellRow], observations: dict[str, ClusterObservation], now: datetime
+) -> None:
+    """Updates the unready clock and the free-bytes reading of each serving
+    cell from this pass. A cell that could not be observed keeps both as they
+    were: it neither starts nor stops its clock."""
+
+    serving = {row.cell_id: row for row in rows if row.desired_state in alerts.SERVING_STATES}
+    # A cell that stops, or is deleted, forgets both: started again, it is measured afresh.
+    memory.unready_since = {cell: since for cell, since in memory.unready_since.items() if cell in serving}
+    memory.free_bytes = {cell: free for cell, free in memory.free_bytes.items() if cell in serving}
+    for cell_id, row in serving.items():
+        observation = observations.get(cell_id)
+        if observation is None:
+            continue
+        # A hold is an upgrade, backup, restore or move that cellctl runs on purpose: the cell is
+        # down for it, not broken. _in_transition would also count a cell that is merely unready
+        # as in transition, because its row reads dirty, and so would hide the outage itself.
+        if observation.pod_ready or _held(row, observation):
+            memory.unready_since.pop(cell_id, None)
+        else:
+            memory.unready_since.setdefault(cell_id, now)
+        # The backup Job's filesystem report is the one free-space reading cellctl has: hourly on
+        # local storage, nightly otherwise, so it can be a day old. Node or kubelet stats would
+        # need RBAC cellctl does not hold.
+        used, total = observation.backup_job_used_bytes, observation.backup_job_total_bytes
+        if used is not None and total:
+            memory.free_bytes[cell_id] = total - used
+
+
+def _held(row: CellRow, observation: ClusterObservation) -> bool:
+    return _active_hold(row, observation) is not None or row.hold_kind is not None
+
+
 def _in_transition(row: CellRow, observation: ClusterObservation, refusal_parked: bool) -> bool:
-    if _active_hold(row, observation) is not None or row.hold_kind is not None:
+    if _held(row, observation):
         return True
     if row.observed_state == "failed" and row.generation == row.observed_generation:
         return False
@@ -1496,8 +1688,9 @@ async def _reconcile_row(
         and not start_upgrade
         and not is_render_digest_candidate
         # D4: a converged cell whose volume is lost still has its relocation
-        # to start.
+        # to start, and one the operator marked to move has its move.
         and relocation_volume(row, observation, cluster_config.storage) is None
+        and planned_move_volume(row, observation, cluster_config.storage) is None
     )
     # D4: ready is an observation, never a memory. A served, converged row
     # whose only change is its pod's readiness is observed, not re-applied:
@@ -1766,10 +1959,18 @@ async def _reconcile_row(
             and decision.target_applied_at is not None
         )
         hold_active = observation.statefulset_exists and observation.statefulset_hold_kind is not None
+        manifests = render_cell_manifests(spec)
+        if decision.delete_claim:
+            # D4: a claim deleted this pass is not applied again. This pass
+            # renders the deleted claim's class, and an unused claim is gone
+            # at once, so the apply would recreate it on the old class. The
+            # next pass, seeing no claim, applies the new one.
+            manifests = [manifest for manifest in manifests
+                         if (manifest["kind"], manifest["metadata"]["name"]) != ("PersistentVolumeClaim", spec.pvc_name)]
         refused, statefulset_applied = _apply_cell_manifests(
             cluster,
             row.cell_id,
-            render_cell_manifests(spec),
+            manifests,
             hold_active=hold_active,
             statefulset_exists=observation.statefulset_exists,
         )
@@ -1895,6 +2096,7 @@ async def _reconcile_row(
         await db.write_import(connection, item.import_id, {"observed_state": "discarded", "recipient": None,
                               "upload_id": None, "part_urls": None, "urls_expire_at": None})
     row_updates: dict[str, object] = dict(decision.row_updates)
+    row_updates.update(storage_receipt(row, observation, cluster_config.storage, now=now))
     if refused:
         # D4: the StatefulSet landed but another object was refused. The
         # refusal is what the row records, and nothing converged.
@@ -2035,15 +2237,16 @@ def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservati
 def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
     """D3: the hourly hold reads its clone and prunes only on its first run
     after 02:00 UTC; the stopped pre-upgrade backup of a local cell never
-    prunes. Every backup of a Hetzner cell keeps its claim and the nightly
-    prune, as before local storage."""
+    prunes, nor does a planned move's. Every other backup of a Hetzner cell
+    keeps its claim and the nightly prune, as before local storage."""
 
     if decision.hold_kind == SNAPSHOT_BACKUP:
         return {
             "claim_name": hold_job_name(CLONE_CLAIM_NAME, spec.hold_started_at),
             "retention": HOURLY_RETENTION_ARGS if decision.backup_prune else None,
         }
-    if spec.local_volume and decision.hold_kind == "upgrade":
+    if decision.hold_kind == MOVE or (spec.local_volume and decision.hold_kind == "upgrade"):
+        # A move's cell is down while its backup runs, so it never prunes either.
         return {"retention": None}
     return {"retention": RETENTION_ARGS}
 

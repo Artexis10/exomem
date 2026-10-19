@@ -12,6 +12,34 @@ import pytest
 
 from cloud_rehearsal import build, platform, report, substrate, tls
 from cloud_rehearsal.mcp_client import _HiddenInputs
+from cloud_rehearsal.shell import wait_for
+
+
+def test_wait_for_propagates_error_when_retries_are_disabled() -> None:
+    calls = 0
+
+    def probe() -> None:
+        nonlocal calls
+        calls += 1
+        raise ValueError("ambiguous result")
+
+    with pytest.raises(ValueError, match="ambiguous result"):
+        wait_for(probe, timeout=1, interval=0, description="a write", retry_exceptions=())
+    assert calls == 1
+
+
+def test_wait_for_retries_transient_error_by_default() -> None:
+    calls = 0
+
+    def probe() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("warming")
+        return True
+
+    assert wait_for(probe, timeout=1, interval=0, description="a read") is True
+    assert calls == 2
 
 
 @pytest.mark.parametrize("enveloped", [False, True])
@@ -288,13 +316,14 @@ def test_repository_inputs_exist(path: str) -> None:
     assert (images.REPO_ROOT / path).exists()
 
 
-def test_pki_verifies_under_strict_x509(tmp_path: Path) -> None:
+@pytest.mark.parametrize("hostname", [tls.MCP_HOST, "127.0.0.1"])
+def test_pki_verifies_under_strict_x509(tmp_path: Path, hostname: str) -> None:
     import socket
     import ssl
     import threading
 
-    pki = tls.make_pki(tmp_path)
-    leaf = pki.leaves[tls.MCP_HOST]
+    pki = tls.make_pki(tmp_path, (hostname,))
+    leaf = pki.leaves[hostname]
     (tmp_path / "leaf.pem").write_text(leaf.cert_pem + leaf.key_pem, encoding="utf-8")
     server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_context.load_cert_chain(tmp_path / "leaf.pem")
@@ -313,7 +342,7 @@ def test_pki_verifies_under_strict_x509(tmp_path: Path) -> None:
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     with socket.create_connection(("127.0.0.1", port)) as raw:
-        with client_context.wrap_socket(raw, server_hostname=tls.MCP_HOST) as wrapped:
+        with client_context.wrap_socket(raw, server_hostname=hostname) as wrapped:
             assert wrapped.version()
     thread.join(timeout=5)
     listener.close()
@@ -343,3 +372,191 @@ def test_the_token_request_observer_records_the_verifier_shape_not_the_verifier(
     asyncio.run(client._observe_token_request(request))
     assert client.verifier_seen == {"length": len(verifier), "uses_dot_or_tilde": True}
     assert verifier not in str(client.verifier_seen)
+
+
+def test_operator_abort_is_opt_in_and_accepts_provision_only() -> None:
+    """The ordinary rehearsal must not acquire the interrupted restore stage."""
+    from cloud_rehearsal.__main__ import _parser
+
+    assert _parser().parse_args(["run"]).operator_restore_abort is False
+    selected = _parser().parse_args(["run", "--operator-restore-abort", "--steps", "1,2"])
+    assert selected.operator_restore_abort is True and selected.steps == "1,2"
+
+
+def test_operator_abort_never_qualifies_a_node_even_with_twelve_passing_steps() -> None:
+    """The optional partial proof cannot accidentally become production qualification."""
+    run = _passing_report()
+    run.inputs["operator_restore_abort"] = True
+    assert run.to_json()["outcome"]["gates_node"] is False
+
+
+def test_requested_operator_abort_failure_cannot_be_a_known_finding(monkeypatch) -> None:
+    """A requested restore stage must fail even when harness-check accepts known step findings."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import operator_restore_abort, scenarios
+    from cloud_rehearsal.__main__ import _parser
+
+    async def provision(_ctx, _record):
+        pass
+
+    async def abort(_ctx):
+        raise report.StepFailure("the writer survived rollback")
+
+    monkeypatch.setattr(scenarios, "STEPS", [(2, "provision", provision, ())])
+    monkeypatch.setattr(scenarios, "snapshot_logs", lambda _ctx: None)
+    monkeypatch.setattr(operator_restore_abort, "run_abort", abort)
+    args = _parser().parse_args(["run", "--operator-restore-abort", "--harness-check"])
+    ctx = SimpleNamespace(report=report.Report("abort"), cli_image=None,
+                          operator_restore_abort=args.operator_restore_abort)
+    with pytest.raises(report.StageFailed):
+        asyncio.run(scenarios.run_steps(ctx))
+    assert ctx.report.stages["operator_restore_abort"]["status"] == "failed"
+
+
+def test_operator_image_build_reads_the_node_roles_x86_pin(monkeypatch, tmp_path) -> None:
+    """Changing node-role pin fields must not break the x86 operator image build."""
+    from types import SimpleNamespace
+
+    import yaml
+
+    from cloud_rehearsal import operator_restore_abort
+
+    class ImageBuildReached(Exception):
+        pass
+
+    def command(args, **_kwargs):
+        if args[:2] == ["docker", "build"]:
+            raise ImageBuildReached
+        return SimpleNamespace(stdout="")
+
+    ctx = SimpleNamespace(
+        stack=SimpleNamespace(workdir=tmp_path, run_id="operator-pin"),
+        report=SimpleNamespace(stages={"operator_restore_abort": {}}),
+    )
+    monkeypatch.setattr(operator_restore_abort, "run", command)
+    monkeypatch.setattr(operator_restore_abort, "observed_volume_mount", lambda *_args: "mock")
+    monkeypatch.setattr(operator_restore_abort, "_labels", lambda *_args, **_kwargs: [])
+    with pytest.raises(ImageBuildReached):
+        operator_restore_abort._start_operator(ctx, "snapshot", "/ignored")
+    defaults = yaml.safe_load((operator_restore_abort.images.REPO_ROOT / "infra/ansible/roles/k3s/defaults/main.yml").read_text())
+    assert ctx.report.stages["operator_restore_abort"]["operator_k3s"] == {
+        "version": defaults["k3s_version"], "sha256": defaults["k3s_binaries"]["x86_64"]["sha256"],
+    }
+
+
+def test_operator_configuration_keeps_certificate_verification(tmp_path: Path) -> None:
+    """The runner's bridge route must not replace the disposable CA with insecure TLS."""
+    import yaml
+
+    from cloud_rehearsal.operator_restore_abort import operator_kubeconfig
+
+    source = tmp_path / "source.yaml"
+    destination = tmp_path / "operator.yaml"
+    document = {"clusters": [{"name": "local", "cluster": {
+        "server": "https://127.0.0.1:31443", "certificate-authority-data": "disposable-ca",
+    }}], "users": [{"name": "local", "user": {"client-certificate-data": "disposable-cert"}}]}
+    source.write_text(yaml.safe_dump(document))
+    operator_kubeconfig(source, destination, "192.0.2.7")
+    observed = yaml.safe_load(destination.read_text())
+    assert observed["clusters"][0]["cluster"] == {
+        "server": "https://192.0.2.7:6443", "certificate-authority-data": "disposable-ca",
+    }
+    assert observed["users"] == document["users"]
+    assert destination.stat().st_mode & 0o777 == 0o600
+    assert yaml.safe_load(source.read_text()) == document
+
+
+@pytest.mark.parametrize("requested", [False, True])
+def test_abort_only_renders_the_shipped_break_glass_binding(monkeypatch, tmp_path, requested) -> None:
+    """The optional operator must mint its own identity without breaking ordinary observer exec."""
+    from types import SimpleNamespace
+
+    import yaml
+
+    documents = list(yaml.safe_load_all((platform.PLATFORM_CHART / "templates/operator-access.yaml").read_text()))
+    binding = next(doc for doc in documents if doc["metadata"]["name"] == "exomem-break-glass")
+
+    def render(_stack, _values, **kwargs):
+        return [("templates/cloud-storage-class.yaml", {"kind": "StorageClass", "metadata": {"name": "test-storage"}}),
+                *[("templates/operator-access.yaml", doc) for doc in documents
+                  if "templates/operator-access.yaml" in kwargs["show_only"]]]
+
+    monkeypatch.setattr(platform, "render_chart", render)
+    config = platform.PlatformConfig("controller", "gateway", "cell", "0-1", "https://example.test", "/mcp", "source",
+                                     operator_restore_abort=requested)
+    stack = SimpleNamespace(postgres=SimpleNamespace(ip="192.0.2.3"), workdir=tmp_path,
+                            object_store=SimpleNamespace(endpoint=lambda **_kwargs: "https://192.0.2.4"))
+    rendered = platform._render(stack, config).rendered
+    assert rendered[1:] == ([binding] if requested else [])
+
+
+def test_requested_operator_abort_cannot_be_silently_skipped() -> None:
+    """A subset without provisioning must not report success for an unexecuted requested stage."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import scenarios
+
+    ctx = SimpleNamespace(report=report.Report("no-provision"), operator_restore_abort=True)
+    with pytest.raises(report.StageFailed):
+        asyncio.run(scenarios.run_steps(ctx, only=set()))
+    assert ctx.report.stages["operator_restore_abort"]["failure"]["message"].endswith("provisioning at step 2")
+
+
+def test_operator_observer_mounts_only_the_selected_pvc(monkeypatch) -> None:
+    """Observing a PVC must not expose the entire K3s volume in the operator container."""
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import operator_restore_abort
+
+    stack = SimpleNamespace(run_id="example", k3s=SimpleNamespace(container="exo-rehearsal-k3s-example"))
+    observed = [{"Name": "/exo-rehearsal-k3s-example", "Mounts": [
+        {"Destination": "/var/lib/rancher/k3s", "Type": "volume", "Name": "whole-node"},
+        {"Destination": "/var/lib/rancher/k3s/storage", "Type": "volume", "Name": "storage"},
+    ]}]
+    monkeypatch.setattr(operator_restore_abort, "run", lambda _command: SimpleNamespace(stdout=json.dumps(observed)))
+    mount = operator_restore_abort.observed_volume_mount(stack, "/var/lib/rancher/k3s/storage/selected-pvc")
+    assert mount == "type=volume,source=storage,target=/observed-cell-volume,readonly,volume-subpath=selected-pvc"
+
+
+@pytest.mark.parametrize("path", ["/var/lib/rancher/k3s/server", "/var/lib/rancher/k3s/storage", "/var/lib/rancher/k3s/storage/pvc/../server"])
+def test_operator_observer_rejects_a_mount_beyond_one_pvc(path) -> None:
+    """A wider or traversing mount must fail before Docker can expose node state."""
+    from types import SimpleNamespace
+
+    from cloud_rehearsal.operator_restore_abort import observed_volume_mount
+
+    with pytest.raises((ValueError, report.StepFailure)):
+        observed_volume_mount(SimpleNamespace(), path)
+
+
+@pytest.mark.parametrize("cited", [False, True])
+def test_restore_recall_requires_a_hit_not_a_query_echo(monkeypatch, cited) -> None:
+    """An echoed query cannot prove that the post-snapshot write survived rollback."""
+    from cloud_rehearsal import operator_restore_abort
+
+    phrase = "After snapshot example"
+    body = {"result": {"query": phrase, "hits": [{"title": phrase}] if cited else []}}
+    monkeypatch.setattr(operator_restore_abort, "_runtime", lambda *_args: {"result": body, "is_error": False})
+    if cited:
+        assert operator_restore_abort._mcp(None, phrase, "recall")["phrase_recalled"] is True
+    else:
+        with pytest.raises(report.StepFailure, match="recall lost a governed write"):
+            operator_restore_abort._mcp(None, phrase, "recall")
+
+
+@pytest.mark.parametrize("copies", [0, 1, 2])
+def test_final_kernel_witness_uses_retained_stdout_and_rejects_loss_or_duplicates(copies) -> None:
+    """A stopped container's discarded tmpfs must not lose or fabricate the recovery witness."""
+    from cloud_rehearsal.operator_restore_abort import observer_record
+    from cloud_rehearsal.restore_abort_observer import OBSERVER_SCHEMA
+
+    final = {"schema": OBSERVER_SCHEMA, "bash_exit_code": 143, "errors": [], "events": []}
+    stdout = "run started\n" + json.dumps({"unrelated": "output"}) + "\n" + (json.dumps(final) + "\n") * copies
+    if copies == 1:
+        assert observer_record(stdout) == final
+    else:
+        with pytest.raises(report.StepFailure, match="expected one final kernel witness"):
+            observer_record(stdout)

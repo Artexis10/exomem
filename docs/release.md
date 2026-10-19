@@ -183,10 +183,16 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
    `.release-please-manifest.json`, and `CHANGELOG.md`.
 3. Confirm CI and the pre-release checks above.
 4. **Required: run one full CI pass on `main` and confirm it is green before
-   merging the release PR.** The release PR runs only the normal PR tier —
-   full CI (retrieval quality/latency, governance wire characterization,
-   semantic write latency, graph convergence, docker) runs on the nightly
-   schedule and on explicit dispatch, never per push to the release branch
+   merging the release PR.** The release PR runs lint, build, specs,
+   capabilities, the wheel onboarding gate and release evidence, and no other
+   test job: the full run at its base revision is its test evidence. Release
+   evidence also refuses a release PR that changes any file release-please
+   does not manage, so land a fix
+   through its own pull request, never by a push to the release branch. Full
+   CI (retrieval quality/latency, governance wire characterization, semantic
+   write latency, graph convergence, docker, the frozen verifier and source K3s
+   integration) runs on the nightly schedule and
+   on explicit dispatch, never per push to the release branch
    (each release-PR push used to re-trigger a 46-job full run; 61% of a
    measured day's runner-minutes went to those stampedes while ordinary PRs
    queued). Dispatch, then watch the run this dispatch created — selecting by
@@ -200,7 +206,13 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
    ```
 
    A green nightly run on the same `main` revision serves equally; a red or
-   missing full run blocks the release-PR merge.
+   missing full run blocks the release-PR merge. The full run cancels the
+   unfinished push run at the same revision itself, because it runs every job
+   that the push run runs.
+
+   Cloud image builds and smoke checks still run on the release pull request.
+   The version checker parses Python and TOML assignments, so a version marker
+   cannot hide another runtime or dependency change.
 5. Merge the Release Please PR.
 6. Release Please tags `vX.Y.Z` and creates the GitHub Release.
 7. The release workflow's `plan` job finds the release artifacts that are missing

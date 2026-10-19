@@ -44,7 +44,7 @@ def test_worker_clip_embeds_video_via_keyframes(vault, monkeypatch: pytest.Monke
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00\x00video", text="x",
+        vault, scope="Rental", category="clips", filename="demo.mp4", data=b"\x00\x00video", text="x",
     )
     called = {}
     monkeypatch.setattr(embeddings, "embed_video_frames", lambda p: called.setdefault("v", _three_frames()))
@@ -94,7 +94,7 @@ def test_worker_gate_on_writes_frames_and_queues_ocr(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
+        vault, scope="Rental", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
     monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
     monkeypatch.setattr(
@@ -127,7 +127,7 @@ def test_worker_gate_off_never_touches_scene_path(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_VIDEO_SCENE_FRAMES", raising=False)
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
+        vault, scope="Rental", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
     monkeypatch.setattr(embeddings, "embed_video_frames", lambda p: _three_frames())
     monkeypatch.setattr(
@@ -150,7 +150,7 @@ def test_worker_frame_write_failure_still_upserts_vectors(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
+        vault, scope="Rental", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
     monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
     monkeypatch.setattr(
@@ -302,7 +302,7 @@ def test_worker_gate_on_enqueues_parent_reembed_after_ocr(
     monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
+        vault, scope="Rental", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
     monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
     w = media_worker.MediaWorker(vault, execution_mode="inline")
@@ -324,7 +324,7 @@ def test_worker_reembed_gate_off_not_enqueued(vault, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
+        vault, scope="Rental", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
     monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
     w = media_worker.MediaWorker(vault, execution_mode="inline")

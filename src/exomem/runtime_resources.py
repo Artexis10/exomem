@@ -10,7 +10,7 @@ import contextlib
 import logging
 import os
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -399,7 +399,9 @@ def _source_line_bound(source: str) -> int:
     ))
 
 
-def _yaml_expanded_cost(text: str, *, maximum: int) -> int:
+def _yaml_expanded_cost(
+    text: str, *, maximum: int, check: Callable[[], None] | None = None,
+) -> int:
     """Bound alias/merge expansion from parser events before construction.
 
     libyaml constructors flatten repeated merges recursively. Byte size alone
@@ -416,6 +418,8 @@ def _yaml_expanded_cost(text: str, *, maximum: int) -> int:
     total = 0
     try:
         for event in yaml.parse(text, Loader=vault._YAML_SAFE_LOADER):
+            if check is not None:
+                check()
             anchor = getattr(event, "anchor", None)
             if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
                 if anchor:
@@ -458,11 +462,17 @@ class SemanticPreparation:
     those retain their existing controls and measured cgroup acceptance.
     """
 
-    def __init__(self, source_bytes: int, *, bulk: bool) -> None:
+    def __init__(
+        self, source_bytes: int, *, bulk: bool, limit_bytes: int | None = None,
+        check: Callable[[], None] | None = None,
+    ) -> None:
         self.limit = (
             SEMANTIC_PREPARATION_BYTES - SEMANTIC_SMALL_RESERVE_BYTES
             if bulk else SEMANTIC_SMALL_RESERVE_BYTES
         )
+        if limit_bytes is not None:
+            self.limit = min(self.limit, limit_bytes)
+        self.check = check
         self.reuse_allowance = (4 if bulk else 1) * 1024 * 1024
         self.reserved = 0
         self.source = ""
@@ -473,6 +483,8 @@ class SemanticPreparation:
 
     def reserve(self, amount: int) -> None:
         global _preparation_bytes, _preparation_peak
+        if self.check is not None:
+            self.check()
         with _preparation_lock:
             extra = max(0, amount - self.reserved)
             if amount > self.limit:
@@ -518,24 +530,32 @@ class SemanticPreparation:
 
 
 @contextlib.contextmanager
-def semantic_preparation(vault_root: Path, path: Path):
+def semantic_preparation(
+    vault_root: Path, path: Path, *, source_limit: int | None = None,
+    limit_bytes: int | None = None, check: Callable[[], None] | None = None,
+    expected_hash: str | None = None,
+):
     """Reserve before source/parse allocations; never wait for memory capacity."""
     from . import find_corpus, freshness, vault
 
+    if check is not None:
+        check()
     signature = freshness.stat_signature(path)
     source_bytes = path.stat().st_size
     bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
-    preparation = SemanticPreparation(source_bytes, bulk=bulk)
+    preparation = SemanticPreparation(source_bytes, bulk=bulk, limit_bytes=limit_bytes, check=check)
     try:
-        if source_bytes > SEMANTIC_SOURCE_MAX_BYTES:
+        maximum_source = min(SEMANTIC_SOURCE_MAX_BYTES, source_limit) if source_limit is not None else SEMANTIC_SOURCE_MAX_BYTES
+        if source_bytes > maximum_source:
             raise PreparationBudgetExceeded("semantic source budget exceeded")
         preparation.reserve(8 * source_bytes + 65536)
         source, preparation.guard = vault.read_bounded_guarded_bytes(
-            vault_root, path.relative_to(vault_root).as_posix(), limit=source_bytes
+            vault_root, path.relative_to(vault_root).as_posix(), limit=source_bytes,
+            **({"expected_hash": expected_hash} if expected_hash is not None else {}),
         )
         if len(source) != source_bytes or freshness.stat_signature(path) != signature:
             raise OSError("semantic input changed during preparation")
-        preparation.source = source.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        preparation.source = source.decode("utf-8")
         preparation.signature = signature
         # Dense inline YAML has many nodes even on one line. Charge before
         # either existing page/unit parser constructs them. The conservative
@@ -550,7 +570,8 @@ def semantic_preparation(vault_root: Path, path: Path):
         preparation.reserve(preparation.parser_bytes)
         if frontmatter:
             expanded = _yaml_expanded_cost(
-                frontmatter.group(1), maximum=(preparation.limit - preparation.parser_bytes) // 2
+                frontmatter.group(1), maximum=(preparation.limit - preparation.parser_bytes) // 2,
+                check=check,
             )
             preparation.parser_bytes += 2 * expanded
             preparation.reserve(preparation.parser_bytes)

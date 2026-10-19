@@ -6,9 +6,11 @@ import json
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
-from ..collection_store import derived_rows, index_migrations
+from ..collection_store import derived_rows, index_migrations, native_identity
+from ..collection_store.native_projections import NativeProjectionPlan
 from ..collection_store.query_indexes import ProjectionPlan
 from . import ir, typed_sql, validation
+from .ordered_seeks import Seek
 from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, ReadSession, wire_bytes
 
 _SEAL = object()
@@ -50,6 +52,46 @@ class RowPage:
     has_more: bool
     last_order_key: tuple | None
     total: int | None = None
+
+
+def logical_item_key(admitted, value):
+    """Restore public identities; canonical items already retain their logical TEXT key."""
+    if isinstance(admitted.projection, NativeProjectionPlan) and type(value) is bytes:
+        try:
+            return native_identity.decode(value, admitted.projection.layout.identity)
+        except (ValueError, UnicodeError) as error:
+            raise QueryError("QUERY_UNAVAILABLE") from error
+    if type(value) is not str:
+        raise QueryError("QUERY_UNAVAILABLE")
+    return value
+
+
+def indexed_relation(admitted, *, hinted=True):
+    """Resolve native operand aliases without putting a table hint on a subquery."""
+    if isinstance(admitted.projection, NativeProjectionPlan) and not admitted.table.startswith("temp."):
+        return admitted.projection.read_relation(admitted.table.split(".", 1)[0],
+                                                 index=admitted.index if hinted else None) + " p"
+    return admitted.table + " p" + (" INDEXED BY " + admitted.index if hinted else "")
+
+
+def _populate_native(session, manifest, projection, private, table, scanned, where, params, layout, compiled):
+    """Stream only admitted query dependencies into the request's scalar TEMP relation."""
+    fields = {scalar.field for scalar in projection.scalars
+              if scalar.field in manifest.schema.fields and scalar.field in compiled.dependency_paths}
+    columns = ("row_id", "item_key", "row_version", *(f"k{ordinal}_{part}" for ordinal in range(len(private.scalars))
+                                                     for part in ("rank", "tag", "band", "key")))
+    sql = f"INSERT INTO {table}({','.join(columns)}) VALUES({','.join('?' for _ in columns)})"
+
+    def parameters(rows):
+        for row_id, item_key, version in rows:
+            session.check()
+            values = session.selected_values(row_id, layout, fields, max_bytes=_MAX_DECODE_BYTES, check=session.check)
+            logical = native_identity.decode(item_key, projection.layout.identity)
+            encoded = private.admitted_parameters(row_id, logical, version, values)
+            yield tuple(encoded[name] for name in columns)
+
+    with closing(session.connection.execute(f"SELECT p.row_id,p.item_key,p.row_version FROM {scanned} WHERE {where}", params)) as rows:
+        session.connection.executemany(sql, parameters(rows))
 
 
 def declaration(manifest, basis, *, projected=frozenset()) -> dict:
@@ -199,10 +241,14 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                 scanned = f"temp.{ids} a CROSS JOIN {stored} p NOT INDEXED"
                 where, params = "p.row_id=a.row_id", ()
             # Projection ordinals are fixed by the validated internal layout; withheld keys never enter TEMP.
-            keys = ",".join(f"json_extract(p.keys_json,'$[{ordinal}]')" if scalar.field in manifest.schema.fields
-                            else "json('[0,null]')" for ordinal, scalar in enumerate(projection.scalars))
-            conn.execute(f"INSERT INTO {table}(row_id,item_key,row_version,keys_json) "
-                         f"SELECT p.row_id,p.item_key,p.row_version,json_array({keys}) FROM {scanned} WHERE {where}", params)
+            if isinstance(projection, NativeProjectionPlan):
+                _populate_native(session, manifest, projection, private, table, scanned, where, params,
+                                 source.layout or session.typed_layout(manifest.collection_id), compiled)
+            else:
+                keys = ",".join(f"json_extract(p.keys_json,'$[{ordinal}]')" if scalar.field in manifest.schema.fields
+                                else "json('[0,null]')" for ordinal, scalar in enumerate(projection.scalars))
+                conn.execute(f"INSERT INTO {table}(row_id,item_key,row_version,keys_json) "
+                             f"SELECT p.row_id,p.item_key,p.row_version,json_array({keys}) FROM {scanned} WHERE {where}", params)
         session.check_temp()
         selected = tuple(f.path for f in query.select.fields) or fields
         dependencies = set(compiled.dependency_paths) | set(selected)
@@ -236,6 +282,13 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
         admitted.check()
         return result
 
+    def identity_text(op, payload, value):
+        admitted.check()
+        logical = logical_item_key(admitted, payload)
+        result = typed_sql.text_predicate(op, logical.encode("utf-8").hex(), value)
+        admitted.check()
+        return result
+
     def values(row_id, item_key):
         try:
             admitted.check()
@@ -255,37 +308,45 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
             raise QueryError("QUERY_COST_LIMIT") from error
 
     conn.create_function("exomem_typed_text", 3, text)
+    if isinstance(admitted.projection, NativeProjectionPlan):
+        conn.create_function("exomem_typed_identity_text", 3, identity_text)
     terms = ",".join(column for column, _ in compiled.order_terms)
-    cursor = conn.execute(f"SELECT p.row_id,{terms} FROM {admitted.table} p INDEXED BY {admitted.index} "
-                          f"WHERE {compiled.where_sql} ORDER BY {compiled.order_sql} LIMIT ?",
-                          (*compiled.params, admitted.query.page.limit + 1))
     rows, size, last = [], 2, None
-    with closing(session.fetch(cursor)) as batches:
-        for batch in batches:
-            for row_id, *order in batch:
-                if len(rows) == admitted.query.page.limit:
-                    return RowPage(rows, True, last)
-                identity = conn.execute(
-                    f"SELECT CASE WHEN {admitted.membership_sql} THEN i.item_key END "
-                    f"FROM {admitted.items} i WHERE i.row_id=? AND i.collection_id=?",
-                    (row_id, admitted.query.source.ref),
-                ).fetchone()
-                if identity is None or identity[0] is None:
-                    raise QueryError("QUERY_UNAVAILABLE")
-                try:
-                    raw = values(row_id, identity[0])
-                except QueryError as error:
-                    if error.code == "QUERY_RESULT_TOO_LARGE" and rows:
+    seeks = ((Seek(compiled.where_sql, compiled.params, compiled.order_sql),)
+             if compiled.seeks is None else compiled.seeks)
+    relation = indexed_relation(admitted)
+    for seek in seeks:
+        admitted.check()
+        order = " ORDER BY " + seek.order_sql if seek.order_sql else ""
+        cursor = conn.execute(f"SELECT p.row_id,{terms} FROM {relation} "
+                              f"WHERE {seek.where_sql}{order} LIMIT ?",
+                              (*seek.params, admitted.query.page.limit + 1 - len(rows)))
+        with closing(session.fetch(cursor)) as batches:
+            for batch in batches:
+                for row_id, *order in batch:
+                    if len(rows) == admitted.query.page.limit:
                         return RowPage(rows, True, last)
-                    raise
-                row = json.loads(raw)
-                row_size = wire_bytes(row) + 2 * bool(rows)
-                if size + row_size > budget:
-                    if not rows:
-                        raise QueryError("QUERY_RESULT_TOO_LARGE")
-                    return RowPage(rows, True, last)
-                size += row_size
-                rows.append(row)
-                last = tuple(order)
+                    identity = conn.execute(
+                        f"SELECT CASE WHEN {admitted.membership_sql} THEN i.item_key END "
+                        f"FROM {admitted.items} i WHERE i.row_id=? AND i.collection_id=?",
+                        (row_id, admitted.query.source.ref),
+                    ).fetchone()
+                    if identity is None or identity[0] is None:
+                        raise QueryError("QUERY_UNAVAILABLE")
+                    try:
+                        raw = values(row_id, logical_item_key(admitted, identity[0]))
+                    except QueryError as error:
+                        if error.code == "QUERY_RESULT_TOO_LARGE" and rows:
+                            return RowPage(rows, True, last)
+                        raise
+                    row = json.loads(raw)
+                    row_size = wire_bytes(row) + 2 * bool(rows)
+                    if size + row_size > budget:
+                        if not rows:
+                            raise QueryError("QUERY_RESULT_TOO_LARGE")
+                        return RowPage(rows, True, last)
+                    size += row_size
+                    rows.append(row)
+                    last = tuple(order)
     admitted.check()
     return RowPage(rows, False, last)

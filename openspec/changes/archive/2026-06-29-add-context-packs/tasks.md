@@ -55,7 +55,7 @@
       + frontmatter + wikilinks only; vault and `find` ordering unchanged.
 - [x] 4.6 `openspec validate add-context-packs --strict` passes.
 
-## 5. Deploy (Hugo)
+## 5. Deploy (operator)
 - [ ] 5.1 `reset --hard origin/main` on the deploy checkout + restart; reconnect the
       claude.ai connector so `find`'s new `pack` param appears. Live smoke: one real
       `find(pack=true)` confirms `tension` pairs populate from the band and the pack is

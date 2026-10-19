@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
@@ -27,8 +28,9 @@ from pathlib import Path
 import pytest
 from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
+from test_typed_history_generations import previous_release
 
-from exomem import records, state_migration
+from exomem import held_fs, records, state_migration
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
     admission,
@@ -41,9 +43,11 @@ from exomem.collection_store import (
     snapshot,
     takeover,
     tokens,
+    typed_storage,
 )
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.collection_store.preview import preview_store
+from exomem.get_page import get_page
 from exomem.governance.principal import library_scope
 from exomem.plan_memory import plan_memory
 from exomem.record_memory import record_memory
@@ -68,7 +72,10 @@ def coordinator(database):
         def urlopen(request, timeout):
             response = transport.request(request.method, request.full_url, content=request.data,
                                          headers=dict(request.header_items()))
-            assert response.status_code == 200, response.text
+            if response.status_code != 200:
+                # What a real client sees, so the code under test answers the status itself.
+                raise urllib.error.HTTPError(request.full_url, response.status_code, response.text,
+                                             response.headers, BytesIO(response.content))
             return BytesIO(response.content)
         patch.setattr("urllib.request.urlopen", urlopen)
         yield
@@ -312,7 +319,8 @@ def test_crash_around_marker_cutover_recovers_the_same_create_once(ab, cut, tmp_
     assert ab_bytes(ab.root) == before
 
 
-@pytest.mark.parametrize("evidence", ["configured_sync_root", "sync_client_metadata", "windows_sync_folder"])
+@pytest.mark.parametrize("evidence", ["configured_sync_root", "sync_client_metadata", "sync_client_metadata_in_kb",
+                                      "sync_client_metadata_at_marker", "windows_sync_folder"])
 def test_unverified_custody_refuses_the_c_producer_and_leaves_a_b_usable(abc, evidence, monkeypatch, tmp_path):
     """Defect: a synced or overlapping deployment mints store custody, or refusing it blocks A/B writes."""
     root = abc.root
@@ -320,6 +328,10 @@ def test_unverified_custody_refuses_the_c_producer_and_leaves_a_b_usable(abc, ev
         monkeypatch.setenv(custody.SYNC_ROOTS_ENV, str(tmp_path))
     elif evidence == "sync_client_metadata":
         (abc.root / ".stfolder").mkdir()
+    elif evidence == "sync_client_metadata_in_kb":
+        (authority.marker_path(abc.root).parent.parent / ".stfolder").mkdir()
+    elif evidence == "sync_client_metadata_at_marker":
+        (authority.marker_path(abc.root).parent / ".stfolder").mkdir()
     else:
         # A Windows-mounted OneDrive folder keeps no client metadata in the tree.
         root = tmp_path / "OneDrive - Contoso" / "vault"
@@ -374,26 +386,39 @@ def _older():
 
 
 def test_launcher_refuses_an_actual_older_interpreter_on_a_fresh_root_copy(abc, tmp_path, monkeypatch):
-    """Defect: the supported launcher hands a C vault copy to a store-blind older release."""
+    """An absent hint cannot let an older candidate replace the supported serving worker."""
     import asyncio
+
+    from conftest import _drain_background_threads
+    from test_service_manager import _supervisor
 
     from exomem.service_manager import WorkerRuntime
 
+    abc.release()
+    _drain_background_threads()
     copy = tmp_path / "copy"
     shutil.copytree(abc.root, copy)
+    authority.marker_path(copy).unlink()
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "fresh-state"))
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(copy))
     runtime = WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=8765)
     target = asyncio.run(runtime.inspect({"python": OLDER, "version": _older()}))
     with pytest.raises(ValueError, match="does not support required state compatibility"):
         runtime.migration_required(target)
-    started = subprocess.run(
-        [OLDER, "-I", "-c", "import sys; from pathlib import Path; from exomem import state_migration;"
-         " state_migration.require_vault_state_ready(Path(sys.argv[1]))", str(copy)],
-        capture_output=True, text=True, env={**os.environ, "EXOMEM_STATE_ROOT": str(tmp_path / "old-state")})
-    assert started.returncode != 0
-    assert "StateCompatibilityUnsupported" in started.stderr or "COLLECTION_STORE_MARKER_CONFLICT" in started.stderr
-    assert not (tmp_path / "old-state").exists() or not any((tmp_path / "old-state").rglob("collections.sqlite"))
+
+    async def refuse_before_handoff():
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        serving.inspect = runtime.inspect
+        serving.migration_required = runtime.migration_required
+        result = await manager.upgrade({"python": OLDER, "version": _older()})
+        assert not result["ok"]
+        assert result["error"] == "target interpreter verification failed; current admission unchanged"
+        assert serving.pid == 100
+        assert serving.events == ingress.events == []
+        assert manager.records.pending() is None
+
+    asyncio.run(refuse_before_handoff())
+    assert not (tmp_path / "fresh-state").exists()
 
 
 def test_older_interpreter_refuses_the_newer_store_schema(abc):
@@ -420,6 +445,31 @@ def test_restart_reacquires_its_own_head_without_waiting(abc, tmp_path):
     status, outcome, meta = run_host(tmp_path, tmp_path / "state", "host-a", _restart)
     assert status == {"status": "admitted"} and outcome == "committed"
     assert meta[schema.META_INSTANCE_ID] == instance
+
+
+def _restart_and_publish(found):
+    result = _restart(found)
+    found.release()
+    return result
+
+
+def test_enabled_core_sync_without_root_evidence_preserves_create_restart_and_publication(ab, tmp_path):
+    """A built-in plugin capability bit must not block a verified local store workflow."""
+    config = ab.root / ".obsidian"
+    config.mkdir()
+    (config / "core-plugins.json").write_text('{"sync": true}')
+    before = ab_bytes(ab.root)
+    assert create_c(ab)["status"] == "marker_admitted"
+    assert ab.write_c(ROW, "Canonical")["outcome"] == "committed"
+    marker = authority.read_marker(ab.root)
+    instance = ab.meta()[schema.META_INSTANCE_ID]
+    ab.release()
+    status, outcome, meta = run_host(tmp_path, tmp_path / "state", "host-a", _restart_and_publish)
+    assert status == {"status": "admitted"} and outcome == "committed"
+    assert meta[schema.META_INSTANCE_ID] == instance
+    assert authority.read_marker(ab.root) == marker and ab_bytes(ab.root) == before
+    with closing(connection.open_reader(replica.replica_path(ab.root))) as reader:
+        assert reader.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_COMMIT_SEQ,)).fetchone() == ("3",)
 
 
 def _handoff_on_b(found):
@@ -453,7 +503,7 @@ def test_lease_handoff_adopts_the_newer_replica_in_both_directions(abc, tmp_path
 
 
 def _held_read(found):
-    """Read C while another thread holds a checkout registration on the same store.
+    """Refuse a stale C read while another thread holds a checkout registration.
 
     A checkout's connection belongs to its opening thread, so the other borrower holds
     the manager's checkout registration, which every checkout takes first.
@@ -469,7 +519,7 @@ def _held_read(found):
     thread.start()
     try:
         assert held.wait(30), "the borrowing thread never checked out"
-        return found.read_c()
+        refused(found.read_c, "COLLECTION_STORE_UNAVAILABLE")
     finally:
         done.set()
         thread.join(30)
@@ -483,12 +533,15 @@ def _adopt_and_release(found):
 def _behind(found):
     pending = found.open()
     takeover.RECHECK_SECONDS = 0  # every checkout re-resolves while another thread borrows
-    rows = _held_read(found)
+    _held_read(found)
+    with closing(connection.open_reader(found.session.path)) as reader:
+        rows = sorted(values["title"] for _, values in typed_storage.collection_values(reader, CID))
     refusal = refused(lambda: found.write_c(LATER, "Lost write"), "COLLECTION_STORE_SYNC_PENDING")
     with preview_store(found.root, found.manager._collection_store):
-        file_write = found.write_a("A while C waits")
+        file_write = refused(lambda: found.write_a("A while C waits"), "COLLECTION_STORE_UNAVAILABLE")
+    assert "Independent" in get_page(found.root, path="Knowledge Base/Notes/Independent.md").body
     found.release()
-    found.write_a("A on a later token")
+    refused(lambda: found.write_a("A on a later token"), "COLLECTION_STORE_UNAVAILABLE")
     found.release()  # a later token than the resolving one still hands the lease back
     return pending, rows, refusal, file_write
 
@@ -501,8 +554,11 @@ def _delivery(delivered, found):
     return attention, found.write_c(LATER, "After delivery")["outcome"], found.read_c()
 
 
-def test_lagging_replica_is_sync_pending_with_reads_until_delivery(abc, tmp_path):
-    """Defect: a holder behind the recorded head writes over it, blocks reads, A/B or the lease, or never rechecks."""
+def test_lagging_replica_withholds_relevant_reads_until_delivery(abc, tmp_path):
+    """A lagging holder retains rows but cannot release relevant files before the required head arrives."""
+    note = abc.root / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("---\ntitle: Independent\n---\nIndependent knowledge\n")
     abc.release()
     run_host(tmp_path, tmp_path / "state-b", "host-b", _adopt_and_release)
     lagging = replica.replica_path(abc.root).read_bytes()
@@ -516,7 +572,7 @@ def test_lagging_replica_is_sync_pending_with_reads_until_delivery(abc, tmp_path
     assert pending["status"] == "sync_pending"
     assert (pending["recorded_commit_seq"], pending["local_commit_seq"]) == (3, 2)
     assert rows == ["Canonical"]
-    assert "adopt-local" in refusal and file_write == "committed"
+    assert "adopt-local" in refusal and "COLLECTION_STORE_UNAVAILABLE" in file_write
     assert abc.write_a("A while B waits") == "committed"
     abc.release()
     attention, outcome, final = run_host(tmp_path, tmp_path / "state-b", "host-b",
@@ -533,16 +589,22 @@ def _write_and_crash(found):
 
 def _restart_diverged(found):
     status = found.open()
-    rows = found.read_c()
+    refused(found.read_c, "COLLECTION_STORE_UNAVAILABLE")
+    with closing(connection.open_reader(found.session.path)) as reader:
+        rows = sorted(values["title"] for _, values in typed_storage.collection_values(reader, CID))
     refused(lambda: found.write_c(OTHER, "Refused"), "COLLECTION_STORE_DIVERGED")
     with preview_store(found.root, found.manager._collection_store):
-        file_write = found.write_a("A beside divergence")
+        file_write = refused(lambda: found.write_a("A beside divergence"), "COLLECTION_STORE_UNAVAILABLE")
+    assert "Independent" in get_page(found.root, path="Knowledge Base/Notes/Independent.md").body
     found.manager.close()
     return status, rows, file_write, found.meta()
 
 
-def test_fork_is_durably_diverged_with_reads_and_a_b_writes_continuing(abc, tmp_path):
-    """Defect: a host whose unpublished commits fork from the replica adopts over them or keeps writing."""
+def test_fork_retains_unpublished_rows_but_withholds_relevant_reads(abc, tmp_path):
+    """A fork keeps its unpublished rows, rejects relevant reads, and preserves the recorded head."""
+    note = abc.root / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("---\ntitle: Independent\n---\nIndependent knowledge\n")
     abc.release()
     run_host(tmp_path, tmp_path / "state-b", "host-b", _write_and_crash, exit_code=73)
     stranded = abc.manager.client.status()
@@ -551,7 +613,7 @@ def test_fork_is_durably_diverged_with_reads_and_a_b_writes_continuing(abc, tmp_
     abc.release()
     status, rows, file_write, meta = run_host(tmp_path, tmp_path / "state-b", "host-b", _restart_diverged)
     assert status["status"] == "diverged" and rows == ["Canonical", "Unpublished on B"]
-    assert file_write == "committed" and schema.META_REPLICA_DIVERGENCE in meta
+    assert "COLLECTION_STORE_UNAVAILABLE" in file_write and schema.META_REPLICA_DIVERGENCE in meta
     # The diverged host hands the lease back without replacing the recorded head.
     recorded = abc.manager.client.status().collection_store_head
     assert recorded.instance_id == abc.meta()[schema.META_INSTANCE_ID]
@@ -560,6 +622,9 @@ def test_fork_is_durably_diverged_with_reads_and_a_b_writes_continuing(abc, tmp_
 
 def _adopt_late_delivery(delivered, found):
     pending = found.open()
+    assert not found.session.path.exists()
+    refused(lambda: found.write_a("Unverified sibling"), "COLLECTION_STORE_UNAVAILABLE")
+    assert "Independent" in get_page(found.root, path="Knowledge Base/Notes/Independent.md").body
     replica.replica_path(found.root).write_bytes(delivered)
     return pending, found.open(), found.read_c(), found.write_c(LATER, "On the copy")["outcome"]
 
@@ -569,6 +634,9 @@ def test_copied_vault_on_fresh_state_and_coordinator_adopts_the_replica(abc, tmp
     abc.release()
     copy = tmp_path / "copy"
     shutil.copytree(abc.root, copy)
+    note = copy / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntitle: Independent\n---\nIndependent knowledge\n")
     original, copied_ab = file_bytes(abc.root), ab_bytes(copy)
     delivered = replica.replica_path(copy).read_bytes()
     _truncated(copy)
@@ -615,27 +683,50 @@ def _granted_epoch(vault):
         conn.commit()
 
 
-def _refused_replica(found):
+def _newer_schema(vault):
+    newer = str(schema.SCHEMA_VERSION + 1)
+    with closing(sqlite3.connect(replica.replica_path(vault))) as conn:
+        conn.execute("UPDATE store_meta SET value=? WHERE key=?", (newer, schema.META_SCHEMA_VERSION))
+        conn.execute("UPDATE alembic_version SET version_num=?", (newer,))
+        conn.commit()
+
+
+def _refused_replica(unproved, found):
     status = found.open()
     refused(lambda: record_memory(found.root, "query", collection=CID), "")
-    return status, found.session.path.exists(), found.write_a("A beside the refused replica")
+    if unproved:
+        refused(lambda: found.write_a("Unverified sibling"), "COLLECTION_STORE_UNAVAILABLE")
+        assert "Independent" in get_page(found.root, path="Knowledge Base/Notes/Independent.md").body
+        file_write = "withheld"
+    else:
+        file_write = found.write_a("A beside the refused replica")
+    return status, found.session.path.exists(), file_write
 
 
 @pytest.mark.parametrize(("tamper", "copied", "expected"), [
     (_foreign_store, True, "diverged"), (_missing_marker_collection, True, "sync_pending"),
     (_foreign_lineage, False, "diverged"), (_granted_epoch, False, "diverged"),
+    (_newer_schema, True, "sync_pending"),
 ])
 def test_unverified_replica_is_never_adopted(abc, tmp_path, tamper, copied, expected):
-    """Defect: a foreign, pre-marker, other-lineage or ungranted-epoch replica becomes C's authority."""
+    """Defect: a foreign, pre-marker, other-lineage, ungranted-epoch or newer-schema replica becomes C's authority."""
     abc.release()
     root, where = abc.root, {}
     if copied:
         root = tmp_path / "copy"
         shutil.copytree(abc.root, root)
         where = dict(root=root, database=tmp_path / "copy-coordinator.sqlite", vault_id="copy")
+    unproved = copied or tamper is _foreign_lineage
+    if unproved:
+        note = root / "Knowledge Base/Notes/Independent.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("---\ntitle: Independent\n---\nIndependent knowledge\n")
     tamper(root)
-    status, live, file_write = run_host(tmp_path, tmp_path / "state-b", "host-b", _refused_replica, **where)
-    assert status["status"] == expected and not live and file_write == "committed"
+    source_bytes = replica.replica_path(root).read_bytes()
+    status, live, file_write = run_host(tmp_path, tmp_path / "state-b", "host-b",
+                                      functools.partial(_refused_replica, unproved), **where)
+    assert status["status"] == expected and not live and file_write == ("withheld" if unproved else "committed")
+    assert replica.replica_path(root).read_bytes() == source_bytes
 
 
 # --- slices 3-6: coalesced publication, export flush, backup, divergence and reconcile ------
@@ -736,25 +827,81 @@ def test_a_second_write_waits_out_the_window_until_the_export_flush(abc, tmp_pat
     assert not [path for path in staged.rglob("*") if path.name.endswith(("-wal", "-shm"))]
 
 
-def test_a_slow_publication_copy_leaves_file_and_store_writes_acknowledging(abc, monkeypatch):
-    """Defect: publication holds the vault-wide boundary while it copies, so writes refuse MUTATION_BUSY."""
+@pytest.mark.parametrize("phase", ["copy", "current-head", "cold-ready", "cold-intent-copy", "predecessor", "installed"])
+def test_a_slow_publication_copy_leaves_file_and_store_writes_acknowledging(abc, monkeypatch, phase):
+    """Defect: publication verification holds exclusion and makes ordinary writes refuse MUTATION_BUSY."""
     from exomem.collection_store import runtime
 
     monkeypatch.setattr(runtime, "PUBLISH_SETTLE_SECONDS", 0.1)
     monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
     _published(abc)
-    staged, release = _stalled_copy(monkeypatch)
+    if phase == "copy":
+        staged, release = _stalled_copy(monkeypatch)
+    else:
+        staged, release = threading.Event(), threading.Event()
+        outside = replica._Publisher.outside
+        resolve = replica._Publisher.resolve
+
+        if phase in {"cold-ready", "cold-intent-copy"}:
+            def leave_ready(publisher, pending, **kwargs):
+                if pending["phase"] == "ready":
+                    raise replica._Retry("interrupted after ready")
+                return resolve(publisher, pending, **kwargs)
+
+            monkeypatch.setattr(replica._Publisher, "resolve", leave_ready)
+            abc.write_c(str(uuid.uuid4()), "Ready copy awaiting recovery")
+            _until(lambda: (raw := abc.meta().get(schema.META_PENDING_REPLICA_PUBLICATION))
+                   is not None and json.loads(raw)["phase"] == "ready")
+
+        if phase == "cold-intent-copy":
+            with held_fs.acquire(abc.root).require() as filesystem:
+                filesystem_type = type(filesystem)
+            copy = filesystem_type.copy
+
+            def stalled_descriptor_copy(filesystem, source, parent, leaf, **kwargs):
+                installed = replica.replica_path(abc.root).stat()
+                if (source.identity.device, source.identity.inode) == (installed.st_dev, installed.st_ino):
+                    staged.set()
+                    assert release.wait(20), "descriptor-copy barrier was not released"
+                return copy(filesystem, source, parent, leaf, **kwargs)
+
+            monkeypatch.setattr(filesystem_type, "copy", stalled_descriptor_copy)
+
+        @contextmanager
+        def stalled_verification(publisher, **kwargs):
+            with outside(publisher, **kwargs):
+                pending = json.loads(publisher.pending_raw) if publisher.pending_raw else None
+                hashing = [witness for witness in publisher.verifications.values() if witness.digest is None]
+                stage_exists = (pending is not None and publisher.workspace_relative is not None
+                                and (publisher.root / publisher.workspace_relative / pending["stage_leaf"]).exists())
+                selected = (
+                    phase == "current-head" and pending is None
+                    or pending is not None and pending["phase"] == "ready" and (
+                        phase == "cold-ready" and any(w.leaf == pending["stage_leaf"] for w in hashing)
+                        or phase == "predecessor" and stage_exists
+                        or phase == "installed" and not stage_exists
+                    )
+                )
+                if hashing and selected:
+                    staged.set()
+                    assert release.wait(20), "verification barrier was not released"
+                yield
+
+        monkeypatch.setattr(replica._Publisher, "outside", stalled_verification)
+        monkeypatch.setattr(replica._Publisher, "resolve", resolve)
     abc.write_c(LATER, "Starts a publication")
-    assert staged.wait(10)
     try:
+        assert staged.wait(10)
         started = time.monotonic()
-        assert abc.write_a("A file write during the copy") == "committed"
-        assert abc.write_c(str(uuid.uuid4()), "A store write during the copy")["outcome"] == "committed"
+        assert abc.write_a("A file write during publication verification") == "committed"
+        assert abc.write_c(str(uuid.uuid4()), "A store write during publication verification")["outcome"] == "committed"
         took = time.monotonic() - started
     finally:
         release.set()
     assert took < 2.5  # the mutation timeout is 5 s; a held boundary refuses MUTATION_BUSY there
     _published(abc)  # the next window carries the writes made during the copy
+    # Drain the publisher before the fixture retires its SQLite handle.
+    abc.manager.close(drain_views=False)
 
 
 def test_a_lease_lost_during_the_copy_abandons_the_swap_and_keeps_the_previous_replica(abc, monkeypatch):
@@ -1255,12 +1402,12 @@ def test_rollback_reports_disable_when_publication_fails(abc, monkeypatch):
     assert abc.write_a("A after failed publication") == "committed"
 
 
-def test_marker_profile_must_match_the_canonical_collection(abc):
+def test_hint_profile_cannot_override_the_canonical_collection(abc):
     """A marker edit cannot make a Records store disappear from a profile-filtered inventory."""
     marker = json.loads(authority.read_marker(abc.root))
     marker["collections"][0]["semantic_profile"] = "planning"
     authority.marker_path(abc.root).write_text(json.dumps(marker))
-    refused(abc.read_c, "COLLECTION_STORE_MARKER_CONFLICT")
+    assert abc.read_c() == ["Canonical"]
 
 
 def test_failed_close_stops_renewing_an_unadmitted_lease(ab):
@@ -1319,6 +1466,49 @@ def test_takeover_and_owner_evidence_never_open_the_vault_replica_in_sqlite(abc,
     assert path.read_bytes() == before
 
 
+def test_takeover_retains_native_source_io_errors_and_archive_classification(abc, monkeypatch):
+    """A source permission failure must not become corrupt-candidate Pending or an installed store."""
+    from exomem import vault_portability
+
+    abc.release()
+    source = replica.replica_path(abc.root)
+    before = source.read_bytes()
+    failure = PermissionError(13, "source access refused")
+    lstat = Path.lstat
+
+    def refused_source(path, *args, **kwargs):
+        if path == source:
+            raise failure
+        return lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as denied:
+        denied.setattr(Path, "lstat", refused_source)
+        with pytest.raises(PermissionError) as raised, takeover.staged_replica(abc.session, lambda: None):
+            pytest.fail("unreadable source supplied takeover facts")
+        assert raised.value is failure
+        with pytest.raises(vault_portability.PortabilityError, match="SOURCE_CHANGED_DURING_EXPORT"):
+            vault_portability._open_regular_source(source)
+    assert source.read_bytes() == before
+    assert not list(abc.session.path.parent.glob(".exomem-adopt-*.sqlite"))
+
+
+def test_takeover_preserves_a_check_error_even_when_its_code_describes_invalid_bytes(abc):
+    """A custody or fencing callback owns its error identity, even across candidate validation."""
+    abc.release()
+    source = replica.replica_path(abc.root)
+    before = source.read_bytes()
+    failure = CollectionStoreError("COLLECTION_SNAPSHOT_INVALID", "the caller's check refused")
+
+    def check():
+        raise failure
+
+    with pytest.raises(CollectionStoreError) as raised, takeover.staged_replica(abc.session, check):
+        pytest.fail("a refused check supplied takeover facts")
+    assert raised.value is failure
+    assert source.read_bytes() == before
+    assert not list(abc.session.path.parent.glob(".exomem-adopt-*.sqlite"))
+
+
 def test_launcher_refuses_an_actual_v1_marker_candidate_before_handoff(abc, tmp_path, monkeypatch):
     """A store-aware candidate that passes capability admission but cannot preserve version-two path ownership."""
     import asyncio
@@ -1349,12 +1539,12 @@ def test_launcher_refuses_an_actual_v1_marker_candidate_before_handoff(abc, tmp_
 
 @pytest.mark.parametrize("field,value", [("source_path", "Knowledge Base/Records/Other/Items"),
                                           ("layout", "markdown-log")])
-def test_marker_ownership_must_match_canonical_storage(abc, field, value):
-    """A valid-shaped marker that contradicts the canonical source declaration."""
+def test_hint_storage_cannot_override_canonical_ownership(abc, field, value):
+    """A valid-shaped compatibility hint cannot retarget the canonical source declaration."""
     marker = json.loads(authority.read_marker(abc.root))
     marker["collections"][0][field] = value
     authority.marker_path(abc.root).write_text(json.dumps(marker))
-    refused(abc.read_c, "COLLECTION_STORE_MARKER_CONFLICT")
+    assert abc.read_c() == ["Canonical"]
 
 
 def test_log_marker_ownership_preserves_structural_path_boundaries(abc):
@@ -1371,3 +1561,176 @@ def test_log_marker_ownership_preserves_structural_path_boundaries(abc):
     for path in (entry["source_path"] + "/other.md", entry["source_path"] + "#not-an-item",
                  "Knowledge Base/Records/Detached/Other.md", "Knowledge Base/Records/Work/Notes.md"):
         assert authority.owned_entry(abc.root, marker, path) is None
+
+
+def test_a_callers_change_to_a_parsed_marker_never_reaches_the_next_caller(abc):
+    """Parsing is cached per marker spelling, so each caller must still get its own copy."""
+    raw = authority.read_marker(abc.root)
+    first = authority.parse_marker(abc.root, raw)
+    first["collections"][0]["source_path"] = "Knowledge Base/Records/Elsewhere/Items"
+    first["collections"].append(dict(first["collections"][0]))
+    again = authority.parse_marker(abc.root, raw)
+    assert again == json.loads(raw)
+    assert authority.owned_entry(abc.root, again, "Knowledge Base/Records/Elsewhere/Items/x.md") is None
+
+
+def test_a_missing_marker_is_refused_as_unreadable_not_crashed_on(abc):
+    """Callers pass `read_marker` straight through, and it returns None when no marker exists."""
+    with pytest.raises(CollectionStoreError, match="unreadable mode marker"):
+        authority.parse_marker(abc.root, None)
+
+
+# --- a store that an earlier release wrote: schema guard, migration order and adoption ----------
+
+# The state compatibility ID that schema 11 carries once tests guard it: no ID guards 11 itself,
+# but guarding it exercises the mechanism on the real migration from schema 10.
+SCHEMA_GUARD = "collections-store-schema-11"
+
+
+def _guard_schema_11(patch):
+    patch.setattr(schema, "FIRST_GUARDED_SCHEMA_VERSION", 11)
+
+
+def _earlier_c(found):
+    """C created and written by the schema-10 release, which handed the lease back with its replica."""
+    with pytest.MonkeyPatch.context() as previous:
+        previous_release(previous)
+        assert create_c(found)["status"] == "marker_admitted"
+        assert found.write_c(ROW, "Canonical")["outcome"] == "committed"
+        found.release()
+    assert _schema(found.session.path) == 10
+
+
+def _schema(path):
+    with closing(sqlite3.connect(path)) as raw:
+        return schema.schema_version(raw)
+
+
+def _recorded(root):
+    return state_migration.recorded_descriptor_ids(root) or ()
+
+
+class _Crash(BaseException):
+    """The process dies at this instant: no handler below the test runs."""
+
+
+def test_a_crash_right_after_the_migration_leaves_the_schema_guard_recorded(ab, monkeypatch):
+    """Defect: the writer records what the new schema requires only after migrating, so a crash between
+    leaves a migrated store that the launcher still hands to an earlier release, which then deadlocks."""
+    _earlier_c(ab)
+    _guard_schema_11(monkeypatch)
+    ensure = schema.ensure_schema
+
+    def crash_once_migrated(conn):
+        migrating = schema.schema_version(conn.connection.driver_connection) < schema.SCHEMA_VERSION
+        ensure(conn)
+        if migrating:
+            raise _Crash
+
+    monkeypatch.setattr(schema, "ensure_schema", crash_once_migrated)
+    with pytest.raises(_Crash):
+        ab.open()
+    assert _schema(ab.session.path) == schema.SCHEMA_VERSION
+    assert SCHEMA_GUARD in _recorded(ab.root)
+
+
+def test_an_admission_that_refuses_leaves_a_store_from_an_earlier_release_unmigrated(ab):
+    """Defect: admission migrates the store before its recovery check, so a store that it then refuses is
+    already out of reach of the earlier release that wrote it."""
+    _earlier_c(ab)
+    # Legacy machine-local state in the vault, as from an old backup, fails the recovery check.
+    (ab.root / "Knowledge Base/.claims.sqlite").write_bytes(b"legacy state")
+    with pytest.raises(state_migration.StateMigrationOfflineRequired, match="OFFLINE_REQUIRED"):
+        ab.open()
+    assert _schema(ab.session.path) == 10
+
+
+def test_a_failed_migration_is_a_pending_takeover_that_hands_back_the_lease_and_retries(ab, monkeypatch):
+    """Defect: a migration that fails leaves no takeover state, so nothing reports why the store is not
+    served, and the lease stays held until it expires; or it leaves the schema guard recorded, so the
+    earlier release that can still open the rolled-back store is refused."""
+    from exomem.collection_store import native_metadata
+
+    _earlier_c(ab)
+    _guard_schema_11(monkeypatch)
+    failing = [True]
+    repair = native_metadata.repair_triggers
+
+    def fail_after_the_ddl(conn):
+        if failing[0]:
+            raise sqlite3.OperationalError("disk I/O error")
+        repair(conn)
+
+    monkeypatch.setattr(native_metadata, "repair_triggers", fail_after_the_ddl)
+    pending = ab.open()
+    assert pending["code"] == "COLLECTION_STORE_SCHEMA_PENDING" and "disk I/O error" in pending["reason"]
+    assert ab.manager.status()["collection_store"]["status"] == "schema_pending"
+    assert "retried" in refused(ab.read_c, "COLLECTION_STORE_SCHEMA_PENDING")
+    assert _schema(ab.session.path) == 10 and SCHEMA_GUARD not in _recorded(ab.root)
+    ab.release()  # nothing to publish, so the lease goes back at once
+    assert ab.manager.client.status().holder is None
+    failing[0] = False
+    assert ab.open() == {"status": "admitted"}
+    assert ab.read_c() == ["Canonical"] and _schema(ab.session.path) == schema.SCHEMA_VERSION
+    assert SCHEMA_GUARD in _recorded(ab.root)
+
+
+def test_a_create_that_an_earlier_release_left_pending_finishes_after_the_upgrade(ab):
+    """Defect: a create intent left at the earlier schema is never migrated, so every recovery read refuses
+    COLLECTION_STORE_SCHEMA_PENDING and the create stays pending forever."""
+    publish = replica.publish_replica
+
+    def sync_appears(*args, **kwargs):
+        result = publish(*args, **kwargs)
+        (ab.root / ".stfolder").mkdir(exist_ok=True)
+        return result
+
+    with pytest.MonkeyPatch.context() as previous:
+        previous_release(previous)
+        previous.setattr(replica, "publish_replica", sync_appears)
+        refused(lambda: create_c(ab), "COLLECTION_STORE_CUSTODY_REQUIRED")
+    assert _schema(ab.session.path) == 10 and not authority.marker_path(ab.root).exists()
+    (ab.root / ".stfolder").rmdir()
+    ab.session.verify_custody()
+    refused(ab.open, "create recovery owns this store")  # as the service finds it at startup
+    assert admission.resume_local(ab.session, ab.manager, fence_client=ab.operator)["status"] == "marker_admitted"
+    assert _schema(ab.session.path) == schema.SCHEMA_VERSION
+    assert ab.write_c(ROW, "After the upgrade")["outcome"] == "committed"
+
+
+def _copied(found, tmp_path):
+    copy = tmp_path / "copy"
+    shutil.copytree(found.root, copy)
+    return copy
+
+
+def _restored(found, tmp_path):
+    from conftest import _drain_background_threads
+
+    from exomem import vault_portability
+    from exomem.init import init_vault
+
+    init_vault(found.root, force=True)
+    _drain_background_threads()  # Source workers must finish before restore changes the process state root.
+    context = vault_portability.PortabilityContext(
+        cell_id="source-cell", vault_id="logical-vault", operation_id="export-earlier",
+        created_at="2026-10-06T00:00:00+00:00", operator_authorized=True, lifecycle_state="quiesced",
+        routing_stopped=True, active_mutations=0, background_writers_stopped=True, reads_allowed=True)
+    with pytest.MonkeyPatch.context() as previous:
+        previous_release(previous)
+        exported = vault_portability.export_quiesced_vault(found.root, tmp_path / "exports", context=context)
+    prepared = vault_portability.prepare_restore(exported.archive_path, tmp_path / "staging", context=replace(
+        context, lifecycle_state="restore-staging", operation_id="restore-earlier"))
+    assert vault_portability.publish_prepared_restore(prepared, tmp_path / "target").state == "published"
+    return tmp_path / "target"
+
+
+@pytest.mark.parametrize("arrival", [_copied, _restored])
+def test_a_vault_that_an_earlier_release_published_is_adopted_on_a_fresh_host(ab, tmp_path, arrival):
+    """Defect: a fresh host never adopts the replica, and a restore refuses the archive, that an earlier
+    release published, because only a store at the current schema validates."""
+    _earlier_c(ab)
+    vault = arrival(ab, tmp_path)
+    assert _schema(replica.replica_path(vault)) == 10  # the vault keeps the bytes the earlier release published
+    assert run_host(tmp_path, tmp_path / "fresh-state", "fresh", _adopt_fresh_copy, root=vault,
+                    database=tmp_path / "fresh-coordinator.sqlite") == "committed"

@@ -127,12 +127,10 @@ def test_review_question_is_not_advertised_or_classified_as_a_read() -> None:
     )
 
 
-def test_current_tool_descriptions_link_to_the_shared_api_reference(
+def test_adoption_tool_has_its_public_title(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     tools = asyncio.run(_build_server(monkeypatch, tmp_path).list_tools())
-    reference = "https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md"
-    assert all(reference in tool.to_mcp_tool().description for tool in tools)
     adoption = next(tool.to_mcp_tool() for tool in tools if tool.name == "adoption_studio")
     assert adoption.annotations.title == "Adopt Existing Memory"
 

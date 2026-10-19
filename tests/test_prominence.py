@@ -287,11 +287,8 @@ def test_the_capture_axis_names_both_lifecycle_classes_and_the_transition_bounda
 ) -> None:
     """Stated intent and observed outcomes are capture classes, not magic words.
 
-    The dogfood session that motivated this had the evidence in ordinary
-    language every turn -- "let's do the next one", "three done", "Kim posted
-    it" -- and the capture predicate was closed over three classes that name
-    none of them. The classes are asserted with their ROUTE, because a class
-    an agent cannot route is a label rather than an instruction.
+    The capture predicate must name stated intent and observed outcomes with
+    their routes. A class without a route cannot guide a client.
     """
     capture = prominence.CONTRACTS[level].capture.lower()
 
@@ -778,3 +775,52 @@ def test_resolved_reports_a_context_without_any_request_scope(config):
 
     assert payload["context"] == "coding"
     assert "preference" not in payload
+
+
+# ------------------------------------------------------------------ levels view
+
+#: (rung, environment, machine config, identity-wide, per-context, unreadable,
+#:  expected {context: (level, source)})
+_LEVEL_LADDER = [
+    ("default", None, None, None, {}, False,
+     {"coding": ("balanced", "default"), "conversation": ("maximal", "default")}),
+    ("config", None, "light", None, {}, False,
+     {"coding": ("light", "config"), "conversation": ("light", "config")}),
+    ("identity-wide", None, "light", "off", {}, False,
+     {"coding": ("off", "preference"), "conversation": ("off", "preference")}),
+    ("context", None, "light", "off", {"conversation": "maximal"}, False,
+     {"coding": ("off", "preference"), "conversation": ("maximal", "preference:context")}),
+    ("env", "balanced", "light", "off", {"conversation": "maximal"}, False,
+     {"coding": ("balanced", "env"), "conversation": ("balanced", "env")}),
+    ("unreadable", None, None, None, {}, True,
+     {"coding": ("balanced", "preference:unavailable"),
+      "conversation": ("balanced", "preference:unavailable")}),
+]
+
+
+@pytest.mark.parametrize(
+    "rung,env,machine,stored,contexts,unreadable,expected",
+    _LEVEL_LADDER,
+    ids=[row[0] for row in _LEVEL_LADDER],
+)
+def test_the_levels_view_shows_what_each_contexts_clients_actually_get(
+    config, saved, monkeypatch, rung, env, machine, stored, contexts, unreadable, expected
+):
+    """A settings view that disagreed with resolution would show the owner a level
+    their chat app or coding client does not get. Asked without any client, it
+    must still report both contexts, each with the rung that decided it."""
+    if env is not None:
+        monkeypatch.setenv("EXOMEM_PROMINENCE", env)
+    if machine is not None:
+        config.write_text(json.dumps({"schema": 1, "prominence": machine}), "utf-8")
+    extra = {"unavailable": "PREFERENCE_STATE_UNAVAILABLE"} if unreadable else {}
+    saved(stored=stored, contexts=contexts, **extra)
+
+    shown = {context: (v["level"], v["source"]) for context, v in prominence.levels().items()}
+
+    assert shown == expected
+    for context, client_surface in (("coding", "codex"), ("conversation", "claude-ai")):
+        assert (
+            prominence.resolve(client_surface),
+            prominence._active_source(client_surface),
+        ) == expected[context]

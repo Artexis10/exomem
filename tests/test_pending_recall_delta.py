@@ -19,12 +19,14 @@ from __future__ import annotations
 import hashlib
 import importlib
 import os
+import sqlite3
 import uuid
 from pathlib import Path
 
 import pytest
 
 from exomem import (
+    deferred_index,
     derived_receipts,
     find_corpus,
     freshness,
@@ -803,7 +805,7 @@ def test_restart_hydrates_pending_before_ready(
     assert _hybrid(vault, marker) == [rel]
 
 
-def test_unprovable_pending_overflow_returns_warming(
+def test_pending_overflow_serves_unaffected_catalogue_with_coverage_warning(
     tmp_path: Path, managed_runtime: None
 ) -> None:
     vault = tmp_path
@@ -832,8 +834,8 @@ def test_unprovable_pending_overflow_returns_warming(
     sentinel_rel = "Knowledge Base/Notes/overflow-0000.md"
     assert _keyword(vault, "Bounded pending page 0000") == [sentinel_rel]
 
-    # One row past the bound the snapshot overflows and recall must fail closed
-    # rather than serve the last published catalogue as if it were complete.
+    # Past the body bound every pending identity stays suppressed, while the
+    # settled catalogue remains usable with incomplete coverage disclosed.
     overflow_rel = "Knowledge Base/Notes/overflow-past-bound.md"
     overflow_after = _page(
         title="Overflow past bound",
@@ -849,11 +851,11 @@ def test_unprovable_pending_overflow_returns_warming(
     _reset_overlay()
     find_module.reset_page_and_result_caches()
 
-    with pytest.raises(find_module.RetrievalIndexWarming) as warming:
-        _keyword(vault, "Bounded pending page 0000")
-    assert warming.value.complete is False
-    with pytest.raises(find_module.RetrievalIndexWarming):
-        _hybrid(vault, marker)
+    degraded: list[str] = []
+    assert _keyword(vault, "Bounded pending page 0000", degraded=degraded) == []
+    assert "pending_visibility" in degraded
+    assert _hybrid(vault, marker) == []
+    assert _keyword(vault, "ordinary operations")
 
 
 def test_corrupt_pending_row_returns_warming_before_catalogue_access(
@@ -879,13 +881,11 @@ def test_corrupt_pending_row_returns_warming_before_catalogue_access(
         changes=((rel, before, after, None),),
     )
 
-    # The canonical bytes no longer equal the intended after state the receipt
-    # recorded, so the pending row can no longer be proven.
-    _write(
-        vault,
-        rel,
-        _page(title="Corrupt pending", body="Unrelated bytes.", updated="2026-08-24"),
-    )
+    # Corrupt custody cannot establish a trustworthy suppression footprint.
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE pending_recall_rows SET canonical_generation = 'invalid-lineage'"
+        )
     _reset_overlay()
     find_module.reset_page_and_result_caches()
 
@@ -1409,10 +1409,8 @@ def test_out_of_band_supersession_recovers_after_persistent_publication(
     _reset_overlay()
     find_module.reset_page_and_result_caches()
 
-    # The receipt's intended after state is no longer on disk, so managed recall
-    # fails closed rather than serving an unprovable projection.
-    with pytest.raises(find_module.RetrievalIndexWarming):
-        _keyword(vault, marker)
+    # The page stays suppressed until its current bytes reach both lanes.
+    assert _keyword(vault, marker) == []
 
     # Once the persistent lanes publish the current canonical bytes, the row is
     # superseded out of band and retires; recall recovers instead of warming
@@ -1827,8 +1825,7 @@ def test_retirement_refuses_a_lane_pass_that_indexed_an_older_generation(
     )
     _reset_overlay()
     find_module.reset_page_and_result_caches()
-    with pytest.raises(find_module.RetrievalIndexWarming):
-        _keyword(vault, marker)
+    assert _keyword(vault, marker) == []
 
 
 def test_publication_notice_reprojects_only_the_published_batch(
@@ -1925,3 +1922,407 @@ def test_publication_notice_reprojects_only_the_published_batch(
         assert _overlay(vault).ready is True
 
     assert len(hydration) == pending_total, len(hydration)
+
+
+@pytest.mark.parametrize("pending_ceiling", [1, 6])
+def test_optional_prompt_keeps_material_when_pending_identity_is_unprovable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pending_ceiling: int,
+) -> None:
+    """A real prompt survives uncertain citations without claiming exact identity."""
+    import asyncio
+    import json
+
+    from fastmcp import FastMCP
+    from test_derived_identifier_egress import _govern
+    from test_governance_postfilter import _as_external_connector_client, _seed_adoption_run
+
+    from exomem import server
+    from exomem.governance import egress
+
+    visible, absent = memory_refs.new_id(), memory_refs.new_id()
+    _write(tmp_path, "Knowledge Base/Notes/open.md", _page(
+        title="Open", body="Admitted material.", updated="2026-01-01", exomem_id=visible,
+    ))
+    _govern(tmp_path, "external", scope="Notes/uncertain.md")
+    rule = tmp_path / "Knowledge Base/_Governance/rules/withheld.yaml"
+    rule.write_text(rule.read_text().replace("ceiling: 0", f"ceiling: {pending_ceiling}"))
+    pending_path = "Knowledge Base/Notes/uncertain.md"
+    after = _page(title="Pending", body="Pending material.", updated="2026-01-01")
+    _publish_change(tmp_path, batch_id="optional-visible", generation="optional-visible", changes=(
+        (pending_path, None, after, None),
+    ))
+    (tmp_path / pending_path).write_bytes(b"\xff")
+    _reset_overlay()
+    refs = (memory_refs.memory_ref(visible), memory_refs.memory_ref(absent))
+    _seed_adoption_run(tmp_path, run_ref=f"Retain this material: {' '.join(refs)}")
+    _as_external_connector_client(monkeypatch)
+    mcp = FastMCP("pending-optional-prompt")
+    server.register_adoption_mcp(mcp, vault_root=tmp_path)
+
+    rendered = asyncio.run(mcp.render_prompt("continue_adoption"))
+    text = json.dumps([getattr(message.content, "text", "") for message in rendered.messages])
+    assert "Retain this material" in text
+    assert all(ref not in text for ref in refs)
+    assert egress.WITHHELD_REFERENCE in text
+    with pytest.raises(find_module.RetrievalIndexWarming, match="warming"):
+        memory_refs.paths_for_ids_read_only(tmp_path, (visible,))
+
+
+def test_hidden_pending_withdrawal_preserves_redaction_with_equal_canonical_bytes(
+    tmp_path: Path,
+) -> None:
+    """Hidden custody cannot expose a formerly redacted stable-reference token."""
+    import shutil
+
+    from test_derived_identifier_egress import _govern
+
+    from exomem import working_set
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    pending, settled = tmp_path / "pending", tmp_path / "settled"
+    identity, absent = memory_refs.new_id(), memory_refs.new_id()
+    hidden = "Knowledge Base/Notes/Withheld/hidden.md"
+    before = _page(title="Hidden", body="Before.", updated="2026-01-01", exomem_id=identity)
+    after = _page(title="Hidden", body="Committed.", updated="2026-01-02", exomem_id=identity)
+    _write(pending, hidden, before)
+    target = "Knowledge Base/Notes/open.md"
+    _write(pending, target, _page(title="Open", body="Open material.", updated="2026-01-01"))
+    _govern(pending, "external")
+    _publish_change(pending, batch_id="optional-hidden", generation="optional-hidden", changes=(
+        (hidden, before, after, None),
+    ))
+    _write(pending, hidden, after + "\nLater bytes retain the same identity.\n")
+    _reset_overlay()
+    shutil.copytree(pending, settled)
+    who = RequestPrincipal("external", surface="mcp")
+    hidden_ref, absent_ref = memory_refs.memory_ref(identity), memory_refs.memory_ref(absent)
+    text = f"Read {hidden_ref} absent {absent_ref}."
+
+    assert egress.redact_withheld_references(pending, text, principal=who) == (
+        egress.redact_withheld_references(settled, text, principal=who)
+    ) == f"Read {egress.WITHHELD_REFERENCE} absent {absent_ref}."
+    assert memory_refs.paths_for_ids_read_only(
+        pending, (identity,),
+        admit_pending_paths=lambda paths: egress.pending_identity_candidates(
+            pending, paths, principal=who,
+        ),
+    ) == {identity: ()}, "redaction evidence must not revive current mappings"
+    packet = working_set.build_packet(
+        items=[working_set.LaneItem(
+            role="example", level="page", ref=target, path=target, title="Open",
+            text="", lifecycle="active", updated="", anchor=hidden_ref,
+        )], anchors=[], roles=[], current_state=[], ambiguity=[], missing=[],
+        max_chars=4000, generation={}, status="resolved",
+    )
+    release = egress.AnnotatedHits(hits=[], active=True)
+    pending_packet = egress.guard_working_set(pending, packet, release, principal=who)
+    assert pending_packet == egress.guard_working_set(settled, packet, release, principal=who)
+    assert pending_packet["pointers"] == [] and pending_packet["missing"] == []
+
+
+def test_new_hidden_pending_identity_does_not_change_an_absent_optional_reference(
+    tmp_path: Path,
+) -> None:
+    """A hidden unreadable new page cannot reveal custody through blanket omission."""
+    from test_derived_identifier_egress import _govern
+
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    _govern(tmp_path, "external")
+    absent = memory_refs.memory_ref(memory_refs.new_id())
+    who = RequestPrincipal("external", surface="mcp")
+    text = f"Retain this material and {absent}."
+    before = egress.redact_withheld_references(tmp_path, text, principal=who)
+    hidden = "Knowledge Base/Notes/Withheld/new.md"
+    after = _page(title="Hidden", body="Pending.", updated="2026-01-01")
+    _publish_change(
+        tmp_path, batch_id="optional-new-hidden", generation="optional-new-hidden",
+        changes=((hidden, None, after, None),),
+    )
+    (tmp_path / hidden).write_bytes(b"\xff")
+    _reset_overlay()
+
+    assert egress.redact_withheld_references(tmp_path, text, principal=who) == before == text
+
+
+def test_optional_references_preserve_unknown_custody_and_error_input_exemptions(
+    tmp_path: Path,
+) -> None:
+    """Citation omission cannot hide damaged custody or reveal an echoed input's membership."""
+    from test_derived_identifier_egress import _govern
+
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    _govern(tmp_path, "external")
+    ref = memory_refs.memory_ref(memory_refs.new_id())
+    uncertain = "Knowledge Base/Notes/uncertain.md"
+    after = _page(title="Pending", body="Pending.", updated="2026-01-01")
+    _publish_change(tmp_path, batch_id="optional-custody", generation="optional-custody", changes=(
+        (uncertain, None, after, None),
+    ))
+    (tmp_path / uncertain).write_bytes(b"\xff")
+    _reset_overlay()
+    who = RequestPrincipal("external", surface="mcp")
+    with request_scope(who):
+        error = ValueError(f"Could not read {ref}")
+        assert str(egress.postfilter_error("read_memory", error, tmp_path, request_kwargs={
+            "path": ref,
+        })) == str(error)
+    with sqlite3.connect(deferred_index.store_path(tmp_path)) as connection:
+        connection.execute("UPDATE pending_recall_rows SET canonical_generation = 'invalid'")
+    _reset_overlay()
+
+    with pytest.raises(find_module.RetrievalIndexWarming, match="warming"):
+        egress.redact_withheld_references(tmp_path, f"Read {ref}", principal=who)
+
+
+@pytest.mark.parametrize("damaged_custody", [False, True])
+def test_reference_read_reports_which_pending_proof_refused_it(
+    tmp_path: Path, damaged_custody: bool,
+) -> None:
+    """Identical retryable errors must identify the failed proof without logging records."""
+    from exomem import call_spans, commands
+
+    identity = memory_refs.new_id()
+    ref = memory_refs.memory_ref(identity)
+    _write(tmp_path, "Knowledge Base/Notes/known.md", _page(
+        title="Known", body="Known material.", updated="2026-01-01", exomem_id=identity,
+    ))
+    pending = "Knowledge Base/Notes/uncertain.md"
+    after = _page(title="Pending", body="Pending material.", updated="2026-01-01")
+    _publish_change(
+        tmp_path, batch_id="read-diagnostic", generation="read-diagnostic",
+        changes=((pending, None, after, None),),
+    )
+    (tmp_path / pending).write_bytes(b"\xff")
+    if damaged_custody:
+        with sqlite3.connect(deferred_index.store_path(tmp_path)) as connection:
+            connection.execute("UPDATE pending_recall_rows SET canonical_generation = 'invalid'")
+    _reset_overlay()
+
+    token = "pending-reference-diagnostic"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        with library_scope(), pytest.raises(find_module.RetrievalIndexWarming) as refusal:
+            commands.op_get(tmp_path, path=ref)
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+        spans = {row["name"]: row for row in call_spans.pop_call_spans(token)}
+
+    assert refusal.value.site == "pending_visibility_incomplete"
+    assert refusal.value.status == "temporarily_unavailable"
+    fields = spans["read.resolve_identifier"]["fields"]
+    assert fields["pending_custody_unknown"] == int(damaged_custody)
+    assert fields["pending_identity_unknown"] == int(not damaged_custody)
+    assert set(fields) == {
+        "pending_custody_unknown", "pending_identity_unknown", "thread_cpu_us",
+    }
+    assert all(isinstance(value, int) for value in fields.values())
+
+
+def test_optional_reference_uses_the_proven_destination_of_a_pending_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admitted old owner must not mask the withheld destination as a duplicate."""
+    from test_derived_identifier_egress import _govern
+
+    from exomem import semantic_contract
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    identity = memory_refs.new_id()
+    ref = memory_refs.memory_ref(identity)
+    old = "Knowledge Base/Notes/open.md"
+    new = "Knowledge Base/Notes/Withheld/moved.md"
+    page = _page(title="Moved", body="Moved material.", updated="2026-01-01", exomem_id=identity)
+    _write(tmp_path, old, page)
+    _govern(tmp_path, "external")
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    _publish_change(
+        tmp_path, batch_id="optional-move", generation="optional-move",
+        changes=((old, page, None, ref), (new, None, page, ref)),
+    )
+    # The maintained source still observes the old owner; custody proves the move.
+    snapshot = semantic_contract.current_reference_identity_snapshot(tmp_path)
+    assert snapshot is not None and snapshot.reference_owners[identity] == (old,)
+    assert memory_refs.paths_for_ids_read_only(tmp_path, (identity,)) == {identity: (new,)}
+    who = RequestPrincipal("external", surface="mcp")
+
+    assert egress.redact_withheld_references(tmp_path, f"Read {ref}", principal=who) == (
+        f"Read {egress.WITHHELD_REFERENCE}"
+    )
+
+
+def test_activation_keeps_admitted_material_when_a_budget_pointer_origin_is_uncertain(
+    tmp_path: Path, managed_runtime,
+) -> None:
+    """Real activation must not turn three admitted subjects into an unavailable packet."""
+    from conftest import initialize_vault_state_offline
+    from test_derived_identifier_egress import _govern
+
+    from exomem import (
+        commands,
+        epistemic_graph,
+        working_set,
+        working_set_index,
+        working_set_runtime,
+        writer_lease,
+    )
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    initialize_vault_state_offline(tmp_path, source="isolated optional origin fixture")
+    titles = ("Amber Observatory", "Cedar Warehouse", "Quince Laboratory")
+    for index, title in enumerate(titles):
+        _write(tmp_path, f"Knowledge Base/Products/{title}.md", _page(
+            title=title, updated="2026-01-01", exomem_id=memory_refs.new_id(),
+            body=(f"{title} stores current operational observations. "
+                  + f"Fixture detail {index}. " * 20),
+        ))
+    pending_path = "Knowledge Base/Notes/Withheld/unrelated.md"
+    before = _page(
+        title="Unrelated orchard", body="Ordinary orchard material.", updated="2026-01-01",
+    )
+    _write(tmp_path, pending_path, before)
+    _govern(tmp_path, "external")
+    with library_scope():
+        _prime(tmp_path)
+        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+        projection = find_module.FreshnessSnapshot(tmp_path).projection_key("kb")
+        stamp = working_set_runtime._key_text(projection)
+        working_set_index.WorkingSetIndex(tmp_path).rebuild(freshness_stamp=stamp)
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "activate_context")
+    guest = RequestPrincipal(
+        "principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:fixture",
+    )
+
+    def invoke(principal):
+        working_set_runtime.reset_caches_for_tests()
+        with request_scope(principal):
+            return writer_lease.invoke_command(
+                command, tmp_path, turn=f"Remind me about {', '.join(titles)}.", max_chars=640,
+            )
+
+    baseline = invoke(guest)
+    assert not baseline["abstained"]
+    assert tuple(len(baseline[key]) for key in ("anchors", "units", "pointers")) == (3, 5, 1)
+    assert memory_refs.parse_memory_ref(baseline["pointers"][0]["anchor"])
+    canonical = {path: path.read_bytes() for path in (tmp_path / "Knowledge Base").rglob("*.md")}
+    with library_scope():
+        _publish_change(
+            tmp_path, batch_id="activation-origin", generation="activation-origin",
+            changes=((pending_path, before, before + "\nIntended revision.\n", None),),
+        )
+        _write(tmp_path, pending_path, before)
+    _reset_overlay()
+    assert all(path.read_bytes() == raw for path, raw in canonical.items())
+    assert _overlay(tmp_path).servable and not _overlay(tmp_path).ready
+
+    degraded = invoke(guest)
+    assert not degraded["abstained"]
+    assert degraded["anchors"] == baseline["anchors"]
+    assert degraded["units"] == baseline["units"]
+    assert degraded["pointers"] == []
+    marker = {"role": "pointers", "reason": "identity_incomplete"}
+    assert degraded["missing"] == [*baseline["missing"], marker]
+    assert degraded["generation"]["lexical_evidence"] == baseline["generation"]["lexical_evidence"]
+    refunded = sum(working_set.served_chars("pointers", item) for item in baseline["pointers"])
+    assert degraded["budget"]["used_chars"] == baseline["budget"]["used_chars"] - refunded
+
+    hidden = invoke(RequestPrincipal("external", surface="mcp"))
+    assert not hidden["abstained"] and hidden["pointers"] == baseline["pointers"]
+    assert marker not in hidden["missing"]
+    with pytest.raises(find_module.RetrievalIndexWarming, match="warming"):
+        egress.visible_memory_ref_paths(
+            tmp_path, (baseline["pointers"][0]["anchor"],), principal=guest,
+        )
+    with sqlite3.connect(deferred_index.store_path(tmp_path)) as connection:
+        connection.execute("UPDATE pending_recall_rows SET canonical_generation = 'invalid'")
+    _reset_overlay()
+    unavailable = invoke(guest)
+    assert unavailable["abstained"] and unavailable["abstention"]["reason"] == "unavailable"
+
+
+@pytest.mark.parametrize("conversation_inferred", [False, True])
+def test_optional_origin_coverage_does_not_reveal_pointer_membership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conversation_inferred: bool,
+) -> None:
+    """An empty batch and known, absent, hidden, or duplicate origins share one coverage result."""
+    from test_derived_identifier_egress import _govern
+
+    from exomem import working_set
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    identities = [memory_refs.new_id() for _ in range(4)]
+    paths = (
+        "Knowledge Base/Notes/open.md", "Knowledge Base/Notes/Withheld/hidden.md",
+        "Knowledge Base/Notes/duplicate-a.md", "Knowledge Base/Notes/duplicate-b.md",
+    )
+    owners = (identities[0], identities[2], identities[3], identities[3])
+    for path, identity in zip(paths, owners, strict=True):
+        _write(tmp_path, path, _page(
+            title="Fixture", body="Admitted fixture material.",
+            updated="2026-01-01", exomem_id=identity,
+        ))
+    _govern(tmp_path, "external")
+    who = RequestPrincipal("external", surface="mcp")
+    release = egress.AnnotatedHits(hits=[], active=True)
+    refs = [memory_refs.memory_ref(identity) for identity in identities]
+
+    def packet(origins):
+        return working_set.build_packet(
+            items=[working_set.LaneItem(
+                role="example", level="page", ref=paths[0], path=paths[0], title="Fixture pointer",
+                text="", lifecycle="active", updated="", anchor=origin,
+            ) for origin in origins],
+            anchors=[], roles=[], current_state=[], ambiguity=[], missing=[], max_chars=4000,
+            generation={}, status="resolved", conversation_inferred=conversation_inferred,
+        )
+
+    packets = [packet(origins) for origins in ([], *([ref] for ref in refs))]
+    complete = [
+        egress.guard_working_set(tmp_path, item, release, principal=who) for item in packets
+    ]
+    assert [bool(item["pointers"]) for item in complete] == [False, True, False, False, False]
+    pending = "Knowledge Base/Notes/uncertain.md"
+    after = _page(title="Pending", body="Pending material.", updated="2026-01-01")
+    _publish_change(
+        tmp_path, batch_id="origin-membership", generation="origin-membership",
+        changes=((pending, None, after, None),),
+    )
+    (tmp_path / pending).write_bytes(b"\xff")
+    _reset_overlay()
+    degraded = [
+        egress.guard_working_set(tmp_path, item, release, principal=who) for item in packets
+    ]
+    assert all(item == degraded[0] for item in degraded)
+    assert degraded[0]["missing"] == [{"role": "pointers", "reason": "identity_incomplete"}]
+    assert degraded[0]["budget"]["used_chars"] == 0
+    assert all(not item["pointers"] for item in degraded)
+    # The same compiled packets recover; omission never mutates a cached input.
+    _write(tmp_path, pending, after)
+    _reset_overlay()
+    recovered = [
+        egress.guard_working_set(tmp_path, item, release, principal=who) for item in packets
+    ]
+    assert recovered == complete
+
+    def forbid_census(*args, **kwargs):
+        pytest.fail("empty optional origins must not scan canonical identities")
+
+    with monkeypatch.context() as empty:
+        empty.setattr(memory_refs, "_scan_pages", forbid_census)
+        empty.setattr("exomem.semantic_contract.current_reference_identity_snapshot", forbid_census)
+        egress.guard_working_set(tmp_path, packets[0], release, principal=who)
+    with sqlite3.connect(deferred_index.store_path(tmp_path)) as connection:
+        connection.execute("UPDATE pending_recall_rows SET canonical_generation = 'invalid'")
+    _reset_overlay()
+    assert egress.visible_memory_ref_paths(tmp_path, (), principal=who) == {}
+    with pytest.raises(find_module.RetrievalIndexWarming, match="warming"):
+        egress.guard_working_set(tmp_path, packets[0], release, principal=who)

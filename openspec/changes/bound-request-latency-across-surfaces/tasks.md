@@ -1,5 +1,15 @@
 # Tasks
 
+## 5. Ordinary write follow-through
+
+- [ ] 5.1 Serve page-scoped write advice with independent emission history and delivered fingerprints; verify global carriers, disclosure, and batch behavior.
+- [ ] 5.2 Publish receipt proof under the existing outermost vault hold; verify overlapping multi-hold supersession, direct fallback, degradation, and replay.
+- [ ] 5.3 Prime the writer resolver from the proven structural corpus; verify freshness, recall separation, and blocked-edit behavior.
+- [ ] 5.4 Refresh manifest claims after revisions and add CPU attribution to existing spans; verify changed claims and unchanged release checks.
+- [ ] 5.5 Reuse installed acceptance tools for matched warm writes, all outcomes, and honest coverage; independently verify latency, CPU, custody, and convergence.
+- [ ] 5.6 Package one shared read-only MCP canary and preserve the existing script interface; verify installed availability, acceptance and incomplete evidence. Add strict schema expectations beside unchanged indexed expectations. Verify source-bound membership, optional rank, private validation, local references and incomplete observer failures. Retain safe validator path fingerprints for mismatch correlation without changing outcomes or claiming unique assertion identity. Require independent source-only key checks and new series without changing frozen keys or exposing unused cases.
+- [ ] 5.7 Install the availability canary through systemd user units and expose offline status; verify credentials, actual execution and authorized notification delivery. Verify release acceptance across active read and write streams.
+
 ## 1. Prove the source and public boundaries
 
 - [ ] 1.1 Reconcile final integrated source with current contracts; verify incoming connector-boundary checks and existing acknowledgement custody before product edits.
@@ -24,6 +34,7 @@
 - [ ] 3.4 Select residency from measured RSS and cold/warm costs; verify encoder output identity, CPU-cap compliance and documented rollback.
 - [ ] 3.5 Localize overdue activation intervals through a bounded isolated reproduction; record the responsible work, including packet finalization. Reuse `RequestBudget` checks in controllable loops/waits and existing safe deferral paths; retain managed index rebuild deferral. Verify packet or existing budget abstention returns within the absolute deadline; classify every overrun as failed and unresolved. Preserve canonical mutation immunity and exact terminal/component custody; keep an unsafe-to-bound repair open while independent work continues.
 - [ ] 3.6 Establish pending bars from current measurements where justified; verify recorded choices and keep remaining thresholds null and pending.
+- [ ] 3.7 Keep optional direct-read links off the foreground build path. Verify cold and evicted reads release permitted bodies with unknown inbound links, existing watcher recovery restores exact links, and mutation safety remains complete.
 
 ## 4. Verify installed behavior and deliver
 
@@ -78,3 +89,25 @@ The existing finalization-error workflow also verifies budget custody and restor
 This bounded repair does not localize the installed service's recorded overruns.
 Other I/O, graph snapshot proof and publication waits remain unbounded.
 Task 3.5 stays open; neither a live gain nor full deadline acceptance is claimed.
+
+## Bounded retrieval carry
+
+Attribution on an installed cell placed most abstaining activation time in the
+retrieval carry. The carry now stops each rarity count one page past its
+decision window. An owner whose configuration can withhold no page ranks on
+the catalogue's statistics, and corroboration stops once it holds its rows
+(design decision 7). New ledger
+spans name each carry rung and each role lane's catalogue and hydration work.
+A `runtime.gc` span records collector pauses.
+
+A new model-free gate times an abstaining turn's carry right after a catalogue
+write, at 2,000 and 8,000 notes, on Python 3.12.3 with SQLite 3.45.1 as in CI.
+On 0.121.0 the median carry grew from 118 ms to 607 ms (5.2x), and the gate fails.
+With this change it grew from 40 ms to 93 ms (2.4x), and the gate passes.
+Identity tests show that bounded rarity and rank-order corroboration give the
+same answers as before. Twin tests delete a vault's only withheld page. For a
+restricted reader, and for the owner under a governance policy, both carry
+rungs return the same rows and scores with the page present or deleted.
+
+The installed measurement is still open. Tasks 3.2 and 3.3 stay open until the
+cell reports the new carry spans on at least fifty abstaining carries.

@@ -1,5 +1,111 @@
 ## ADDED Requirements
 
+### Requirement: Collection store GA targets one hosting node
+
+General availability SHALL target one hosting node with one canonical live store and the existing single-writer lease. Consistent backup, explicit restore, local restart, managed upgrade and supported-reader compatibility SHALL remain required. No file-sync product or additional database host SHALL be a prerequisite.
+
+Cross-host takeover, replica transport, fleet custody and divergent-host reconciliation clauses in this change SHALL apply to a future deployment scope. They SHALL require a concrete, exercisable use case before activation or additional implementation. Deferring that scope SHALL NOT waive single-host correctness, backup integrity, publication guarantees or resource and latency acceptance.
+
+#### Scenario: Single-host acceptance needs no second hosting node
+- **WHEN** a deployment proves local admission, restart, managed upgrade, consistent backup and writable restore
+- **THEN** absence of a second hosting node or file-sync product does not block its GA acceptance
+- **AND** every other applicable correctness, compatibility and performance gate remains required
+
+#### Scenario: Backup is distinct from active database handoff
+- **WHEN** the hosting node captures a consistent store snapshot for backup or portability
+- **THEN** that snapshot is a restorable artifact, not a second query server or proof of cross-host writer takeover
+
+### Requirement: Admitted canonical state determines collection ownership
+
+Collection ownership SHALL derive from the complete admitted local store: collections, their current manifests and the existing transition intent. The proof SHALL validate the complete set before principal filtering or discovery limits. Missing manifests, invalid declarations, overlapping regions or unresolved bindings SHALL NOT produce a partial set that permits file fallback. No second durable ownership catalog SHALL be added.
+
+Admission, import and restore SHALL validate full stored-path containment against complete canonical declarations. Routine ownership proofs SHALL validate declaration namespaces without a row-wide path census. Selected projection reads and publication SHALL require each path to belong to its canonical collection. Row writes SHALL keep generated paths within declared regions.
+
+The existing mode marker SHALL remain a compatibility hint and transition preimage. Missing or older marker membership SHALL NOT return a canonical collection to file authority. Trusted production enrollment, the current fence and the coordinator's recorded head SHALL establish the binding. A completed export and verified retired fence SHALL take precedence over residual prior-enrollment metadata. A dark preview database SHALL NOT establish production enrollment.
+
+Every canonical ownership sample SHALL contain the coordinator's currently recorded head within the same store and a valid instance lineage. Initial and terminal samples SHALL each prove containment; their ownership bindings SHALL still exclude ordinary heads. A failed authority read SHALL NOT mean that no head exists. A genuinely unrecorded head SHALL preserve first-create and exact-retry behavior. Unfinished exports after retirement SHALL use the matching retired-fence head as their floor. This namespace proof SHALL NOT grant row admission.
+
+Admission MAY read complete declarations as structural recovery facts before its existing acquisition and takeover decisions. Those facts SHALL establish neither ordinary file authority nor canonical row admission.
+
+First production admission SHALL include only its complete verified intent cohort when no trusted active enrollment or verified restore exists. Unrelated preview rows SHALL remain private and unchanged. A valid interrupted first-create intent SHALL remain resumable.
+
+Reverse export SHALL plan every canonical collection, even with an absent or incomplete compatibility hint. After validating the plan, its existing guarded apply MAY repair that hint before recording the existing export intent. The intent SHALL bind the resulting exact bytes. A conflicting or foreign hint SHALL remain preserved. Hint repair alone SHALL NOT change collection authority or retire the fence.
+
+Within possible collection layers, file fallback SHALL require a complete negative proof. Paths outside those layers SHALL remain usable without an available store. Possible layers SHALL derive from the existing profile placement contract, including portable path comparison and ancestor overlap. Unknown ownership can delay ordinary files inside those layers; it SHALL NOT disable provably disjoint knowledge.
+
+A read that relies on collection ownership SHALL obtain a complete binding under the existing consistency boundary before that reliance. Before final result or error release, it SHALL obtain a fresh complete binding under that boundary. An unchanged binding SHALL permit the existing byte and governance checks to decide release. A changed or unresolved relevant binding SHALL replace the entire payload with the existing unavailable outcome before its disclosure receipt claims release.
+
+The comparison SHALL include canonical placement, trusted enrollment, store and instance identity, fence generation, complete ownership and transition admission. It SHALL NOT compare ordinary row revisions, commit heads or publication hashes. The read SHALL capture no further candidates after its final comparison. It SHALL NOT reuse its original WAL snapshot as the fresh proof. Provider work SHALL remain outside the consistency boundary. Disjoint knowledge SHALL remain usable when its read never relies on collection ownership.
+
+Mutations SHALL recheck both endpoints and directory overlap inside their existing boundary. No new durable epoch, ownership catalog, per-path RPC or additional cache SHALL be introduced.
+
+The first schema-13 delivery SHALL include both repaired ownership and the new installation semantics. Production enrollment SHALL record the schema requirements before migration, installation or fresh-store admission. Supported candidate and restore paths SHALL derive those requirements from trusted enrollment and verified snapshots even when the mode marker is absent. Failed dark preparation SHALL NOT impose the production requirement on a file-only vault.
+
+#### Scenario: Restoring an older marker cannot return a collection to files
+- **GIVEN** the admitted store owns collections A and B, while an older marker lists only A
+- **WHEN** the supported service restarts and queries B by identity or path
+- **THEN** B retains canonical ownership and returns authorized SQLite values rather than misleading physical view bytes
+- **AND** generic deletion, moves and destinations inside B remain protected
+
+#### Scenario: Removing the hint does not remove ownership
+- **WHEN** an enrolled store restarts through supported startup with its mode marker absent
+- **THEN** trusted enrollment and the validated local store determine ownership
+- **AND** absence of the hint never proves file authority
+
+#### Scenario: Unavailable ownership keeps disjoint knowledge usable
+- **WHEN** the store is unavailable and a request targets a path outside every possible collection layer
+- **THEN** the ordinary knowledge operation remains usable
+- **AND** an ambiguous path inside a possible collection layer does not receive marker-derived file authority
+
+#### Scenario: Concurrent creation cannot invalidate a file-read negative
+- **WHEN** collection creation adds a namespace after a generic read relies on a negative ownership proof
+- **THEN** the fresh terminal binding detects the change and withholds the entire result or error payload
+- **AND** it does not publish stale counts, snippets or a successful release receipt
+
+#### Scenario: Ordinary row writes do not invalidate ownership
+- **WHEN** concurrent row writes preserve the complete ownership binding during a generic read
+- **THEN** those writes alone do not cause an ownership refusal
+- **AND** provider work does not hold the vault mutation boundary
+
+#### Scenario: A stale recovery snapshot cannot establish file authority
+- **GIVEN** the coordinator's recorded head includes collections A and B, while a structurally valid recovery snapshot contains only A
+- **WHEN** a read tries to establish file authority using that snapshot
+- **THEN** its ownership proof is unavailable even when its initial and terminal namespace declarations match
+- **AND** compatibility hints cannot substitute for required head containment
+- **AND** provably disjoint knowledge remains readable
+
+#### Scenario: A current recovery snapshot preserves ordinary files
+- **GIVEN** a verified recovery snapshot contains the recorded head within its store and valid instance lineage
+- **WHEN** a read targets an ordinary file outside its canonical namespaces but inside a possible collection layer
+- **THEN** that file remains readable through its ordinary policy
+- **AND** the namespace proof grants no canonical row admission
+
+#### Scenario: More rows do not add an ownership census
+- **WHEN** an ordinary sibling file read obtains complete ownership proofs for collections with many rows
+- **THEN** those proofs validate declaration namespaces without enumerating item, held or projection paths
+- **AND** admission and selected projection checks retain their containment guarantees
+
+#### Scenario: Unrelated preview data stays private during first admission
+- **GIVEN** an unadmitted preview store contains a collection outside a proposed first production intent
+- **WHEN** production creation tries to enroll that store
+- **THEN** it refuses before preparation or enrollment and leaves the unrelated preview rows unchanged
+- **AND** exact recovery of a valid first-create intent remains supported
+
+#### Scenario: Export repairs only its compatibility preimage
+- **GIVEN** an admitted store has two exportable collections and its hint is absent or lists only one
+- **WHEN** the owner previews and applies reverse export
+- **THEN** the plan includes both collections and the guarded apply binds its existing intent to the complete hint
+- **AND** a crash after hint repair but before intent creation leaves collection data and authority unchanged
+
+#### Scenario: Retired enrollment does not revive an exported store
+- **WHEN** export completed and its verified fence is retired, but residual store metadata records prior enrollment
+- **THEN** that residue does not restore store ownership or block proved file-mode operation
+
+#### Scenario: Schema requirements cover fresh production stores without the hint
+- **WHEN** a fresh store enters production at schema 13 and its marker is absent during candidate inspection or verified restore
+- **THEN** the supported launcher rejects an actual schema-12 candidate before worker replacement or vault access
+- **AND** a failed dark preview leaves an otherwise file-only vault's compatibility unchanged
+
 ### Requirement: One embedded collection store is the single source of truth
 Each vault SHALL have exactly one embedded SQLite collection store that is the only canonical source for structured collections of every collection type, built-in (Records, Planning) or declared: their type declarations, manifests, items, item versions, per-row provenance, held candidates, and audit transitions. The store SHALL enforce collection-scoped item identity and declared natural-key uniqueness with database constraints, SHALL commit every mutation, including every row of a bulk mutation, in one transaction under the existing single-writer lease, and SHALL make its transaction, audit-effect, item-version, provenance and manifest-history tables append-only. Knowledge notes, entities, sources, evidence and episodes SHALL remain Markdown and SHALL NOT be stored in it. The `dataset` storage strategy SHALL remain a file-canonical, query-only adapter and SHALL NOT be imported into the store. Records, Planning and declared types SHALL keep their distinct kinds, typed schemas, natural keys, provenance, audit and governance; only the storage engine changes. The store SHALL require SQLite 3.38 or newer and a local filesystem where WAL journaling takes effect, and readiness SHALL refuse collection writes, never falling back to file-canonical writes, when either fails.
 
@@ -45,18 +151,56 @@ Each collection SHALL carry a generation that increments exactly once per commit
 ### Requirement: Collection views are Markdown projections of the store
 The substrate SHALL render every collection manifest, item, log-layout collection, and held candidate as a Markdown view at the same vault-relative path the file-canonical layout used, using the existing item, log, filename and managed-presentation renderers and keeping the visible system identity properties. Views SHALL NOT be canonical. Every item and manifest view, and every log block, SHALL carry a view stamp naming the store identity, the rendering store instance, the row version and a payload-hash prefix. The stamp SHALL be a reserved system property that callers cannot write and the payload hash ignores.
 
-The item, manifest and held views changed by a mutation SHALL be staged and fsynced inside the mutation's transaction and published after commit, before the mutation is acknowledged, so that any reader of the vault file sees the acknowledged write. A view SHALL never be published ahead of its committed row. Every publish, synchronous or asynchronous, SHALL be check-then-swap:
+The mutation SHALL commit exact item and manifest render hashes, row versions and retained installation contexts with the canonical rows and receipt. It SHALL acknowledge that durable SQLite commit without staging or installing item and manifest files. The existing projector SHALL publish those files asynchronously. Required input custody and preservation SHALL remain before canonical writes. Held views SHALL retain their existing synchronous publication. A view SHALL never be published ahead of its committed row. Every publish SHALL be check-then-swap:
 - move the current view aside atomically;
 - install the staged view without replacing any file that appeared in between;
 - hash the aside copy, and hold it as `VIEW_CONFLICT` with its bytes when it differs from the view's expected on-disk hash.
 
-A publish SHALL NEVER overwrite a view edit the substrate has not classified. On every start and periodically, the substrate SHALL hash every view path before the projector runs, and SHALL send mismatches to edit-back classification, so detection does not depend on a file-system watcher. The staged view's hash SHALL be recorded inside the mutation's transaction, adding no second commit to the acknowledgement path. Log-layout views, history pages and type views SHALL be published asynchronously with bounded lag. Every view's pending state SHALL be recorded durably in the same transaction as the mutation, so that a crash after commit re-renders it on restart. A projection failure SHALL NOT turn a committed mutation into a refusal: it SHALL be retried, and reported as a receipt warning and in inspection.
+A publish SHALL NEVER overwrite a view edit the substrate has not classified. On every start and periodically, the substrate SHALL hash every view path before the projector runs, and SHALL send mismatches to edit-back classification, so detection does not depend on a file-system watcher. The exact rendered view's hash SHALL be recorded inside the mutation's transaction, adding no second commit to the acknowledgement path. Item, manifest, log-layout, history and type views SHALL be published asynchronously. Healthy-writer publication lag SHALL be measured separately from acknowledgement latency and bounded under the acceptance harness. Every view's pending state SHALL be recorded durably in the same transaction as the mutation, so that a crash after commit re-renders it on restart. A projection failure SHALL NOT turn a committed mutation into a refusal. It SHALL remain pending, be retried and appear in inspection. Existing receipt warnings MAY report it where the closed receipt envelope supports them.
+
+Installation metadata SHALL separate physical source candidates from queued work and record exact readiness before publication. An unresolved input SHALL keep its token, render context and readiness. Recovery SHALL preserve each token's source authority independently of newer queued work. Missing or conflicting historical authority SHALL preserve bytes under the existing owner-only quarantine. Schema 13 SHALL enforce this metadata compatibility boundary through existing schema guards without adding tables or columns.
 
 Index synchronization of views SHALL NOT be on the acknowledgement path. Structured readers SHALL read the store rather than views. Vault file tools SHALL refuse to delete, move or recover a path owned by a collection view, with a remediation naming the collection operation. Views SHALL be normalized on re-render: values and the authored body SHALL be emitted exactly, while YAML formatting that is not data need not be preserved. Audit markers and manifest audit heads SHALL NOT be rendered.
 
-#### Scenario: A committed append appears as a view
-- **WHEN** an append is acknowledged
-- **THEN** the item's view already exists at the path its filename recipe names, with its values, body and managed presentation, and a following `get_page` of that path returns them
+#### Scenario: A committed append precedes its physical view
+- **WHEN** an append is acknowledged before background publication
+- **THEN** structured queries return its committed values immediately
+- **AND** `get_page` keeps its governed physical-view semantics and may remain unavailable until publication
+- **AND** background publication creates the physical view with its values, body and managed presentation
+
+#### Scenario: An edited pending view is not a canonical-read shortcut
+- **WHEN** an item or manifest file has held, edited, detached, ambiguous, unknown or unsafe bytes before the watcher classifies it
+- **THEN** direct reads withhold that file rather than substitute a canonical render
+- **AND** an invalid edit stays in place while structured queries serve the last valid SQLite state
+- **AND** direct file reads preserve their existing authorization and byte-validation rules
+
+#### Scenario: Repeated writes preserve pending-view recovery
+- **WHEN** later mutations commit before an earlier item or manifest render reaches disk
+- **THEN** the store retains exact pending state and the context needed to classify edits against the last physical render
+- **AND** restart publishes the latest committed state without losing an unseen edit
+
+#### Scenario: A queued render retains an unpromoted physical predecessor
+- **GIVEN** version 2 reached disk without promotion, and version 3 is pending without installation
+- **WHEN** version 4 replaces the pending descriptor
+- **THEN** the writer confirms and retains version 2's historical governance context before filtering render contexts
+- **AND** an edit against physical version 2 keeps that context across restart and a policy change
+
+#### Scenario: Queued work does not claim physical exposure
+- **WHEN** a canonical item or manifest changes before its queued render is staged
+- **THEN** its installation metadata keeps physical source candidates separate from the latest SQL pending pair
+- **AND** reconcile records exact installation readiness after staging and flushing in its transaction
+- **AND** publication requires the committed token, readiness, pending pair and render context to agree
+- **AND** recovery uses an old token's own evidence after a newer SQL pending pair replaces it
+
+#### Scenario: Ambiguous source authority preserves private bytes
+- **WHEN** input candidates lack complete historical context or carry different policies
+- **THEN** the store preserves the exact bytes under its existing owner-only quarantine
+- **AND** an editable stamp never selects a less restrictive policy
+
+#### Scenario: An older writer refuses installation metadata it cannot preserve
+- **WHEN** a schema 12 reader or writer opens a store with the new installation semantics
+- **THEN** metadata-only schema 13 and the existing compatibility guard refuse that reader before access
+- **AND** this boundary adds no table, column, public envelope or separate queue
 
 #### Scenario: An agent write never overwrites an unseen edit
 - **WHEN** a human edits an item view and, before the watcher has classified the edit (or while no watcher runs, or while the service is offline), an agent update to the same item commits
@@ -75,12 +219,23 @@ Index synchronization of views SHALL NOT be on the acknowledgement path. Structu
 - **THEN** no view shows the uncommitted values, and the staging file is removed by bounded crash recovery
 
 #### Scenario: File tools cannot delete a view
-- **WHEN** a file tool is asked to delete or move an item view
+- **WHEN** a file tool is asked to delete, move or restore a path that admitted canonical ownership gives a store collection: a view, a folder that holds one, or a move or restore destination inside the collection
 - **THEN** it refuses with `COLLECTION_VIEW_PATH`, and the store and view are unchanged
+
+#### Scenario: File tools keep file behaviour on a proved file-only vault
+- **WHEN** a vault has no production store enrollment and a file tool deletes, moves or restores a file, including a file collection's item
+- **THEN** the tool behaves exactly as before and opens no collection store
 
 #### Scenario: Projection resumes after a crash
 - **WHEN** the process stops after a commit but before the view is written
 - **THEN** on restart the pending view is rendered and inspection reported it as pending until then
+
+#### Scenario: A handoff drain leaves unfinished views recoverable
+- **WHEN** the drain reaches its share of the handoff deadline or the caller cancels it
+- **THEN** it stops starting optional view work at safe checkpoints
+- **AND** completed preservation commits and unfinished views remain pending for the next holder
+- **AND** required custody, installation and transaction finalization finish without interruption
+- **AND** replica publication and coordinator release retain their original deadline
 
 #### Scenario: Obsidian sees ordinary Markdown
 - **WHEN** a user opens a collection directory in an ordinary Markdown editor
@@ -93,7 +248,32 @@ When a view file changes and its bytes differ from the last published or pending
 - a stamp whose payload-hash prefix does not match the row SHALL be held `VIEW_INVALID`;
 - only a view whose bytes are exactly the bytes parsed at import MAY be unstamped, and any other unstamped view SHALL be held `VIEW_INVALID`.
 
-For a view stamped with the current row version, it SHALL, after the file has been quiet for a settle window, classify the edit deterministically without interpreting prose. A formatting-only edit SHALL be re-rendered without a transaction. A valid change to declared values or body, made against the item's current row version, SHALL be applied as an ordinary governed `update` (or Planning `update` or `triage`) through the same leaf functions, validation, governance precommit, audit transition and receipt as a tool call, with actor `owner:view-edit`, a reason naming the view, and a request identity derived from the view path, base row version and file hash so that a replay is a no-op; the view SHALL then be re-rendered. A valid manifest edit SHALL be applied as a governed `revise`. An edit that is ambiguous, schema-breaking, violates Planning lifecycle or hierarchy rules, changes a system property, conflicts with a newer row version, deletes a view, moves a view out of its collection's source root, adds an unbound file under a projection root, or is a file-sync conflict copy SHALL become a held view correction carrying the human's bytes and field-addressed diagnostics, and SHALL NEVER silently overwrite or discard either the store row or the human's edit. A move of a view within its collection's source root with an intact current stamp SHALL be a governed `view_move` transition that updates the item's view path, re-authorized for the new path, and SHALL NOT re-render the old path. A later valid edit of the same view SHALL supersede its held correction. History pages SHALL be read-only: edits to them SHALL be ignored and re-rendered.
+For a view stamped with the current row version, it SHALL, after the file has been quiet for a settle window, classify the edit deterministically without interpreting prose. A formatting-only edit SHALL be re-rendered without a transaction. A valid change to declared values or body, made against the item's current row version, SHALL be applied as an ordinary governed `update` (or Planning `update` or `triage`) through the same leaf functions, validation, governance precommit, audit transition and receipt as a tool call, with actor `owner:view-edit`, a reason naming the view, and a request identity derived from the view path, base row version and file hash so that a replay is a no-op; the view SHALL then be re-rendered. A valid manifest edit SHALL be applied as a governed `revise`. An edit that is ambiguous, schema-breaking, violates Planning lifecycle or hierarchy rules, changes a system property, conflicts with a newer row version, deletes a view, moves a view out of its collection's source root, adds an unbound file under a projection root, or is a file-sync conflict copy SHALL become a held view correction carrying the human's bytes and field-addressed diagnostics, and SHALL NEVER silently overwrite or discard either the store row or the human's edit. A move of a view within its collection's source root with an intact current stamp SHALL be a governed `view_move` transition that updates the item's view path, re-authorized for the new path, and SHALL NOT re-render the old path. A later valid edit of the same view SHALL resolve a held correction of bytes at that view path, which is an invalid edit kept in place or a deleted view. A held correction of displaced bytes, such as a stale-buffer save (`VIEW_CONFLICT`), SHALL be resolved only by resuming or discarding it. History pages SHALL be read-only: edits to them SHALL be ignored and re-rendered.
+
+Invalid item and manifest edits SHALL remain at their view paths until a valid edit or explicit discard resolves the correction. Canonical queries SHALL continue to serve the last valid SQLite state. Direct file reads SHALL withhold invalid views until their bytes become valid renders.
+
+The watcher SHALL enqueue bounded path and move hints without opening the store or waiting for its thread. The store thread SHALL check ownership and grant due work a bounded turn between requests. Overflow and directory events SHALL request a census. Census and settling metadata SHALL remain bounded in memory, with disposable disk-backed state for larger observations. A census SHALL examine materialized files, without per-row filesystem work for summary collections.
+
+A complete census SHALL establish only the candidates observed during that sweep, not an atomic filesystem snapshot. Partial or failed sweeps SHALL NOT authorize missing-path effects. Before adopting a move, the writer SHALL recheck the collection basis, old-path absence, destination custody, identity, stamp, bytes and authorization. Observed duplicates SHALL remain ambiguous. The move SHALL keep the payload version, advance the collection generation, and retire or rebind pending installations without recreating the old path. Replay identity SHALL include the observed generation. Publication SHALL preserve unseen bytes through its existing no-clobber rules.
+
+Orphan cleanup SHALL remove an unowned stage or aside only when its bytes match a committed render or a complete durable held copy. Unknown bytes SHALL remain untouched and cleanup SHALL report pending.
+
+#### Scenario: A refused move commit retains unknown aliases
+- **WHEN** a move captures unknown bytes from a stage alias and SQL COMMIT fails
+- **THEN** the stage alias and destination remain untouched
+- **AND** successful cleanup starts only after the hold commits and fresh held handles prove the same object, versions and digest
+
+#### Scenario: A second save cannot clear unresolved move provenance
+- **WHEN** an unknown moved view changes again before canonical installation is confirmed, including after hold discard or restart
+- **THEN** every differing observation and displaced input stays quarantined without applying an ordinary row edit
+- **AND** only fresh held proof of a committed canonical target clears its pending provenance in an existing confirmation transaction
+- **AND** preserved old descriptors retain their own quarantine state, while later ordinary edits follow normal rules after canonical confirmation
+
+A file moved outside its source root SHALL remain at the destination under ordinary destination permissions. Proven move evidence SHALL preserve a correction and restore the canonical view. Unknown correction bytes SHALL retain quarantine; no move hint or path adoption SHALL establish their release authority.
+
+#### Scenario: A stage changes after a move drops its token ownership
+- **WHEN** a move commits before cleanup, and the remaining stage changes before orphan recovery
+- **THEN** recovery preserves its unknown bytes and reports pending cleanup instead of deleting them by filename
 
 #### Scenario: A value edit in Obsidian becomes an audited update
 - **WHEN** a user changes one declared field in an item view and saves
@@ -108,8 +288,10 @@ For a view stamped with the current row version, it SHALL, after the file has be
 - **THEN** the user's bytes are kept in a held `VIEW_CONFLICT` correction naming both versions, the agent's committed value is unchanged, and the view is re-rendered to the current row
 
 #### Scenario: Schema-breaking edit is held
-- **WHEN** a user adds an undeclared property or writes a value of the wrong type in a view
+- **WHEN** a user adds an undeclared property or writes a value of the wrong type in an item or manifest view
 - **THEN** the row is unchanged, a held `VIEW_INVALID` correction carries the edit and its field-addressed diagnostics, and inspection and attention report it
+- **AND** the edited bytes remain in place while canonical queries serve the last valid row
+- **AND** direct file reads withhold the invalid view until a valid edit or explicit discard resolves the correction
 
 #### Scenario: A stale buffer cannot revert a newer version
 - **WHEN** a second device or an editor buffer opened at row version 4 saves over a view whose item is at version 5
@@ -123,6 +305,26 @@ For a view stamped with the current row version, it SHALL, after the file has be
 - **WHEN** a user renames an item view within its collection folder and the editor rewrites links to it
 - **THEN** a `view_move` transition records the new path and the old path is not re-rendered
 
+#### Scenario: An interrupted census does not mistake a rename for deletion
+- **WHEN** a view moves to a directory the census has not reached and the sweep is interrupted
+- **THEN** the incomplete sweep preserves the moved file and does not recreate its old path
+
+#### Scenario: Repeated moves remain separate transitions
+- **WHEN** an unchanged item moves from one path to another, back, and again to the second path
+- **THEN** each move records its own transition while the payload version remains unchanged
+
+#### Scenario: A later duplicate survives reconciliation
+- **WHEN** another file acquires a moved item's stamp after the census has examined that file
+- **THEN** publication preserves both files and a later census classifies the duplicate without claiming an atomic earlier snapshot
+
+#### Scenario: Summary row count does not multiply filesystem work
+- **WHEN** a summary collection gains canonical rows without gaining materialized pages
+- **THEN** its census examines only its materialized files and performs no per-row filesystem reads
+
+#### Scenario: Request load does not starve settled edits
+- **WHEN** foreground requests remain queued after a view's settle window expires
+- **THEN** the store thread gives due edit-back work bounded turns and applies the edit through the normal writer
+
 #### Scenario: Deleting a view does not delete the item
 - **WHEN** a user deletes an item view file
 - **THEN** the item remains in the store, a held `VIEW_DELETED` correction is reported, and the view is re-rendered
@@ -132,7 +334,7 @@ For a view stamped with the current row version, it SHALL, after the file has be
 - **THEN** only the valid state is applied and no held correction remains for that view
 
 ### Requirement: Collection audit is an append-only store table with a rendered history view
-Every committed collection mutation SHALL be exactly one audit transition in the store, carrying its 24-lowercase-hex transition identifier, the operation, the actor, the sanitized reason, the before and after collection generation and manifest version, the commit time, the recorded receipt, and a hash chain over its predecessor, with one content-free audit effect per changed item naming its row, effect, and before and after versions and hashes. A bulk mutation SHALL be one transition with one effect per written row. Audit transitions SHALL copy no item values. The transition SHALL commit in the same transaction as the change it describes, so no committed change can lack its transition. Records and Planning mutations SHALL NOT write audit events to `Knowledge Base/log.md`. The substrate SHALL render, per collection, a read-only history page generated from the audit table, newest first and readable like an activity log: date, operation, actor, reason, and links to the changed item views. The page SHALL be bounded, with older transitions on numbered pages of a fixed number of transitions, and only the newest numbered page SHALL be rewritten. It SHALL be rendered for the intersection of the audiences that can read its path: an effect SHALL appear only when every such audience can read its item, and a transaction with any omitted effect SHALL be shown without its reason. Inspection SHALL verify the audit chain incrementally from a recorded verified-through point.
+Every committed collection mutation SHALL be exactly one audit transition in the store, carrying its 24-lowercase-hex transition identifier, the operation, the actor, the sanitized reason, the before and after collection generation and manifest version, the commit time, the recorded receipt, and a hash chain over its predecessor, with one content-free audit effect per changed item naming its row, effect, and before and after versions and hashes. A bulk mutation SHALL be one transition with one effect per written row. Audit transitions SHALL copy no item values. The transition SHALL commit in the same transaction as the change it describes, so no committed change can lack its transition. Records and Planning mutations SHALL NOT write audit events to `Knowledge Base/log.md`. The substrate SHALL render, per collection, a read-only history page generated from the audit table, newest first and readable like an activity log: date, operation, actor, reason, and links to the changed item views. The page SHALL be bounded, with older transitions on numbered pages of a fixed number of transitions. Ordinary append pagination SHALL rewrite only the main page and newest numbered page. Governance invalidation and repair of edited generated pages MAY regenerate older pages. It SHALL be rendered for the intersection of the audiences that can read its path: an effect SHALL appear only when every such audience can read its item, and a transaction with any omitted effect SHALL be shown without its reason. Inspection SHALL verify the audit chain incrementally from a validated verified-through point without changing canonical state. Canonical history corruption SHALL raise an integrity error rather than invent a native gap. Every native event hash input SHALL remain reconstructible from immutable stored facts.
 
 #### Scenario: Change and audit are atomic
 - **WHEN** a mutation commits or is interrupted at any point
@@ -150,6 +352,35 @@ Every committed collection mutation SHALL be exactly one audit transition in the
 - **WHEN** a user edits a history page
 - **THEN** no audit transition changes and the page is re-rendered from the table
 
+#### Scenario: Governance changes affect an older history page
+- **GIVEN** an older numbered page contains effects whose current release has changed
+- **WHEN** the page is read or reconciled
+- **THEN** stale bytes cannot release withheld effects or a mixed transaction's reason
+- **AND** the projector may regenerate that page without changing audit transitions
+- **AND** page numbers and navigation reveal no omitted transition count
+
+#### Scenario: Hidden-only history changes keep public metadata unchanged
+- **WHEN** a transaction adds only effects withheld from any audience that can read the history page
+- **THEN** the page's released content, stamps, public version, hashes, continuations and navigation remain unchanged
+- **AND** audience intersection includes default and page-only session-grant readers
+
+#### Scenario: Imported history retains its prior assessment and payloads
+- **GIVEN** an imported collection has a preserved history assessment and retained legacy correction payloads
+- **WHEN** row history is read after a native correction
+- **THEN** authorized retained legacy payloads and native versions remain readable in the existing history envelope
+- **AND** genuinely missing legacy payloads report `unavailable_legacy`
+- **AND** exhaustive verification never upgrades the imported assessment or makes unknown history acknowledgeable
+
+#### Scenario: A public history read verifies a new suffix
+- **GIVEN** admission validated a collection prefix and later transactions extend it
+- **WHEN** inspection or query reads canonical history
+- **THEN** it verifies the new suffix under its current snapshot and leaves canonical state unchanged
+- **AND** unexplained database changes invalidate prefix trust before it can be reused
+
+#### Scenario: Native history is corrupt
+- **WHEN** canonical event material or its predecessor chain fails verification
+- **THEN** the read reports a store-integrity error instead of a native gap or a governance omission
+
 #### Scenario: Activity log no longer grows with Records writes
 - **WHEN** a Records or Planning mutation commits
 - **THEN** `Knowledge Base/log.md` is not read or rewritten by it
@@ -158,8 +389,9 @@ Every committed collection mutation SHALL be exactly one audit transition in the
 
 Older-reader/startup exclusion SHALL apply to supported Exomem launchers and
 candidate admission, including copied/restored vaults with fresh external state.
-Required compatibility SHALL be derived from the existing authority marker
-before bootstrap or activation, not solely from an external manifest.
+Required compatibility SHALL derive from trusted production enrollment and the
+validated store or restore snapshot before bootstrap or activation. A missing
+marker or external manifest SHALL NOT erase that requirement.
 Replication custody SHALL be verified through a supported deployment adapter
 as specified in Persistent machine-local state lives outside the vault.
 Unknown custody SHALL leave store activation/publication unavailable while
@@ -167,19 +399,19 @@ unrelated file collections and knowledge remain usable. These guarantees SHALL
 NOT claim control over arbitrary manually launched historical executables or
 unmanaged sync programs outside that boundary.
 
-The live store's files SHALL NEVER be copied by file-level backup or export. The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. The rows of a derived import collection SHALL stay out of the replica; they are rebuilt from their preserved sources (`bring-in-large-exports`). A replica SHALL be adopted only when the vault-side mode marker names store mode and the same store identity.
+The live store's files SHALL NEVER be copied by file-level backup or export. The substrate SHALL produce consistent snapshots of the collection store only through the SQLite online backup API into a staging file that is switched to a single-file journal mode, integrity-checked and atomically renamed. It SHALL publish such a snapshot as a replica inside the vault after committed transactions, coalesced off the acknowledgement path, and synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export. The replica SHALL NEVER be opened for writing in place. The rows of a derived import collection SHALL stay out of the replica; they are rebuilt from their preserved sources (`bring-in-large-exports`). Explicit restore SHALL bind the verified snapshot to trusted production enrollment and the current fence. Marker membership alone SHALL NOT establish or erase ownership.
 
 Every transaction SHALL advance a store-wide sequence and chained head hash. The writer-lease holder SHALL report `(store_id, instance_id, commit_seq, head_hash)` to the coordinator on renew and release. A new holder facing a head recorded by another instance SHALL adopt the replica only once it reaches that head, and until then SHALL refuse collection writes with the retryable `COLLECTION_STORE_SYNC_PENDING`, naming both sequences and the remedy. A store for which no foreign head was ever recorded SHALL never wait. An owner-only, preview-first `adopt-local` operation SHALL let the holder continue from local state, recording the fork point, and the other side's later-arriving changes SHALL be reconciled as held corrections.
 
 The coordinator SHALL persist the head atomically with a valid holder/token renew or ordinary release and retain it after release or expiry. A stale holder SHALL NOT replace it; operator release SHALL preserve the recorded head. The renewer SHALL use a trusted head provider rather than the opening-thread SQLite writer. Ordinary release SHALL flush the replica before relinquishing local writer authority. The collection-store capability fence SHALL remain separate from governance schema versions 3/4, and file-only vaults SHALL retain their existing admission behavior.
 
-An explicit operator transition to a different store identity SHALL use the current generation and atomically advance it, clear only the former identity's head and revoke the lease token. Same-target/capability replay at the current or predecessor generation SHALL preserve head, holder and token. Generations SHALL NOT reset or disappear, and stale replay after intervening identity transitions SHALL conflict. These coordinator operations SHALL NOT perform or authorize export/re-migration; the adapter SHALL preserve the old identity/head in durable transition evidence before the cut and reacquire before marker cutover.
+An explicit operator transition to a different store identity SHALL use the current generation and atomically advance it, clear only the former identity's head and revoke the lease token. Same-target/capability replay at the current or predecessor generation SHALL preserve head, holder and token. Generations SHALL NOT reset or disappear, and stale replay after intervening identity transitions SHALL conflict. An operator-only retire SHALL compare the enrolled store identity and generation. In one coordinator transaction it SHALL append the retired fence and its head to an append-only history, remove the enrolled fence and revoke the lease token. The writer credential SHALL NOT retire a fence, and the retire SHALL use its own route so that a coordinator without it answers contract-absent instead of replaying a transition. A retired vault SHALL admit writers without the store capability as a never-enrolled vault does, and its fence read SHALL report not enrolled with the newest retired generation. A host whose marker still routes to the retired store SHALL refuse store requests rather than serve them. Replay of the newest retire SHALL succeed without another revocation, and a retire that names another store identity or generation SHALL conflict. Re-enrolment SHALL take the newest retired generation as its basis and advance to the next generation; a basis from before the retire SHALL conflict. These coordinator operations SHALL NOT perform or authorize export/re-migration; the adapter SHALL preserve the old identity/head in durable transition evidence before the cut and reacquire before marker cutover.
 
 Each live store SHALL carry an instance identity and lineage. Replica publication SHALL be check-then-swap against the last replica this instance published. Any foreign replica or foreign view stamp SHALL set the divergence state immediately. A service on a copied or moved vault with no local store SHALL adopt the replica as a new lineage entry and be writable. It SHALL refuse collection writes with a divergence error, while serving reads and knowledge writes, when the local store holds transactions the replica lacks. A preview-first operator reconciliation SHALL turn every item changed by the divergent store after the fork point into a held view correction on the surviving store, so divergence never silently loses a write. Running more than one collection writer on one vault without the multi-host writer lease SHALL be explicitly unsupported, and `describe` and the doctor probe SHALL say so. Restore SHALL validate integrity, schema version and store identity, and SHALL surface any difference between the restored rows and existing views as held view corrections rather than overwriting either.
 
 Before admission, a token-bound bootstrap state SHALL preserve the actual acquisition head and prevent ordinary checkout, head replacement and successful release until that evidence is reconciled with the validated local chain and initial publication is durable. Capability-bearing renewal MAY omit the head during this bounded recovery. A dark recovery producer SHALL validate the complete physical manifest and only its exact optional collection-store descriptor without advertising ordinary runtime support.
 
-Mixed-authority marker installation SHALL be durable and no-clobber when absent. Replacement SHALL require established custody of the marker namespace in addition to validating its exact preimage; ordinary atomic replacement alone SHALL NOT count as compare-and-swap against incoming synchronization. Replacement SHALL NOT expose a missing-marker file-authority window. Unsupported custody SHALL preserve the existing routing and pending create. After intent cleanup, projection effects SHALL still require current marker membership, and exact create replay SHALL recheck current governance and the immutable transaction's presence in the current chain without a new business transaction.
+Mixed-authority marker installation SHALL be durable and no-clobber when absent. Replacement SHALL require established custody of the marker namespace in addition to validating its exact preimage; ordinary atomic replacement alone SHALL NOT count as compare-and-swap against incoming synchronization. Replacement SHALL NOT expose a missing-marker file-authority window. Unsupported custody SHALL preserve the existing routing and pending create. After intent cleanup, projection effects SHALL still require current admitted canonical ownership, and exact create replay SHALL recheck current governance and the immutable transaction's presence in the current chain without a new business transaction.
 
 #### Scenario: Bootstrap renewal preserves unreconciled acquisition evidence
 - **WHEN** a local create/recovery runtime is attached before its acquired head and durable publication have been reconciled
@@ -195,7 +427,7 @@ Mixed-authority marker installation SHALL be durable and no-clobber when absent.
 
 #### Scenario: Create retry after intent cleanup retains governed admission
 - **WHEN** an exact create request is retried after its intent was cleared
-- **THEN** current authorization and marker membership guard return of its immutable receipt, no new business transaction is written, and later loss of membership still prevents projection effects
+- **THEN** current authorization and canonical ownership guard return of its immutable receipt, no new business transaction is written, and loss of canonical admission prevents projection effects
 
 #### Scenario: Backup of the vault is consistent
 - **WHEN** restic or a vault copy captures the vault while agents are writing
@@ -240,8 +472,22 @@ Mixed-authority marker installation SHALL be durable and no-clobber when absent.
 - **WHEN** a service starts on a copy of the vault with no local store
 - **THEN** it adopts the vault's replica as its live store and accepts collection writes
 
+#### Scenario: A retired store fence readmits file-mode writers
+- **WHEN** the operator retires a vault's store fence at its enrolled store identity and generation
+- **THEN** the holder that opened against the fence loses its lease token, and a writer without the store capability acquires the lease as on a never-enrolled vault
+- **AND** the fence read reports not enrolled with the retired generation, and repeating that retire returns the same answer without revoking the writer admitted after it
+
+#### Scenario: Re-enrolment after a retire takes the next generation
+- **WHEN** the operator re-enrols a vault whose store fence was retired at generation N
+- **THEN** the fence is enrolled at generation N+1 and the lease token is revoked
+- **AND** an enrolment based on a generation before N, and a replay of the retire at generation N, conflict
+
 ### Requirement: Collection store migration is verifiable and reversible
-A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. The vault's collection mode SHALL have one authority: a vault-side mode marker that adoption reads. On a multi-host vault, migration SHALL refuse while the lease coordinator does not explicitly advertise `collections-store-v1`, with a message naming the exact release to upgrade the coordinator to. Store adoption SHALL advance a separate vault-specific `collections-store-v1` capability fence with generation CAS and lease-token invalidation in one coordinator transaction, reacquire before marker cutover, and record an optional state compatibility descriptor so older releases refuse before access. Governance versions 3/4 and file-only manifests SHALL remain unchanged; ignoring extra request fields SHALL NOT establish coordinator capability. The importer SHALL read legacy audit history with an uncapped streaming reader filtered per collection. It SHALL record each view's expected hash as the hash of the exact bytes it parsed. Non-managed installs SHALL migrate through an offline command with the same proof. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership, re-verification of only the collections changed since pre-import (carrying forward the proofs of unchanged ones) within the cutover budget, abandoning the upgrade cleanly when it cannot, and atomic publication, so that writes pause only for the ordinary bounded handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode. Export SHALL set the mode marker to exported and tombstone the replica so no host can adopt it. Downgrade to a pre-store release SHALL require export first.
+A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. Collection ownership SHALL derive from complete admitted canonical state; the mode marker SHALL remain a compatibility hint and transition preimage. On a multi-host vault, migration SHALL refuse while the lease coordinator does not explicitly advertise `collections-store-v1`, with a message naming the exact release to upgrade the coordinator to. Store adoption SHALL advance a separate vault-specific `collections-store-v1` capability fence with generation CAS and lease-token invalidation in one coordinator transaction, reacquire before marker cutover, and record an optional state compatibility descriptor so older releases refuse before access. Governance versions 3/4 and file-only manifests SHALL remain unchanged; ignoring extra request fields SHALL NOT establish coordinator capability. The importer SHALL read legacy audit history with an uncapped streaming reader filtered per collection. It SHALL record each view's expected hash as the hash of the exact bytes it parsed. Non-managed installs SHALL migrate through an offline command with the same proof. Store mode SHALL require writer-lease coordination: an install without a configured coordinator SHALL refuse every store step with `COLLECTION_STORE_COORDINATION_REQUIRED`, naming the single-host coordinator setup. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership; at handoff, a comparison of every collection with the basis it was pre-imported from, carrying the pre-import and its proofs forward when none changed and re-importing within the cutover budget when one did; abandoning the migration cleanly, with nothing published and the release completing in file mode, when it cannot finish in that budget or a live store's head moved since the standby copied it; and atomic publication, so that writes pause only for the ordinary bounded handoff. A failure after publication SHALL NOT stop the service: the supervisor SHALL rerun the migrator once, after the failed migrator's lease expires, before the replacement starts; when the store is still pending after that rerun, the replacement serves the vault's reads while the published store carries its intent, and the next handoff or the owner's offline apply finishes it after comparing every collection with its import basis. Only a live store that is set aside or unreadable after the step SHALL fail the handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode. A collection the store never wrote SHALL keep its files byte for byte. The export SHALL apply only offline, as the owner, with the service stopped and the operator credential; a serving process SHALL refuse it. It SHALL refuse the whole vault, naming each collection and reason, while any routed collection was created by the store, exceeds a file-mode bound, holds a value or held correction without a file form, or has a view that a person changed since the store published it. Partial reverse export remains outside this contract. Before any file changes it SHALL record an export intent in the store and publish the replica, so no host serves or adopts the store while it leaves. It SHALL retire the coordinator's store fence only after it verifies that file mode reads every collection as the store served it, and only then retire the marker by renaming it to `mode.json.exported-<utc>`, never by writing a new marker mode that released launchers cannot parse. It SHALL then tombstone the replica and the live store under the same `.exported-<utc>` suffix, retire the store's state compatibility descriptors, and keep the tombstones as evidence that no host adopts. A run cut at any step SHALL resume from its intent to the same files. It SHALL record in its intent that it verified the files before it retires the fence, and a resumed run after that retire SHALL finish the marker and tombstones without reading the files again. A retired fence alone SHALL never let a run retire the marker. A later migration SHALL mint a new store identity and enrol the fence at the next generation. Other hosts SHALL retire their stale local stores with an explicit owner step once the exported vault reaches them. Downgrade to a pre-store release SHALL require export first.
+
+Reverse export SHALL retire registered generated history views through its existing guarded targets before file verification and fence retirement. Only an absent file or exact recorded published or pending bytes SHALL qualify. Edited or unregistered history files SHALL remain preserved and block the whole export. A filename or generated header SHALL NOT authorize removal. The existing SQL tombstones SHALL retain all canonical history.
+
+Partial export SHALL retain history projection bindings so resume can accept already absent targets. Abandon SHALL mark removed history views pending for later normal regeneration without rewriting collection file views during its offline close. That close SHALL retain replica publication, checkpointing and verified head release. After verified fence retirement, recovery SHALL finish its existing renames without rechecking or removing newly authored files at former history paths.
 
 #### Scenario: Import proves its round trip
 - **WHEN** a vault with Records and Planning collections is migrated
@@ -255,9 +501,57 @@ A vault SHALL move from file-canonical collections to the store only through a d
 - **WHEN** an agent writes to a collection while the standby is pre-importing
 - **THEN** that collection is re-imported and re-verified at handoff
 
+#### Scenario: A handoff reuses unchanged import proofs
+- **GIVEN** the standby proved several collections beside a live store
+- **WHEN** one collection changes before handoff
+- **THEN** only changed or added collections receive a fresh import and proof
+- **AND** unchanged eligible imports keep their exact envelopes, source bindings and successful proof identity
+- **AND** the candidate preserves the live chain prefix, valid references and held governance
+
+#### Scenario: A refreshed candidate changes before seal
+- **WHEN** a collection, live base, selected database identity, contents, journaling or recorded proof changes after refresh
+- **THEN** the migration rechecks the current candidate within its deadline or abandons without publishing stale data
+- **AND** cleanup preserves unknown scratch bytes and another active migration's files
+
+#### Scenario: A sealed candidate changes before installation
+- **WHEN** the sealed database changes before installation
+- **THEN** the migration refuses that candidate and preserves the live store and changed staging bytes
+
+#### Scenario: A handoff that cannot finish its migration completes in file mode
+- **WHEN** a managed handoff's migration cannot finish within its budget
+- **THEN** the migrator publishes no store, marker or fence cut and exits successfully
+- **AND** the release completes with the vault in file mode, and the next handoff retries the migration
+
+#### Scenario: A live store that moved after the copy is not swapped
+- **WHEN** the serving worker commits to a vault's live store after the standby copied it
+- **THEN** the handoff abandons the migration and the live store keeps that commit
+
+#### Scenario: A failure after publication that a rerun clears finishes in the same handoff
+- **WHEN** a managed handoff's migrator fails once after it published the store and before the marker is installed
+- **THEN** the supervisor waits out the failed migrator's lease and runs the migrator once more
+- **AND** the replacement starts with the vault migrated and writable
+
+#### Scenario: A failure after publication that persists keeps the vault serving
+- **WHEN** a managed handoff's migrator and its one rerun both fail after the store was published
+- **THEN** the replacement starts, the handoff record names the step `pending`, and the vault serves reads
+- **AND** after the fence cut every writer inside the lease is refused until the step finishes, and before it writes commit to the still-canonical files
+- **AND** the next handoff imports a file changed outside the lease meanwhile before it admits the store
+
+#### Scenario: A migrator stopped by the supervisor settles by what it left
+- **WHEN** the supervisor's wait stops a migrator whose published store had not finished
+- **THEN** the replacement starts, and the handoff record names the step `pending` with the code `timed_out`
+
+#### Scenario: A swap that stopped half way fails the handoff
+- **WHEN** a managed handoff's migrator stops after it set the live store aside and before the new store is in place
+- **THEN** the handoff fails into recovery with the step recorded as `unsafe`
+
 #### Scenario: Legacy history beyond the file-mode bounds is imported
 - **WHEN** a vault's activity logs exceed 8 MB across more than 128 archives and a collection's chain is deeper than 2048 transitions
 - **THEN** every reachable event is imported and the proof's chain-length check passes
+
+#### Scenario: An install without lease coordination cannot reach store mode
+- **WHEN** an install that configures no writer-lease coordinator runs the migration preflight, prepare or apply, enrols a store, creates a summary collection, or starts serving a store
+- **THEN** the preflight reports the vault `blocked` with `COLLECTION_STORE_COORDINATION_REQUIRED`, every other step refuses with that code and names the single-host coordinator setup, and nothing is staged, created or served
 
 #### Scenario: An outdated coordinator blocks migration with a named release
 - **WHEN** a multi-host vault's coordinator does not explicitly advertise `collections-store-v1`
@@ -265,11 +559,87 @@ A vault SHALL move from file-canonical collections to the store only through a d
 
 #### Scenario: An exported vault cannot be re-adopted
 - **WHEN** a migrated vault is exported and a host later starts with a stale local store or finds the tombstoned replica
-- **THEN** the mode marker says exported and no replica or local store is adopted as canonical
+- **THEN** the vault has no mode marker, only its `mode.json.exported-<utc>` tombstone, and no replica or local store is adopted as canonical
 
 #### Scenario: Reverse export restores files
 - **WHEN** a migrated vault is exported back to files
 - **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
+- **AND** file mode reads every collection as the store served it
+
+#### Scenario: Reverse export retires history before its policy owner leaves
+- **GIVEN** a migrated collection has generated history with reasons and item links
+- **WHEN** the owner applies reverse export
+- **THEN** verified generated history views are absent before file verification and fence retirement
+- **AND** restricted file reads cannot recover stale history after the linked rows' policy changes
+- **AND** the SQL tombstones retain every audit row
+
+#### Scenario: Interrupted history retirement can resume or abandon
+- **WHEN** export stops after removing some verified generated history views
+- **THEN** resume accepts those absent targets and completes the existing export protocol
+- **AND** abandon retains their bindings and queues normal regeneration without rewriting collection file views
+- **AND** its offline close still publishes the replica and releases the verified head
+
+#### Scenario: Export preserves authored bytes at history paths
+- **WHEN** a history path contains edited or unregistered bytes before export verification
+- **THEN** preview or apply refuses the whole export and preserves those bytes
+- **AND** a new authored file after verified fence retirement survives recovery of the final renames
+
+#### Scenario: A collection the store created keeps the vault in the store
+- **WHEN** the owner previews an export of a vault with a collection that the store created
+- **THEN** the preview is blocked, names that collection, and the vault, its marker and its fence stay as they were
+
+#### Scenario: Another host refuses a store whose export recorded its intent
+- **WHEN** an export recorded its intent and published the replica, then stopped, and another host with its own state adopts the replica
+- **THEN** that host refuses the store's collections with `COLLECTION_STORE_EXPORT_PENDING`, commits nothing and leaves the coordinator's recorded head as it was
+
+#### Scenario: An interrupted export resumes from its intent
+- **WHEN** an export stops after its intent, between a collection's files and its checkpoint, after its fence retire or after its marker retire
+- **THEN** the next apply with the same plan identity finishes to the same files and tombstones without a second checkpoint
+- **AND** no host is left with a retired fence beside a marker that still routes collections
+
+#### Scenario: An exported vault migrates again at the next generation
+- **WHEN** the owner migrates a vault whose export retired its fence at generation N
+- **THEN** the new store has a new identity and its fence and marker carry generation N+1
+
+### Requirement: An unadmitted migration and an unfinished export have an owner way out
+A migration whose imported files changed after it published its store SHALL NOT admit that store; the owner's next apply SHALL supersede it with fresh staging that imports the changed files. On a first enrolment, the coordinator's fence SHALL move from the superseded store to the new one by one CAS at the next generation, and the new store's first publication SHALL keep the superseded store's replica as `.foreign-*` evidence. On an enrolled vault, the apply SHALL first restore the store that the migration superseded, only after it proves that the migrated store is that store plus only the migration's own imports, and SHALL continue the restored store as a new tenure when the migrated store's publication or head reached the vault replica or the coordinator. The owner SHALL be able to abandon an export that cannot finish while its fence stands: one store transaction records each file that holds the export's bytes as that file's view, records each checkpoint that the activity log holds as the parent of the next export's checkpoint, and deletes the intent; no vault file is rewritten and no edit is adopted. After the fence is retired, a rerun SHALL go on from the frozen store only when the coordinator's newest retired fence names this store at the marker's generation with a head in this store's chain. A rerun SHALL finish a restore only while the restored store still ends at the head the migration imported onto; a restored store that committed since SHALL migrate again as any live store does. An export SHALL refuse before its intent unless the coordinator serves both the fence retire and the retired-fence read. A failed proof or check SHALL refuse and keep the stores, the marker, the fence and the files as they were.
+
+#### Scenario: A changed import supersedes the unadmitted store on a first enrolment
+- **WHEN** a migration that cut the first fence and published its store is cut before its marker, a writer outside the lease changes an imported file, and the owner applies again
+- **THEN** the apply imports the change into a new store, moves the fence to it at the next generation and installs the marker, at whichever step a further cut stops that apply
+- **AND** the superseded store's replica is kept as `.foreign-*` evidence
+
+#### Scenario: A changed import on an enrolled vault restores the store it superseded
+- **WHEN** a migration on a vault with a live store is cut after it published the migrated store, an imported file changes, and the owner applies again
+- **THEN** the apply restores the store that the migration superseded, with its rows and its head, and migrates again with the change
+- **AND** when the migrated store reached the replica or the coordinator, the restored store continues as a new tenure, and the coordinator's head names that tenure
+
+#### Scenario: A restore cut before its fork finishes on the next apply
+- **WHEN** an apply restored the superseded store and stopped before it continued that store as a new tenure
+- **THEN** until that apply the service holds the restored store as `sync_pending` and commits nothing
+- **AND** the next apply recognises the restore from the newest superseded store, which carries the migration's intent for the current marker, forks, and migrates again
+
+#### Scenario: A restored store that served a write migrates again
+- **WHEN** an apply restored the superseded store, its new staging never went live because its proof refused or the apply was killed, and the service then committed a write to the restored store
+- **THEN** the next apply migrates the restored store with the changed file, and the service serves the restored rows and the later write
+
+#### Scenario: An export that cannot finish is abandoned
+- **WHEN** an export stopped after some collections' files and checkpoints, a person edited a view, the rerun refuses over that view, and the owner abandons the export
+- **THEN** no vault file changes, the edit stays where the person wrote it, the store serves every row it served before the export, and a later export reads `acknowledged_gap` for every written collection
+- **AND** a checkpoint whose manifest write landed without its activity-log event is not the next export's parent
+
+#### Scenario: A fence retired by hand lets the export go forward
+- **WHEN** the operator retires the store fence after an export recorded its intent but before it wrote the files, and the owner runs the apply again
+- **THEN** the apply writes and verifies the files from the store, then retires the marker and tombstones the store, and file mode reads every collection as the store served it
+- **AND** when the head the coordinator recorded at that retire is not in this store, the apply refuses and no file changes
+
+#### Scenario: An edit after the export's own fence retire does not stop its renames
+- **WHEN** an export is cut after it retired its fence, and a person edits a view in file mode before the rerun
+- **THEN** the rerun finishes the marker and tombstones without reading the files again, and the edit stays
+
+#### Scenario: An export whose lease lapsed after its intent refuses behind another host's head
+- **WHEN** an export's lease lapses after it recorded its intent, and another host takes the lease and records a newer head
+- **THEN** the export refuses with `COLLECTION_STORE_SYNC_PENDING` before it publishes or writes a file
 
 ### Requirement: Collection store writes meet a latency budget
 
@@ -314,6 +684,14 @@ The substrate SHALL support three declared storage strategies. For `markdown-log
 
 Chronological-log child rows SHALL declare a bounded `container_field` in addition to their delimiter and fields; that container SHALL be a declared array-of-object item-schema field, so adapters do not impose domain field names. For the log layout, the store SHALL keep the view's frame, meaning the bytes outside the declared item section, its UTF-8 BOM, its newline style and its final-newline state, and SHALL re-emit them byte-identically. Markdown parsing of views and legacy files SHALL accept exactly one leading UTF-8 BOM for frontmatter parsing. A log-layout view SHALL stay within its rendering size cap, and a write that would exceed it SHALL refuse with a remediation to use the items layout.
 
+#### Scenario: EOF newline state survives the shared log renderer
+- **WHEN** an imported log with no suffix is rendered or exported after a row write
+- **THEN** the renderer keeps its final-newline state and inserts only the separator needed before a first block
+
+#### Scenario: A trailing section keeps its authored whitespace
+- **WHEN** a log with a trailing section is projected and exported
+- **THEN** both paths preserve the complete suffix and its whitespace
+
 #### Scenario: Log layout renders one readable history file
 - **WHEN** a log-layout collection is queried or safely mutated
 - **THEN** the store is canonical and its log view shows every item as a readable block in declared order, and no generated dataset is promoted implicitly
@@ -325,6 +703,72 @@ Chronological-log child rows SHALL declare a bounded `container_field` in additi
 #### Scenario: Dataset stays directly editable
 - **WHEN** a dataset-backed collection uses CSV, TSV, or JSON
 - **THEN** its rows remain readable and editable with ordinary tools, Exomem queries them from the file, and dataset append/update refuses rather than reserializing the file
+
+### Requirement: Log frame edits preserve row and source history
+
+A newly rendered store log view SHALL carry a managed frame stamp that binds the store, instance, rendered generation and full canonical frame hash. The stamp SHALL NOT become authored frame content or appear in reverse export. Existing persisted render contexts SHALL retain authentic frame bases. Current metadata SHALL NOT manufacture historical frame proof.
+
+The decoder SHALL accept one complete managed comment line outside code fences in the frame prefix or declared item section. It SHALL NOT use a marker from a later section. A fenced marker SHALL remain authored text. The renderer SHALL place the marker before an unterminated empty EOF heading and normally after the declared heading. Removing it SHALL restore authored bytes without normalizing a separator.
+
+Frame comparison SHALL use the canonical renderer's frame representation for the current row occupancy in the same snapshot. A required first-block separator alone SHALL NOT count as an authored frame edit. A real edit SHALL retain its captured proposal bytes and use the stored canonical frame hash as its authenticated base.
+
+A settled frame edit SHALL apply only against an authentic recorded base whose frame hash remains current. Unrelated row commits SHALL NOT invalidate an unchanged frame base. The internal writer SHALL record one content-free `view_frame_edit` transition by `owner:view-edit`, advance the collection generation, and queue the log view. It SHALL change no item version or item effect. A missing or stale frame base SHALL preserve the complete buffer as a held correction.
+
+The writer SHALL validate the whole log before applying components. Frame and row changes SHALL use their respective leaves and deterministic replay identities. A component commit SHALL NOT accept the whole buffer digest. Publication SHALL displace that buffer only after every component is canonical or durably held.
+
+#### Scenario: Unrelated rendered rows do not expire an unchanged frame base
+- **WHEN** an edited buffer outlives at least three separately rendered row generations and its canonical frame stays unchanged
+- **THEN** a persisted context for the same path, collection and log kind may authenticate its full frame hash at a later generation
+- **AND** both classification and mutation require integer generations ordered from the stamp through the context to the current collection
+- **AND** a different canonical frame rejects the edit, while an exact frame revert permits an unapplied edit without relaxing row or held-byte governance
+
+Explicit resume of a held log block SHALL parse exactly one block under the declared grammar and reject stray text. A stale-block update SHALL rebase against its recorded row version without reverting untouched newer fields. An unbound template block SHALL use ordinary append validation, caller overrides and key derivation. Log blocks SHALL NOT adopt item-file filenames.
+
+#### Scenario: A log edit preserves untouched canonical fields
+- **GIVEN** the API stored strings with edge spaces and fields that the log does not display
+- **WHEN** the owner saves formatting changes that the declared parser discards
+- **THEN** the canonical row and its history remain unchanged
+- **WHEN** the owner changes one displayed field or resumes that change from a stale block
+- **THEN** edit-back compares the proposal with the display of its recorded base through the shared renderer and parser
+- **AND** only changed fields update; untouched stored spaces and newer undisplayed fields remain exact
+
+A direct log read SHALL require release of the manifest, every canonical row and complete fields. It SHALL prove exact current rendered bytes in the same snapshot and retain additional frame membership restrictions. An edited, stale or partly withheld log SHALL answer as absent.
+
+#### Scenario: A mixed log save preserves every component
+- **WHEN** a saved buffer changes its frame and several rows, including an invalid or unbound block
+- **THEN** valid components commit through their leaves and every remaining byte stays in the buffer or a durable correction
+
+#### Scenario: A crash between component commits is replayable
+- **WHEN** the writer stops after one component commits and before the remaining components finish
+- **THEN** retry preserves the original buffer, commits each remaining valid component once and adds no duplicate transition
+
+#### Scenario: A stale frame cannot replace a newer frame
+- **WHEN** a buffer retains unchanged row stamps but names an older frame base
+- **THEN** the current frame stays canonical and the complete stale buffer becomes a correction
+
+#### Scenario: A row commit does not stale the frame
+- **WHEN** a row commit advances the generation without changing the canonical frame hash
+- **THEN** an authentic frame edit from the earlier generation can apply without reverting that row
+
+#### Scenario: An old context cannot acquire invented frame proof
+- **WHEN** an edited frame names a context that retained no authenticated frame hash
+- **THEN** the writer preserves the buffer as a correction rather than deriving its base from current metadata
+
+#### Scenario: A held block resumes without reverting untouched fields
+- **WHEN** the owner resumes a stale block after another field changes through the API
+- **THEN** the ordinary update applies the block's changes and preserves the untouched newer field
+
+#### Scenario: A template block resumes through ordinary append
+- **WHEN** the owner resumes an unbound template block with inferred identity
+- **THEN** ordinary validation derives its key and appends once, while a refusal preserves the held bytes
+
+#### Scenario: An empty unterminated log accepts prose and its first template block
+- **WHEN** an owner edits prose before an empty EOF heading, then inserts a template below it
+- **THEN** the managed marker adds no authored newline, the frame applies, and the template remains separately resumable
+
+#### Scenario: A direct log read proves the complete current render
+- **WHEN** a caller requests a generated log path
+- **THEN** only the exact current render is readable after every row and complete fields are released; edited or withheld content stays absent
 
 ### Requirement: Imported legacy audit gaps can be explicitly rebaselined
 
@@ -501,6 +945,39 @@ Append and targeted update for `markdown-log` and `markdown-items` collections S
 - **WHEN** mutations target different vault roots
 - **THEN** collection serialization does not introduce a global cross-vault lock
 
+#### Scenario: A curation Records step on a store collection commits once through the store
+- **WHEN** a curation or episode Records step (`append-record` or `update-record`) on a collection owned by the complete admitted canonical store is prepared, applied or resumed through the service that serves the vault
+- **THEN** the whole command runs on the service's store thread, the store writer makes the one transaction, and that transaction row carries the run and the step's operation identity as its request identity, so one run never reads another run's transaction as its own
+- **AND** the seal binds the collection identity, the store's container hash and, for an update, the item version, not the generated views' paths and hashes
+- **AND** a step sealed before the migration, or a run approved before it, commits once through the store only when its file views are, byte for byte, the views the store has published, the files and the store's published item and manifest views are the same set, and none is unpublished; otherwise, including after a published view was deleted by hand, it refuses with `CURATION_BINDING_STALE` and writes nothing
+- **AND** a collection that the caller can read only in part refuses the leaf as stale before any attempt, as a withheld collection does
+- **AND** a crash after the store commit reconciles from the transaction row and records `recovered-committed` once, and a replay writes nothing
+- **AND** a resume that runs a page leaf and a store Records leaf together commits each once
+
+#### Scenario: A curation Records step with no service serving the vault refuses and writes nothing
+- **WHEN** such a step is prepared, applied or resumed through the command dispatcher on a vault that no service serves, so no store thread runs it
+- **THEN** the dispatcher routes the command nowhere and the step's own resolution refuses with `CURATION_RECORDS_STORE_UNSUPPORTED`: a prepare seals no plan, an apply records no approval, and the store and the collection's views are unchanged
+- **AND** a resume of a run approved before the migration records no receipt, so the run does not fail and stays resumable once the service serves the vault
+- **AND** the refusal names the Records action that makes the change there, `record_memory append` for an append step or `record_memory update` for an update step
+- **AND** a caller from whom the collection is withheld gets the refusal that a missing collection gives, before any answer that says the collection exists
+
+#### Scenario: A curation Records step into a store collection that keeps one log refuses before any seal
+- **WHEN** a curation or episode Records step is prepared for a store collection whose storage is a log or a summary
+- **THEN** it refuses with `CURATION_RECORDS_STORAGE_UNSUPPORTED` and seals no plan
+
+#### Scenario: A committed file Records step stays verified after migration
+- **WHEN** an existing file-mode Records witness is migrated and its Markdown view is regenerated
+- **THEN** readback verifies the witness through the checkpoint's original source binding, imported event and unchanged canonical item version
+- **AND** it adds no transaction and requires no store-native request identity for the historical write
+
+#### Scenario: An old event cannot certify a manually changed imported item
+- **WHEN** a file item changes before migration while retaining the witnessed update's old audit marker
+- **THEN** its captured source hash differs from the witness, readback reports changed, and no write repeats
+
+#### Scenario: Missing original source evidence stays uncertain
+- **WHEN** an older import checkpoint cannot bind an existing file witness to its original item bytes
+- **THEN** readback stays uncertain and never reconstructs that byte hash from a normalized view or treats a run identity as a commit
+
 ### Requirement: Idempotent append and conflict-safe update
 The substrate SHALL make exact append retries idempotent where a stable item identity is available. When a caller omits the item identity and every field of the manifest's declared natural key is present in the validated values, the substrate SHALL derive the identity deterministically from the collection identity and the natural-key serialisation the read path already uses, and stamp it explicitly like any other item key; an explicit identity SHALL still win, and a payload that lacks a natural-key field SHALL receive a random identity as before. Reusing one identity with different content SHALL refuse as an identity conflict. An append whose derived or supplied identity differs from an existing item's while its serialised natural key equals that item's SHALL refuse as a natural-key conflict naming every such existing item; the store's natural-key uniqueness constraint SHALL enforce this. Targeted update SHALL change only the resolved item and SHALL never fall back from a missing identifier to fuzzy text matching. A mutation carrying a transport request identity SHALL record that identity and its terminal receipt in the same transaction as the write; a retry with the same identity SHALL return the recorded receipt without writing, and the same identity with a different request SHALL refuse. Both profiles SHALL inherit these rules through the shared mechanics.
 
@@ -539,7 +1016,7 @@ The substrate SHALL make exact append retries idempotent where a stable item ide
 
 ### Requirement: Auditable agent mutations and receipts
 
-Every agent mutation SHALL require a concise reason and SHALL return a bounded receipt containing collection identity, item identity (null for create and lifecycle operations), operation-specific required before and after item/manifest/container hashes, affected view paths, committed outcome, and a transition correlation. The receipt SHALL be recorded with the transition in the collection store. Each collection SHALL keep a reader version of 1 for collections whose history contains only create/append/update transitions, and 2 once a `revise` or `rebaseline` has committed, and every later mutation SHALL preserve version 2. The reader version SHALL be reported as today, but no manifest marker or item audit marker SHALL be written.
+Every agent mutation SHALL require a concise reason and SHALL return a bounded receipt containing collection identity, item identity (null for create and lifecycle operations), operation-specific required before and after item/manifest/container hashes, affected view paths, committed outcome, and a transition correlation. The receipt SHALL be recorded with the transition in the collection store. Each collection SHALL keep a reader version of 1 for collections whose history contains only create/append/update transitions, and 2 once a `revise` or `rebaseline` has committed, and every later mutation SHALL preserve version 2. The stored reader version SHALL retain its existing semantics without extending the public inspection envelope. No manifest marker or item audit marker SHALL be written.
 
 The collection store SHALL hold exactly one audit transition per committed mutation, as specified by the audit-table requirement. Transitions imported from the legacy activity log SHALL be kept verbatim and chained ahead of native transitions. Inspection SHALL verify the transition hash chain from the collection's audit head, and SHALL distinguish `baseline`, `ok`, positive `gap`, bounded `history_incomplete`, and `acknowledged_gap`. For store-native history, `gap` and `acknowledged_gap` SHALL arise only from imported legacy history, and `history_incomplete` only from governance. Inspection SHALL never repair or invent history. Operational journals and governance receipts SHALL retain their existing distinct roles. A derived import collection (`bring-in-large-exports`) SHALL instead record one transition per imported member, with member-level effects, and SHALL keep no per-row history, receipts or audit effects.
 

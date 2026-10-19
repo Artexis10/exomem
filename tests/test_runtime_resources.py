@@ -125,14 +125,16 @@ def test_unsafe_native_override_escape_is_explicit(monkeypatch: pytest.MonkeyPat
     assert os.environ["OMP_NUM_THREADS"] == "32"
 
 
+@pytest.mark.parametrize("entrypoint", ["cli", "managed-worker"])
 def test_server_bootstrap_replaces_native_env_before_numpy_import(
-    tmp_path: Path,
+    tmp_path: Path, entrypoint: str,
 ) -> None:
     probe = tmp_path / "server-probe"
     (tmp_path / "numpy.py").write_text(
         "import os\n"
         "from pathlib import Path\n"
         "assert os.environ['OMP_NUM_THREADS'] == '1'\n"
+        "assert os.environ['OPENBLAS_NUM_THREADS'] == '1'\n"
         "assert os.environ['RAYON_NUM_THREADS'] == '1'\n"
         "assert os.environ['TOKENIZERS_PARALLELISM'] == 'false'\n"
         "Path(os.environ['EXOMEM_RUNTIME_PROBE']).write_text('ok')\n",
@@ -140,18 +142,30 @@ def test_server_bootstrap_replaces_native_env_before_numpy_import(
     )
     env = os.environ | {
         "OMP_NUM_THREADS": "32",
+        "OPENBLAS_NUM_THREADS": "32",
         "RAYON_NUM_THREADS": "32",
         "TOKENIZERS_PARALLELISM": "true",
         "EXOMEM_RUNTIME_PROBE": str(probe),
         "PYTHONPATH": f"{tmp_path}{os.pathsep}{Path(__file__).parents[1] / 'src'}",
     }
+    command = (
+        "import exomem.__main__ as entry; "
+        "entry._dispatch_main = lambda _raw: __import__('numpy') and 0; "
+        "raise SystemExit(entry.main(['serve']))"
+    )
+    if entrypoint == "managed-worker":
+        command = (
+            "import sys, types; from exomem import service_manager as entry; "
+            "sys.modules['exomem.server'] = types.SimpleNamespace("
+            "run=lambda **_kwargs: __import__('numpy')); "
+            f"raise SystemExit(entry.main(['worker', '--socket', {str(tmp_path / 'worker.sock')!r}, "
+            "'--host', '127.0.0.1', '--port', '8765']))"
+        )
     result = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import exomem.__main__ as entry; "
-            "entry._dispatch_main = lambda _raw: __import__('numpy') and 0; "
-            "raise SystemExit(entry.main(['serve']))",
+            command,
         ],
         env=env,
         text=True,

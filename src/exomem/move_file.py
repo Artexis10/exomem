@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy, working_set_heat
+from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
@@ -136,7 +137,7 @@ def _admit_publication(vault_root: Path, rel: str, content: bytes | None) -> Non
         raise MoveFileError("WRITE_REFUSED", "target is unavailable") from None
 
 
-def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
+def _held_rename(vault_root: Path, old_rel: str, new_rel: str, *, rollback: bool = False) -> None:
     try:
         # `old_rel` is always a source this call's caller has already resolved
         # to an existing on-disk spelling (including a macOS-origin NFD name
@@ -150,7 +151,10 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
             new_rel,
             source_kind="file",
             physical=True,
+            rollback=rollback,
         )
+    except OpError as error:
+        raise MoveFileError(error.code, error.message) from error
     except reserved_paths.ReservedPathLeafError as error:
         if error.code == "CROSS_DEVICE":
             raise MoveFileError(
@@ -305,6 +309,7 @@ def move_file(
     content_transform: Callable[[str], str] | None = None,
     extra_writes: tuple[PlannedWrite, ...] = (),
     validate_only: bool = False,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
@@ -315,6 +320,7 @@ def move_file(
     rewrite mutating append-only bytes, not to stop a caller that has already
     justified the change. `extra_writes` joins the same atomic batch so a
     caller's own registry updates commit with the move or not at all.
+    A caller's binding witness is checked before rename and batch publication.
     """
     try:
         old_abs, old_rel = resolve_under_vault(
@@ -397,6 +403,9 @@ def move_file(
                 "path is reserved for its owning subsystem",
             ) from None
         raise MoveFileError("MOVE_FAILED", "held file acquisition was refused") from None
+    from .collection_store import authority as collection_authority
+
+    collection_authority.refuse_view_paths(vault_root, (old_rel,), MoveFileError)
     try:
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
@@ -407,6 +416,8 @@ def move_file(
         new_abs = new_abs.with_name(raw_protection.PREFIX + new_abs.name)
         new_rel = new_abs.relative_to(vault_root).as_posix()
     _admit_destination(vault_root, new_rel)
+    # Decided before any destination existence check, so it cannot tell a withheld view from none.
+    collection_authority.refuse_view_paths(vault_root, (new_rel,), MoveFileError)
     if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
         raise MoveFileError(
             code="EPISODE_KIND_RESERVED",
@@ -442,6 +453,9 @@ def move_file(
             paired_binary = (binary_rel, new_binary)
         _admit_destination(vault_root, new_rel)
         _admit_destination(vault_root, paired_binary[1])
+        collection_authority.refuse_view_paths(
+            vault_root, (old_rel, new_rel, *paired_binary), MoveFileError
+        )
         if (vault_root / paired_binary[1]).exists():
             raise MoveFileError(
                 code="DEST_EXISTS",
@@ -895,6 +909,8 @@ def move_file(
                     combined.extend(log_plan.writes)
                 # The moved page is the move's one piece of work, on its new
                 # path; the link rewrites around it earn nothing (review F1).
+                if _validate_prepared_bindings is not None:
+                    _validate_prepared_bindings()
                 heat_move = working_set_heat.begin_commit(vault_root, [new_abs])
                 try:
                     _held_rename(vault_root, old_rel, new_rel)
@@ -905,7 +921,7 @@ def move_file(
                         try:
                             _held_rename(vault_root, *paired_binary)
                         except MoveFileError:
-                            _held_rename(vault_root, new_rel, old_rel)
+                            _held_rename(vault_root, new_rel, old_rel, rollback=True)
                             raise
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
@@ -919,6 +935,7 @@ def move_file(
                                 vault_root=vault_root,
                                 required_guards=required_guards,
                                 index_reports=batch_index_reports,
+                                _validate_prepared_bindings=_validate_prepared_bindings,
                                 semantic_states={
                                     write.path.relative_to(vault_root).as_posix(): semantic_states[
                                         write.path.relative_to(vault_root).as_posix()
@@ -937,8 +954,8 @@ def move_file(
                     )
                     try:
                         if paired_binary is not None:
-                            _held_rename(vault_root, paired_binary[1], paired_binary[0])
-                        _held_rename(vault_root, new_rel, old_rel)
+                            _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
+                        _held_rename(vault_root, new_rel, old_rel, rollback=True)
                     except MoveFileError as rollback_error:
                         raise RuntimeError(
                             f"move link rewrite failed ({error}); rename rollback also "
@@ -1024,18 +1041,23 @@ def move_file(
                 code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 reason=str(error),
             ) from error
+        if _validate_prepared_bindings is not None:
+            _validate_prepared_bindings()
         _held_rename(vault_root, old_rel, new_rel)
         try:
             if writes:
                 # Link rewrites are the move's bookkeeping, nobody's work.
                 with working_set_heat.primary_paths(()):
-                    batch_atomic_write(writes, vault_root=vault_root)
+                    batch_atomic_write(
+                        writes, vault_root=vault_root,
+                        _validate_prepared_bindings=_validate_prepared_bindings,
+                    )
         except Exception as e:
             log.exception(
                 "move_file: link-update batch failed for %s -> %s", old_rel, new_rel
             )
             try:
-                _held_rename(vault_root, new_rel, old_rel)
+                _held_rename(vault_root, new_rel, old_rel, rollback=True)
             except MoveFileError as rollback_error:
                 raise RuntimeError(
                     f"move link rewrite failed ({e}); rename rollback also failed: "

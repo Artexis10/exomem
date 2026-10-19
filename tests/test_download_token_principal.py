@@ -365,16 +365,32 @@ def test_raw_transfer_rechecks_verified_session_purpose_and_closure(vault: Path,
     released = _download(client, saved["path"], token)
     assert released.status_code == 200, released.text
     assert released.content == (vault / saved["path"]).read_bytes()
+    private = tmp_path / "private-copy"
+    private.mkdir(mode=0o700)
+    from exomem import reserved_paths
+
+    copied = reserved_paths.copy_generic_file(vault, saved["path"], private / "original")
+    read_bytes = Path.read_bytes
+
+    def no_whole_original(path):
+        assert path != vault / saved["path"], "copy release reread the whole original"
+        return read_bytes(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", no_whole_original)
+        assert egress.release_allows_download(vault, saved["path"], principal=session_recipient, artifact_copy=copied)
     authority.declare_purpose(
         connection, context=context, audience=recipient.audience_id,
         purpose="unrelated", now=NOW, expires_at=NOW + 300,
     )
     assert _download(client, saved["path"], token).status_code == 404
+    assert not egress.release_allows_download(vault, saved["path"], principal=session_recipient, artifact_copy=copied)
     authority.declare_purpose(
         connection, context=context, audience=recipient.audience_id,
         purpose="route-audit", now=NOW, expires_at=NOW + 300,
     )
     lifecycle.close_verified_session(connection, custody=custody, context=context, now=NOW)
+    assert not egress.release_allows_download(vault, saved["path"], principal=session_recipient, artifact_copy=copied)
     assert _download(client, saved["path"], token).status_code == 404
     connection.close()
 

@@ -7,10 +7,12 @@ substitute for the held-handle operation that consumes the target.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 import threading
+import time
 import unicodedata
 from collections import ChainMap
 from collections.abc import Iterable, Iterator, Mapping
@@ -22,7 +24,7 @@ from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 
-from . import held_fs, request_budget
+from . import call_spans, held_fs, request_budget
 from .cli_ops import OpError
 from .kbdir import kb_dirname
 
@@ -72,6 +74,12 @@ _COLLECTION_SNAPSHOT_RE = re.compile(
 _COLLECTION_AUDIT_SPOOL_RE = re.compile(
     r"^\.exomem-collection-audit-[0-9a-f]{32}\.sqlite(?:-(?:wal|shm|journal))?$",
     re.ASCII,
+)
+_COLLECTION_MIGRATION_RE = re.compile(r"^\.exomem-collection-migration-[0-9a-f]{32}$", re.ASCII)
+#: The names a reverse export gives the live store and its derived rows when it retires them,
+#: casefolded as classification sees every name.
+_COLLECTION_EXPORTED_RE = re.compile(
+    r"^collections(?:-derived)?\.sqlite\.exported-[0-9]{8}t[0-9]{6}z$", re.ASCII
 )
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 
@@ -177,6 +185,23 @@ class GenericFileSnapshot:
     data: bytes
     identity: held_fs.StableIdentity
     mtime: float
+
+
+@dataclass(frozen=True, slots=True)
+class GenericFileCopy:
+    """A private disk copy bound to the retained canonical source and its bytes."""
+
+    private_path: Path
+    vault_root: Path
+    relative_path: str
+    identity: held_fs.StableIdentity
+    source_stat: os.stat_result
+    sha256: str
+    size: int
+    private_identity: held_fs.StableIdentity
+    source_version: held_fs.FileVersion
+    deadline: float | None = None
+    max_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +331,7 @@ def _identity_coordination_scope(
     *,
     descriptor_ids: Iterable[str] | None = None,
     identity_may_change: bool = True,
+    deadline: float | None = None,
 ) -> Iterator[str | None]:
     """Serialize private identity publication with generic held-leaf acquisition."""
 
@@ -335,6 +361,7 @@ def _identity_coordination_scope(
         advance_generation=identity_may_change,
         operation="reserved_identity",
         holder_kind="reserved-state",
+        deadline=deadline,
     ) as generation:
         token = _ACTIVE_IDENTITY_COORDINATION.set((*active, (key, domains)))
         try:
@@ -359,6 +386,10 @@ def _sqlite_family(name: str) -> tuple[str, ...]:
 
 
 _REGISTRY = (
+    InternalStateDescriptor(
+        "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,
+        trees=("_compiled",),
+    ),
     InternalStateDescriptor(
         CONNECTOR_BOUNDARY_DESCRIPTOR_ID,
         "governance.connector_boundary",
@@ -552,6 +583,8 @@ _REGISTRY = (
         # marker are vault-canonical and are reserved by their own phase.
         # Derived collections' rows sit beside it and rebuild from its import log.
         exact=(*_sqlite_family("collections.sqlite"), *_sqlite_family("collections-derived.sqlite")),
+        # A reverse export keeps the retired store as evidence that no host adopts.
+        patterns=(_COLLECTION_EXPORTED_RE,),
     ),
     InternalStateDescriptor(
         "collection-replica",
@@ -594,6 +627,14 @@ _REGISTRY = (
         "collection_store.legacy",
         StatePlacement.TARGET_ADJACENT,
         leaf_patterns=(_COLLECTION_AUDIT_SPOOL_RE,),
+    ),
+    InternalStateDescriptor(
+        "collection-migration",
+        "collection_store.migration",
+        StatePlacement.TARGET_ADJACENT,
+        # Bounded recovery scratch: the one retained migration staging directory beside
+        # the live store it becomes. A new prepare replaces it; a finished cutover removes it.
+        component_tree_patterns=(_COLLECTION_MIGRATION_RE,),
     ),
 )
 
@@ -1260,6 +1301,126 @@ def _read_generic_bytes_held(
                 return GenericFileSnapshot(read_result.require(), file.identity, mtime)
 
 
+
+def _copy_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ReservedPathLeafError("IO_REFUSED")
+
+
+def _digest_descriptor(file, *, deadline: float | None, max_bytes: int | None) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    os.lseek(file.descriptor, 0, os.SEEK_SET)
+    while True:
+        _copy_deadline(deadline)
+        chunk = os.read(file.descriptor, 65536)
+        if not chunk:
+            return digest.hexdigest(), size
+        size += len(chunk)
+        if max_bytes is not None and size > max_bytes:
+            raise ReservedPathLeafError("IO_REFUSED")
+        digest.update(chunk)
+
+
+@contextmanager
+def _generic_copy_source(vault_root: Path, value: object):
+    # Private-identity inventory needs only a short acquisition scope, including Windows short-name checks.
+    with _generic_identity_catalogue_scope(vault_root, value) as identities:
+        pass
+    parent_path, leaf = _leaf_spelling(value)
+    with held_fs.acquire(Path(vault_root)).require() as filesystem:
+        with filesystem.parent(parent_path).require() as parent:
+            _refuse_private_identity(parent.identity, identities)
+            with filesystem.file(parent, leaf).require() as file:
+                _require_current_generic_directory(filesystem, parent)
+                if identities.descriptor_for(file.identity) is not None or file.identity.link_count != 1:
+                    raise ReservedPathLeafError("RESERVED_PATH")
+                yield filesystem, parent, leaf, file
+                _require_current_generic_directory(filesystem, parent)
+                with _generic_identity_catalogue_scope(vault_root, value) as current_identities:
+                    _refuse_private_identity(parent.identity, current_identities)
+                    _refuse_private_identity(file.identity, current_identities)
+                    with filesystem.file(parent, leaf).require() as current:
+                        if current.identity != file.identity:
+                            raise ReservedPathLeafError("IO_REFUSED")
+
+
+@contextmanager
+def private_copy_directory():
+    """Own a temporary spool with the existing Windows DACL or POSIX mode owner."""
+    import tempfile
+
+    from .mutation_lock import prepare_windows_private_state_root
+
+    with tempfile.TemporaryDirectory(prefix="exomem-recovery-") as temporary:
+        private = Path(temporary) / "private"
+        if os.name == "nt":
+            prepare_windows_private_state_root(private)
+        else:
+            private.mkdir(mode=0o700)
+        yield private
+
+
+def copy_generic_file(vault_root: Path, value: object, private_path: Path, *,
+                      max_bytes: int | None = None, deadline: float | None = None) -> GenericFileCopy:
+    """Copy through retained no-follow owners; the caller owns private storage cleanup."""
+    private_path = Path(private_path)
+    try:
+        _copy_deadline(deadline)
+        with _generic_copy_source(vault_root, value) as (filesystem, parent, leaf, file):
+            before = file.version()
+            if max_bytes is not None and before.size > max_bytes:
+                raise ReservedPathLeafError("IO_REFUSED")
+            with held_fs.acquire(private_path.parent).require() as destination:
+                with destination.parent(".").require() as target:
+                    filesystem.copy(file, target, private_path.name, max_bytes=before.size if max_bytes is None else min(before.size, max_bytes), deadline=deadline).require()
+                    with destination.file(target, private_path.name).require() as copied:
+                        digest, size = _digest_descriptor(copied, deadline=deadline, max_bytes=max_bytes)
+                        private_identity = copied.identity
+            after = file.version()
+            if before != after or size != after.size:
+                raise ReservedPathLeafError("IO_REFUSED")
+            return GenericFileCopy(private_path, Path(vault_root), str(value), file.identity,
+                                   os.fstat(file.descriptor), digest, size, private_identity, after, deadline, max_bytes)
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+
+
+def require_current_generic_copy(copied: GenericFileCopy) -> None:
+    """Rehash retained source and private bytes before authorizing their first byte."""
+    try:
+        with _generic_copy_source(copied.vault_root, copied.relative_path) as (_, _, _, source):
+            before = source.version()
+            if before != copied.source_version:
+                raise ReservedPathLeafError("IO_REFUSED")
+            digest, size = _digest_descriptor(source, deadline=copied.deadline, max_bytes=copied.max_bytes)
+            if digest != copied.sha256 or size != copied.size or before != source.version():
+                raise ReservedPathLeafError("IO_REFUSED")
+        with held_fs.acquire(copied.private_path.parent).require() as filesystem:
+            with filesystem.parent(".").require() as parent:
+                with filesystem.file(parent, copied.private_path.name).require() as file:
+                    if file.identity != copied.private_identity or file.identity.link_count != 1:
+                        raise ReservedPathLeafError("IO_REFUSED")
+                    digest, size = _digest_descriptor(file, deadline=copied.deadline, max_bytes=copied.max_bytes)
+                    if digest != copied.sha256 or size != copied.size:
+                        raise ReservedPathLeafError("IO_REFUSED")
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+
+
+def require_generic_copy_source_version(copied: GenericFileCopy) -> held_fs.FileVersion:
+    """Check retained canonical identity and change time without reading its bytes."""
+    try:
+        _copy_deadline(copied.deadline)
+        with _generic_copy_source(copied.vault_root, copied.relative_path) as (_, _, _, source):
+            current = source.version()
+            if current != copied.source_version:
+                raise ReservedPathLeafError("IO_REFUSED")
+            return current
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+
+
 def inspect_generic_file(
     vault_root: Path,
     value: object,
@@ -1565,6 +1726,7 @@ def move_generic_path(
     source_kind: str,
     identities: IdentityCatalogue | None = None,
     physical: bool = False,
+    rollback: bool = False,
 ) -> None:
     """Move one generic file or directory through retained source/destination handles.
 
@@ -1585,6 +1747,7 @@ def move_generic_path(
             source_kind=source_kind,
             identities=current,
             physical=physical,
+            rollback=rollback,
         )
 
 
@@ -1596,10 +1759,14 @@ def _move_generic_path_held(
     source_kind: str,
     identities: IdentityCatalogue,
     physical: bool = False,
+    rollback: bool = False,
 ) -> None:
+    from . import writer_lease
 
     source_parent_path, source_leaf = _leaf_spelling(source, physical=physical)
     destination_parent_path, destination_leaf = _leaf_spelling(destination)
+    effects = [Path(vault_root) / source_parent_path / source_leaf,
+               Path(vault_root) / destination_parent_path / destination_leaf]
     if source_kind not in {"file", "directory"}:
         raise ReservedPathLeafError("UNSAFE_PATH")
     assert isinstance(source, (str, os.PathLike))
@@ -1626,6 +1793,9 @@ def _move_generic_path_held(
                 with source_result.require() as source_file:
                     _refuse_private_identity(source_file.identity, identities)
                     _require_current_generic_directory(filesystem, source_parent)
+                    # An exact inverse must remain possible after a completed move loses its forward authority.
+                    if not rollback:
+                        writer_lease.validate_active_collection_file_paths(vault_root, effects)
                     destination_parent_result = filesystem.parent(
                         destination_parent_path, create=True
                     )
@@ -1663,6 +1833,8 @@ def _move_generic_path_held(
                                 else "IO_REFUSED"
                             )
                             raise ReservedPathLeafError(code)
+                        if not rollback:
+                            writer_lease.validate_active_collection_file_paths(vault_root, effects)
                         moved = filesystem.rename(
                             source_file, destination_parent, destination_leaf
                         )
@@ -1691,6 +1863,9 @@ def _move_generic_path_held(
                 if classify_logical(child).blocked:
                     raise ReservedPathLeafError("RESERVED_PATH")
                 _refuse_private_identity(record.identity, identities)
+                effects.extend((effects[0] / record.relative_path, effects[1] / record.relative_path))
+            if not rollback:
+                writer_lease.validate_active_collection_file_paths(vault_root, effects)
             destination_parent_result = filesystem.parent(
                 destination_parent_path, create=True
             )
@@ -1705,6 +1880,8 @@ def _move_generic_path_held(
                 _refuse_private_identity(destination_parent.identity, identities)
                 _require_current_generic_directory(filesystem, source_directory)
                 _require_current_generic_directory(filesystem, destination_parent)
+                if not rollback:
+                    writer_lease.validate_active_collection_file_paths(vault_root, effects)
                 moved = filesystem.rename_directory(
                     source_directory, destination_parent, destination_leaf
                 )
@@ -2313,6 +2490,7 @@ def _flight_wait_seconds() -> float:
     )
 
 
+@call_spans.timed("reserved.identity.baseline_wait")
 def _await_baseline_flight(
     flight: _BaselineFlight,
     timeout: float,
@@ -2600,6 +2778,7 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     return flight.catalogue
 
 
+@call_spans.timed("reserved.identity.baseline_build")
 def _build_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     """Walk one vault's private identities and stamp the generation that proved it."""
 

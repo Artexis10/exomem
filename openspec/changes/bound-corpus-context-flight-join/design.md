@@ -30,12 +30,11 @@ A representative trace: `canonical_files_committed` at `20:41:50.523`, `returned
 - `rebuild-graph-without-blocking-writes` specifies a bounded waiter for the graph
   rebuild flight; `graph_sync.py:2257` implements "Admit one bounded response waiter for
   work already registered." The corpus-context flight is the unbounded sibling.
-- `Notes/Patterns/bound-interactive-waits-below-the-work` records the rule, the
-  non-configurable constraint, the do-not-launder-failures constraint, and the
-  enumeration test.
-- `Notes/Insights/the-exomem-graph-rebuild-never-touches-the-vault-creation-lock` is a
-  measured negative result. `VAULT_LOCK_NESTED` and `VAULT_LOCK_TIMEOUT` appear in the
-  same log windows and are correlated symptoms, not the cause. Do not re-derive that.
+- The decisions below require a fixed caller-side bound, visible deferred
+  outcomes, unchanged real errors, and an enumeration test for unbounded joins.
+- Inspection found that the graph rebuild does not acquire the vault creation
+  lock. `VAULT_LOCK_NESTED` and `VAULT_LOCK_TIMEOUT` occurred in the same log
+  windows but did not establish the cause of the corpus-context wait.
 
 ## Goals / Non-Goals
 

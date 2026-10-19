@@ -65,6 +65,7 @@ class PlatformConfig:
     trusted_ingress_source_value: str
     attachments_limit_fallback: int = 20
     local_storage_coexistence: bool = False
+    operator_restore_abort: bool = False
 
 
 @dataclass
@@ -87,6 +88,9 @@ def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[st
         "b2BucketId": "rehearsal-bucket-id",
         "b2AccountId": "rehearsal-account-id",
         "b2Endpoint": stack.object_store.endpoint(from_host=False),
+        # The forced-canary step waits out this deadline inside a 40-minute budget; the
+        # chart's production default (30) would leave it no margin.
+        "upgradeReadyDeadlineMinutes": 10,
         "databaseEgressCidrs": [f"{stack.postgres.ip}/32"],
     }
 
@@ -121,6 +125,8 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
         "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
         "templates/namespaces.yaml",
     )
+    if config.operator_restore_abort:
+        show_only += ("templates/operator-access.yaml",)
     rendered = render_chart(
         stack, values,
         show_only=() if config.local_storage_coexistence else show_only,
@@ -133,6 +139,10 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
             or (config.local_storage_coexistence
                 and (source == "templates/cell-local-storage.yaml" or source.startswith("charts/topolvm/"))))
         and (source != "templates/namespaces.yaml" or doc["metadata"]["name"] == PLATFORM_NAMESPACE)
+        # The opt-in runner mints the shipped break-glass identity. Applying
+        # the CONNECT guard would also block the ordinary rehearsal observer.
+        and (source != "templates/operator-access.yaml"
+             or (doc["kind"] == "ClusterRoleBinding" and doc["metadata"]["name"] == "exomem-break-glass"))
     ]
     hetzner = next(doc for source, doc in rendered if source == "templates/cloud-storage-class.yaml")
     return Platform(rendered=documents, hetzner_class=hetzner["metadata"]["name"])

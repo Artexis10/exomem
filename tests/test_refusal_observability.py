@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,54 @@ def test_a_refusal_logs_one_content_free_line(caplog: pytest.LogCaptureFixture) 
     lines = [r for r in caplog.records if "catalog_proof_incomplete" in r.getMessage()]
     assert len(lines) == 1, f"expected exactly one refusal log line, got {len(lines)}"
     assert lines[0].levelname == "INFO"
+
+
+
+@pytest.mark.parametrize("request_id", [None, "not-a-request\nprivate-text"])
+def test_refusal_logs_leave_unbound_or_invalid_request_ids_unknown(
+    caplog: pytest.LogCaptureFixture, request_id: str | None
+) -> None:
+    """A direct caller or malformed context must not fabricate correlation or log text."""
+    from contextlib import nullcontext
+
+    from exomem import command_surface
+
+    context = (
+        command_surface.mcp_request_context(request_id)
+        if request_id is not None else nullcontext()
+    )
+    with caplog.at_level("INFO", logger="exomem.find"), context:
+        find_module.RetrievalIndexWarming(site="catalog_outcome")
+
+    line = next(r.getMessage() for r in caplog.records if "retrieval refusal:" in r.getMessage())
+    assert "request_id=unbound" in line
+    assert "private-text" not in line
+
+
+def test_concurrent_refusal_logs_bind_the_active_request_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Concurrent refusals must bind each validated site to its own request."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import command_surface
+
+    barrier = threading.Barrier(2)
+    requests = [(str(uuid.uuid4()), "catalog_outcome"), (str(uuid.uuid4()), "reference_sidecar")]
+
+    def refuse(request: tuple[str, str]) -> None:
+        request_id, site = request
+        with command_surface.mcp_request_context(request_id):
+            barrier.wait(timeout=5)
+            find_module.RetrievalIndexWarming(site=site)
+
+    with caplog.at_level("INFO", logger="exomem.find"), ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(refuse, requests))
+
+    lines = [r.getMessage() for r in caplog.records if "retrieval refusal:" in r.getMessage()]
+    assert len(lines) == len(requests)
+    for request_id, site in requests:
+        assert sum(f"site={site} " in line and f"request_id={request_id}" in line for line in lines) == 1
 
 
 def test_the_catalog_outcome_site_is_named() -> None:

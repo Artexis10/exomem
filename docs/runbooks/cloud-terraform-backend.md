@@ -60,3 +60,18 @@ terraform -chdir=infra/terraform/foundation plan -refresh-only -detailed-exitcod
 ```
 
 Exit `0` is required. Exit `2` is drift and blocks deployment.
+
+## Preserve the import bucket policy
+
+Set `cloud_import_allowed_origins` to the approved web origins for every
+durability plan. The empty default removes the browser CORS rule.
+Keep this input with the reviewed operational packet so later plans preserve it.
+
+The import policy permits signed PUT responses and exposes `ETag` to those
+origins. It cancels unfinished uploads under `cells/` after two days.
+It does not expire completed files.
+
+Compare the saved plan with the current bucket policy before each apply.
+Retain the prior CORS and lifecycle arrays for rollback.
+A rollback must use the current bucket revision.
+Restoring the prior policy cannot recover parts that the provider already cancelled.

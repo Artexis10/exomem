@@ -233,7 +233,7 @@ def test_an_unreadable_key_file_means_no_preference_not_a_choice(
 _ISSUE_TITLES = [
     "Exomem first-run defect inventory — issues 477 to 485",
     "Zellij session serialization: what cold recovery can and cannot know",
-    "Hub88 Postgres MCP consolidated banner discriminator",
+    "Postgres MCP consolidated banner discriminator",
 ]
 
 

@@ -12,6 +12,7 @@ import fnmatch
 import hashlib
 import io
 import lzma
+import os
 import re
 import stat
 import struct
@@ -21,7 +22,7 @@ import zipfile
 import zlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,7 @@ _TEXT_SUFFIXES = frozenset(
         ".rst",
         ".rego",
         ".service",
+        ".timer",
         ".sh",
         ".sql",
         ".svg",
@@ -637,6 +639,40 @@ def repository_input_paths(repo_root: Path) -> tuple[str, ...]:
     return tuple(path.relative_to(root).as_posix() for path in _repository_files(root))
 
 
+def _repository_link_findings(
+    path: Path, root: Path, inputs: set[Path], label: str
+) -> list[PrivacyFinding]:
+    invalid = PrivacyFinding("external_input_provenance", label, 0)
+    try:
+        link_target = os.readlink(path)
+    except OSError:
+        return [invalid]
+    findings = _scan_text(link_target, label)
+    windows_path = PureWindowsPath(link_target)
+    if PurePosixPath(link_target).is_absolute() or windows_path.drive or windows_path.root:
+        return findings + [invalid]
+    current = path.parent
+    components = link_target.split("/")
+    for index, component in enumerate(components):
+        if component == "..":
+            if current == root:
+                return findings + [invalid]
+            current = current.parent
+        elif component not in {"", "."}:
+            current = current / component
+        try:
+            mode = current.lstat().st_mode
+        except OSError:
+            return findings + [invalid]
+        # Inspect each component before '..' can erase a symlink from the path.
+        if stat.S_ISLNK(mode) or (index < len(components) - 1 and not stat.S_ISDIR(mode)):
+            return findings + [invalid]
+    # The target's own inventory entry scans its content and determines its format.
+    if not stat.S_ISREG(mode) or current not in inputs:
+        return findings + [invalid]
+    return findings
+
+
 def scan_repository_inputs(repo_root: Path) -> PrivacyScanReport:
     """Scan all declared distributable inputs without consulting a vault or env."""
 
@@ -644,28 +680,36 @@ def scan_repository_inputs(repo_root: Path) -> PrivacyScanReport:
     findings: list[PrivacyFinding] = []
     scanned_text_files = 0
     files = _repository_files(root)
+    inputs = set(files)
     for path in files:
         relative = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            # The repository intentionally publishes AGENTS.md as an in-tree
-            # alias. Validate only its link metadata and scan its regular target
-            # independently; never follow arbitrary aliases during inventory.
+        parent = root
+        for component in path.relative_to(root).parts[:-1]:
+            parent = parent / component
             try:
-                link_target = path.readlink().as_posix()
+                mode = parent.lstat().st_mode
             except OSError:
-                link_target = ""
-            if relative != "AGENTS.md" or link_target != "CLAUDE.md":
-                findings.append(
-                    PrivacyFinding("external_input_provenance", relative, 0)
+                findings.append(PrivacyFinding("artifact_unreadable", relative, 0))
+                break
+            if not stat.S_ISDIR(mode):
+                rule = (
+                    "external_input_provenance"
+                    if stat.S_ISLNK(mode)
+                    else "filesystem_entry_type"
                 )
-            continue
-        path_findings, text_count = _scan_artifact_with_count(
-            path,
-            label=relative,
-            policies=DEFAULT_BINARY_PROVENANCE,
-        )
-        findings.extend(path_findings)
-        scanned_text_files += text_count
+                findings.append(PrivacyFinding(rule, relative, 0))
+                break
+        else:
+            if path.is_symlink():
+                findings.extend(_repository_link_findings(path, root, inputs, relative))
+                continue
+            path_findings, text_count = _scan_artifact_with_count(
+                path,
+                label=relative,
+                policies=DEFAULT_BINARY_PROVENANCE,
+            )
+            findings.extend(path_findings)
+            scanned_text_files += text_count
     return PrivacyScanReport(
         scanned_files=len(files),
         scanned_text_files=scanned_text_files,

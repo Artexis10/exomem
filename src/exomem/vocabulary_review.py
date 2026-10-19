@@ -39,12 +39,13 @@ def _registry_overlay(vault_root: Path, item: Mapping[str, Any], ref: str) -> An
     """The registry spec whose overlay `ref` names, for a registry proposal only."""
     if item.get("signal") != REGISTRY_PROPOSAL_SIGNAL:
         return None
-    from .vocabulary import registry_specs
+    from .vocabulary import instances, registry_specs
 
     root = Path(vault_root)
     for spec in registry_specs().values():
-        if spec.overlay(root).relative_to(root).as_posix() == ref:
-            return spec
+        selected = instances.match_overlay(root, spec, ref, authoring=True)
+        if selected is not None:
+            return selected
     raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
 
 
@@ -52,7 +53,6 @@ def _read_registry_overlay(vault_root: Path, spec: Any, ref: str) -> dict[str, A
     if egress.owner_only_aggregate(vault_root) is not None:
         raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
     from .vocabulary import load
-
     from .vocabulary.contract import admission_refusal
 
     if admission_refusal(vault_root, spec) is not None:
@@ -66,14 +66,59 @@ def _read_registry_overlay(vault_root: Path, spec: Any, ref: str) -> dict[str, A
     }
 
 
-def _require_registry_observation(vault_root: Path) -> None:
+def registry_proposal(vault_root: Path, item: Mapping[str, Any]) -> tuple[Any, dict] | None:
+    """Resolve a queued registry's one exact target and its original request."""
+    if item.get("signal") != REGISTRY_PROPOSAL_SIGNAL:
+        return None
+    targets = item.get("target_versions", {})
+    if len(targets) != 1:
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
+    spec = _registry_overlay(vault_root, item, next(iter(targets)))
+    try:
+        request = json.loads(item.get("question") or "")
+    except (TypeError, ValueError):
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work") from None
+    if (spec is None or not isinstance(request, dict) or request.get("registry") != spec.name
+            or item.get("family") != spec.family):
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
+    return spec, request
+
+
+def _require_registry_observation(vault_root: Path, item: Mapping[str, Any] | None = None) -> None:
     # Currency and collision outcomes depend on whole registries; private domains
     # must exist before a limited caller can observe their private definitions.
-    from .vocabulary.contract import selected_admission_refusal
+    from .vocabulary.contract import admission_refusal, selected_admission_refusal
+
+    if item is not None and item.get("signal") == REGISTRY_PROPOSAL_SIGNAL:
+        try:
+            if _visible(vault_root, item):
+                proposal = registry_proposal(vault_root, item)
+                if proposal is not None and admission_refusal(vault_root, proposal[0]) is None:
+                    return
+        except ValueError:
+            pass
+        _require_registry_observation(vault_root)
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
 
     for spec in (relation_registry.SPEC, entity_types.SPEC):
         if selected_admission_refusal(vault_root, spec) is not None:
             raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry observation is unavailable")
+
+
+def _observed_item(vault_root: Path, store: VocabularyState, ref: str) -> dict[str, Any]:
+    """Admit lookup outcomes before they can distinguish withheld work from absence."""
+    try:
+        item = store.get(ref)
+    except ValueError as error:
+        # This fixed store error code denotes absence; state corruption must stay visible.
+        if not str(error).startswith("VOCABULARY_ITEM_NOT_FOUND:"):
+            raise
+        _require_registry_observation(vault_root)
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work") from None
+    _require_registry_observation(vault_root, item)
+    if item.get("signal") != REGISTRY_PROPOSAL_SIGNAL and not _visible(vault_root, item):
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
+    return item
 
 
 def registry_hashes(vault_root: Path) -> dict[str, str]:
@@ -93,6 +138,29 @@ def _validate_live_choice(vault_root: Path, item: WorkItem, decision: Mapping[st
     canonical = choice["canonical"]
     proposing = decision["outcome"] == "propose-new"
     findings = []
+    queued = registry_proposal(vault_root, item.to_dict())
+    selected_registry = None
+    if queued is not None:
+        from .vocabulary import registry as vocabulary_registry
+
+        selected_registry = vocabulary_registry.load(queued[0], Path(vault_root)).typed
+    if queued is not None and queued[1].get("operation") == "save":
+        from .vocabulary import contract
+        from .vocabulary import registry as vocabulary_registry
+
+        spec, request = queued
+        snapshot = vocabulary_registry.load(spec, Path(vault_root))
+        if proposing:
+            delta = request.get("proposal")
+            if (not isinstance(delta, Mapping) or not isinstance(delta.get("upsert"), Mapping)
+                    or delta["upsert"].get(canonical) != choice["definition"]):
+                raise ValueError("VOCABULARY_DECISION_INVALID: choose the exact queued registry definition")
+            result = contract.propose(vault_root, spec, delta)
+            if not result.get("valid"):
+                raise ValueError("VOCABULARY_DECISION_INVALID: queued delta conflicts with the current registry")
+        elif canonical not in snapshot.entries or snapshot.entries[canonical].status != "active":
+            raise ValueError("VOCABULARY_DECISION_INVALID: reuse a current selected registry entry")
+        return
     if item.family == "entity-instance/v1":
         state = dict(item.projection_currency).get("candidate_state")
         if state == "ambiguous" or (state == "hydration" and proposing):
@@ -103,7 +171,7 @@ def _validate_live_choice(vault_root: Path, item: WorkItem, decision: Mapping[st
     if item.family == "relation-type/v1":
         from . import memory_schema
 
-        registry = relation_registry.load_registry(vault_root)
+        registry = selected_registry or relation_registry.load_registry(vault_root)
         if proposing:
             if registry.resolve(canonical).canonical is not None:
                 raise ValueError(
@@ -125,7 +193,7 @@ def _validate_live_choice(vault_root: Path, item: WorkItem, decision: Mapping[st
             if definition is None or definition.status != "active":
                 raise ValueError("VOCABULARY_DECISION_INVALID: reuse a current canonical relation")
     elif item.family == "entity-type/v1":
-        registry = entity_types.load_entity_types(vault_root)
+        registry = selected_registry or entity_types.load_entity_types(vault_root)
         if proposing:
             if registry.resolve(canonical) is not None:
                 raise ValueError("VOCABULARY_DECISION_INVALID: this canonical type already exists")
@@ -263,7 +331,23 @@ def _fresh(
     refs = [*stored["target_versions"], *(entry["ref"] for entry in stored["evidence"])]
     for ref in dict.fromkeys(refs):
         pages[ref] = _read(vault_root, stored, ref)
-    current_hashes = registry_hashes(vault_root)
+    _require_registry_observation(vault_root, stored)
+    queued = registry_proposal(vault_root, stored)
+    if queued is not None:
+        spec, _request = queued
+        from .vocabulary import instances, registry, registry_spec
+
+        # Queues normally declare no registry dependencies; refresh only those an older row declares.
+        current_hashes = {}
+        for key in stored["registry_hashes"]:
+            # Persisted dependency keys use underscores for hyphenated registry subjects.
+            dependency = instances.select(
+                Path(vault_root), registry_spec(key.replace("_", "-")), spec.instance_id,
+            )
+            snapshot = registry.load(dependency, Path(vault_root))
+            current_hashes[key] = f"{snapshot.typed.core_version}:{snapshot.content_hash}"
+    else:
+        current_hashes = registry_hashes(vault_root)
     current = make_item(
         family=stored["family"],
         signal=stored["signal"],
@@ -294,7 +378,6 @@ def review(
 ) -> dict[str, Any]:
     from . import vocabulary_delivery
 
-    _require_registry_observation(vault_root)
     recovery = vocabulary_delivery.recover(vault_root) if continuation is None else None
     owner = VocabularyState(vault_root)
     result = owner.page(
@@ -305,6 +388,11 @@ def review(
         # runs for this fixed candidate window immediately before disclosure.
         visible=lambda item: _visible(vault_root, item),
     )
+    if not result["items"] or any(item["signal"] != REGISTRY_PROPOSAL_SIGNAL for item in result["items"]):
+        _require_registry_observation(vault_root)
+    else:
+        for item in result["items"]:
+            _require_registry_observation(vault_root, item)
     if recovery and (recovery["processed"] or recovery["state"] != "current"):
         result["recovery"] = recovery
     return result
@@ -319,13 +407,13 @@ def context(
     max_related_pages: int = 8,
     continuation: str | None = None,
 ) -> dict[str, Any]:
-    _require_registry_observation(vault_root)
     if type(max_body_chars) is not int or not 0 <= max_body_chars <= 12000:
         raise ValueError("VOCABULARY_LIMIT_INVALID: body budget must be 0 to 12000")
     if type(max_related_pages) is not int or not 1 <= max_related_pages <= 64:
         raise ValueError("VOCABULARY_LIMIT_INVALID: evidence page budget must be 1 to 64")
     store = VocabularyState(vault_root)
-    current, pages = _fresh(vault_root, store.get(ref))
+    stored = _observed_item(vault_root, store, ref)
+    current, pages = _fresh(vault_root, stored)
     if expected_fingerprint is not None and current.fingerprint != expected_fingerprint:
         raise ValueError("VOCABULARY_DECISION_STALE: refresh the changed consideration")
     offset = 0
@@ -388,15 +476,16 @@ def context(
             if not 0 <= offset <= len(page_evidence):
                 raise ValueError("VOCABULARY_CONTINUATION_INVALID: refresh item context")
     observed = store.observe(current)
+    queued = registry_proposal(vault_root, current.to_dict())
     if current.family == "relation-type/v1":
         definitions = vocabulary_evidence.relation_evidence(
-            relation_registry.load_registry(vault_root),
+            relation_registry.load_registry(vault_root, registry_scope=queued[0].instance_id if queued else None),
             query="review relationship meaning",
             limit=max_related_pages,
         )
     else:
         definitions = vocabulary_evidence.resolve_entity_type(
-            entity_types.load_entity_types(vault_root),
+            entity_types.load_entity_types(vault_root, registry_scope=queued[0].instance_id if queued else None),
             query="review entity type fit",
             limit=max_related_pages,
         )
@@ -418,7 +507,7 @@ def context(
 
     evidence_refs = [entry.ref for entry in page_evidence]
     next_offset = offset + max_related_pages
-    return {
+    result: dict[str, Any] = {
         "item": observed,
         "choice_contract": choice_contract(current.family),
         "targets": [bounded(target) for target, _ in current.target_versions],
@@ -444,12 +533,28 @@ def context(
             "application": "use existing canonical writers and permissions",
         },
     }
+    if queued is not None and queued[1].get("operation") == "save":
+        spec, request = queued
+        common = {"tool": "schema_memory", "subject": spec.name, "registry_scope": spec.instance_id}
+        definitions["registration"] = {
+            "inspect": {**common, "operation": "inspect"},
+            "propose": {**common, "operation": "propose", "proposal": request["proposal"]},
+            "save": {**common, "operation": "save", "proposal": request["proposal"],
+                     "expected_hash": dict(current.target_versions)[next(iter(dict(current.target_versions)))],
+                     "why": request["why"], "vocabulary_ref": current.ref,
+                     "vocabulary_fingerprint": current.fingerprint},
+        }
+        result["choice_contract"]["propose-new"]["definition"] = {
+            "type": "object", "fields": sorted(spec.fields),
+            "attributes": sorted(spec.attributes), "source": "exact queued upsert entry",
+        }
+    return result
 
 
 def decide(vault_root: Path, *, ref: str, decision: dict[str, Any]) -> dict[str, Any]:
-    _require_registry_observation(vault_root)
     store = VocabularyState(vault_root)
-    current, _ = _fresh(vault_root, store.get(ref))
+    stored = _observed_item(vault_root, store, ref)
+    current, _ = _fresh(vault_root, stored)
     validate_decision(current, decision)  # Stale requests must not even update currency.
     _validate_live_choice(vault_root, current, decision)
     actor = effective_principal()

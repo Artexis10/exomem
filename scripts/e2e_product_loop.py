@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -307,6 +309,21 @@ def _run(
     return proc
 
 
+def _installed_records_summary_enabled(
+    python: Path, *, env: dict[str, str], cwd: Path,
+) -> bool:
+    result = _run(
+        [str(python), "-c",
+         "import json; from exomem.collection_store.capability import records_summary_enabled; "
+         "print(json.dumps(records_summary_enabled()))"],
+        env=env, cwd=cwd, timeout=60,
+    )
+    enabled = json.loads(result.stdout.strip())
+    if type(enabled) is not bool:
+        raise RuntimeError(f"the installed capability did not report a boolean: {enabled!r}")
+    return enabled
+
+
 def _result_data(result: Any) -> Any:
     if getattr(result, "is_error", False):
         raise RuntimeError(f"MCP tool returned an error: {result}")
@@ -424,6 +441,44 @@ def _operator_reconcile_data(stdout: str) -> dict[str, Any]:
     ):
         raise RuntimeError(f"operator reconcile did not succeed: {payload!r}")
     return data
+
+
+def _operator_graph_snapshot(vault: Path) -> dict[str, Any]:
+    """Read bounded lineage metadata, never page content or checkpoint paths.
+
+    These sequential reads are observations, not an atomic publication view.
+    Acknowledgement and the terminated server's process-local state are unobserved.
+    Observation failure must not replace the workflow's original exception.
+    """
+    try:
+        from exomem import epistemic_graph, graph_sync
+
+        facts: dict[str, Any] = {"acknowledgement": "not_observed"}
+        # Managed readers initialize maintenance; use the fixed protocol's pure parsers and limits.
+        for name, path, parse, limit in (
+            ("floor", graph_sync.floor_path(vault),
+             graph_sync.GraphSyncGenerationFloor.parse, graph_sync._FLOOR_READ_LIMIT),
+            ("checkpoint", graph_sync.checkpoint_path(vault),
+             graph_sync.GraphSyncCheckpoint.parse, graph_sync._CHECKPOINT_READ_LIMIT),
+        ):
+            try:
+                with path.open("rb") as stream:
+                    raw = stream.read(limit + 1)
+            except FileNotFoundError:
+                facts[name] = {"parse_status": "absent", "generation": None}
+                continue
+            record = parse(raw) if len(raw) <= limit else None
+            facts[name] = {"parse_status": "valid" if record is not None else "malformed",
+                           "generation": record.generation if record is not None else None}
+            if record is not None and hasattr(record, "checkpoint_sha256"):
+                facts[name]["checkpoint_sha256"] = record.checkpoint_sha256
+        sidecar = epistemic_graph.sidecar_path(vault)
+        # SQLite defines these three companion suffixes.
+        facts["sidecar_exists"] = {suffix: Path(str(sidecar) + suffix).exists()
+                                   for suffix in ("", "-wal", "-shm")}
+        return facts
+    except Exception as error:  # noqa: BLE001 - diagnostics must not mask the failure
+        return {"observation": "unavailable", "error_type": type(error).__name__}
 
 
 def _run_operator_reconcile(
@@ -1722,6 +1777,7 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     )
     from exomem import epistemic_graph, memory_refs
 
+    reconcile_snapshots = {"before_deletion": _operator_graph_snapshot(vault)}
     refs_sidecar = memory_refs.sidecar_path(vault)
     refs_sidecar.unlink(missing_ok=True)
     graph_sidecar = epistemic_graph.sidecar_path(vault)
@@ -1743,16 +1799,27 @@ def _installed_stdio(args: argparse.Namespace) -> int:
         ),
         encoding="utf-8",
     )
-    state["operator_reconcile"] = _run_operator_reconcile(
-        executable,
-        env,
-        work,
-        timeout=args.request_timeout,
-    )
-    if not refs_sidecar.exists() or not graph_sidecar.exists():
-        raise RuntimeError(
-            "host operator reconcile did not rebuild the deleted reference and graph sidecars"
+    reconcile_snapshots["before_operator"] = _operator_graph_snapshot(vault)
+    try:
+        state["operator_reconcile"] = _run_operator_reconcile(
+            executable,
+            env,
+            work,
+            timeout=args.request_timeout,
         )
+        if not refs_sidecar.exists() or not graph_sidecar.exists():
+            raise RuntimeError(
+                "host operator reconcile did not rebuild the deleted reference and graph sidecars"
+            )
+    except Exception:
+        reconcile_snapshots["after_failure"] = _operator_graph_snapshot(vault)
+        try:
+            diagnostic = home / "logs" / "operator-reconcile-state.json"
+            diagnostic.parent.mkdir(parents=True, exist_ok=True)
+            diagnostic.write_text(json.dumps(reconcile_snapshots) + "\n", encoding="utf-8")
+        except OSError:  # The existing failure-log collector owns artifact publication.
+            pass
+        raise
     asyncio.run(
         _stdio_session(
             executable,
@@ -2580,7 +2647,7 @@ def _print_convergence_digest(relative: Path, text: str) -> None:
     print(f"--- end convergence digest: {relative} ---", flush=True)
 
 
-def _publish_server_logs(root: Path) -> None:
+def _publish_server_logs(root: Path, *, label: str = "") -> None:
     """Rescue the server's own log before the scratch root is deleted.
 
     The harness deletes everything it built, the failing server's log included,
@@ -2597,7 +2664,7 @@ def _publish_server_logs(root: Path) -> None:
     source = root / "home" / "logs"
     if not source.is_dir():
         return
-    destination = REPO_ROOT / "test-results" / "e2e-logs"
+    destination = REPO_ROOT / "test-results" / "e2e-logs" / label
     try:
         destination.mkdir(parents=True, exist_ok=True)
     except OSError as exc:  # noqa: BLE001 - diagnostics must not mask the failure
@@ -2640,11 +2707,61 @@ def _e2e_workdir(*, keep: bool):
             yield str(path)
         except BaseException:
             _publish_server_logs(path)
+            _publish_server_logs(path / "s1", label="s1")
             raise
+
+
+def _publish_parent_phase_timings(
+    phases: list[dict[str, object]], *, elapsed: float, budget: float,
+) -> None:
+    """Keep aggregate-budget evidence after the scratch root has been removed."""
+    try:
+        document = json.dumps({
+            "measurement": "parent subprocess wall time",
+            "elapsed_seconds_including_cleanup": elapsed,
+            "budget_seconds": budget,
+            "phases": phases,
+        }, allow_nan=False)
+    except Exception:  # noqa: BLE001 - observation must not replace the budget failure
+        document = None
+    if document is not None:
+        try:
+            destination = REPO_ROOT / "test-results" / "e2e-logs"
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "parent-phase-timings.json").write_text(
+                document + "\n", encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001 - stderr can retain an unavailable artifact
+            pass
+    try:
+        print(
+            "product-e2e: parent phase timings: " + (document or "unavailable"),
+            file=sys.stderr, flush=True,
+        )
+    except Exception:  # noqa: BLE001 - diagnostic I/O must not replace the failure
+        pass
 
 
 def _orchestrate(args: argparse.Namespace) -> int:
     started = time.monotonic()
+    phases: list[dict[str, object]] = []
+
+    def run_phase(phase: str, command: list[str], **options: Any):
+        # These labels name fixed harness steps, never command text or vault content.
+        try:
+            phase_started = time.monotonic()
+        except Exception:  # noqa: BLE001 - a missing observation does not block work
+            phase_started = None
+        result = _run(command, **options)
+        try:
+            observation: dict[str, object] = {"phase": phase, "seconds": None}
+            phases.append(observation)
+            if phase_started is not None:
+                observation["seconds"] = time.monotonic() - phase_started
+        except Exception:  # noqa: BLE001 - retain the subprocess result unchanged
+            pass
+        return result
+
     with _e2e_workdir(keep=args.keep_work) as tmp_raw:
         tmp = Path(tmp_raw)
         home = tmp / "home"
@@ -2655,7 +2772,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             path.mkdir()
         env = _clean_env(home, vault)
         print("product-e2e: build installed wheel")
-        _run(
+        run_phase(
+            "wheel build",
             ["uv", "build", "--out-dir", str(dist)],
             env=env,
             cwd=REPO_ROOT,
@@ -2668,18 +2786,38 @@ def _orchestrate(args: argparse.Namespace) -> int:
         bin_dir = venv / ("Scripts" if WINDOWS else "bin")
         python = bin_dir / ("python.exe" if WINDOWS else "python")
         executable = bin_dir / ("exomem.exe" if WINDOWS else "exomem")
-        _run(["uv", "venv", str(venv)], env=env, cwd=work, timeout=30)
-        _run(
-            ["uv", "pip", "install", "--python", str(python), str(wheels[-1])],
+        run_phase("environment creation", ["uv", "venv", str(venv)], env=env, cwd=work, timeout=30)
+        run_phase(
+            "wheel installation",
+            [
+                "uv", "pip", "install", "--compile-bytecode",
+                "--python", str(python), str(wheels[-1]),
+            ],
             env=env,
             cwd=work,
             timeout=min(args.budget_seconds, 120),
         )
-        _run(
+        run_phase(
+            "vault initialization",
             [str(executable), "init", "--vault", str(vault)],
             env=env,
             cwd=work,
             timeout=30,
+        )
+        initially_enabled = _installed_records_summary_enabled(python, env=env, cwd=work)
+        print(
+            f"product-e2e: installed wheel={wheels[-1].name} "
+            f"sha256={hashlib.sha256(wheels[-1].read_bytes()).hexdigest()} "
+            f"records_summary_enabled={initially_enabled}",
+            flush=True,
+        )
+        print(f"product-e2e: setup wall seconds={time.monotonic() - started:.1f}", flush=True)
+        s1 = tmp / "s1"
+        (s1 / "home").mkdir(parents=True)
+        print(f"product-e2e: generic home={home} vault={vault} work={work}", flush=True)
+        print(
+            f"product-e2e: S1 home={s1 / 'home'} vault={s1 / 'vault'} work={s1 / 'work'}",
+            flush=True,
         )
         child_timeout = max(30.0, args.request_timeout * 14)
         common = [
@@ -2692,84 +2830,131 @@ def _orchestrate(args: argparse.Namespace) -> int:
             "--request-timeout",
             str(args.request_timeout),
         ]
-        print("product-e2e: stdio governed lifecycle + restart")
-        _run(
-            [
-                str(python),
-                str(Path(__file__).resolve()),
-                "--installed-stdio",
-                "--executable",
-                str(executable),
-                *common,
-            ],
-            env=env,
-            cwd=work,
-            timeout=child_timeout,
-        )
-        print("product-e2e: HTTP auth + Studio + review context + triage + shutdown")
-        _run(
-            [
-                str(python),
-                str(Path(__file__).resolve()),
-                "--installed-http",
-                "--python",
-                str(python),
-                "--http-server",
-                str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
-                *common,
-            ],
-            env=env,
-            cwd=work,
-            timeout=max(30.0, args.request_timeout * 6),
-        )
-        print("product-e2e: writer-lease coordination (two replicas)")
-        _run(
-            [
-                str(python),
-                str(Path(__file__).resolve()),
-                "--installed-lease",
-                "--python",
-                str(python),
-                "--http-server",
-                str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
-                *common,
-            ],
-            env=env,
-            cwd=work,
-            timeout=max(60.0, args.request_timeout * 8),
-        )
-        # Its own module: the wheel is built once above, and this journey restarts the
-        # service, rewrites one installed file and imports a large export.
-        print(
-            "product-e2e: S1 Records summary journey "
-            "(dark, released, import, fields, copy, restore, rollback)"
-        )
-        s1_journey = _run(
-            [
-                str(python),
-                str(REPO_ROOT / "scripts" / "e2e_s1_summary_journey.py"),
-                "--python",
-                str(python),
-                "--executable",
-                str(executable),
-                "--older-python",
-                args.older_python,
-                "--vault",
-                str(tmp / "s1-vault"),
-                "--work",
-                str(work / "s1-journey"),
-                "--home",
-                str(home),
-                "--request-timeout",
-                str(args.request_timeout),
-            ],
-            env=env,
-            cwd=work,
-            timeout=max(180.0, args.request_timeout * 14),
-        )
-        print(s1_journey.stdout.strip().splitlines()[-1])
+
+        def generic_branch() -> None:
+            branch_started = time.monotonic()
+            try:
+                print("product-e2e: stdio governed lifecycle + restart")
+                run_phase(
+                    "stdio journey",
+                    [
+                        str(python),
+                        str(Path(__file__).resolve()),
+                        "--installed-stdio",
+                        "--executable",
+                        str(executable),
+                        *common,
+                    ],
+                    env=env,
+                    cwd=work,
+                    timeout=child_timeout,
+                )
+                print("product-e2e: HTTP auth + Studio + review context + triage + shutdown")
+                run_phase(
+                    "HTTP journey",
+                    [
+                        str(python),
+                        str(Path(__file__).resolve()),
+                        "--installed-http",
+                        "--python",
+                        str(python),
+                        "--http-server",
+                        str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
+                        *common,
+                    ],
+                    env=env,
+                    cwd=work,
+                    timeout=max(30.0, args.request_timeout * 6),
+                )
+                print("product-e2e: writer-lease coordination (two replicas)")
+                run_phase(
+                    "writer lease journey",
+                    [
+                        str(python),
+                        str(Path(__file__).resolve()),
+                        "--installed-lease",
+                        "--python",
+                        str(python),
+                        "--http-server",
+                        str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
+                        *common,
+                    ],
+                    env=env,
+                    cwd=work,
+                    timeout=max(60.0, args.request_timeout * 8),
+                )
+            finally:
+                print(
+                    "product-e2e: generic branch wall seconds="
+                    f"{time.monotonic() - branch_started:.1f}",
+                    flush=True,
+                )
+
+        def summary_branch() -> None:
+            branch_started = time.monotonic()
+            try:
+                # The journey uses the wheel built above and imports a large export.
+                # Disabled wheels stage the release capability only in their test installation.
+                print(
+                    "product-e2e: S1 Records summary journey "
+                    "(capability, enrolment, import, fields, copy, adoption, rollback)"
+                )
+                s1_journey = run_phase(
+                    "records summary journey",
+                    [
+                        str(python),
+                        str(REPO_ROOT / "scripts" / "e2e_s1_summary_journey.py"),
+                        "--python",
+                        str(python),
+                        "--executable",
+                        str(executable),
+                        "--older-python",
+                        args.older_python,
+                        "--vault",
+                        str(s1 / "vault"),
+                        "--work",
+                        str(s1 / "work"),
+                        "--home",
+                        str(s1 / "home"),
+                        "--request-timeout",
+                        str(args.request_timeout),
+                    ],
+                    env=_clean_env(s1 / "home", s1 / "vault"),
+                    cwd=s1,
+                    timeout=max(180.0, args.request_timeout * 14),
+                )
+                print(s1_journey.stdout.strip().splitlines()[-1])
+            finally:
+                print(
+                    f"product-e2e: S1 branch wall seconds={time.monotonic() - branch_started:.1f}",
+                    flush=True,
+                )
+
+        if initially_enabled:
+            # ON branches share immutable installed bytes and use separate vaults and process state.
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(generic_branch), executor.submit(summary_branch)]
+                failures = []
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception as error:  # noqa: BLE001 - await and retain both branch failures
+                        failures.append(error)
+                if failures:
+                    raise ExceptionGroup("installed product acceptance failed", failures)
+        else:
+            # OFF acceptance finishes on the original bytes before S1 rewrites
+            # the test installation.
+            generic_branch()
+            summary_branch()
+
     elapsed = time.monotonic() - started
+    print(
+        f"product-e2e: total wall seconds={elapsed:.1f} budget seconds={args.budget_seconds:.1f}",
+        flush=True,
+    )
     if elapsed > args.budget_seconds:
+        _publish_parent_phase_timings(phases, elapsed=elapsed, budget=args.budget_seconds)
         raise TimeoutError(
             f"product E2E took {elapsed:.1f}s, over {args.budget_seconds:.1f}s budget"
         )

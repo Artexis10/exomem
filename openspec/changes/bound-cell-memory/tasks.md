@@ -22,7 +22,7 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted image and vector-ext
 
 Service-v1 cells no longer load the full matrix (see 2.2), so 3.1 now affects only local and legacy processes. 3.1–3.4 and 4.x stay open. They become launch work only if the Cloud occupancy qualification (add-cloud-service-resource-policy 3.9) shows corpus-context or rebuild memory limiting density. The 3 GiB cell limit holds until measurements support a reviewed change.
 
-- [ ] 3.1 Streaming matrix load (preallocate from the row count), and bulk drains that reload once instead of splicing per file.
+- [ ] 3.1 Stream matrix loads through preallocation. Retain compatible matrices for bounded catch-up after bulk publication, without per-file splices. Reject known-stale serving after a failed token probe. Native memory and latency acceptance remain open.
 - [ ] 3.2 Batched `rebuild_all` and a streaming identity census.
 - [ ] 3.3 Serve semantic page states and link maps from the lexical store tables. The semantic-contract suites must stay green, and the harness must show corpus-context bytes no longer scaling with the vault.
 - [ ] 3.4 (was 2.6) Register the semantic corpus context as a reapable idle cache slot. Blocked on D5 step 2 (3.3).

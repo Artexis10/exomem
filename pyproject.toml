@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.115.0" # x-release-please-version
+version = "0.128.2" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,7 +39,8 @@ dependencies = [
     "fastmcp==4.0.3",
     "httpx>=0.27",
     "httpx2>=2.12,<3",         # FastMCP provider clients use a distinct exception family
-    "jsonschema>=4.23,<5",     # portable cloud package manifest validation
+    "jsonschema>=4.23,<5",     # cloud package manifests and canary response expectations
+    "referencing>=0.37,<0.38", # JSON Schema traversal and offline reference resolution
     "ijson>=3.5.1,<4",        # bounded, lossless selection from stored JSON streams
     "markdown-it-py==4.2.0",   # shared CommonMark syntax and exact original-region adapter
     "pyyaml>=6.0",
@@ -195,6 +196,7 @@ dev = [
     "pytest>=8.0",
     "pytest-split>=0.11,<1",
     "pytest-timeout>=2.3",
+    "pytest-xdist>=3.6",
     "tiktoken>=0.7",
     "tokenizers>=0.20",
 ]
@@ -258,6 +260,8 @@ markers = [
     "nli: loads the exact frozen stance-verifier model; run only in its dedicated job",
     "governance_timing_release: exact-capacity actual-wire governance timing characterization",
     "query_deadline: keeps the shipped interactive query deadline instead of the test-wide relaxed one",
+    # tests/repository_docs_reads.py fails a test that reads these paths unmarked.
+    "reads_repository_docs: reads docs/, openspec/ or root Markdown; also runs on docs-only pull requests",
 ]
 
 # Blackwell (RTX 50-series, sm_120 / compute capability 12.0) needs CUDA wheels.

@@ -67,7 +67,7 @@ def test_delete_after_remove_drops_clip_rows(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
-    rel = "Knowledge Base/Evidence/Yolo/photos/a.jpg"
+    rel = "Knowledge Base/Evidence/Rental/photos/a.jpg"
     idx = embeddings.ClipIndex(vault)
     idx.upsert(rel, _unit(0), 1.0)
     assert idx.has(rel)
@@ -88,8 +88,8 @@ def test_delete_after_remove_clip_extra_absent_delete_still_succeeds(
 ) -> None:
     """EXOMEM_DISABLE_CLIP=1 (default suite env; stands in for a lean install
     without the `embeddings` extra) must not break the rest of the delete."""
-    rel = "Knowledge Base/Evidence/Yolo/photos/a.jpg"
-    (vault / "Knowledge Base/Evidence/Yolo/photos").mkdir(parents=True, exist_ok=True)
+    rel = "Knowledge Base/Evidence/Rental/photos/a.jpg"
+    (vault / "Knowledge Base/Evidence/Rental/photos").mkdir(parents=True, exist_ok=True)
     (vault / rel).write_bytes(b"\xff\xd8\xff")
 
     report = index_sync.delete_after_remove(vault, [rel])
@@ -364,14 +364,14 @@ def test_reconcile_heals_clip_and_frame_orphans(
 
     # Seed a CLIP orphan: a row for a path with no file on disk (as if the
     # binary had been deleted before this fix existed).
-    ghost_rel = "Knowledge Base/Evidence/Yolo/photos/ghost.jpg"
+    ghost_rel = "Knowledge Base/Evidence/Rental/photos/ghost.jpg"
     idx = embeddings.ClipIndex(vault)
     idx.upsert(ghost_rel, _unit(2), 1.0)
     assert idx.has(ghost_rel)
 
     # A media binary may outlive its Markdown sidecar. It still needs semantic
     # cleanup, but it is not a binary orphan.
-    sidecar_only_rel = "Knowledge Base/Evidence/Yolo/photos/sidecar-only.jpg"
+    sidecar_only_rel = "Knowledge Base/Evidence/Rental/photos/sidecar-only.jpg"
     sidecar_only_binary = vault / sidecar_only_rel
     sidecar_only_binary.parent.mkdir(parents=True, exist_ok=True)
     sidecar_only_binary.write_bytes(b"\xff\xd8\xff")

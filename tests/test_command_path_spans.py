@@ -133,18 +133,27 @@ def test_an_encode_names_the_module_that_asked(token: str, monkeypatch: pytest.M
     exec("def ask():\n    return embeddings.embed_texts(['one', 'two'])\n", namespace)
     namespace["ask"]()
     names = _names(token)
-    assert names["embeddings.encode"]["fields"] == {"texts": 2, "chars": 6}
+    fields = names["embeddings.encode"]["fields"]
+    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+        "texts": 2, "chars": 6,
+    }
     assert "encode.by.context_pack" in names
     assert embeddings._encode_caller.__doc__  # the attribution is documented at the seam
 
 
 def test_a_direct_read_names_its_phases(vault: Path, token: str) -> None:
+    from exomem import vault as vault_module
+
     found = commands.op_find(vault, query="metabolism")
     hit = (found["hits"] if isinstance(found, dict) else found)[0]
     _names(token)  # discard the find's spans
+    vault_module.evict_inbound_index(vault)
     out = commands.op_read_memory(vault, path=hit["path"], links=True, include_history=True)
     assert "links" in out and "history" in out
+    assert out["links"]["inbound"] is None
     names = _names(token)
     assert "read.page" in names
-    assert set(names["read.links"]["fields"]) == {"inbound", "outbound"}
+    assert set(names["read.links"]["fields"]) - {call_spans.THREAD_CPU_US} == {
+        "outbound",
+    }
     assert "entries" in names["read.history"]["fields"]

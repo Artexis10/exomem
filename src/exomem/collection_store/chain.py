@@ -32,7 +32,7 @@ def recorded_head(conn: sqlite3.Connection) -> tuple[int, str | None]:
     return int(rows.get(schema.META_COMMIT_SEQ, "0")), rows.get(schema.META_STORE_HEAD_HASH)
 
 
-def verify_store_chain(conn: sqlite3.Connection) -> tuple[int, str | None]:
+def verify_store_chain(conn: sqlite3.Connection, *, check=None) -> tuple[int, str | None]:
     """Recompute every head from genesis and return the verified head.
 
     Raises :class:`StoreChainError` naming the first ``commit_seq`` whose
@@ -44,6 +44,8 @@ def verify_store_chain(conn: sqlite3.Connection) -> tuple[int, str | None]:
     for commit_seq, event_hash, head in conn.execute(
         "SELECT commit_seq, event_hash, store_head_hash FROM txns ORDER BY commit_seq"
     ):
+        if check is not None:
+            check()
         expected_seq += 1
         if commit_seq != expected_seq:
             raise StoreChainError(expected_seq, "sequence gap")

@@ -36,9 +36,10 @@ import functools
 import hashlib
 import json
 import math
+import sqlite3
 import struct
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID
 
@@ -67,6 +68,7 @@ from . import tables
 
 JSON_V1 = "json-v1"
 TYPED_V1 = "typed-v1"
+TYPED_V2 = "typed-v2"
 MISSING, NULL, BOOLEAN, INT64, BIGINT, FLOAT, STRING, JSON = range(8)
 _INT64 = range(-(2**63), 2**63)
 _ABSENT = object()
@@ -125,13 +127,23 @@ class Layout:
     def encoded(self) -> str:
         return canonical_json({"version": 1, "fields": list(self.fields)})
 
+    #: A class constant, not a property: scans read it once per row.
+    encoding = TYPED_V1
+
 
 @functools.lru_cache(maxsize=64)
 def _layout(collection_id: str, generation: int, encoded: str) -> Layout:
     raw = json.loads(encoded)
-    if set(raw) != {"version", "fields"} or raw["version"] != 1 or not isinstance(raw["fields"], list):
+    if not isinstance(raw, dict):
         raise TypedStorageError("unsupported typed layout descriptor")
-    layout = Layout(collection_id, generation, tuple(raw["fields"]))
+    if raw.get("version") == 2:
+        from .native_layout import parse
+
+        layout = parse(collection_id, generation, raw)
+    elif set(raw) == {"version", "fields"} and raw["version"] == 1 and isinstance(raw["fields"], list):
+        layout = Layout(collection_id, generation, tuple(raw["fields"]))
+    else:
+        raise TypedStorageError("unsupported typed layout descriptor")
     if layout.encoded != encoded:
         raise TypedStorageError("typed layout descriptor is not canonical")
     return layout
@@ -178,8 +190,17 @@ def decode_value(tag: int, value: Any, key: Any) -> Any:
     raise TypedStorageError("stored typed value does not match its discriminator")
 
 
-def encode_row(layout: Layout, values: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Column parameters in ``value_columns`` order, then the residual object."""
+def encode_row(layout: Layout, values: Mapping[str, Any], *, connection=None, scope=None) -> tuple[Any, ...]:
+    """Column parameters in ``value_columns`` order, then the residual object.
+
+    ``scope`` is the caller's ``native_metadata.WriteScope`` for the open transaction, if it encodes many rows.
+    """
+    if layout.encoding == TYPED_V2:
+        from . import native_rows
+
+        if connection is None:
+            raise TypedStorageError("native row encoding requires its metadata connection")
+        return native_rows.encode_row(connection, layout, values, scope=scope)
     columns = []
     for name in layout.fields:
         columns.extend(encode_value(values.get(name, _ABSENT)))
@@ -188,7 +209,13 @@ def encode_row(layout: Layout, values: Mapping[str, Any]) -> tuple[Any, ...]:
     return (*columns, canonical_json(residual) if residual else None)
 
 
-def decode_row(layout: Layout, columns) -> dict[str, Any]:
+def decode_row(layout: Layout, columns, *, connection=None) -> dict[str, Any]:
+    if layout.encoding == TYPED_V2:
+        from . import native_rows
+
+        if connection is None:
+            raise TypedStorageError("native row decoding requires its metadata connection")
+        return native_rows.decode_row(connection, layout, columns, database=layout.database)
     columns = tuple(columns)
     if len(columns) != 3 * len(layout.fields) + 1:
         raise TypedStorageError("typed row width differs from its layout")
@@ -218,6 +245,15 @@ class _AnyValue(UserDefinedType):
 
 @functools.lru_cache(maxsize=64)
 def _declarations(layout: Layout):
+    if layout.encoding == TYPED_V2:
+        from . import native_tables
+
+        current = native_tables.current(layout, layout.current_table)
+        version = native_tables.history(layout)
+        statement = insert(current)
+        upsert = statement.on_conflict_do_update(index_elements=[current.c.row_id], set_={
+            name: statement.excluded[name] for name in ("item_key", "row_version", *layout.value_columns, "r")})
+        return current, version, upsert, version.insert()
     metadata = MetaData()
     items = tables.items.to_metadata(metadata)
     identity = tables.version_identity.to_metadata(metadata)
@@ -269,9 +305,10 @@ def _version_triggers(layout: Layout) -> tuple[str, ...]:
         f"""CREATE TRIGGER IF NOT EXISTS {table}_append_only_delete BEFORE DELETE ON {table}
         BEGIN SELECT RAISE(ABORT, '{message}'); END""",
         f"""CREATE TRIGGER IF NOT EXISTS {table}_typed_rows_only BEFORE INSERT ON {table}
-        WHEN NOT EXISTS (SELECT 1 FROM items WHERE row_id=NEW.row_id
-                         AND collection_id='{layout.collection_id}' AND encoding='{TYPED_V1}')
-        BEGIN SELECT RAISE(ABORT, 'typed versions belong to typed-v1 rows of their collection'); END""",
+        WHEN NOT EXISTS (SELECT 1 FROM items i JOIN typed_encoding_mappings m ON m.collection_id=i.collection_id
+                         WHERE i.row_id=NEW.row_id AND i.collection_id='{layout.collection_id}'
+                         AND i.encoding='{layout.encoding}' AND m.generation={layout.generation} AND m.state='ready')
+        BEGIN SELECT RAISE(ABORT, 'typed versions belong to the ready typed generation of their collection'); END""",
         # A typed payload precedes its own identity; it never joins an existing
         # (JSON or typed) one. Its deferred foreign key refuses a payload whose
         # typed identity never follows, and JSON identities need JSON payloads.
@@ -281,31 +318,73 @@ def _version_triggers(layout: Layout) -> tuple[str, ...]:
     )
 
 
-def _identity_trigger(layout: Layout) -> str:
+def _identity_trigger(layout: Layout, *, generation_bound: bool = True) -> str:
+    payload = f"EXISTS (SELECT 1 FROM {layout.version_table} WHERE row_id=NEW.row_id AND row_version=NEW.row_version)"
+    if generation_bound:
+        # A payload staged before retirement must not attach to another generation.
+        # Empty unrelated histories permit the identity; only its own payload is required.
+        condition = (f"((NEW.encoding='{layout.encoding}' AND NEW.payload_generation={layout.generation} AND NOT {payload}) OR "
+                     f"({payload} AND (NEW.encoding<>'{layout.encoding}' OR NEW.payload_generation IS NOT {layout.generation})))")
+    else:
+        condition = f"NEW.encoding='{layout.encoding}' AND NOT {payload}"
     return f"""CREATE TRIGGER IF NOT EXISTS {layout.version_table}_identity BEFORE INSERT ON version_identity
-        WHEN NEW.encoding='{TYPED_V1}'
-          AND EXISTS (SELECT 1 FROM items WHERE row_id=NEW.row_id AND collection_id='{layout.collection_id}')
-          AND NOT EXISTS (SELECT 1 FROM {layout.version_table}
-                          WHERE row_id=NEW.row_id AND row_version=NEW.row_version)
-        BEGIN SELECT RAISE(ABORT, 'version_identity requires its typed payload'); END"""
+        WHEN EXISTS (SELECT 1 FROM items WHERE row_id=NEW.row_id AND collection_id='{layout.collection_id}')
+          AND {condition}
+        BEGIN SELECT RAISE(ABORT, 'version_identity requires its unique generation-bound typed payload'); END"""
 
 
 def _create_tables(conn, layout: Layout) -> None:
-    current, version, _, _ = _declarations(layout)
+    current, _, _, _ = _declarations(layout)
     conn.execute(CreateTable(current))
+    create_history(conn, layout)
+
+
+def create_history(conn, layout: Layout) -> None:
+    """Install one retained payload generation independently of its query relation."""
+    if layout.encoding == TYPED_V2:
+        from .native_tables import history
+
+        version = history(layout)
+    else:
+        _, version, _, _ = _declarations(layout)
     conn.execute(CreateTable(version))
     for statement in _version_triggers(layout):
         conn.execute(statement)
 
 
-def repair_triggers(conn) -> None:
+def repair_triggers(conn, *, generation_bound: bool = True) -> None:
     """Restore each published typed collection's history protections (schema ensure)."""
     for cid, generation, encoded in conn.execute(
-        "SELECT collection_id,generation,layout_json FROM typed_encoding_mappings WHERE state='ready'"
+        "SELECT collection_id,generation,layout_json FROM typed_encoding_mappings WHERE state IN ('ready','retired')"
     ).fetchall():
         layout = _layout(cid, generation, encoded)
-        for statement in (*_version_triggers(layout), _identity_trigger(layout)):
+        for statement in (*_version_triggers(layout), _identity_trigger(layout, generation_bound=generation_bound)):
             conn.execute(statement)
+
+
+def validate_history_bindings(conn) -> None:
+    """Prove old typed history before schema 11 assigns its generation."""
+    from . import tokens
+
+    for cid, in conn.execute("SELECT DISTINCT i.collection_id FROM version_identity v JOIN items i ON i.row_id=v.row_id "
+                             "WHERE v.encoding='typed-v1'"):
+        if conn.execute("SELECT count(*) FROM typed_encoding_mappings WHERE collection_id=? AND state='ready'",
+                        (cid,)).fetchone()[0] != 1:
+            raise TypedStorageError("typed history has no unique ready descriptor")
+        layout = ready_layout(conn, cid)
+        if layout is None:
+            raise TypedStorageError("typed history has no verified ready descriptor")
+        for row_id, version, key, schema_version, payload in conn.execute(
+            "SELECT v.row_id,v.row_version,i.item_key,v.schema_version,v.payload_hash FROM version_identity v "
+            "JOIN items i ON i.row_id=v.row_id WHERE i.collection_id=? AND v.encoding='typed-v1'", (cid,),
+        ):
+            try:
+                row = conn.execute(f"SELECT body,{','.join(layout.value_columns)},r FROM {layout.version_table} "
+                                   "WHERE row_id=? AND row_version=?", (row_id, version)).fetchone()
+                if row is None or tokens.payload_hash(schema_version, key, decode_row(layout, row[1:]), row[0]) != payload:
+                    raise TypedStorageError("typed history payload does not prove its generation")
+            except (sqlite3.DatabaseError, ValueError, TypeError, OverflowError) as error:
+                raise TypedStorageError("typed history payload is absent or invalid") from error
 
 
 # --- reads ------------------------------------------------------------------
@@ -325,14 +404,32 @@ def ready_layout(conn, collection_id: str) -> Layout | None:
         return None
     if hashlib.sha256(row[1].encode()).hexdigest() != row[2]:
         raise TypedStorageError("typed layout descriptor changed")
-    return _layout(collection_id, row[0], row[1])
+    layout = _layout(collection_id, row[0], row[1])
+    if layout.encoding == TYPED_V2:
+        from . import index_migrations
+        from .native_projections import NativeProjectionPlan
+
+        plan = index_migrations.ready_plan(conn, collection_id)
+        if not isinstance(plan, NativeProjectionPlan) or plan.layout.generation != layout.generation:
+            raise TypedStorageError("native payload has no matching published query relation")
+        return replace(layout, current=plan.table_name)
+    return layout
 
 
 def require_layout(conn, collection_id: str) -> Layout:
     layout = ready_layout(conn, collection_id)
     if layout is None:
-        raise TypedStorageError("typed-v1 collection has no published layout")
+        raise TypedStorageError("typed collection has no published layout")
     return layout
+
+
+def version_layout(conn, collection_id: str, generation: int) -> Layout:
+    """Resolve the retained descriptor bound to an immutable version."""
+    row = conn.execute("SELECT layout_json,layout_hash FROM typed_encoding_mappings WHERE collection_id=? "
+                       "AND generation=? AND state IN ('ready','retired')", (collection_id, generation)).fetchone()
+    if row is None or hashlib.sha256(row[0].encode()).hexdigest() != row[1]:
+        raise TypedStorageError("typed version descriptor is absent or changed")
+    return _layout(collection_id, generation, row[0])
 
 
 def _current(conn, layout: Layout, where: str, parameters) -> list[tuple[int, str, dict[str, Any]]]:
@@ -346,7 +443,7 @@ def _current(conn, layout: Layout, where: str, parameters) -> list[tuple[int, st
     ).fetchall():
         if version != current:
             raise TypedStorageError("typed current row is missing or stale")
-        rows.append((row_id, key, decode_row(layout, values)))
+        rows.append((row_id, key, decode_row(layout, values, connection=conn)))
     return rows
 
 
@@ -360,6 +457,11 @@ def current_values(conn, layout: Layout, row_id: int) -> dict[str, Any]:
 
 def selected_current_values(conn, layout: Layout, row_id: int, selection, *, max_bytes, check):
     """Select admitted typed columns before hydration; never fetch withheld residuals."""
+    if layout.encoding == TYPED_V2:
+        from . import native_rows
+
+        return native_rows.selected_current_values(conn, layout, row_id, selection, max_bytes=max_bytes,
+                                                   check=check, database=layout.database)
     from io import BytesIO
 
     from ..query_engine.selected_values import read_selected_tree
@@ -438,7 +540,7 @@ def hydrate(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def version_values(conn, row_id: int, row_version: int) -> tuple[dict[str, Any], str]:
     """Values and body of one immutable version, resolved through version_identity."""
-    identity = conn.execute("SELECT v.encoding,i.collection_id FROM version_identity v "
+    identity = conn.execute("SELECT v.encoding,i.collection_id,v.payload_generation FROM version_identity v "
                             "JOIN items i ON i.row_id=v.row_id WHERE v.row_id=? AND v.row_version=?",
                             (row_id, row_version)).fetchone()
     if identity is None:
@@ -447,36 +549,86 @@ def version_values(conn, row_id: int, row_version: int) -> tuple[dict[str, Any],
         raw, body = conn.execute("SELECT values_json,body FROM item_versions WHERE row_id=? AND row_version=?",
                                  (row_id, row_version)).fetchone()
         return json.loads(raw), body
-    layout = require_layout(conn, identity[1])
+    layout = version_layout(conn, identity[1], identity[2])
     row = conn.execute(f"SELECT body,{','.join(layout.value_columns)},r FROM {layout.version_table} "  # noqa: S608
                        "WHERE row_id=? AND row_version=?", (row_id, row_version)).fetchone()
     if row is None:
         raise TypedStorageError("typed version payload is absent")
-    return decode_row(layout, row[1:]), row[0]
+    return decode_row(layout, row[1:], connection=conn), row[0]
 
 
 # --- writes -----------------------------------------------------------------
 
 
-def _upsert_current(conn, layout: Layout, row_id: int, row_version: int, encoded) -> None:
+def _current_parameters(conn, layout: Layout, row_id: int, row_version: int, encoded, *, item_key=None):
+    values = {"row_id": row_id, "row_version": row_version,
+              **dict(zip((*layout.value_columns, "r"), encoded, strict=True))}
+    if layout.encoding == TYPED_V2:
+        from . import native_identity
+
+        if item_key is None:
+            item_key = conn.execute("SELECT item_key FROM items WHERE row_id=? AND collection_id=?",
+                                    (row_id, layout.collection_id)).fetchone()[0]
+        values["item_key"] = native_identity.encode(item_key, layout.identity)
+    return values
+
+
+def _upsert_current(conn, layout: Layout, row_id: int, row_version: int, encoded, *, item_key=None) -> None:
     _, _, upsert, _ = _declarations(layout)
-    conn.execute(upsert, {"row_id": row_id, "row_version": row_version,
-                        **dict(zip((*layout.value_columns, "r"), encoded, strict=True))})
+    conn.execute(upsert, _current_parameters(conn, layout, row_id, row_version, encoded, item_key=item_key))
+
+
+def _version_parameters(layout, row_id, row_version, encoded, body, payload_hash, txn_id, schema_version):
+    history = {"row_id": row_id, "row_version": row_version, "body": body,
+               **dict(zip((*layout.value_columns, "r"), encoded, strict=True))}
+    identity = {"row_id": row_id, "row_version": row_version,
+                "encoding": layout.encoding, "payload_hash": payload_hash, "txn_id": txn_id,
+                "schema_version": schema_version, "payload_generation": layout.generation}
+    return history, identity
 
 
 def write_version(conn, layout: Layout, *, row_id: int, row_version: int, values: Mapping[str, Any],
-                  body: str, payload_hash: str, txn_id: int, schema_version: int) -> None:
+                  body: str, payload_hash: str, txn_id: int, schema_version: int, item_key=None, scope=None) -> None:
     """Write typed current/version payloads and their identity in the caller's transaction."""
-    encoded = encode_row(layout, values)
-    _upsert_current(conn, layout, row_id, row_version, encoded)
+    encoded = encode_row(layout, values, connection=conn, scope=scope)
+    _upsert_current(conn, layout, row_id, row_version, encoded, item_key=item_key)
     _, _, _, insert_version = _declarations(layout)
-    conn.execute(insert_version, {"row_id": row_id, "row_version": row_version, "body": body,
-                                 **dict(zip((*layout.value_columns, "r"), encoded, strict=True))})
-    conn.execute(tables.INSERT_IDENTITY, {"row_id": row_id, "row_version": row_version,
-        "encoding": TYPED_V1, "payload_hash": payload_hash, "txn_id": txn_id, "schema_version": schema_version})
+    history, identity = _version_parameters(layout, row_id, row_version, encoded, body, payload_hash, txn_id, schema_version)
+    conn.execute(insert_version, history)
+    conn.execute(tables.INSERT_IDENTITY, identity)
+
+
+def write_new_versions(conn, layout: Layout, rows, *, txn_id: int, schema_version: int, scope=None) -> None:
+    """Encode new rows once, then install current payloads, history and identities."""
+    current, history, identities = [], [], []
+    for row_id, key, values, body, payload_hash in rows:
+        encoded = encode_row(layout, values, connection=conn, scope=scope)
+        current.append(_current_parameters(conn, layout, row_id, 1, encoded, item_key=key))
+        version, identity = _version_parameters(layout, row_id, 1, encoded, body, payload_hash, txn_id, schema_version)
+        history.append(version)
+        identities.append(identity)
+    _, _, upsert, insert_version = _declarations(layout)
+    if layout.encoding == TYPED_V2:
+        from .native_operands import FileRole, operand_snapshot
+
+        raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection
+        with operand_snapshot(raw, layout, role=FileRole.STORE):
+            conn.executemany(upsert, current)
+    else:
+        conn.executemany(upsert, current)
+    # History must precede its identity: triggers refuse payloads attached to existing identities.
+    conn.executemany(insert_version, history)
+    conn.executemany(tables.INSERT_IDENTITY, identities)
 
 
 # --- forward migration --------------------------------------------------------
+
+
+def migration_diagnostic(conn, collection_id: str) -> dict | None:
+    """The newest failed conversion's bounded reason; reads never restart that candidate."""
+    row = conn.execute("SELECT state,diagnostic_json FROM typed_encoding_mappings WHERE collection_id=? "
+                       "ORDER BY generation DESC LIMIT 1", (collection_id,)).fetchone()
+    return json.loads(row[1]) if row is not None and row[0] == "failed" and row[1] is not None else None
 
 
 def _transaction(conn):
@@ -512,7 +664,7 @@ def _fail(conn, layout: Layout) -> str:
 _SOURCE_COLUMNS = "row_id,row_version,item_key,schema_version,values_json,body,payload_hash"
 
 
-def migrate_batch(conn, collection_id: str, fields, *, limit: int = 128) -> str:
+def migrate_batch(conn, collection_id: str, fields, *, limit: int = 128, encoding=TYPED_V1) -> str:
     """Advance one bounded forward migration step; return building, ready or failed.
 
     The caller owns the writer lease, transaction and collection authority.
@@ -523,6 +675,12 @@ def migrate_batch(conn, collection_id: str, fields, *, limit: int = 128) -> str:
     commit the JSON mapping stays the only authority; a failed proof drops the
     candidate tables and leaves it so. Old JSON history is never rewritten.
     """
+    if encoding == TYPED_V2:
+        from . import native_migrations
+
+        return native_migrations.migrate_batch(conn, collection_id, fields, limit=limit)
+    if encoding != TYPED_V1:
+        raise ValueError("unsupported typed migration target")
     _transaction(conn)
     if type(limit) is not int or not 0 < limit <= 500:
         raise ValueError("typed migration limit must be between 1 and 500")

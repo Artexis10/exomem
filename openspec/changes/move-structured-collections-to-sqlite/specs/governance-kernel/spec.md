@@ -1,7 +1,22 @@
 ## ADDED Requirements
 
+### Requirement: Held owner-summary bytes keep their owner boundary
+Held corrections of an owner-only summary SHALL retain the unrestricted-owner floor in every shared authorization path. This floor SHALL apply to legacy corrections whose stored source path resolves to a canonical summary projection, even without a stored quarantine flag. Ordinary refused row proposals SHALL keep their existing subject policy.
+
+#### Scenario: A legacy summary correction cannot expose hidden row counts
+- **WHEN** a recipient can read a collection manifest but cannot read one of its rows
+- **AND** a held summary correction predates the stored quarantine flag
+- **THEN** canonical summary ownership keeps that correction absent from the recipient's reads, inspection and attention
+- **AND** the unrestricted owner can read the preserved bytes
+
 ### Requirement: Collection store artifacts and view paths never disclose withheld items
 The vault-side collection directory (the replica, mode marker, staging, aside, foreign, exported and sync-conflict copies) SHALL be reserved and denied on every egress path, the hosted gateway, and every index and resolver. Release decisions SHALL be cached per audience, policy fingerprint and collection, and re-evaluated only for changed rows or a changed fingerprint. Every surface that can expose a view path SHALL authorize the item behind it before disclosing the path, its title-bearing filename or its existence: directory listing and counts, inbound links and graph neighbours, the wikilink and title resolver, lexical and reference indexes, page refusal shapes, file-tool refusals, attention and due-state entries, history-page links, held-correction views, inventory counts, and sync-conflict copies of views.
+
+Detached correction bytes without proven canonical provenance SHALL carry a persisted quarantine flag. Their content, diagnostics and counts SHALL be visible only to an unrestricted owner, regardless of standing or session grants. Complete canonical-render equality MAY establish provenance. Copied identity fields, stamps and persisted device/inode equality SHALL NOT establish it. Canonical target hints SHALL only add row and field restrictions. The flag SHALL participate in authorization fingerprints and cache invalidation; incompatible readers SHALL refuse the guarded schema.
+
+#### Scenario: A recycled inode does not release unrelated detached bytes
+- **WHEN** unrelated detached bytes carry a current stamp and match a prior canonical file's persisted device/inode pair
+- **THEN** the bytes remain quarantined from recipients and restricted owners despite the target row's release
 
 #### Scenario: The replica is never served
 - **WHEN** any caller requests, lists, searches or resolves a path under the vault-side collection directory
@@ -10,6 +25,25 @@ The vault-side collection directory (the replica, mode marker, staging, aside, f
 #### Scenario: A withheld item's filename does not leak through a listing
 - **WHEN** a withheld item's view has a title-bearing filename and an audience lists its folder, follows backlinks, or resolves the title
 - **THEN** the view path, filename and count are absent from every response, exactly as if the item did not exist
+
+#### Scenario: A file tool answers a withheld view as a missing path
+- **WHEN** a caller from whom an item is withheld names the item's view as the file to delete or the source of a move
+- **THEN** the refusal is the `NOT_FOUND` that the same path gives when the item does not exist, and for that source path only a caller who may see the item receives `COLLECTION_VIEW_PATH`
+- **AND** a move or restore destination inside a collection is refused with `COLLECTION_VIEW_PATH` by its region alone, before any existence check
+
+#### Scenario: A hold is released no further than its item
+- **WHEN** a held candidate would change an existing item that a policy withholds from an audience, by any selector
+- **THEN** the hold is withheld from that audience in every listing, read and count, while the owner still sees it
+
+#### Scenario: A copied stamp cannot release unrelated bytes
+- **WHEN** a detached file carries a readable item's copied identity and current stamp but unrelated content
+- **THEN** its correction remains quarantined, and recipients and restricted owners cannot read its bytes, diagnostics or count
+- **AND** a standing or session grant cannot bypass that restriction
+
+#### Scenario: Path adoption cannot launder correction bytes
+- **WHEN** the writer adopts a moved path whose differing original bytes lack proven file continuity
+- **THEN** it preserves those bytes in quarantine and publishes canonical content at that path
+- **AND** the path change alone never grants the correction its target item's audience
 
 ### Requirement: Collection type default audience is a subject-level default-deny
 Every item of a collection type whose declaration sets `default_audience: owner` SHALL be evaluated with a subject-level default-deny that follows exactly the existing scope `default_deny` rule:

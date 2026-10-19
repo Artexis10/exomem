@@ -103,43 +103,43 @@ def _entity_page(
 def test_entity_candidate_resolution_is_alias_aware_active_and_bounded(tmp_path) -> None:
     _entity_page(
         tmp_path,
-        "Knowledge Base/Entities/People/Olivia Khwaja.md",
-        title="Olivia Khwaja",
-        aliases=["Olivia K"],
+        "Knowledge Base/Entities/People/Mira Vale.md",
+        title="Mira Vale",
+        aliases=["Mira V"],
     )
     _entity_page(
         tmp_path,
-        "Knowledge Base/Entities/People/Archived Olivia.md",
-        title="Archived Olivia",
-        aliases=["Olivia K"],
+        "Knowledge Base/Entities/People/Archived Mira.md",
+        title="Archived Mira",
+        aliases=["Mira V"],
         status="archived",
     )
 
-    result = entity_candidates.resolve_entity_candidate(tmp_path, name="olivia k")
+    result = entity_candidates.resolve_entity_candidate(tmp_path, name="mira v")
 
     assert result["status"] == "match"
-    assert result["candidates"][0]["path"].endswith("Olivia Khwaja.md")
+    assert result["candidates"][0]["path"].endswith("Mira Vale.md")
     assert result["candidates"][0]["matched_by"] == "alias"
     routed = commands.op_connect_memory(
         tmp_path,
         operation="resolve-entity",
-        name="Olivia K",
+        name="Mira V",
         entity_type="person",
     )
     assert routed == result
 
 
 def test_entity_candidate_resolution_returns_ambiguity_without_mutation(tmp_path) -> None:
-    for filename, title in (("One.md", "Olivia One"), ("Two.md", "Olivia Two")):
+    for filename, title in (("One.md", "Mira One"), ("Two.md", "Mira Two")):
         _entity_page(
             tmp_path,
             f"Knowledge Base/Entities/People/{filename}",
             title=title,
-            aliases=["Olivia"],
+            aliases=["Mira"],
         )
 
     result = entity_candidates.resolve_entity_candidate(
-        tmp_path, name="Olivia", limit=1
+        tmp_path, name="Mira", limit=1
     )
 
     assert result["status"] == "ambiguous"

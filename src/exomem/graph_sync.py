@@ -52,6 +52,11 @@ _RESET_MEMBERS = (
 # hashes and a duplicated created-path array. Keep a small format margin while
 # still refusing arbitrary multi-megabyte synced inputs.
 _CHECKPOINT_READ_LIMIT = 3_200_000
+# A node row stores its page's structural summary, about seven times the
+# page's own size (a 0.6 MB page stores 4.4 MB), so the checkpoint bound
+# above cannot double as the row bound. This one still caps what a tampered
+# sidecar can make a read allocate.
+_GRAPH_ROW_READ_LIMIT = 64 * 1024 * 1024
 _RECEIPT_READ_LIMIT = 65_536
 _FLOOR_READ_LIMIT = 8_192
 # Re-reads of a *busy* epoch, not of a broken one. The sidecar reader already
@@ -182,12 +187,31 @@ def _is_exact_canonical_json(raw: str | bytes, value: object) -> bool:
     return isinstance(rendered, bytes) and rendered == _canonical_json(value)
 
 
-def limit_graph_metadata_read(conn: sqlite3.Connection) -> None:
-    """Bound untrusted sidecar TEXT before SQLite allocates it for parsing."""
+def _limit_sidecar_read(conn: sqlite3.Connection, limit: int) -> None:
     setlimit = getattr(conn, "setlimit", None)
     category = getattr(sqlite3, "SQLITE_LIMIT_LENGTH", None)
     if callable(setlimit) and isinstance(category, int):
-        setlimit(category, _CHECKPOINT_READ_LIMIT)
+        setlimit(category, limit)
+
+
+def limit_graph_metadata_read(conn: sqlite3.Connection) -> None:
+    """Bound untrusted sidecar TEXT before SQLite allocates it for parsing.
+
+    For a connection that reads only `graph_meta`: no value it reads may
+    exceed the checkpoint format.
+    """
+    _limit_sidecar_read(conn, _CHECKPOINT_READ_LIMIT)
+
+
+def limit_graph_row_read(conn: sqlite3.Connection) -> None:
+    """Bound every sidecar value a connection that reads graph rows loads.
+
+    A row past the bound fails the whole statement, so a node the bound
+    cannot hold withholds every neighbour and count read beside it.
+    Checkpoint values parsed through such a connection keep their own
+    format bound in `GraphSyncCheckpoint.parse`.
+    """
+    _limit_sidecar_read(conn, _GRAPH_ROW_READ_LIMIT)
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -376,6 +400,11 @@ class GraphSyncCheckpoint:
 
     @classmethod
     def parse(cls, raw: str | bytes) -> GraphSyncCheckpoint | None:
+        # The format's own bound, held here so it applies however the bytes
+        # were read: a graph snapshot reads them under the larger row bound.
+        encoded = raw.encode("utf-8", "surrogatepass") if isinstance(raw, str) else raw
+        if len(encoded) > _CHECKPOINT_READ_LIMIT:
+            return None
         try:
             value = json.loads(raw, object_pairs_hook=_reject_duplicate_json_keys)
             if not isinstance(value, dict) or set(value) != {
@@ -818,6 +847,7 @@ class GraphLifecycleTransition:
                     source=self.destination,
                     destination=self.source,
                     recovery=not self.recovery,
+                    rollback=True,
                 )
                 self.renamed = False
             if self.epoch is not None:
@@ -1477,9 +1507,13 @@ def publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
 def canonical_publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
     """Read the bounded canonical epoch used by a private publication ticket.
 
-    This deliberately consults only the floor and checkpoint artifacts.  The
-    sidecar acknowledgement is derived state and must never be opened from the
-    short canonical publication hold.
+    This deliberately consults only the floor and checkpoint artifacts, so it
+    never opens the sidecar. The acknowledgement is derived state: a caller
+    that must bind it under the short canonical publication hold reads it
+    separately through `acknowledgement_state`, whose read is bounded by
+    `_ACK_READ_BUSY_TIMEOUT_SECONDS` and reports contention as `busy`. A behind
+    publication's ticket does this, once, because the acknowledgement it keeps
+    is what its publication must not move.
     """
     floor_status, floor = floor_state(vault_root)
     checkpoint_status, checkpoint = checkpoint_state(vault_root)
@@ -2019,6 +2053,25 @@ class GraphRebuildInProgress(GraphRebuildRegistrationError):
         super().__init__(
             "GRAPH_SYNC_REBUILD_IN_PROGRESS",
             "Retry after the active graph rebuild owner publishes or releases its claim.",
+        )
+
+
+class GraphRepairQueued(GraphRebuildInProgress):
+    """A whole-vault pass published behind, and the drain owns the rest of its repair.
+
+    A subclass because it means what `GraphRebuildInProgress` means to every
+    caller: the graph converges without this caller, so the outcome is pending
+    rather than failed, it may not mark the registry, and no newer pass is owed
+    for it. Its code tells an operator that nothing is rebuilding: the published
+    graph reports itself not current while the queued paths drain.
+    """
+
+    def __init__(self) -> None:
+        GraphRebuildRegistrationError.__init__(
+            self,
+            "GRAPH_SYNC_REPAIR_QUEUED",
+            "Repair of the changed pages is queued for the background index owner; "
+            "retry a graph-dependent query only if it reports warming.",
         )
 
 
@@ -2803,8 +2856,10 @@ class GraphRebuildCoordinator:
                     continue
                 if isinstance(error, GraphRebuildInProgress):
                     logger.info(
-                        "graph rebuild coalesced with active external owner "
-                        "checkpoint_sha256=%s generation=%s",
+                        "graph rebuild %s checkpoint_sha256=%s generation=%s",
+                        "published behind; its repair is queued"
+                        if isinstance(error, GraphRepairQueued)
+                        else "coalesced with active external owner",
                         required.checkpoint_sha256,
                         required.generation,
                     )
@@ -2865,7 +2920,11 @@ class GraphRebuildCoordinator:
             self._condition.notify_all()
 
     def _wait(self, checkpoint: GraphSyncCheckpoint, timeout: float | None) -> GraphBuildOutcome:
-        with self._condition:
+        from . import foreground_priority
+
+        # The rebuild is a bulk pass, so a foreground joiner must not park it.
+        # A joiner holds no boundary: the rebuild publishes under it.
+        with foreground_priority.outside_foreground(), self._condition:
             ready = self._condition.wait_for(
                 lambda: self._error is not None
                 or (self._outcome is not None and self._outcome.covers(checkpoint)),

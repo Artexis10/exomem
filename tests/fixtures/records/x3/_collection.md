@@ -29,7 +29,7 @@ storage:
   defaults:
     status: completed
   note_rules:
-    - equals: "Stopped, didn't feel like it, circadian and recovery"
+    - equals: "Stopped early"
       values:
         status: aborted
     - equals: "Partial"
@@ -70,4 +70,4 @@ links:
         limit: 24
 ---
 
-A human-owned X3 training-log contract. The log remains ordinary Markdown.
+An invented X3 training-log contract. The log remains ordinary Markdown.

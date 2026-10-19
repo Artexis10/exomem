@@ -33,13 +33,18 @@ run "one_variable_entry_adds_one_agent_in_the_fleet_location" {
 
   variables {
     k3s_agent_nodes = {
-      "01" = { private_ip = "10.50.1.31", server_type = "cpx42" }
+      "01" = { private_ip = "10.50.1.31", server_type = "cpx42", shared_profile = "qualified-test" }
     }
   }
 
   assert {
     condition     = output.k3s_agent_nodes["01"].private_ip == "10.50.1.31" && output.k3s_agent_nodes["01"].name == "exomem-agent-01"
     error_message = "The root output must carry each agent's name and private address."
+  }
+
+  assert {
+    condition     = output.k3s_agent_nodes["01"].shared_profile == "qualified-test"
+    error_message = "The root must preserve the shared profile for inventory generation."
   }
 }
 

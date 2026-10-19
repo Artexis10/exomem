@@ -69,6 +69,34 @@ def _matches(
     operation = kwargs.get("operation")
     canonical = choice.get("canonical")
     definition = choice.get("definition")
+    from . import vocabulary_review
+
+    queued = vocabulary_review.registry_proposal(vault_root, item.to_dict())
+    if queued is not None:
+        from .vocabulary import instances, registry_spec
+
+        spec, request = queued
+        generic = request.get("operation") == "save"
+        try:
+            selected_spec = instances.select(vault_root, registry_spec(spec.name),
+                                        kwargs.get("registry_scope") if generic else None, authoring=True)
+        except (ValueError, OSError):
+            return False
+        path = selected_spec.overlay(vault_root).relative_to(vault_root).as_posix()
+        if (selected_spec.instance_id != spec.instance_id or selected_spec.binding_revision != spec.binding_revision
+                or selected_spec.stem != spec.stem or path not in dict(item.target_versions)
+                or kwargs.get("expected_hash") != dict(item.target_versions)[path]
+                or kwargs.get("proposal") != request["proposal"]):
+            return False
+        if generic:
+            return (
+                command == "schema_memory" and operation == "save"
+                and kwargs.get("subject") == spec.name and decision_outcome == "propose-new"
+                and isinstance(request["proposal"].get("upsert"), Mapping)
+                and request["proposal"]["upsert"].get(canonical) == definition
+            )
+        if command != "schema_memory" or operation != request.get("operation"):
+            return False
     if command == "connect_memory" and operation == "create-entity":
         return (
             item.family == "entity-instance/v1"
@@ -439,6 +467,13 @@ def _resulting_versions(vault_root, binding: ApplicationBinding, terminal: Mappi
     """Read the canonical postcondition; never trust caller result fields."""
     from . import get_page, vocabulary_review
 
+    queued = vocabulary_review.registry_proposal(vault_root, binding.item.to_dict())
+    if queued is not None:
+        from .vocabulary import registry
+
+        spec, _request = queued
+        path = spec.overlay(vault_root).relative_to(vault_root).as_posix()
+        return {path: registry.load(spec, vault_root).content_hash}
     if binding.item.family in {"entity-type/v1", "relation-type/v1"}:
         leaf = terminal.get("leaf_result")
         if binding.item.family == "relation-type/v1" and isinstance(leaf, Mapping) and all(

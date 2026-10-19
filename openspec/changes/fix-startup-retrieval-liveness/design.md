@@ -68,7 +68,7 @@ Regression tests use a production-sized synthetic freshness tuple and instrument
 ## Migration Plan
 
 1. Ship the code and delta specs in a patch release.
-2. Upgrade personal and POLLY environments without deleting their rebuildable sidecars.
+2. Upgrade the personal cell and the client cell without deleting their rebuildable sidecars.
 3. Restart one cell at a time and verify liveness, retrieval-gated readiness, transition to ready, and a cold plus hot recall through the public ingress.
 4. Reconcile the personal graph after lexical admission is healthy.
 5. Roll back to 0.60.1 only if the new bounded admission path prevents recovery; no canonical-data migration is involved.

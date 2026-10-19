@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import base64
+import json
+import uuid
+from datetime import UTC, datetime
 
+import pytest
+
+from cellctl.imports import PHASES, ImportRow
 from cellctl.manifests import (
     CELL_PORT,
     STORAGE_CLASS,
     CellManifestSpec,
     namespace_name,
     render_cell_manifests,
+    render_import_job,
     render_namespace,
     render_network_policies,
     render_pvc,
@@ -68,6 +75,44 @@ def test_runtime_network_policy_admits_only_the_gateway_on_cell_port() -> None:
     assert peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] == "exomem-cloud"
     assert peer["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "exomem-cloud-gateway"
     assert rule[0]["ports"] == [{"protocol": "TCP", "port": CELL_PORT}]
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_import_job_keeps_cell_confinement_and_limits_ciphertext_url_to_import(phase):
+    """An import phase must not gain cluster credentials or another cell's volume."""
+    spec = _spec()
+    item = ImportRow(str(uuid.uuid4()), spec.cell_id, "adopt", 23, 1, "uploaded", datetime(2026, 1, 1, tzinfo=UTC),
+                     ciphertext_sha256="a" * 64, ciphertext_bytes=256)
+    url = "https://storage.example/ciphertext?signature=invented"
+    manifest = render_import_job(spec, item, phase, deadline_seconds=120, url=url if phase == "import" else None)
+    assert manifest["metadata"]["namespace"] == spec.namespace
+    assert manifest["spec"]["activeDeadlineSeconds"] == 120
+    pod = manifest["spec"]["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert "nodeName" not in pod
+    container = pod["containers"][0]
+    assert container["image"] == spec.image
+    mount = next(value for value in container["volumeMounts"] if value["mountPath"] == "/data")
+    volume = next(value for value in pod["volumes"] if value["name"] == mount["name"])
+    assert volume["persistentVolumeClaim"]["claimName"] == spec.pvc_name and mount["readOnly"] is False
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    command = container["command"]
+    assert command[:3] == ["exomem", "cell-import", "discard" if phase == "cleanup" else phase]
+    assert command[command.index("--import-id") + 1] == item.import_id
+    if phase == "import":
+        assert command[command.index("--url") + 1] == url
+        assert json.loads(command[command.index("--request") + 1]) == item.request()
+    else:
+        assert "--url" not in command and "--request" not in command
+    assert ("--keep-adoption" in command) == (phase == "cleanup")
+
+
+def test_import_job_refuses_an_import_id_that_could_name_another_path():
+    spec = _spec()
+    with pytest.raises(ValueError):
+        item = ImportRow("../another-import", spec.cell_id, "adopt", 23, 1, "requested", datetime(2026, 1, 1, tzinfo=UTC))
+        render_import_job(spec, item, "prepare", deadline_seconds=120)
 
 
 def test_runtime_pod_has_no_egress_at_all_not_even_dns() -> None:

@@ -16,6 +16,8 @@ kernel-global: two volume groups named `cells`, each with a pool `pool0`,
 cannot be active at once. Agent B is therefore the replacement capacity: its
 volume group is created once agent A's disk has been destroyed, as an
 operator brings up a replacement agent (design D4, recovery order step 3).
+A third agent is the planned move's destination: its volume group is created
+once agent B's is deactivated, between the move's backup and its restore.
 """
 
 from __future__ import annotations
@@ -38,6 +40,8 @@ DYNAMIC_RANGE = "172.29.83.128/25"
 SERVER_IP = "172.29.83.10"
 SERVER_NAME = "drill-server"
 AGENTS = {"drill-agent-a": "172.29.83.11", "drill-agent-b": "172.29.83.12"}
+# The planned move's destination, started only for that check.
+MOVE_TARGET = ("drill-agent-c", "172.29.83.13")
 VOLUME_GROUP = "cells"
 POOL = "pool0"
 GIB = 1024**3
@@ -255,12 +259,16 @@ def destroy_agent(cluster: Cluster, agent: Agent) -> None:
     run(["docker", "rm", "--force", "--volumes", agent.container])
     cluster.stack.containers.remove(agent.container)
     agent.destroyed = True
-    _deactivate(cluster, agent, timeout=120)
+    deactivate_volume_group(cluster, agent, timeout=120)
     run(["sudo", "losetup", "--detach", agent.loop_device])
     agent.disk.unlink(missing_ok=True)
 
 
-def _deactivate(cluster: Cluster, agent: Agent, *, timeout: float) -> None:
+def deactivate_volume_group(cluster: Cluster, agent: Agent, *, timeout: float) -> None:
+    """Deactivates the agent's `cells` volume group from a separate
+    container that reads only the agent's disk, retrying while a volume in
+    it is still open. Its volumes and their metadata stay on the disk."""
+
     def deactivated() -> bool:
         result = run(
             [
@@ -284,7 +292,7 @@ def release_disks(cluster: Cluster | None) -> None:
         return
     for agent in cluster.agents.values():
         if agent.volume_group:
-            _deactivate(cluster, agent, timeout=60)
+            deactivate_volume_group(cluster, agent, timeout=60)
         if agent.disk.exists():
             run(["sudo", "losetup", "--detach", agent.loop_device], check=False)
             agent.disk.unlink(missing_ok=True)

@@ -24,42 +24,46 @@ from test_mcp_schema_fidelity import _build_server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-TOTAL_BUDGET = 90_000
+# Raised from 90,000 for the evaluated correction guidance in the semantic-authoring
+# contract (five authoring tools) and the retained-history read and observe fields.
+TOTAL_BUDGET = 91_650
 
-#: Per-tool ceilings in bytes. Their sum is deliberately under TOTAL_BUDGET.
+#: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
+# The bounded viewer and original recovery use spare per-tool headroom; correction guidance raises the total.
 TOOL_CEILINGS: dict[str, int] = {
-    "edit_memory": 6725,
-    "remember": 5200,
-    "replace_memory": 4600,
-    "manage_memory_file": 4325,
-    "connect_memory": 4425,
-    "episode_memory": 4300,
-    "record_memory": 4275,
-    "ask_memory": 4125,
-    "schema_memory": 4125,
-    "observe_memory": 3850,
-    "maintain_memory": 3850,
-    "adoption_studio": 3400,
-    "capture_source": 3475,
-    "review_memory": 3375,
-    "activate_context": 3000,
-    "triage_memory": 3100,
-    "govern_memory": 3225,
-    "plan_memory": 2425,
-    "preserve_artifacts": 2425,
-    "configure_memory": 1550,
-    "read_memory": 1550,
-    "adopt_vault": 1500,
-    "preserve_evidence": 1500,
-    "review_item_context": 1500,
-    "bootstrap": 1275,
-    "query_dataset": 1375,
-    "process_media": 1200,
-    "transfer_artifact": 1100,
-    "browse_memory": 1000,
-    "compile_source": 825,
-    "read_media": 800,
-    "coordination_status": 600,
+    "edit_memory": 6950,
+    "remember": 5425,
+    "replace_memory": 4825,
+    "manage_memory_file": 4550,
+    "connect_memory": 4300,
+    "episode_memory": 4200,
+    "record_memory": 4165,
+    "ask_memory": 4025,
+    "schema_memory": 4000,
+    "observe_memory": 4400,
+    "maintain_memory": 3725,
+    "adoption_studio": 3275,
+    "capture_source": 3325,
+    "review_memory": 3250,
+    "activate_context": 2950,
+    "triage_memory": 2990,
+    "govern_memory": 3100,
+    "plan_memory": 2275,
+    "preserve_artifacts": 2300,
+    "configure_memory": 1400,
+    "read_memory": 1530,
+    "adopt_vault": 1300,
+    "preserve_evidence": 1350,
+    "review_item_context": 1300,
+    "bootstrap": 1100,
+    "query_dataset": 1265,
+    "process_media": 1025,
+    "transfer_artifact": 1330,
+    "browse_memory": 850,
+    "compile_source": 715,
+    "read_media": 625,
+    "coordination_status": 500,
+    "viewer_map": 3325,
 }
 
 AUTHORING_TOOLS = frozenset(

@@ -172,7 +172,7 @@ Use ordinary headings plus optional metadata bullets for v1 semantic blocks.
 
 ## Action
 - id: add-tests
-- relations: implements: [[Requirement#Validation Result Shape]], owns: [[Hugo]]
+- relations: implements: [[Requirement#Validation Result Shape]], owns: [[Fixture Actor]]
 
 Add parser, validation, claim extraction, and context-pack tests.
 ```

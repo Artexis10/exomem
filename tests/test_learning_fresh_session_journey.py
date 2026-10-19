@@ -210,6 +210,8 @@ def test_reverting_a_learned_name_restores_abstention(journey_vault: Path) -> No
 
 
 def test_reverting_a_learned_cue_restores_the_earlier_reading(journey_vault: Path) -> None:
+    from exomem.governance.principal import library_scope
+
     _edit(
         journey_vault,
         SLED,
@@ -228,17 +230,19 @@ def test_reverting_a_learned_cue_restores_the_earlier_reading(journey_vault: Pat
         commands.op_activate_context(journey_vault, turn="weiter", session="session-two")
     ) == [SLED]
 
-    version = commands.op_schema_memory(
-        journey_vault, subject="activation-conventions", operation="history"
-    )["versions"][0]["version"]
-    commands.op_schema_memory(
-        journey_vault,
-        subject="activation-conventions",
-        operation="restore",
-        version=version,
-        why="the cue was a one-off",
-        expected_hash=activation_conventions.load_conventions(journey_vault).content_hash,
-    )
+    # The local owner explicitly requests protected registry history and restore.
+    with library_scope():
+        version = commands.op_schema_memory(
+            journey_vault, subject="activation-conventions", operation="history"
+        )["versions"][0]["version"]
+        commands.op_schema_memory(
+            journey_vault,
+            subject="activation-conventions",
+            operation="restore",
+            version=version,
+            why="the cue was a one-off",
+            expected_hash=activation_conventions.load_conventions(journey_vault).content_hash,
+        )
     _fresh_session()
     assert _resolved(
         commands.op_activate_context(journey_vault, turn="weiter", session="session-three")

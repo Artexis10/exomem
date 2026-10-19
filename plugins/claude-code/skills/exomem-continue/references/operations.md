@@ -35,15 +35,17 @@ Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
 metrics, and tentative claims stay quiet. Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
-`proactive_capture`, affiliation relations require `link_acceptance`, a new Entity follows `proactive_capture`;
-merge or substantial curation requires confirmed `restructure_execution`.
+`proactive_capture`, a new Entity or your own affiliation edge follows `proactive_capture`,
+accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
+confirmed `restructure_execution`.
 
 ## Planning
 
 `plan_memory` is the one public command for human-owned intended future state.
 It has exactly nine actions: read-only `inspect`, `validate`, and `query`, plus
 guarded `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`.
-`inspect` requires one collection; use `browse_memory` to discover collections.
+Use `plan_memory(action="inspect")` without `collection` to discover Planning
+collections. Copy a returned `manifest_path` to inspect one collection.
 Canonical Planning is one ordinary Markdown item file per plan under
 `Knowledge Base/Planning/`; the authored horizon is never auto-rebucketed.
 Outcomes, initiatives, and work items may form an explicit hierarchy; areas are
@@ -489,7 +491,7 @@ model, embedding, or due-state claim.
    `edit_memory` correction or the canonical relation workflow instead of create.
 3. If no entity matches and the identity is stable, and central or recurring,
    and useful beyond this source, call `connect_memory(operation="create-entity")`.
-4. Draft the page following `page-types.md` § entity, propose, and write on confirm.
+4. Draft the page using `page-types.md` and write under the served promotion class and current write scope.
 5. For an existing entity, show a guarded diff and update through `edit_memory`.
 6. Refresh the entity index and top-level counts through the governed writer.
 
@@ -620,8 +622,7 @@ schema. A verified remote identity additionally requires
 `reference`. Without proof, the mapped verified field must be `false`; never
 infer remote byte equality. A Source receipt cannot authorize delivery. Missing
 collection or fields permits only `structural_suggestions`; collection changes
-need confirmed `restructure_execution`. A separately accepted relation remains
-`link_acceptance`.
+need confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.
@@ -645,25 +646,26 @@ need confirmed `restructure_execution`. A separately accepted relation remains
 
 ## download
 
-**Goal:** Pull a stored vault file *out* into the code sandbox to work on it — the
-reverse of the upload channel. Read-only; the bytes stream out-of-band, never back
-through the model.
-
-### Triggers
-- "open / analyze / re-read that file in the sandbox"
-- needing the raw bytes of a dataset, an evidence scan, or any stored artifact to process locally
+**Goal:** Recover the exact stored original after its external source disappears.
+Notes and exports use their separate read and export paths.
 
 ### Procedure
-1. Call **`transfer_artifact(operation="download")`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived).
-2. In the sandbox, `GET {download_url}?path=<vault-relative path>` with header `Authorization: Bearer <token>`.
-3. The server resolves the path under the vault root (traversal-safe) and streams the file. An out-of-vault or missing path is refused.
+1. Call `transfer_artifact(operation="download", artifact="<stored artifact or custody page>")` to receive the available delivery paths.
+2. If the client supports MCP blobs, read `deliveries.native_resource.uri` to receive the bounded original.
+3. Otherwise, open `deliveries.https.url` in a browser to download the original without a hidden header.
+4. Check the recovered SHA-256 and size against `artifact` to confirm the version.
+5. Preserve a derivative through the existing writer with provenance to the original to retain its source.
 
-### Notes
-- The token is **download-scoped** — it can read but not write.
-- Whole-vault read, like `read_memory` — datasets and evidence live in sibling folders, all reachable by path.
+Supply `expected_sha256` when a particular version is required. A prepared handoff
+proves no consumption. The link delegates only the named artifact version until
+expiry; current session and disclosure checks still apply. A changed or withheld
+original requires a fresh authorized handoff. Large payloads use HTTPS before
+base64 encoding. Desktop/personal endpoints serve recovery; Cloud outbound delivery
+remains unavailable. Native attachment rendering in other clients remains unverified.
 
-### Writes performed
-- None — read-only.
+Legacy automation can still omit `path` and use the returned token in an
+Authorization header with `download_url?path=...`. Broad legacy tokens remain
+header-only and cannot become clickable grants.
 
 ---
 

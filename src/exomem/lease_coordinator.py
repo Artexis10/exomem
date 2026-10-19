@@ -61,6 +61,13 @@ class SQLiteLeaseStore:
                 "vault_id TEXT PRIMARY KEY, store_id TEXT NOT NULL, "
                 "generation INTEGER NOT NULL CHECK(generation>0), head_json TEXT)"
             )
+            # Append-only: a retired generation stays the basis of the next enrolment.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS lease_collection_store_fence_history ("
+                "vault_id TEXT NOT NULL, store_id TEXT NOT NULL, "
+                "generation INTEGER NOT NULL CHECK(generation>0), head_json TEXT, "
+                "retired_at REAL NOT NULL, PRIMARY KEY(vault_id, generation))"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         return _connection(self.path)
@@ -114,12 +121,20 @@ class SQLiteLeaseStore:
         ).fetchone()
 
     @staticmethod
-    def _store_fence_state(row) -> dict:  # noqa: ANN001
+    def _retired_store_fence_row(conn: sqlite3.Connection, vault_id: str):  # noqa: ANN205
+        return conn.execute(
+            "SELECT store_id, generation, head_json FROM lease_collection_store_fence_history "
+            "WHERE vault_id=? ORDER BY generation DESC LIMIT 1",
+            (vault_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _store_fence_state(row, retired=None) -> dict:  # noqa: ANN001
         return CollectionStoreFenceState(
             COLLECTION_STORE_CAPABILITY,
             row is not None,
             row[0] if row else None,
-            int(row[1]) if row else 0,
+            int(row[1]) if row else (int(retired[1]) if retired else 0),
         ).as_dict()
 
     @staticmethod
@@ -298,7 +313,26 @@ class SQLiteLeaseStore:
 
     def collection_store_fence(self, vault_id: str) -> dict:
         with self._connect() as conn:
-            return self._store_fence_state(self._store_fence_row(conn, vault_id))
+            conn.execute("BEGIN")
+            row = self._store_fence_row(conn, vault_id)
+            retired = None if row else self._retired_store_fence_row(conn, vault_id)
+            conn.execute("COMMIT")
+        return self._store_fence_state(row, retired)
+
+    def retired_collection_store_fence(self, vault_id: str) -> dict:
+        """The newest retired store fence and the head recorded when it was retired.
+
+        A separate read from the fence read, whose fields released clients check exactly.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            retired = self._retired_store_fence_row(conn, vault_id)
+            conn.execute("COMMIT")
+        return {
+            "store_id": retired[0] if retired else None,
+            "generation": int(retired[1]) if retired else 0,
+            "collection_store_head": json.loads(retired[2]) if retired and retired[2] else None,
+        }
 
     def transition_collection_store_fence(
         self,
@@ -328,13 +362,15 @@ class SQLiteLeaseStore:
                     (target.store_id, target.generation, vault_id),
                 )
             else:
-                if expected != 0:
+                retired = self._retired_store_fence_row(conn, vault_id)
+                if expected != (int(retired[1]) if retired else 0):
                     conn.execute("COMMIT")
-                    return self._store_fence_state(None), False
+                    return self._store_fence_state(None, retired), False
+                target = CollectionStoreFenceState(capability, True, store_id, expected + 1)
                 conn.execute(
                     "INSERT INTO lease_collection_store_fences(vault_id, store_id, generation) "
-                    "VALUES (?, ?, 1)",
-                    (vault_id, target.store_id),
+                    "VALUES (?, ?, ?)",
+                    (vault_id, target.store_id, target.generation),
                 )
             conn.execute(
                 "UPDATE leases SET holder=NULL, expires_at=NULL, "
@@ -343,6 +379,46 @@ class SQLiteLeaseStore:
             )
             conn.execute("COMMIT")
         return target.as_dict(), True
+
+    def retire_collection_store_fence(
+        self,
+        vault_id: str,
+        *,
+        expected_generation: object,
+        capability: object,
+        store_id: object,
+    ) -> tuple[dict, bool]:
+        expected = self._generation(expected_generation, minimum=1)
+        target = CollectionStoreFenceState(capability, True, store_id, expected)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._store_fence_row(conn, vault_id)
+            if current is None:
+                retired = self._retired_store_fence_row(conn, vault_id)
+                conn.execute("COMMIT")
+                # A lost acknowledgement replays the newest retire without a second revocation.
+                replay = retired is not None and (retired[0], int(retired[1])) == (
+                    target.store_id,
+                    expected,
+                )
+                return self._store_fence_state(None, retired), replay
+            if (current[0], int(current[1])) != (target.store_id, expected):
+                conn.execute("COMMIT")
+                return self._store_fence_state(current), False
+            conn.execute(
+                "INSERT INTO lease_collection_store_fence_history"
+                "(vault_id, store_id, generation, head_json, retired_at) VALUES (?, ?, ?, ?, ?)",
+                (vault_id, current[0], int(current[1]), current[2], self.clock()),
+            )
+            conn.execute("DELETE FROM lease_collection_store_fences WHERE vault_id=?", (vault_id,))
+            # As a store cut does, revoke the holder that opened against the retired fence.
+            conn.execute(
+                "UPDATE leases SET holder=NULL, expires_at=NULL, "
+                "fencing_token=fencing_token+1 WHERE vault_id=?",
+                (vault_id,),
+            )
+            conn.execute("COMMIT")
+        return self._store_fence_state(None, current), True
 
     def schema_fence(self, vault_id: str) -> dict | None:
         with self._connect() as conn:
@@ -671,6 +747,32 @@ def create_app(
             )
         return JSONResponse(result)
 
+    async def retired_collection_store_fence(request: Request) -> JSONResponse:
+        # Read as the fence read is: an export that goes forward after a retire checks this head.
+        if not (authorized(request) or operator_authorized(request)):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return JSONResponse(store.retired_collection_store_fence(request.path_params["vault_id"]))
+
+    async def retire_collection_store_fence(request: Request) -> JSONResponse:
+        # A distinct route, so a coordinator without it answers 404 instead of a same-store replay.
+        if not operator_authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+            result, accepted = store.retire_collection_store_fence(
+                request.path_params["vault_id"],
+                expected_generation=body["expected_generation"],
+                capability=body["capability"],
+                store_id=body["store_id"],
+            )
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse({"error": "invalid request"}, status_code=400)
+        if not accepted:
+            return JSONResponse(
+                {"error": "collection store fence conflict", "current": result}, status_code=409
+            )
+        return JSONResponse(result)
+
     async def schema_fence(request: Request) -> JSONResponse:
         if not operator_authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -769,6 +871,16 @@ def create_app(
                 "/v1/vaults/{vault_id:str}/collection-store-fence",
                 collection_store_fence,
                 methods=["GET", "PUT"],
+            ),
+            Route(
+                "/v1/vaults/{vault_id:str}/collection-store-fence/retire",
+                retire_collection_store_fence,
+                methods=["POST"],
+            ),
+            Route(
+                "/v1/vaults/{vault_id:str}/collection-store-fence/retired",
+                retired_collection_store_fence,
+                methods=["GET"],
             ),
             Route(
                 "/v1/vaults/{vault_id:str}/schema-fence",

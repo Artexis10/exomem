@@ -76,6 +76,19 @@ def test_projection_delta_settles_and_reopens_destination_without_reconcile(tmp_
     assert due_state.served(tmp_path)["categories"]["artifact_role_promotion"] == 1
 
 
+def test_a_new_origin_does_not_change_the_previous_shared_projection(tmp_path):
+    due_state.reconcile(tmp_path)
+    snapshot = due_state._load_shared(tmp_path)
+    before = due_state.load(tmp_path)
+    assert before["role_state"]["has_origins"] is False
+    write(tmp_path, method())
+
+    due_state.apply_write_delta(tmp_path, ORIGIN)
+
+    assert due_state.load(tmp_path)["role_state"]["has_origins"] is True
+    assert snapshot == before
+
+
 def test_explicit_coverage_exists_even_without_findings(tmp_path):
     write(tmp_path, "## Claim\nOrdinary text.")
     assert report(tmp_path).as_dict()["meta"]["coverage"] == dict.fromkeys(FAMILIES, "complete")
@@ -488,6 +501,19 @@ def test_private_origins_do_not_consume_visible_origin_limit(tmp_path):
     state.persist(tmp_path, index)
     rows, coverage = state.served(tmp_path, lambda path: not path.startswith("A-private"))
     assert len(rows) == 1
+    assert coverage["artifact_role_promotion"] == "complete"
+
+
+def test_a_relevant_origin_is_served_beyond_the_global_origin_cap(tmp_path):
+    """Unrelated stored origins must not cap advice on the material a caller just received."""
+    from exomem import artifact_role_state as state
+
+    write(tmp_path, method())
+    index = report(tmp_path).role_state
+    index["origins"].update({f"A-unrelated-{i}": index["origins"][ORIGIN] for i in range(80)})
+    state.persist(tmp_path, index)
+    rows, coverage = state.served(tmp_path, lambda _path: True, paths=frozenset({ORIGIN}))
+    assert len(rows) == 1 and rows[0].path == ORIGIN
     assert coverage["artifact_role_promotion"] == "complete"
 
 

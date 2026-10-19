@@ -49,6 +49,8 @@ EXPECTED_TABLES = {
     "query_cursor_state",
     "version_identity",
     "typed_encoding_mappings",
+    "typed_field_epochs",
+    "typed_value_formats",
     "import_jobs",
     "import_rejections",
     "import_members",
@@ -379,7 +381,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 10
+    assert schema.SCHEMA_VERSION == 13
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -426,6 +428,17 @@ def test_a_store_newer_than_this_release_refuses(tmp_path: Path) -> None:
     assert refused.value.code == "COLLECTION_STORE_SCHEMA_NEWER"
 
 
+def test_schema_12_readers_refuse_projection_exposure_metadata(store, monkeypatch):
+    """An old direct writer must not discard historical policy from a schema 13 descriptor."""
+    path = store.path
+    store.close()
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 12)
+    with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+        connection.open_reader(path)
+    with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+        connection.open_writer(path, lease_check=_allow)
+
+
 @pytest.mark.parametrize("revision", [None, "unknown", "7"])
 def test_present_revision_metadata_cannot_masquerade_as_legacy(
     store: connection.WriterConnection, revision: str | None,
@@ -445,7 +458,7 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
-@pytest.mark.parametrize("revision", ["10", "9"])
+@pytest.mark.parametrize("revision", ["13", "9"])
 def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
     path = store.path
     store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
@@ -460,12 +473,12 @@ def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
             connection.open_writer(path, lease_check=_allow)
     else:
-        assert schema.schema_version(store.connection) == 10
+        assert schema.schema_version(store.connection) == 13
         store.close()
         with closing(connection.open_reader(path)) as reader:
-            assert schema.schema_version(reader) == 10
+            assert schema.schema_version(reader) == 13
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("10",)]
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("13",)]
 
 
 def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
@@ -479,19 +492,20 @@ def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
         assert reader.execute("SELECT * FROM items").fetchall() == rows
     for _ in range(2):
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("10",)]
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("13",)]
             assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
             assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
 
 
-def _next_revision(tmp_path, monkeypatch, statements):
+def _next_revision(tmp_path, monkeypatch, statements, *, target=None):
     migrations = tmp_path / "migrations%20"
     if not migrations.exists():
         shutil.copytree(schema._MIGRATION_PATH, migrations)
-    target = 11
-    script = migrations / "versions" / "11_probe.py"
+    target = schema.SCHEMA_VERSION + 1 if target is None else target
+    previous = target - 1
+    script = migrations / "versions" / f"{target}_probe.py"
     script.write_text(
-        "from alembic import op\nrevision = '11'\ndown_revision = '10'\n"
+        f"from alembic import op\nrevision = '{target}'\ndown_revision = '{previous}'\n"
         "def upgrade():\n" + "".join(f"    op.get_bind().exec_driver_sql({sql!r})\n" for sql in statements)
     )
     monkeypatch.setattr(schema, "_MIGRATION_PATH", migrations)
@@ -1123,7 +1137,7 @@ def test_schema_migration_failure_rolls_back_and_connection_can_be_reused(
     assert store.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [(str(current_version),)]
     assert store.connection.execute("SELECT count(*) FROM audit_effects").fetchone() == (0,)
     assert store.connection.execute("SELECT name FROM sqlite_master WHERE name='migration_probe'").fetchone() is None
-    _next_revision(tmp_path, monkeypatch, ["CREATE TABLE migration_probe(x INTEGER) STRICT"])
+    _next_revision(tmp_path, monkeypatch, ["CREATE TABLE migration_probe(x INTEGER) STRICT"], target=target_version)
     assert schema.ensure_schema(store.core) == target_version
     with store.transaction() as tx:
         tx.execute("INSERT INTO migration_probe VALUES (1)")

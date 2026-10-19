@@ -12,6 +12,7 @@ from exomem import (
     mutation_terminal,
     record_formats,
     record_governance,
+    records,
     semantic_writes,
 )
 from exomem import (
@@ -71,6 +72,30 @@ def _write_manifest(tmp_path: Path, *, claims: str = "", lifecycle: str = "activ
     path.write_text(_manifest(claims=claims, lifecycle=lifecycle), encoding="utf-8")
     (path.parent / "Entries").mkdir()
     return path
+
+
+def test_manifest_revision_refreshes_routing_before_projection_ttl(tmp_path: Path) -> None:
+    path = _write_manifest(tmp_path, claims="claims:\n  terms: [account state]\n")
+    (tmp_path / "Knowledge Base/log.md").write_text("# Activity\n", encoding="utf-8")
+    due_state.reconcile(tmp_path)
+    assert due_state.routing_targets(tmp_path)[0].title == "Account status ledger"
+    manifest = collections.load_manifest(tmp_path, path)
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+
+    result = records.revise_collection(
+        tmp_path,
+        manifest.path,
+        manifest_text=path.read_text(encoding="utf-8").replace(
+            "title: Account status ledger", "title: Revised status ledger"
+        ),
+        why="clarify the collection title",
+        **records.lifecycle_guards(manifest, snapshot),
+    )
+
+    assert result["outcome"] == "committed"
+    targets = due_state.routing_targets(tmp_path)
+    assert len(targets) == 1
+    assert targets[0].title == "Revised status ledger"
 
 
 def test_declared_claims_round_trip_through_manifest_inspection_and_describe(
@@ -541,6 +566,29 @@ def test_routing_targets_filter_the_manifest_before_disclosing_claims(tmp_path: 
     ) == []
 
 
+def test_mutating_visible_claim_rows_cannot_change_later_reads_or_page_deltas(tmp_path: Path) -> None:
+    _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n")
+    _write_item(
+        tmp_path,
+        record_id="22222222-2222-4222-8222-222222222222",
+        account="account-alpha",
+        effective_on="2026-09-03",
+        status="active",
+        provider="Provider Alpha",
+        tags=["subscriptions"],
+    )
+    path, _ = _write_observation(tmp_path)
+    due_state.reconcile(tmp_path)
+    expected = due_state.load(tmp_path)["claims"][MANIFEST_PATH]["items"]
+    rows = due_state.visible_claim_items(tmp_path, MANIFEST_PATH)
+    rows[0]["values"]["account"] = "changed by the caller"
+    rows[0]["values"]["tags"].append("changed by the caller")
+
+    assert due_state.visible_claim_items(tmp_path, MANIFEST_PATH) == expected
+    due_state.apply_write_delta(tmp_path, path)
+    assert due_state.load(tmp_path)["claims"][MANIFEST_PATH]["items"] == expected
+
+
 def test_incomplete_claims_census_keeps_declared_terms_but_suppresses_derived(
     tmp_path: Path,
 ) -> None:
@@ -853,6 +901,20 @@ def test_observation_delta_opens_pending_then_serves_after_exact_grace(
         observed_at=observed_at,
     )
 
+    projection = due_state.state_path(tmp_path)
+    before = projection.stat()
+    unchanged = due_state.apply_observation_write_delta(
+        tmp_path,
+        path=path,
+        observation_ref=page_ref,
+        terms=["account", "subscriptions", "cancelled"],
+        routing=routing,
+        observed_at=observed_at,
+    )
+    after = projection.stat()
+    assert unchanged is None
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
     stored = due_state.load(tmp_path)["categories"]["unreflected_observations"][path]
     assert stored["open"] == []
     assert stored["pending"][0]["due_at"] == "2026-09-02T15:30:00+00:00"
@@ -866,6 +928,33 @@ def test_observation_delta_opens_pending_then_serves_after_exact_grace(
     component = stored["pending"][0]["component"]
     assert component["collection_id"] == str(manifest.collection_id)
     assert component["observation_ref"] == page_ref
+
+
+def test_unrouted_observation_removes_its_stale_bucket_then_leaves_state_untouched(
+    tmp_path: Path,
+) -> None:
+    _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n")
+    path, page_ref = _write_observation(tmp_path)
+    now = dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)
+    due_state.reconcile(tmp_path, now=now)
+    snapshot = due_state._load_shared(tmp_path)
+    before = due_state.load(tmp_path)
+    assert path in before["categories"]["unreflected_observations"]
+
+    due_state.apply_observation_write_delta(
+        tmp_path, path=path, observation_ref=page_ref, terms=[], routing=None, observed_at=now
+    )
+
+    assert path not in due_state.load(tmp_path)["categories"]["unreflected_observations"]
+    assert snapshot == before
+    projection = due_state.state_path(tmp_path)
+    emission = due_state.emission_path(tmp_path)
+    persisted = (projection.stat(), emission.stat())
+    unchanged = due_state.apply_observation_write_delta(
+        tmp_path, path=path, observation_ref=page_ref, terms=[], routing=None, observed_at=now
+    )
+    assert unchanged is None
+    assert (projection.stat(), emission.stat()) == persisted
 
 
 def test_observation_fingerprint_changes_when_matched_terms_grow() -> None:
@@ -1549,7 +1638,27 @@ def test_carrier_reuses_projection_and_routing_within_each_audience_read(
     calls.update(load=0, routing=0)
     withheld = due_state.served_entries(tmp_path, now=now)
     assert not any(row["category"] == "unreflected_observations" for row in withheld)
-    assert calls == {"load": 1, "routing": 1}
+    # The projection file is unchanged, so the rebuild reuses its parse.
+    assert calls == {"load": 0, "routing": 1}
+
+
+def test_a_serve_leaves_the_shared_projection_as_the_file_says(tmp_path: Path) -> None:
+    # Every read shares one parse per projection file. A serve that changed it
+    # would change every later answer until the file is next rewritten.
+    _write_candidate_pages(tmp_path)
+    _write_candidate_pages(tmp_path, domain="garden-lease")
+    _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n")
+    _write_observation(tmp_path)
+    now = dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)
+    due_state.reconcile(tmp_path, now=now)
+    served = due_state.served_entries(tmp_path, now=now)
+    assert len({row["path"] for row in served}) > 1
+    due_state.served_entries(tmp_path, now=now, paths=frozenset({served[0]["path"]}), recover=False)
+    later = now + dt.timedelta(days=1)
+    from_shared = due_state.served_entries(tmp_path, now=later)
+
+    due_state.reset_serve_cache()
+    assert from_shared == due_state.served_entries(tmp_path, now=later)
 
 
 def test_collection_coverage_reports_unreflected_and_inventory_count(tmp_path: Path) -> None:
@@ -1667,7 +1776,7 @@ def test_bootstrap_teaches_routing_candidates_and_collection_confirmation(
     assert "one" in candidate and "confirmation" in candidate
     assert "exactly dated" in candidate and "sources" in candidate
     assert "collection creation" in envelope.CONFIRM_REQUIRED
-    assert "collections automatically" in envelope.FOUNDER_GATE
+    assert "Automatic collections stay refused" in envelope.FOUNDER_GATE
 
 
 def test_mcp_facing_collection_claims_journey(

@@ -7,7 +7,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from fastmcp.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from exomem import commands, relation_queue, server, writer_lease
@@ -205,16 +204,12 @@ def test_real_mcp_rest_cli_resolver_rejects_unbounded_and_cross_mode_inputs(
     mcp = server.build_server(require_auth=False)
     request = {"operation": "resolve-relation", **arguments}
 
-    try:
-        mcp_result = asyncio.run(
-            mcp.call_tool("connect_memory", request, run_middleware=True)
-        )
-    except ToolError as exc:  # FastMCP may raise or return an error result.
-        mcp_error = str(exc)
-    else:
-        assert mcp_result.is_error is True
-        mcp_error = repr(mcp_result)
-    assert code in mcp_error
+    mcp_result = asyncio.run(
+        mcp.call_tool("connect_memory", request, run_middleware=True)
+    )
+    mcp_refusal = json.loads(mcp_result.content[0].text)
+    assert mcp_refusal["success"] is False
+    assert mcp_refusal["error"]["code"] == code
 
     rest_response = TestClient(mcp.http_app()).post(
         "/api/connect_memory",

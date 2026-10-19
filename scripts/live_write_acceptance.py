@@ -1,15 +1,15 @@
 """Installed-product acceptance for fast durable write acknowledgement.
 
-What this measures is the complete public write a person actually waits for --
-entry to acknowledgement -- and the read that immediately follows it, on a real
-installed cell, separately for the in-process server and for the connector in
-front of it. The deterministic gate in ``semantic_write_latency.py`` proves the
-shape on synthetic corpora; this proves it where the corpus, the hardware and
-the transport are real.
+The connector measures HTTP entry to acknowledgement and the public read that
+immediately follows it. Its service owns startup and background convergence.
+Direct mode is an in-process helper diagnosis, not maintained-runtime proof.
+The deterministic gate in ``semantic_write_latency.py`` proves the shape on
+synthetic corpora.
 
 Four things have to hold together, and each can fail the run on its own:
 
-* default-write p50 at or below 3.0 s and p90 at or below 5.0 s, per operation;
+* existing default-write p50/p90 bars and the shared ordinary warm-write p95
+  bar, per public operation, with cold priming calls reported separately;
 * the read immediately after a write is exact, or explicitly warming -- a stale
   answer is never acceptable, because deferring derived work must not become
   losing it;
@@ -19,10 +19,9 @@ Four things have to hold together, and each can fail the run on its own:
 * the backlog a burst creates converges within a bounded window rather than
   leaving recall warm indefinitely.
 
-Everything this prints is content-free: closed codes, counts, percentiles and
-ages. No path, title, excerpt, query term or exception text leaves the process,
-because an acceptance artifact is read and pasted by people who are not the
-vault's owner.
+Reports contain synthetic case timings, closed outcomes, counts and ages.
+Package provenance includes its hashed origin, version and source revision;
+vault paths, titles, excerpts and exception text stay out of the report.
 
 It runs against a disposable vault it is handed and nothing else. Resolving a
 vault from the ambient environment is refused rather than discouraged: pointing
@@ -32,40 +31,56 @@ this at a live cell is the one way it could do harm.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
+import importlib.resources
 import json
 import os
+import socket
+import sqlite3
 import statistics
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
+# Source trials must opt in before importing the product. Installed runs never
+# add the repository source tree, including through the shared warm-up helper.
+_bootstrap = argparse.ArgumentParser(add_help=False)
+_bootstrap.add_argument("--package-mode", choices=("installed", "source"), default="installed")
+if _bootstrap.parse_known_args()[0].package_mode == "source":
     sys.path.insert(0, str(SRC))
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import managed_recall  # noqa: E402
+import records_live_acceptance  # noqa: E402
+import yaml  # noqa: E402
 
 from exomem import (  # noqa: E402
+    call_spans,
+    commands,
     deferred_index,
     derived_drain,
     derived_receipts,
-    memory_refs,
+    due_state,
     mode,
     pending_recall,
     readiness,
-    semantic_writes,
+    request_latency_contract,
+    semantic_contract,
+    vault,
     writer_lease,
 )
 from exomem import find as find_module  # noqa: E402
-from exomem import vault as vault_module  # noqa: E402
+from exomem.cli_ops import OpError  # noqa: E402
 
 #: The design's installed-product numbers. Not this script's to tune.
 P50_MS = 3_000.0
@@ -77,7 +92,8 @@ MIN_SAMPLES_PER_OPERATION = 30
 #: oldest-required-component alarm, so exceeding it here is the same breach the
 #: rollout would pause on.
 CONVERGENCE_BOUND_SECONDS = 300.0
-OPERATIONS = ("remember", "edit")
+# These are the public commands this acceptance protocol measures.
+OPERATIONS = ("remember", "edit_memory", "record_memory", "plan_memory")
 TRANSPORTS = ("direct", "connector")
 
 #: Bounded so one pathological response cannot be read into memory.
@@ -93,77 +109,183 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[index]
 
 
-def _page(title: str, marker: str, identity: str) -> str:
-    return (
-        "---\n"
-        f"title: {title}\n"
-        # An entity page carrying observations is the shape the deterministic
-        # gate already writes, and the one whose edit route does not demand a
-        # relation-disposition handoff -- so this measures acknowledgement
-        # latency rather than the cost of satisfying a review contract.
-        "type: entity\n"
-        "status: active\n"
-        "updated: 2026-09-02\n"
-        f"{memory_refs.ID_FIELD}: {identity}\n"
-        "---\n\n"
+def _remember_content(title: str, marker: str, relation_target: str | None) -> str:
+    """A remember body that qualifies through one typed relation, as a real note does.
+
+    Without a target (an empty vault) the first remember is the vault's bootstrap
+    page, which needs no relation.
+    """
+    content = (
         f"# {title}\n\n"
         "## Observations\n\n"
-        f"- [config] {marker} #acceptance (live) ^acceptance-anchor\n"
+        f"- [config] {marker} #acceptance (live)\n"
     )
+    if relation_target is not None:
+        content += f"\n## Relations\n\n- supports [[{relation_target}]]\n"
+    return content
+
+
+def _load_contract(path: Path | None = None) -> tuple[request_latency_contract.LatencyContract, str]:
+    if path is None:
+        contract = request_latency_contract.load_contract()
+        source = importlib.resources.files("exomem").joinpath("request_latency_contract.json").read_bytes()
+    else:
+        source = path.read_bytes()
+        contract = request_latency_contract.LatencyContract.model_validate_json(source)
+    return contract, hashlib.sha256(source).hexdigest()
+
+
+def _package_identity(package_mode: str, *, role: str = "observer-and-direct-runtime") -> dict[str, Any]:
+    from installed_package_identity import package_identity
+
+    try:
+        return package_identity(package_mode, role=role)
+    except ValueError as error:
+        raise SystemExit(
+            "installed acceptance requires a non-editable installed exomem package"
+        ) from error
+
+
+def _require_disposable_environment(vault_root: Path, state_dir: Path) -> None:
+    # A wrong refusal costs a disposable run; a wrong admission can mutate live
+    # data. Restrict local writes to explicit temporary paths and reject conflicts.
+    temporary = Path(tempfile.gettempdir()).resolve()
+    if not vault_root.resolve().is_relative_to(temporary) or not state_dir.resolve().is_relative_to(temporary):
+        raise SystemExit("write acceptance requires disposable vault and state paths under the temporary directory")
+    ambient = os.environ.get("EXOMEM_VAULT_PATH")
+    if ambient and Path(ambient).resolve() != vault_root.resolve():
+        raise SystemExit("write acceptance refuses a conflicting ambient vault")
+    for key in ("EXOMEM_STATE_ROOT", "EXOMEM_WRITER_LEASE_STATE_DIR"):
+        value = os.environ.get(key)
+        if value and not Path(value).resolve().is_relative_to(temporary):
+            raise SystemExit("write acceptance refuses non-temporary ambient state")
+    if not os.environ.get("EXOMEM_STATE_ROOT"):
+        os.environ["EXOMEM_STATE_ROOT"] = str(state_dir / "product")
+    if not os.environ.get("EXOMEM_WRITER_LEASE_STATE_DIR"):
+        os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(state_dir)
+    if not os.environ.get("EXOMEM_CONFIG_PATH"):
+        os.environ["EXOMEM_CONFIG_PATH"] = str(state_dir / "no-config.json")
+
+
+def _require_disposable_connector(
+    url: str, pid: int | None, host_network_namespace: str | None, vault_root: Path, state_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    # A wrong refusal costs a private run; a wrong admission risks production
+    # writes. Bind loopback to an isolated process before creating fixtures.
+    try:
+        endpoint = urlsplit(url)
+        port = endpoint.port
+    except ValueError as error:
+        raise SystemExit("connector requires a literal loopback MCP URL") from error
+    if port is None or not 0 < port < 65536 or url != f"http://127.0.0.1:{port}/mcp":
+        raise SystemExit("connector requires http://127.0.0.1:<port>/mcp without authentication, query or fragment")
+    if pid is None or pid <= 0:
+        raise SystemExit("connector requires an explicit --connector-pid")
+    if not host_network_namespace:
+        raise SystemExit("connector requires an explicit --host-network-namespace observed by the launcher")
+    try:
+        collector_network = os.readlink("/proc/self/ns/net")
+        service_network = os.readlink(f"/proc/{pid}/ns/net")
+        # A private Linux namespace has only its kernel loopback interface.
+        interfaces = [name for _index, name in socket.if_nameindex()]
+        environment = dict(
+            field.decode().split("=", 1)
+            for field in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            if b"=" in field
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise SystemExit("connector process isolation proof is unreadable") from error
+    if collector_network != service_network or collector_network == host_network_namespace or interfaces != ["lo"]:
+        raise SystemExit("connector and observer require the same loopback-only network namespace, distinct from the host anchor")
+    # These are the fixed environment fields that bind the disposable runtime.
+    expected = {
+        "EXOMEM_VAULT_PATH": str(vault_root.resolve()),
+        "EXOMEM_STATE_ROOT": str(Path(os.environ["EXOMEM_STATE_ROOT"]).resolve()),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(state_dir.resolve()),
+    }
+    if any(environment.get(key) != value for key, value in expected.items()):
+        raise SystemExit("connector initial environment does not match the explicit disposable vault and state")
+    instance = environment.get("EXOMEM_INSTANCE_ID", "").strip()
+    if not instance:
+        raise SystemExit("connector initial environment requires EXOMEM_INSTANCE_ID")
+    try:
+        request = Request(f"http://127.0.0.1:{port}/health/ready", method="GET")
+        try:
+            response = urlopen(request, timeout=_CONNECTOR_TIMEOUT_SECONDS)
+        except HTTPError as error:
+            # Startup may truthfully report not_ready. Its identity still binds
+            # the endpoint; health alone never proves full startup readiness.
+            if error.code != 503:
+                raise
+            response = error
+        with response:
+            body = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+            status = response.status
+        if len(body) > _MAX_HTTP_RESPONSE_BYTES:
+            raise ValueError("health response exceeds size limit")
+        health = json.loads(body)
+    except (OSError, ValueError) as error:
+        raise SystemExit("connector readiness identity proof is unreadable") from error
+    if not isinstance(health, dict) or health.get("instance_id") != instance:
+        raise SystemExit("connector readiness instance does not match the explicit process")
+    return {
+        "connector_pid": pid,
+        "collector_network_namespace": collector_network,
+        "service_network_namespace": service_network,
+        "host_network_namespace": host_network_namespace,
+        "host_network_namespace_source": "launcher-observed",
+        "network_interfaces": interfaces,
+        "initial_environment_matches": {key: environment[key] == value for key, value in expected.items()},
+        "instance_id": instance,
+    }, {
+        "source": "service-health-ready",
+        "http_status": status,
+        "status": health.get("status"),
+        "instance_id": health["instance_id"],
+        "release": health.get("release"),
+        "mcp_tool_surface_sha256": health.get("mcp_tool_surface_sha256"),
+        "retrieval": health.get("retrieval"),
+        "runtime_readiness": "externally-unverified",
+    }
 
 
 class _DirectTransport:
-    """The in-process server: the real lease manager over the real leaves."""
+    """The same public command descriptors and lease boundary as the server."""
 
     name = "direct"
 
     def __init__(self, vault_root: Path, state_dir: Path) -> None:
         self.vault_root = vault_root
-        self.manager = writer_lease.LeaseManager(
-            writer_lease.LeaseConfig(state_dir=state_dir)
-        )
+        self.manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=state_dir))
 
-    def write(self, rel_path: str, source: str) -> float:
-        target = self.vault_root / rel_path
-
-        def leaf(root: Path):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                preflight = semantic_writes.preflight_existing(
-                    root, path=rel_path, after_source=source, operation="observe"
-                )
-                if preflight.contract_result.should_block:
-                    codes = [
-                        item.code
-                        for item in preflight.contract_result.blocking_findings
-                    ]
-                    raise RuntimeError(f"acceptance write was blocked: {codes}")
-                semantic_writes.commit_existing(root, preflight=preflight)
-            else:
-                vault_module.batch_atomic_write(
-                    [vault_module.PlannedWrite(target, source, create_only=True)],
-                    vault_root=root,
-                )
-            return {"path": rel_path, "warnings": []}
-
-        command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+    def call(self, name: str, arguments: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+        command = next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
+        token = str(uuid.uuid4())
+        context = call_spans.MCP_CALL_TOKEN.set(token)
+        cpu_started = time.thread_time()
         started = time.perf_counter()
-        self.manager.invoke(
-            command,
-            (self.vault_root,),
-            {"response_detail": "compact"},
-            mutation_request_id=str(uuid.uuid4()),
-        )
-        return (time.perf_counter() - started) * 1_000.0
+        try:
+            result = self.manager.invoke(
+                command, (self.vault_root,), arguments,
+                read_only=commands.invocation_is_read_only(command, arguments),
+                mutation_request_id=str(uuid.uuid4()),
+                implicit_idempotency_scope="session:live-write-acceptance",
+            )
+            elapsed = (time.perf_counter() - started) * 1_000.0
+        finally:
+            self.thread_cpu_ms = (time.thread_time() - cpu_started) * 1_000.0
+            spans = call_spans.pop_call_spans(token)
+            call_spans.MCP_CALL_TOKEN.reset(context)
+            self.phase_attribution = [
+                {"name": span["name"], "elapsed_ms": span["ms"],
+                 "thread_cpu_us": span.get("fields", {}).get("thread_cpu_us")}
+                for span in spans
+            ]
+        return elapsed, result
 
 
 class _ConnectorTransport:
-    """The connector in front of the cell, measured separately by design.
-
-    A connector run that cannot reach a connector fails: silently measuring the
-    in-process path under the connector's name would report the one number the
-    acceptance exists to measure separately.
-    """
+    """External HTTP observer; measure() proves the disposable process first."""
 
     name = "connector"
 
@@ -171,37 +293,71 @@ class _ConnectorTransport:
         self.url = url
         self.token = token
 
-    def write(self, rel_path: str, source: str) -> float:
-        payload = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": str(uuid.uuid4()),
-                "method": "tools/call",
-                "params": {
-                    "name": "remember",
-                    "arguments": {"path": rel_path, "content": source},
-                },
-            }
-        ).encode("utf-8")
-        headers = {
-            "content-type": "application/json",
-            "accept": "application/json, text/event-stream",
-        }
+    def call(self, name: str, arguments: dict[str, Any]) -> tuple[float, Any]:
+        request_id = str(uuid.uuid4())
+        self.request_id = request_id
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }).encode("utf-8")
+        headers = {"content-type": "application/json", "accept": "application/json, text/event-stream",
+                   "x-exomem-request-id": request_id}
         if self.token:
             headers["authorization"] = f"Bearer {self.token}"
         request = Request(self.url, data=payload, headers=headers, method="POST")
         started = time.perf_counter()
         try:
             with urlopen(request, timeout=_CONNECTOR_TIMEOUT_SECONDS) as response:
-                response.read(_MAX_HTTP_RESPONSE_BYTES)
+                body = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+                content_type = records_live_acceptance._content_type(response)
         except (HTTPError, URLError, TimeoutError) as error:
-            # The class only: a transport error's message can carry a host, a
-            # path or a token fragment.
-            raise SystemExit(
-                f"live write acceptance failed: connector call failed "
-                f"({type(error).__name__})"
-            ) from error
-        return (time.perf_counter() - started) * 1_000.0
+            raise SystemExit(f"connector call failed ({type(error).__name__})") from error
+        elapsed = (time.perf_counter() - started) * 1_000.0
+        if len(body) > _MAX_HTTP_RESPONSE_BYTES:
+            raise SystemExit("connector response exceeds size limit")
+        envelope = records_live_acceptance._decode_http_response(body, content_type, request_id)
+        result = envelope["result"]
+        if result.get("isError"):
+            raise SystemExit("connector tool returned an error")
+        structured = result.get("structuredContent")
+        if structured is None:
+            content = result.get("content", [])
+            if len(content) != 1 or content[0].get("type") != "text":
+                raise SystemExit("connector response has no domain result")
+            structured = json.loads(content[0]["text"])
+        # FastMCP wraps union/list return schemas in this result envelope.
+        if isinstance(structured, dict) and set(structured) == {"result"}:
+            structured = structured["result"]
+        if not isinstance(structured, (dict, list)):
+            raise SystemExit("connector domain result must be an object or list")
+        return elapsed, structured
+
+
+def _prepare_collections(client: Any) -> tuple[dict[str, Any], str]:
+    _, described = client.call("record_memory", {"action": "describe"})
+    example = described["examples"]["minimal"]
+    client.call("record_memory", {
+        "action": "create", "manifest_path": example["manifest_path"],
+        "manifest_text": example["manifest_text"], "why": "prepare disposable acceptance",
+    })
+    # Reuse the shipped example's collection envelope and the Planning field
+    # shape. Defaults and accepted Planning values remain product-owned.
+    manifest, _, _ = vault.parse_frontmatter(example["manifest_text"], strict=True)
+    manifest.update({
+        "semantic_profile": "planning", "title": "Acceptance plans",
+        "exomem_id": str(uuid.uuid4()),
+        "item_schema": {"natural_key": ["title"], "fields": {
+            field: {"type": "string", **({"required": True} if field == "title" else {})}
+            for field in ("title", "kind", "status", "lifecycle", "priority", "commitment", "horizon", "health", "area", "parent")
+        }},
+    })
+    planning_path = "Knowledge Base/Planning/Acceptance/_collection.md"
+    client.call("plan_memory", {
+        "action": "create", "manifest_path": planning_path,
+        "manifest_text": "---\n" + yaml.safe_dump(manifest, sort_keys=False) + "---\n",
+        "why": "prepare disposable acceptance",
+    })
+    return example, planning_path
 
 
 def _read_your_write(vault_root: Path, marker: str, rel_path: str) -> str:
@@ -219,14 +375,92 @@ def _read_your_write(vault_root: Path, marker: str, rel_path: str) -> str:
     return "exact" if any(hit.path == rel_path for hit in hits) else "stale"
 
 
-def _full_receipt_count(vault_root: Path) -> int:
+def _connector_read_your_write(client: Any, marker: str, rel_path: str) -> str:
+    """Check a fresh marker through public recall and the selected page read."""
     try:
+        _, result = client.call("ask_memory", {
+            "query": marker, "scope": "kb-only", "mode": "keyword", "limit": 5,
+            "detail": "full", "graph": False, "rerank": False,
+        })
+        if isinstance(result, dict):
+            failure = result.get("error")
+            if isinstance(failure, dict):
+                if failure.get("code") == "RETRIEVAL_INDEX_WARMING":
+                    # RetrievalIndexWarming declares both public availability statuses.
+                    if failure.get("status") == "warming":
+                        return "warming"
+                    if failure.get("status") == "temporarily_unavailable":
+                        return "unavailable"
+                return "unknown"
+            hits = result.get("hits")
+            warming = bool(result.get("warming"))
+        else:
+            hits, warming = result, False
+        if not isinstance(hits, list):
+            return "unknown"
+        hit = next((hit for hit in hits if hit.get("path") == rel_path), None)
+        if hit is None:
+            return "warming" if warming else "stale"
+        _, page = client.call("read_memory", {"path": hit.get("ref") or hit["path"]})
+        if not isinstance(page, dict) or page.get("error") or page.get("success") is False:
+            return "unknown"
+        if page.get("path") != rel_path or not isinstance(page.get("body"), str) or marker not in page["body"]:
+            return "stale"
+        return "exact"
+    except (Exception, SystemExit):  # noqa: BLE001 - a failed public read proves no visibility
+        return "unknown"
+
+
+def _connector_relation_target(client: Any) -> str:
+    """Use a compiled fixture anchor, never an arbitrary search hit or manifest."""
+    _, recalled = client.call("ask_memory", {
+        "query": "", "scope": "kb-only", "mode": "keyword", "limit": 1,
+        "detail": "full", "types": ["insight"], "result_level": "page",
+    })
+    hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
+    if isinstance(hits, list) and hits and hits[0].get("path"):
+        return str(hits[0]["path"]).removesuffix(".md")
+    marker = f"acceptanceanchor{uuid.uuid4().hex}"
+    _, seeded = client.call("remember", {
+        "title": f"Acceptance anchor {uuid.uuid4().hex}",
+        "content": _remember_content("Acceptance anchor", marker, None),
+        "note_type": "insight", "suggestions": False, "response_detail": "compact",
+    })
+    if seeded.get("outcome") in ("held", "refused") or not seeded.get("path"):
+        raise RuntimeError("the public fixture call did not create a compiled relation anchor")
+    return str(seeded["path"]).removesuffix(".md")
+
+
+def _readonly_receipt_connection(vault_root: Path) -> sqlite3.Connection:
+    """Observe an existing supported store without product repair wrappers."""
+    connection = sqlite3.connect(
+        f"{deferred_index.store_path(vault_root).as_uri()}?mode=ro", uri=True, timeout=5.0,
+    )
+    try:
+        if not derived_receipts._receipt_schema_is_current(connection):
+            raise sqlite3.DatabaseError("unsupported receipt schema")
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def _full_receipt_count(vault_root: Path, *, read_only: bool = False) -> int:
+    try:
+        if read_only:
+            connection = _readonly_receipt_connection(vault_root)
+            try:
+                return int(connection.execute(
+                    f"SELECT count(*) FROM {deferred_index._QUEUE_TABLES['full']}"
+                ).fetchone()[0])
+            finally:
+                connection.close()
         return len(deferred_index.list_full_paths(vault_root))
     except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
         return -1
 
 
-def _reconciliation_demanded(vault_root: Path) -> int:
+def _reconciliation_demanded(vault_root: Path, *, read_only: bool = False) -> int:
     """Batches that fail closed into explicit reconciliation demand.
 
     This is deliberately NOT folded into convergence. A `reconcile_required`
@@ -236,7 +470,16 @@ def _reconciliation_demanded(vault_root: Path) -> int:
     writes producing one is a real acceptance failure, and reporting it as
     "still converging" would let it look like slowness.
     """
-    return derived_receipts.stranded_batch_count(vault_root)
+    if not read_only:
+        return derived_receipts.stranded_batch_count(vault_root)
+    try:
+        connection = _readonly_receipt_connection(vault_root)
+        try:
+            return int(connection.execute(derived_receipts._STRANDED_BATCHES_SQL).fetchone()[0])
+        finally:
+            connection.close()
+    except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
+        return -1
 
 
 #: A component this many attempts deep has stopped being a transient retry.
@@ -246,7 +489,7 @@ def _reconciliation_demanded(vault_root: Path) -> int:
 STUCK_ATTEMPT_THRESHOLD = 3
 
 
-def _drain_observation(vault_root: Path) -> dict[str, int]:
+def _drain_observation(vault_root: Path, *, read_only: bool = False) -> dict[str, int]:
     """What the store says about components a burst has not settled yet.
 
     Content-free by construction: counts, a mode name and ages -- no batch id,
@@ -280,12 +523,15 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
     An unreadable store reports -1 rather than zero, because a counter that
     cannot be read has not proved anything.
     """
-    try:
-        due = int(derived_receipts.due_component_count(vault_root))
-    except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
-        due = -1
+    due = -1
+    if not read_only:
+        try:
+            due = int(derived_receipts.due_component_count(vault_root))
+        except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
+            pass
 
     unreadable = {
+        "pending": -1,
         "due": due,
         "claimed": -1,
         "retrying": -1,
@@ -295,15 +541,15 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
     }
     rows: list[tuple[Any, ...]] = []
     try:
-        if deferred_index.store_path(vault_root).exists():
-            connection = deferred_index._connect_readonly(vault_root)
+        if read_only or deferred_index.store_path(vault_root).exists():
+            connection = _readonly_receipt_connection(vault_root) if read_only else deferred_index._connect_readonly(vault_root)
             try:
                 # `is_due` is `due_component_count`'s WHERE clause verbatim,
                 # evaluated per row and against the same `now`.
                 rows = connection.execute(
                     "SELECT c.state, c.attempt_count, c.claim_expires_at, "
                     "c.failure_code, "
-                    "(CASE WHEN (c.state = 'ready' OR "
+                    "(CASE WHEN b.state = 'ready' AND (c.state = 'ready' OR "
                     "(c.state = 'retryable' AND c.next_attempt_at <= :now) OR "
                     "(c.state = 'claimed' AND c.claim_expires_at <= :now)) "
                     "AND NOT EXISTS (SELECT 1 FROM pending_recall_rows AS p "
@@ -311,10 +557,12 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
                     "THEN 1 ELSE 0 END) AS is_due "
                     "FROM derived_batch_components AS c "
                     "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
-                    "WHERE b.state = 'ready' "
-                    "AND c.state IN ('ready', 'claimed', 'retryable')",
+                    "WHERE b.state IN ('prepared', 'ready', 'reconcile_required') "
+                    "AND c.state NOT IN ('completed', 'not_required', 'aborted', 'superseded')",
                     {"now": time.time()},
                 ).fetchall()
+                if read_only:
+                    due = sum(int(row[-1] or 0) for row in rows)
             finally:
                 connection.close()
     except Exception:  # noqa: BLE001 - same
@@ -342,6 +590,7 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
         if failure_code is not None:
             failed += 1
     return {
+        "pending": len(rows),
         "due": due,
         "claimed": claimed,
         "retrying": retrying,
@@ -381,8 +630,8 @@ def _converge(
     "did not converge" cannot distinguish the two outcomes an operator acts on
     differently -- a deep backlog that is draining and wants a longer window,
     and a drain that is stuck and wants a person. It stops early only on the
-    second of those: `stuck` (not due and several attempts deep) or two
-    consecutive passes that completed nothing. An ordinary retry is neither.
+    second of those: an unreadable observation. Retired receipts and retry
+    backoff can produce zero completions while the queue still makes progress.
     """
     dispatch = derived_drain.component_dispatcher()
     observe = derived_drain.canonical_generation_observer()
@@ -393,6 +642,7 @@ def _converge(
     passes = 0
     completed = 0
     stalled_passes = 0
+    previous = _drain_observation(vault_root)
     while True:
         passes += 1
         moved = derived_drain.drain_once(
@@ -400,11 +650,17 @@ def _converge(
             dispatch=dispatch,
             observe_current_generation=observe,
             visibility_publisher=pending_recall.publish,
+            retire_visibility=derived_drain.pending_visibility_retirer(),
             limit=limit,
         )
         completed += int(moved)
-        stalled_passes = 0 if moved else stalled_passes + 1
         observation = _drain_observation(vault_root)
+        retired = (
+            previous["pending"] >= 0
+            and 0 <= observation["pending"] < previous["pending"]
+        )
+        stalled_passes = 0 if moved or retired else stalled_passes + 1
+        previous = observation
         try:
             last_pass = derived_drain.last_pass_observation(vault_root)
         except Exception:  # noqa: BLE001 - a report is worth more than a crash
@@ -419,6 +675,7 @@ def _converge(
             "passes": passes,
             "completed": completed,
             "due": due,
+            "pending": observation["pending"],
             "claimed": observation["claimed"],
             "retrying": observation["retrying"],
             "failed": observation["failed"],
@@ -444,19 +701,34 @@ def _converge(
         # live lease is invisible to `due` entirely. Reporting "converged" over
         # either is the exact outcome these counters exist to prevent, so they
         # gate the verdict rather than only appearing in the report.
-        if due == 0 and observation["stuck"] == 0 and observation["claimed"] == 0:
+        if observation["pending"] == 0 and due == 0 and observation["claimed"] == 0:
             return round(elapsed, 3), True, drain
-        # Stopping early is for the two states more waiting cannot fix: work
-        # that is neither due nor shallow, and passes that move nothing. A row
-        # backing off after one failed attempt is not either of them -- it is
-        # what a drain doing its job looks like. An unreadable count (-1) stops
-        # too, because a counter that cannot be read has proved nothing.
-        if observation["stuck"] > 0 or observation["stuck"] < 0:
-            return round(elapsed, 3), False, drain
-        if stalled_passes >= 2:
+        # Retry backoff can resolve within the remaining window. Only an
+        # unreadable observation prevents further measurement from being useful.
+        if any(observation[key] < 0 for key in ("pending", "due", "stuck", "claimed")):
             return round(elapsed, 3), False, drain
         if time.monotonic() >= deadline:
             return round(elapsed, 3), False, drain
+        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+
+
+def _observe_convergence(
+    vault_root: Path, *, bound_seconds: float, started: float | None = None,
+) -> tuple[float, bool, dict[str, Any]]:
+    """Observe worker-owned receipts without entering the collector runtime."""
+    started = time.monotonic() if started is None else started
+    deadline = started + float(bound_seconds)
+    observations = 0
+    while True:
+        observation = _drain_observation(vault_root, read_only=True)
+        observations += 1
+        elapsed = time.monotonic() - started
+        drain = {**observation, "owner": "service", "observations": observations,
+                 "bound_overrun_seconds": round(max(0.0, elapsed - bound_seconds), 3)}
+        readable = all(value >= 0 for value in observation.values())
+        settled = readable and observation["pending"] == observation["due"] == observation["claimed"] == 0
+        if not readable or settled or time.monotonic() >= deadline:
+            return round(elapsed, 3), settled and elapsed <= bound_seconds, drain
         time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
 
 
@@ -468,106 +740,228 @@ def measure(
     state_dir: Path,
     connector_url: str | None = None,
     connector_token: str | None = None,
+    connector_pid: int | None = None,
+    host_network_namespace: str | None = None,
     convergence_bound_seconds: float = CONVERGENCE_BOUND_SECONDS,
+    package_mode: str = "installed",
+    condition: str = "warm",
+    contract_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run one transport's acceptance burst and return a content-free report."""
+    """Measure public acknowledgements, keeping cold and contended cases separate.
+
+    Connector setup and queue progress belong to the separate service process.
+    """
     root = Path(vault_root)
+    _require_disposable_environment(root, state_dir)
+    package = _package_identity(package_mode, role="observer-only" if transport == "connector" else "observer-and-direct-runtime")
+    contract, contract_hash = _load_contract(contract_path)
+    contract.bar("ordinary-write-warm")
+    if samples_per_operation < 1:
+        raise SystemExit("acceptance requires a positive sample count")
     if transport == "connector":
         if not connector_url:
-            raise SystemExit(
-                "live write acceptance failed: connector transport requires a "
-                "--connector-url or EXOMEM_CONNECTOR_URL"
-            )
+            raise SystemExit("connector transport requires --connector-url")
+        connector_environment, connector_runtime = _require_disposable_connector(connector_url, connector_pid, host_network_namespace, root, state_dir)
         client: Any = _ConnectorTransport(connector_url, connector_token)
     else:
-        state_dir.mkdir(parents=True, exist_ok=True)
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         client = _DirectTransport(root, state_dir)
 
-    os.environ["EXOMEM_FAST_DURABLE_ACK"] = "1"
-    # Managed admission, because the pending overlay is scoped to managed
-    # recall and an offline caller keeps its source-walk fallback -- and
-    # asserted, not merely recorded. `warming` is a truthful outcome of the
-    # read contract, but a harness that never had an admitted catalogue answers
-    # `warming` to everything and measures an unwarmed corpus-context build on
-    # every write. Measured on a 3,789-page copy, that was the difference
-    # between a 377ms edit median with exact reads and a 2,623ms one with a
-    # 27.7s first sample and no exact read at all. The acceptance would have
-    # been reporting the harness.
-    #
-    # This is the served process's own warm-up, shared with the deterministic
-    # gate as one object: see `scripts/managed_recall.py`.
+    if transport == "direct":
+        os.environ["EXOMEM_FAST_DURABLE_ACK"] = "1"
     durations: dict[str, list[float]] = {name: [] for name in OPERATIONS}
-    outcomes = {"exact": 0, "warming": 0, "stale": 0}
-    # The warm-up manages the runtime, so it belongs inside the same `finally`
-    # that gives it back: a warm-up that raises after managing would otherwise
-    # leave this process managed for good.
+    cases: list[dict[str, Any]] = []
+    outcomes = {"exact": 0, "warming": 0, "stale": 0, "unknown": 0}
+    if transport == "connector":
+        outcomes["unavailable"] = 0
+    relation_target: str | None = None
+    last_acknowledged: float | None = None
+
+    def skipped(name: str, index: int, error: BaseException | None = None) -> None:
+        cases.append({
+            "case": index, "operation": name, "condition": "cold" if index == 0 else condition,
+            "elapsed_ms": None, "terminal_outcome": "skipped", "thread_cpu_ms": None,
+            "thread_cpu_source": "unavailable", "phase_attribution": [],
+            "error_class": type(error).__name__ if error else None,
+        })
+
+    def measured_call(name: str, arguments: dict[str, Any], index: int) -> dict[str, Any] | None:
+        nonlocal last_acknowledged
+        result = None
+        error_class = None
+        terminal = "ok"
+        started = time.perf_counter()
+        client.thread_cpu_ms = None
+        client.phase_attribution = []
+        client.request_id = None
+        try:
+            elapsed, result = client.call(name, arguments)
+            # These are structured terminal fields, not inferred prose.
+            if result.get("outcome") in ("held", "refused") or result.get("ok") is False or result.get("success") is False:
+                terminal = "refused"
+            else:
+                last_acknowledged = time.monotonic()
+        except (Exception, SystemExit) as error:  # noqa: BLE001 - retain all timed terminals without their content
+            elapsed = (time.perf_counter() - started) * 1_000.0
+            terminal = "refused" if isinstance(error, OpError) else "error"
+            error_class = type(error).__name__
+        cpu_ms = client.thread_cpu_ms
+        cases.append({
+            "case": index, "operation": name, "condition": "cold" if index == 0 else condition,
+            "elapsed_ms": elapsed, "terminal_outcome": terminal,
+            "thread_cpu_ms": cpu_ms,
+            "thread_cpu_source": "public-boundary-thread" if cpu_ms is not None else "unavailable",
+            "phase_attribution": client.phase_attribution,
+            "request_id": client.request_id,
+            "error_class": error_class,
+        })
+        if index > 0:
+            durations[name].append(elapsed)
+        return result if terminal == "ok" else None
+
+    def collection_read(name: str, collection: str, field: str, marker: str) -> str:
+        try:
+            _, result = client.call(name, {
+                "action": "query", "collection": collection,
+                "filters": [{"column": field, "op": "eq", "value": marker}],
+            })
+            if result.get("status") == "warming":
+                return "warming"
+            if result.get("error") or result.get("success") is False:
+                return "unknown"
+            return "exact" if any(row.get(field) == marker for row in result["rows"]) else "stale"
+        except (Exception, SystemExit):  # noqa: BLE001 - a failed read proves no visibility
+            return "unknown"
+
     try:
-        recall_admission = str(
-            managed_recall.enter_managed_recall(root).get("state", "unknown")
-        )
-        full_receipts_before = _full_receipt_count(root)
-        for index in range(samples_per_operation):
-            identity = str(uuid.UUID(int=index + 1))
-            # An entity page belongs under Entities/: the semantic contract
-            # pairs a declared type with its location, and a benchmark that
-            # fought that contract would be measuring the refusal.
-            rel_path = (
-                f"Knowledge Base/Entities/Concepts/acceptance-{index:04d}.md"
-            )
-            create_marker = f"acceptanceremember{index:04d}"
-            durations["remember"].append(
-                client.write(
-                    rel_path,
-                    _page(f"Acceptance {index:04d}", create_marker, identity),
+        if transport == "connector":
+            relation_target = _connector_relation_target(client)
+        example, planning_path = _prepare_collections(client)
+        if transport == "connector":
+            preparation_seconds, preparation_converged, preparation_drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds)
+            projection = due_state.load(root)
+            # Count stored buckets, separately from the audience-filtered served view.
+            try:
+                due_projection_entries = None if projection is None else sum(
+                    len(due_state._unbucket(bucket))
+                    for pages in projection["categories"].values()
+                    for bucket in pages.values()
                 )
+            except (AttributeError, TypeError, ValueError):
+                due_projection_entries = None
+            due_items = None
+            retrieval = connector_runtime.get("retrieval") or {}
+            recall_admission = str(retrieval.get("state", "unverified"))
+        else:
+            recall_admission = str(
+                managed_recall.enter_managed_recall(root, full_startup=True).get("state", "unknown")
             )
-            outcomes[_read_your_write(root, create_marker, rel_path)] += 1
+            preparation_seconds, preparation_converged, preparation_drain = _converge(
+                root, bound_seconds=convergence_bound_seconds
+            )
+            due_state.reconcile(root)
+            projection = due_state.load(root)
+            due_items = len(due_state.served_entries(root, recover=False))
+            eligible = semantic_contract.build_corpus_context(root).eligible_governed_paths
+            relation_target = min(eligible).removesuffix(".md") if eligible else None
+        full_receipts_before = _full_receipt_count(root, read_only=transport == "connector")
+        # The first public call of each operation is reported as cold; it primes
+        # per-operation state before any sample may claim the warm population.
+        for index in range(samples_per_operation + 1):
+            create_marker = f"acceptanceremember{uuid.uuid4().hex}" if transport == "connector" else f"acceptanceremember{index:04d}"
+            result = measured_call("remember", {
+                "content": _remember_content(f"Acceptance {index:04d}", create_marker, relation_target),
+                "title": f"Acceptance {index:04d}", "note_type": "insight",
+                "suggestions": False, "response_detail": "compact",
+            }, index)
+            if result is None:
+                skipped("edit_memory", index)
+                outcomes["unknown"] += 2
+            else:
+                rel_path = str(result["path"])
+                if not rel_path.endswith(".md"):
+                    rel_path += ".md"
+                relation_target = relation_target or rel_path.removesuffix(".md")
+                if transport == "connector":
+                    outcomes[_connector_read_your_write(client, create_marker, rel_path)] += 1
+                else:
+                    outcomes[_read_your_write(root, create_marker, rel_path)] += 1
+                edit_marker = f"acceptanceedit{uuid.uuid4().hex}" if transport == "connector" else f"acceptanceedit{index:04d}"
+                edited = measured_call("edit_memory", {
+                    "path": rel_path, "why": "correct disposable acceptance observation",
+                    "operation": {"kind": "replace_string", "old_string": create_marker, "new_string": edit_marker},
+                }, index)
+                if edited is None:
+                    outcomes["unknown"] += 1
+                elif transport == "connector":
+                    outcomes[_connector_read_your_write(client, edit_marker, str(edited.get("path") or rel_path))] += 1
+                else:
+                    outcomes[_read_your_write(root, edit_marker, rel_path)] += 1
 
-            edit_marker = f"acceptanceedit{index:04d}"
-            durations["edit"].append(
-                client.write(
-                    rel_path,
-                    _page(f"Acceptance {index:04d}", edit_marker, identity),
-                )
-            )
-            outcomes[_read_your_write(root, edit_marker, rel_path)] += 1
+            record_marker = f"acceptancerecord{index:04d}"
+            try:
+                _, inspected = client.call("record_memory", {"action": "inspect", "collection": example["manifest_path"]})
+            except (Exception, SystemExit) as error:  # noqa: BLE001 - skip only the write whose guard is unknown
+                skipped("record_memory", index, error)
+                outcomes["unknown"] += 1
+            else:
+                recorded = measured_call("record_memory", {
+                    "action": "append", "collection": example["manifest_path"],
+                    "item": dict(example["append_item"], label=record_marker), "item_key": str(uuid.uuid4()),
+                    "expected_container_hash": inspected["snapshot"], "why": "record disposable acceptance event",
+                }, index)
+                outcomes[collection_read("record_memory", example["manifest_path"], "label", record_marker) if recorded is not None else "unknown"] += 1
+
+            plan_marker = f"acceptanceplan{index:04d}"
+            planned = measured_call("plan_memory", {
+                "action": "add", "collection": planning_path,
+                "item": {"title": plan_marker}, "why": "save disposable acceptance intent",
+            }, index)
+            outcomes[collection_read("plan_memory", planning_path, "title", plan_marker) if planned is not None else "unknown"] += 1
     finally:
-        readiness.unmanage_runtime()
+        if transport == "direct":
+            readiness.unmanage_runtime()
 
-    convergence_seconds, converged, drain = _converge(
-        root, bound_seconds=convergence_bound_seconds
-    )
-    full_receipts_after = _full_receipt_count(root)
-    uncovered = (
-        -1
-        if full_receipts_before < 0 or full_receipts_after < 0
-        else max(0, full_receipts_after - full_receipts_before)
-    )
+    if transport == "connector":
+        convergence_seconds, converged, drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds, started=last_acknowledged)
+    else:
+        convergence_seconds, converged, drain = _converge(root, bound_seconds=convergence_bound_seconds)
+    full_receipts_after = _full_receipt_count(root, read_only=transport == "connector")
+    uncovered = -1 if full_receipts_before < 0 or full_receipts_after < 0 else max(0, full_receipts_after - full_receipts_before)
     return {
-        "transport": transport,
-        "samples_per_operation": samples_per_operation,
-        "fast_durable_ack": (
-            "active" if writer_lease.fast_durable_ack_active() else "inactive"
-        ),
+        "transport": transport, "package": package, "condition": condition,
+        "boundary": "public-write-v1",
+        "contract": {"revision": contract.revision, "sha256": contract_hash},
+        "connector_environment": connector_environment if transport == "connector" else None,
+        "connector_runtime_provenance": connector_runtime if transport == "connector" else None,
+        "measurement_scope": "external-http-observer" if transport == "connector" else "helper-in-process-diagnosis",
+        "cpu_scope": "server-unmeasured" if transport == "connector" else "in-process-public-boundary-thread",
+        "cold_definition": "first-public-call-per-operation-after-product-startup",
+        "preparation": {
+            "startup": "service-owned" if transport == "connector" else "product-warm-all",
+            "runtime_readiness": "externally-unverified" if transport == "connector" else "helper-in-process-diagnosis",
+            "convergence_seconds": preparation_seconds,
+            "converged": preparation_converged,
+            "drain": preparation_drain,
+            "due_projection_present": projection is not None,
+            **({"due_projection_entries": due_projection_entries} if transport == "connector" else {}),
+            "due_items": due_items,
+        },
+        "samples_per_operation": samples_per_operation, "cases": cases,
+        "fast_durable_ack": "externally-unverified" if transport == "connector" else ("active" if writer_lease.fast_durable_ack_active() else "inactive"),
         "operations": {
-            name: {
-                "samples": len(values),
-                "p50_ms": round(statistics.median(values), 1),
-                "p90_ms": round(_percentile(values, 0.90), 1),
-                "max_ms": round(max(values), 1),
-            }
+            name: {"samples": len(values), "p50_ms": statistics.median(values) if values else None,
+                   "p90_ms": _percentile(values, 0.90) if values else None,
+                   "p95_ms": _percentile(values, 0.95) if values else None,
+                   "max_ms": max(values) if values else None}
             for name, values in durations.items()
         },
-        "recall_admission": recall_admission,
-        "read_your_write": outcomes,
+        "recall_admission": recall_admission, "read_your_write": outcomes,
         "uncovered_full_receipts": uncovered,
         "post_burst_convergence_seconds": convergence_seconds,
-        "post_burst_convergence_bound_seconds": round(
-            float(convergence_bound_seconds), 1
-        ),
-        "post_burst_converged": converged,
-        "drain": drain,
-        "reconciliation_demanded": _reconciliation_demanded(root),
+        "post_burst_convergence_bound_seconds": float(convergence_bound_seconds),
+        "post_burst_converged": converged, "drain": drain,
+        "reconciliation_demanded": _reconciliation_demanded(root, read_only=transport == "connector"),
     }
 
 
@@ -591,6 +985,10 @@ def _convergence_failure(report: dict[str, Any]) -> str:
     drain = report.get("drain")
     if not isinstance(drain, dict):
         return headline
+    if drain.get("owner") == "service":
+        if any(int(drain.get(key, -1)) < 0 for key in ("pending", "due", "claimed")):
+            return f"{headline}: service queue observation was unreadable"
+        return f"{headline}: observed {drain['pending']} pending service component(s), {drain['claimed']} under live claim(s)"
     passes = int(drain.get("passes", 0))
     stuck = int(drain.get("stuck", 0))
     failed = int(drain.get("failed", 0))
@@ -631,9 +1029,19 @@ def _convergence_failure(report: dict[str, Any]) -> str:
     )
 
 
-def check(report: dict[str, Any]) -> None:
+def check(
+    report: dict[str, Any],
+    *,
+    contract: request_latency_contract.LatencyContract | None = None,
+) -> None:
     """Fail the acceptance on any breach, naming it without naming content."""
     failures: list[str] = []
+    preparation = report.get("preparation")
+    if not isinstance(preparation, dict) or not preparation.get("converged"):
+        failures.append("fixture custody did not converge before measurement")
+    if not isinstance(preparation, dict) or not preparation.get("due_projection_present"):
+        failures.append("due projection was not prepared before measurement")
+    warm_bar = (contract or request_latency_contract.load_contract()).bar("ordinary-write-warm")
     for name in OPERATIONS:
         measured = report["operations"][name]
         if int(measured["samples"]) < MIN_SAMPLES_PER_OPERATION:
@@ -641,6 +1049,9 @@ def check(report: dict[str, Any]) -> None:
                 f"{name} samples={measured['samples']} < "
                 f"{MIN_SAMPLES_PER_OPERATION}"
             )
+        if not measured["samples"]:
+            failures.append(f"{name} has no timed terminals")
+            continue
         if float(measured["p50_ms"]) > P50_MS:
             failures.append(
                 f"{name} p50={float(measured['p50_ms']):.1f}ms > {P50_MS:.1f}ms"
@@ -649,6 +1060,19 @@ def check(report: dict[str, Any]) -> None:
             failures.append(
                 f"{name} p90={float(measured['p90_ms']):.1f}ms > {P90_MS:.1f}ms"
             )
+        if report.get("condition") == "warm":
+            if int(measured["samples"]) < warm_bar.min_samples:
+                failures.append(f"{name} warm sample count below contract minimum")
+            threshold = warm_bar.threshold_ms
+            p95 = float(measured["p95_ms"])
+            if threshold is None or (p95 >= threshold if warm_bar.comparison == "<" else p95 > threshold):
+                failures.append(f"{name} warm p95={p95:.1f}ms breaches {warm_bar.id}")
+    incomplete = sum(case["terminal_outcome"] != "ok" for case in report.get("cases", []))
+    if incomplete:
+        failures.append(f"{incomplete} failed or skipped public write(s)")
+    unknown_reads = int(report["read_your_write"].get("unknown", 0))
+    if unknown_reads:
+        failures.append(f"{unknown_reads} read(s) have unknown visibility")
     stale = int(report["read_your_write"]["stale"])
     if stale:
         failures.append(f"{stale} stale read(s) after an acknowledged write")
@@ -661,7 +1085,9 @@ def check(report: dict[str, Any]) -> None:
     if not report["post_burst_converged"]:
         failures.append(_convergence_failure(report))
     demanded = int(report.get("reconciliation_demanded", 0))
-    if demanded:
+    if demanded < 0:
+        failures.append("reconciliation accounting is unreadable")
+    elif demanded:
         failures.append(
             f"{demanded} batch(es) failed closed into reconciliation demand"
         )
@@ -672,6 +1098,9 @@ def check(report: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--transport", choices=TRANSPORTS, required=True)
+    parser.add_argument("--package-mode", choices=("installed", "source"), default="installed")
+    parser.add_argument("--condition", choices=("warm", "contended"), default="warm")
+    parser.add_argument("--contract", type=Path, help="shared controller contract for matched installed versions")
     parser.add_argument(
         "--samples-per-operation", type=int, default=MIN_SAMPLES_PER_OPERATION
     )
@@ -685,6 +1114,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--connector-url")
+    parser.add_argument("--connector-pid", type=int, help="PID of the service in the observer's private network namespace")
+    parser.add_argument("--host-network-namespace", help="network namespace readlink observed by the host launcher before isolation")
     parser.add_argument(
         "--convergence-bound",
         type=float,
@@ -715,11 +1146,16 @@ def main(argv: list[str] | None = None) -> int:
         state_dir=args.state_dir or (args.vault.parent / "acceptance-state"),
         connector_url=connector_url,
         connector_token=os.environ.get("EXOMEM_CONNECTOR_TOKEN"),
+        connector_pid=args.connector_pid,
+        host_network_namespace=args.host_network_namespace,
         convergence_bound_seconds=args.convergence_bound,
+        package_mode=args.package_mode,
+        condition=args.condition,
+        contract_path=args.contract,
     )
     print(json.dumps(report, sort_keys=True))
     if args.check:
-        check(report)
+        check(report, contract=_load_contract(args.contract)[0])
     return 0
 
 

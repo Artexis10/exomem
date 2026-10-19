@@ -17,7 +17,7 @@ import sqlite3
 import tempfile
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 
 from . import chain, connection, custody, replica, schema, snapshot, typed_storage
@@ -113,6 +113,10 @@ def _evidence(path: Path, scratch: Path):
             while chunk := shared.read(1 << 20):
                 digest.update(chunk)
                 target.write(chunk)
+        # Evidence an earlier release wrote is read from this private copy at the current schema.
+        # A copy that cannot migrate keeps its schema, which the validation below refuses.
+        with suppress(CollectionStoreError):
+            snapshot.migrate_copy(copy)
         with closing(sqlite3.connect(copy, isolation_level=None)) as conn:
             try:
                 meta = snapshot._validate(conn, lambda: None)
@@ -190,23 +194,25 @@ def adopt_local_preview(vault_root, *, recorded=UNKNOWN) -> dict:
 
 def adopt_replica_preview(vault_root, *, recorded=UNKNOWN) -> dict:
     """Preview a fresh host's copy without creating live state or opening the shared replica."""
+    from ..vault_portability import checked_collection_replica
     from . import authority
 
     root = Path(vault_root).resolve()
     raw = authority.read_marker(root)
-    marker = authority.parse_marker(root, raw)
-    with tempfile.TemporaryDirectory(prefix="exomem-adopt-preview-") as scratch, \
-            _evidence(replica.replica_path(root), Path(scratch)) as (digest, conn, meta):
-        if meta is None:
+    if raw is not None:
+        authority.parse_marker(root, raw)
+    with checked_collection_replica(root) as verified:
+        if verified is None:
             raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "the vault replica is incomplete or invalid")
-        for entry in marker["collections"]:
-            authority.require_selected(conn, marker, entry, root=root)
+        meta = dict(verified.connection.execute("SELECT key,value FROM store_meta"))
+        digest = verified.source_sha256
         head = _head(meta)
     recorded_view = recorded if recorded in (UNKNOWN, None) else {
         "store_id": recorded.store_id, "instance_id": recorded.instance_id,
         "commit_seq": recorded.commit_seq, "head_hash": recorded.head_hash}
-    return _sealed({"state": "replica", "store_id": marker["store_id"],
-                    "marker_sha256": hashlib.sha256(raw).hexdigest(), "replica": {"sha256": digest, **head},
+    return _sealed({"state": "replica", "store_id": meta[schema.META_STORE_ID],
+                    "marker_sha256": hashlib.sha256(raw if raw is not None else b"").hexdigest(),
+                    "replica": {"sha256": digest, **head},
                     "recorded_head": recorded_view})
 
 
@@ -237,6 +243,7 @@ def record_fork(conn, preview: dict, *, why: str, token: int):
               schema.META_FORKS: _json(forks), schema.META_REPLICA_DIVERGENCE: None,
               schema.META_VIEW_DIVERGED: None, schema.META_PENDING_REPLICA_PUBLICATION: None,
               schema.META_PUBLISHED_REPLICA_HEAD: None,
+              schema.META_PUBLISHED_REPLICA_EPOCH: None,
               schema.META_ADOPTED_FOREIGN_REPLICA: None if shared is None or ours else shared["sha256"]}
     if not ours:
         values[schema.META_LAST_PUBLISHED_REPLICA_SHA256] = None

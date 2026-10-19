@@ -509,6 +509,26 @@ def test_creation_lock_does_not_mask_activation_manifest_error(tmp_path: Path) -
     assert exc.value.code == "TEST_ERROR"
 
 
+@pytest.mark.parametrize(("source_hash", "status"), (("not-a-hash", "active"), ("b" * 64, "")))
+def test_replacing_activation_candidate_rejects_invalid_current_data(
+    source_hash: str, status: str
+) -> None:
+    candidate = activation_manifest.ActivationCandidate(
+        "Knowledge Base/Notes/Insights/page.md", "a" * 64, _ID_A, "active"
+    )
+    census = activation_manifest.ActivationCensus.from_candidates((candidate,))
+    replacement = activation_manifest.ActivationCandidate(
+        candidate.rel_path, source_hash, _ID_A, status
+    )
+
+    with pytest.raises(activation_manifest.ActivationManifestError) as exc:
+        census._with_replaced_candidate(replacement)
+
+    assert exc.value.code == "ACTIVATION_CENSUS_INVALID"
+    assert "candidate 0" in exc.value.reason
+    assert census.by_path[candidate.rel_path] == candidate
+
+
 def test_unreadable_governed_markdown_fails_census_and_semantic_context(
     tmp_path: Path,
 ) -> None:

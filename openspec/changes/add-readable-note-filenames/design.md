@@ -16,8 +16,8 @@ readable filename, so for it the filename is decoration. Here it is the address.
 What makes the change tractable is that it is not the *only* address.
 `WikilinkResolver` (`vault.py:4799`) keys four ways — full path, KB-stripped path,
 filename stem, and lower-cased frontmatter **title** — with the docstring giving
-the precedent directly: `[[North-Led Content Manual]]` resolves to a file whose
-stem is `2026-05-15-tu-north-led-content-manual`. A link written as the human
+the precedent directly: `[[Test Content Manual]]` resolves to a file whose
+stem is `2026-05-15-tu-test-manual`. A link written as the human
 title is already independent of how the file is named.
 
 ## Goals / Non-Goals

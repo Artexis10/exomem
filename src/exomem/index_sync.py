@@ -26,6 +26,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import sqlite3
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -1042,6 +1043,35 @@ def clear_deferred_work(
     return cleared
 
 
+#: SQLite's own primary result codes for a database another connection holds:
+#: a closed set the library documents.
+_SQLITE_HELD_CODES: Final = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
+
+def _readiness_refusal(error: BaseException) -> str | None:
+    """The refusal's label when `error` says "not now", never "this page".
+
+    A retryable refusal by its own contract (a busy or timed-out mutation
+    boundary, a corpus still warming), a timed-out vault lock, a graph epoch
+    another writer holds, and a SQLite store another connection holds. The
+    label is a code or class name, so it carries no content.
+    """
+    from . import graph_sync
+    from .cli_ops import OpError
+    from .vault import VaultLockTimeout
+
+    if isinstance(error, OpError):
+        return error.code if error.details.get("status") == "retryable" else None
+    if isinstance(error, (VaultLockTimeout, graph_sync.GraphEpochUnreadable)):
+        return error.code
+    if isinstance(error, sqlite3.OperationalError):
+        code = getattr(error, "sqlite_errorcode", None)
+        # An extended result code keeps its primary code in its low 8 bits.
+        if isinstance(code, int) and (code & 0xFF) in _SQLITE_HELD_CODES:
+            return error.sqlite_errorname
+    return None
+
+
 def _drain_graph_work(
     vault_root: Path, *, limit: int | None, requested: set[str] | None
 ) -> int:
@@ -1110,7 +1140,14 @@ def _drain_graph_work(
     batch = [vault_root / receipt.rel_path for receipt in receipts]
     try:
         report = index.drain_paths(batch)
-    except Exception:  # noqa: BLE001 - isolate below rather than lose the queue
+    except Exception as error:  # noqa: BLE001 - isolate below rather than lose the queue
+        refusal = _readiness_refusal(error)
+        if refusal is not None:
+            # Not any page's fault, so no receipt moves: a writer's debt signal
+            # or the drain's backoff retries the whole batch. Isolating would
+            # meet the same refusal once per page, each with a boundary wait.
+            log.info("deferred graph batch refused (%s); work remains queued", refusal)
+            return 0
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
         report = {}
     if report.get("requires_rebuild"):
@@ -1133,13 +1170,33 @@ def _drain_graph_work(
             _republish_graph_availability(index)
         return processed
 
-    for receipt in stalled:
+    for done_count, receipt in enumerate(stalled):
+        if done_count and index.boundary_waiters():
+            # Each replay takes the boundary a writer is waiting on. Step aside;
+            # the rest stay queued untouched for the next pass. Never before the
+            # first replay: a page that always fails rotates behind the queue
+            # only when it is replayed, and a writer that waits at every check
+            # would otherwise pin the healthy pages queued behind it.
+            log.info(
+                "deferred graph replay yielded to a waiting writer; %d receipt(s) remain queued",
+                len(stalled) - done_count,
+            )
+            break
         path = vault_root / receipt.rel_path
         try:
             single = index.drain_paths([path])
-        except Exception:  # noqa: BLE001 - one poison page must not pin the queue
-            # A busy boundary, a locked store, anything raised out of the pass:
-            # a readiness refusal, never the page's fault, so it never counts.
+        except Exception as error:  # noqa: BLE001 - one poison page must not pin the queue
+            refusal = _readiness_refusal(error)
+            if refusal is not None:
+                # The same refusal awaits every later receipt: leave them all.
+                log.info(
+                    "deferred graph replay refused (%s); %d receipt(s) remain queued",
+                    refusal,
+                    len(stalled) - done_count,
+                )
+                break
+            # Anything else raised out of the pass is not proven to be the
+            # page's fault either, so it never counts.
             log.warning(
                 "deferred graph receipt failed; work remains queued", exc_info=True
             )
@@ -1560,8 +1617,11 @@ def _dispatch_upsert_components(
             if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
                 components.append(IndexComponentOutcome("embeddings", "accepted", "embeddings_disabled"))
             else:
-                semantic_drain.request(vault_root, semantic_paths, edited=semantic_edited and not replayed)
-                components.append(IndexComponentOutcome("embeddings", "deferred" if semantic_paths else "accepted", "deferred_durable" if semantic_paths else "no_eligible_paths"))
+                # A replay queues only paths whose publication is not current. An
+                # already-published path is done, as in the legacy deferring arm
+                # below, so only queued work may be reported as deferred.
+                queued = semantic_drain.request(vault_root, semantic_paths, edited=semantic_edited and not replayed)
+                components.append(IndexComponentOutcome("embeddings", "deferred" if queued else "accepted", "deferred_durable" if queued else "no_eligible_paths"))
         except Exception:  # noqa: BLE001 - other projections retain their outcomes
             log.warning("service semantic handoff failed", exc_info=True)
             components.append(IndexComponentOutcome("embeddings", "degraded", "durable_defer_failed"))
@@ -2075,11 +2135,11 @@ _DERIVED_OPTIONAL_COMPONENTS: Final[frozenset[str]] = frozenset(
 #: replayed from a memo.
 _DERIVED_FANOUT_MEMO_LIMIT: Final = 64
 _DERIVED_FANOUT_MEMO_TTL_SECONDS: Final = 300.0
-_derived_fanout_memo: dict[tuple[str, str, str], tuple[float, IndexSyncReport]] = {}
+_derived_fanout_memo: dict[tuple[str, str, str], tuple[float, tuple[IndexSyncReport, ...]]] = {}
 _derived_fanout_lock = threading.Lock()
 
 
-def _derived_memo_get(key: tuple[str, str, str]) -> IndexSyncReport | None:
+def _derived_memo_get(key: tuple[str, str, str]) -> tuple[IndexSyncReport, ...] | None:
     now = time.time()
     with _derived_fanout_lock:
         stale = [
@@ -2093,12 +2153,12 @@ def _derived_memo_get(key: tuple[str, str, str]) -> IndexSyncReport | None:
     return None if entry is None else entry[1]
 
 
-def _derived_memo_put(key: tuple[str, str, str], report: IndexSyncReport) -> None:
+def _derived_memo_put(key: tuple[str, str, str], reports: tuple[IndexSyncReport, ...]) -> None:
     with _derived_fanout_lock:
         if len(_derived_fanout_memo) >= _DERIVED_FANOUT_MEMO_LIMIT:
             oldest = min(_derived_fanout_memo, key=lambda item: _derived_fanout_memo[item][0])
             _derived_fanout_memo.pop(oldest, None)
-        _derived_fanout_memo[key] = (time.time(), report)
+        _derived_fanout_memo[key] = (time.time(), reports)
 
 
 def reset_derived_fanout_memo() -> None:
@@ -2120,20 +2180,22 @@ def converge_paths_from_current_bytes(
     proved itself (no reconcile-required component).
     """
     root = Path(vault_root)
-    written = [root.joinpath(*rel.split("/")) for rel in rel_paths]
-    if not written:
-        return True
+    written = [root.joinpath(*rel.split("/")) for rel in rel_paths if root.joinpath(*rel.split("/")).is_file()]
+    removed = [rel for rel in rel_paths if not os.path.lexists(root.joinpath(*rel.split("/")))]
+    if len(written) + len(removed) != len(rel_paths) or any(path.is_symlink() for path in written):
+        return False
     created = [root.joinpath(*rel.split("/")) for rel in created_rel_paths]
     from . import graph_sync
 
     with graph_sync.standalone_join_waived():
-        report = upsert_after_write(
-            root,
-            written,
-            created_paths=created,
-            publish_corpus_change=True,
-        )
-    return not report.reconcile_required
+        reports = []
+        if removed:
+            reports.append(delete_after_remove(root, removed))
+        if written:
+            reports.append(upsert_after_write(
+                root, written, created_paths=created, publish_corpus_change=True,
+            ))
+    return all(not report.reconcile_required for report in reports)
 
 
 def converge_derived_component(
@@ -2161,68 +2223,74 @@ def converge_derived_component(
     from . import claims, mode, recall_policy, semantic_drain
 
     service = mode.service_profile_enabled()
+    # Tombstones must reach the removal owner before any component can finish,
+    # including semantic components whose service path normally only queues work.
+    has_removals = any(path.after_hash is None for path in receipt.paths)
+    semantic_outcome: bool | Literal["pending"] | None = None
     if service:
         paths = [root / path.rel_path for path in receipt.paths if path.after_hash is not None]
         if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             semantic_drain.request(root, paths, edited=False, claims_required=key == DerivedComponent.CLAIMS.value and claims.claim_level_enabled())
         if key in {DerivedComponent.EMBEDDINGS.value, DerivedComponent.CLAIMS.value}:
-            if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-                return True
-            if key == DerivedComponent.CLAIMS.value and not claims.claim_level_enabled():
-                return True
-            for path in receipt.paths:
+            semantic_outcome = True
+            enabled = not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and (
+                key != DerivedComponent.CLAIMS.value or claims.claim_level_enabled()
+            )
+            for path in receipt.paths if enabled else ():
                 if path.after_hash is None or not recall_policy.is_recall_candidate(root, root / path.rel_path):
                     continue
                 if not semantic_drain.publication_ready(root, path.rel_path, expected_hash=path.after_hash, claims_required=key == DerivedComponent.CLAIMS.value):
-                    return "pending"
-            return True
+                    semantic_outcome = "pending"
+                    break
+            if not has_removals:
+                return semantic_outcome
     memo_key = (
         str(root),
         str(receipt.batch_id),
         str(receipt.canonical_generation),
     )
-    report = _derived_memo_get(memo_key)
-    if report is None:
+    reports = _derived_memo_get(memo_key)
+    if reports is None:
         written: list[Path] = []
         created: list[Path] = []
+        removed: list[str] = []
         for path in receipt.paths:
             if path.after_hash is None:
-                # A tombstone is a removal, and removal has its own fan-out.
+                removed.append(path.rel_path)
                 continue
             target = root.joinpath(*path.rel_path.split("/"))
             written.append(target)
             if path.before_hash is None:
                 created.append(target)
-        if not written:
-            # Nothing this fan-out can publish: a tombstone-only batch is
-            # converged by the removal path the deleting writer already ran.
-            return True
         from . import graph_sync
 
         # A registered graph rebuild still starts; this fan-out just does not
         # wait on it before the embedding step that follows the graph.
         with graph_sync.standalone_join_waived():
-            report = upsert_after_write(
-                root,
-                written,
-                created_paths=created,
-                publish_corpus_change=True,
-                semantic_edited=not service,
-            )
-        if report.reconcile_required:
+            publications = []
+            if removed:
+                publications.append(delete_after_remove(root, removed))
+            if written:
+                publications.append(upsert_after_write(
+                    root, written, created_paths=created,
+                    publish_corpus_change=True, semantic_edited=not service,
+                ))
+        reports = tuple(publications)
+        if any(item.reconcile_required for item in reports):
             return False
-        _derived_memo_put(memo_key, report)
+        _derived_memo_put(memo_key, reports)
+    if semantic_outcome is not None:
+        return semantic_outcome
     report_key = _DERIVED_COMPONENT_REPORT_KEY[key]
     if report_key is None:
         # Freshness is proven by the corpus-change publication the fan-out
         # performs, not by a sidecar row, so a non-degraded report is its proof.
         return True
-    outcome = next(
-        (item for item in report.components if item.component == report_key), None
-    )
-    if outcome is None:
-        # A required component the fan-out never reached is a real absence of
-        # proof. An optional one is simply switched off, and its absence is the
-        # configuration, not a gap.
-        return key in _DERIVED_OPTIONAL_COMPONENTS
-    return outcome.outcome in _DERIVED_CONVERGENT_OUTCOMES
+    for report in reports:
+        outcome = next((item for item in report.components if item.component == report_key), None)
+        if outcome is None:
+            if key not in _DERIVED_OPTIONAL_COMPONENTS:
+                return False
+        elif outcome.outcome not in _DERIVED_CONVERGENT_OUTCOMES:
+            return False
+    return True

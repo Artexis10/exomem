@@ -78,7 +78,8 @@ Facts verified against the code, including by the independent critic review of 2
 3. **Tool surface.**
    - The members of `CLOUD_SURFACE_EXCLUSIONS` are removed from the MCP server after registration.
    - Each entry uses the `SurfaceExclusion` shape: `command`; `reason`, stating what is technically broken; and `lifted_when`.
-   - The current members are `transfer_artifact`, `process_media` and `read_media`; staged import enables `adopt_vault`.
+   - The current members are `transfer_artifact` and `read_media`; staged import enables `adopt_vault`.
+   - `process_media` is served. Its `status`, `process` and `retry` operations use the cell's own media queue, pressure brakes and `EXOMEM_MEDIA_ENGINES` selection, so an engine that is off gets no work and a retry never returns over-budget work.
    - Legacy MCP aliases (`EXOMEM_MCP_LEGACY_COMPAT`) are never registered in cloud mode. A cell has no legacy clients, and aliases would re-expose the leaves of excluded commands.
 4. **Read-only mode.** With `EXOMEM_CLOUD_READ_ONLY=1` the cell refuses every mutating command with `CLOUD_CELL_READ_ONLY`, before vault access. Mutation is classified from the command registry, not from a copied list. Reads keep working.
 5. **Routes.** Only MCP (`/mcp`), `/health` and `/health/ready` are registered. REST (`/api/*`), `/upload` and `/download` are not, because FastMCP custom routes do not inherit MCP authentication.
@@ -266,7 +267,7 @@ The attempt's state lives in annotations on the StatefulSet: `exomem.io/hold=upg
 3. Apply the target image with 1 replica, whatever the desired state, and record `exomem.io/target-applied-at` in the same apply. `cell-init` runs any offline migration.
    - If the API server **refuses** the target (a D4 refusal: a 4xx other than 408, 409 or 429, such as the image-pin admission policy), the target never ran and the volume holds the pre-attempt state. End the attempt without a restore: restore the current image and the desired replicas, remove the hold, and pause the rollout with `error_code = TARGET_REJECTED` and `held_cell_id`.
    - A transient failure (a 5xx, a timeout, 408, 409 or 429) is retried on the next pass.
-4. Wait for Ready, up to 10 minutes from `exomem.io/target-applied-at`. The deadline never runs from `hold-started-at`, because the backup can take most of 15 minutes. D6 owns this deadline, not the D3 init deadline.
+4. Wait for Ready, up to the configured upgrade readiness deadline (30 minutes by default) from `exomem.io/target-applied-at`. The deadline never runs from `hold-started-at`, because the backup can take most of 15 minutes. D6 owns this deadline, not the D3 init deadline. The operator sets it in the chart (`cellctl.upgradeReadyDeadlineMinutes`, 5 to 120), and cellctl refuses to start without it. A first start can rebuild the cell's retrieval catalogue, which takes longer on a larger vault. The cost is that a broken image keeps the canary cell down for the whole deadline before the restore.
    - **On success:** set `last_good_image` and remove the hold. The next routine pass records `observed_image` from the Ready pod (D4).
    - **On timeout:**
      1. In one pass: set the rollout to `paused` with `error_code = UPGRADE_READINESS_TIMEOUT` and `held_cell_id`, then scale to 0 and switch the hold to `restore`. Pausing in the same pass as the switch means no other cell can start the same image in between, and writing the pause first means a crash between the two leaves the rollout paused.

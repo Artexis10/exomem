@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import pytest
+
+pytestmark = pytest.mark.reads_repository_docs
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -96,18 +99,78 @@ def test_release_workflow_publishes_cuda_tags() -> None:
     assert '"cuda ghcr.io/artexis10/exomem:$version-cuda cuda"' in text
 
 
-def test_release_workflow_publishes_attested_cloud_image_by_digest() -> None:
-    text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image")
-    cloud = automatic.split("\n      - name: Build and push Exomem Cloud cell image", 1)[1]
+def test_release_builds_cloud_images_natively_without_discovery_tags() -> None:
+    import yaml
 
-    assert text.count("target: cloud") == 1
-    assert "id: cloud-build" in cloud
-    assert "EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}" in cloud
-    assert "subject-digest: ${{ steps.cloud-build.outputs.digest }}" in cloud
-    assert "push-by-digest=true" in cloud
-    assert "release-image-evidence-cloud" in cloud
-    assert "release_recovery.py finish-images" in cloud
+    jobs = yaml.safe_load(_read(".github/workflows/release-please.yml"))["jobs"]
+    native = jobs["build-cloud-images"]
+    assert native["strategy"]["fail-fast"] is False
+    assert native["strategy"]["matrix"]["include"] == [
+        {"arch": "amd64", "runner": "ubuntu-latest"},
+        {"arch": "arm64", "runner": "ubuntu-24.04-arm"},
+    ]
+    builds = [
+        step
+        for step in native["steps"]
+        if step.get("uses", "").startswith("docker/build-push-action")
+    ]
+    assert {step["id"] for step in builds} == {"cloud-build", "cellctl-build"}
+    for step in builds:
+        role = step["id"].removesuffix("-build")
+        assert f"fromJSON(env.IMAGES).{role}.publish" in step["if"]
+        assert "!cancelled()" in step["if"]
+        assert "steps.recover.outcome == 'success'" in step["if"]
+        assert step["with"]["platforms"] == "linux/${{ matrix.arch }}"
+        assert step["with"]["provenance"] == "mode=min,version=v0.2"
+        assert "push-by-digest=true" in step["with"]["outputs"]
+        assert "env.DRY_RUN != 'true'" in step["with"]["outputs"]
+        assert "tags" not in step["with"]
+        assert "matrix.arch" in step["with"]["cache-from"]
+        assert "matrix.arch" in step["with"]["cache-to"]
+    writes = [
+        step
+        for step in native["steps"]
+        if step.get("uses", "").startswith(("docker/login-action", "actions/upload-artifact"))
+    ]
+    assert all(
+        "DRY_RUN != 'true'" in step.get("if", "")
+        or "steps.digests.outcome == 'success'" in step.get("if", "")
+        for step in writes
+    )
+    digests = next(step for step in native["steps"] if step.get("uses", "").startswith("actions/upload-artifact"))
+    assert digests["with"]["overwrite"] is True
+    assert "github.run_id" in digests["with"]["name"]
+    assert "github.run_attempt" not in digests["with"]["name"]
+
+
+def test_serialized_publisher_joins_and_attests_both_cloud_roles_after_recovery() -> None:
+    import yaml
+
+    jobs = yaml.safe_load(_read(".github/workflows/release-please.yml"))["jobs"]
+    publisher = jobs["publish-image"]
+    assert "build-cloud-images" in publisher["needs"]
+    assert "needs.build-cloud-images.result == 'success'" not in publisher["if"]
+    assert publisher["concurrency"]["cancel-in-progress"] is False
+    assert "release-image-publication" in publisher["concurrency"]["group"]
+    steps = {step["id"]: step for step in publisher["steps"] if "id" in step}
+    assert "release_recovery.py images" in steps["recover"]["run"]
+    for role in ("cloud", "cellctl"):
+        join = steps[f"{role}-build"]
+        assert f'join-image --tag "$TAG" --image {role}' in join["run"]
+        assert "env.DRY_RUN != 'true'" in join["if"]
+        attestation = steps[f"{role}-attestation"]
+        assert f"steps.{role}-build.outcome == 'success'" in attestation["if"]
+        assert (
+            attestation["with"]["subject-digest"] == f"${{{{ steps.{role}-build.outputs.digest }}}}"
+        )
+        assert any(
+            f"release-image-evidence-{role}-" in step.get("with", {}).get("name", "")
+            for step in publisher["steps"]
+        )
+    finalizer = publisher["steps"][-1]
+    assert "always()" in finalizer["if"] and "!cancelled()" in finalizer["if"]
+    assert "env.DRY_RUN != 'true'" in finalizer["if"]
+    assert "release_recovery.py finish-images" in finalizer["run"]
 
 
 def test_release_publish_runs_only_on_the_tag_commit() -> None:
@@ -303,23 +366,6 @@ def test_unix_upgrade_documents_why_it_skips_the_cuda_repair() -> None:
 
     assert "cu132" not in upgrade
     assert "CUDA" in upgrade and "Windows" in upgrade
-
-
-def test_release_workflow_publishes_attested_cellctl_image_by_digest() -> None:
-    # The platform chart consumes cellctl by digest (cellctl.image), on the
-    # same release trigger as the Cloud cell image.
-    text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image")
-    cellctl = automatic.split("\n      - name: Build and push Exomem Cloud cellctl image", 1)[1]
-
-    assert "id: cellctl-build" in cellctl
-    assert "context: infra/cellctl" in cellctl
-    assert "file: infra/cellctl/Dockerfile" in cellctl
-    assert "subject-name: ghcr.io/artexis10/exomem-cellctl" in cellctl
-    assert "subject-digest: ${{ steps.cellctl-build.outputs.digest }}" in cellctl
-    assert "push-by-digest=true" in cellctl
-    assert "release-image-evidence-cellctl" in cellctl
-    assert "release_recovery.py finish-images" in cellctl
 
 
 def test_cellctl_dockerfile_is_digest_pinned_nonroot_and_frozen() -> None:

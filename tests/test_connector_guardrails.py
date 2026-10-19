@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.reads_repository_docs
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOL_SURFACE_CONTRACT = REPO_ROOT / "src" / "exomem" / "tool_surface_contract.json"
 CHATGPT_PLUGIN_CONTRACT = (
@@ -125,7 +127,7 @@ def test_chatgpt_records_pending_guardrail_rejects_invalid_pending_blocks(
 
 
 def test_operator_connector_host_is_canonical() -> None:
-    instructions = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     procedure = "docs/agent-guidance/live-cell.md"
     assert f"`{procedure}`" in instructions
     guidance = (REPO_ROOT / procedure).read_text(encoding="utf-8")

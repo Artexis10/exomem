@@ -77,6 +77,7 @@ projection state.
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import functools
 import hashlib
@@ -96,7 +97,12 @@ from typing import Any
 
 from . import call_spans
 from . import review_state as review_state_module
-from .collection_store.preview import bound_writer, canonical_read, selected_projection_writer, selected_writer
+from .collection_store.preview import (
+    bound_writer,
+    canonical_read,
+    selected_projection_writer,
+    selected_writer,
+)
 from .planning_values import PlanningValues
 
 log = logging.getLogger(__name__)
@@ -201,7 +207,7 @@ _LOCK = threading.Lock()
 #: design: it is per-conversation presentation state, not a durable fact about the
 #: vault, and persisting it would make a server restart change what an agent is
 #: told. The vault is in the key because one process can serve several.
-_EMISSION: dict[tuple[str, str, str], str] = {}
+_EMISSION: dict[tuple[str, str, str, str], str] = {}
 _EMISSION_CAP = 512
 
 #: Projections for vaults whose state file could not be written (a read-only KB
@@ -258,6 +264,39 @@ def load(vault_root: Path) -> dict[str, Any] | None:
     return payload
 
 
+#: The last parsed projection per vault, beside the file token it was read under.
+_SHARED: dict[str, tuple[tuple[int, int, int], dict[str, Any]]] = {}
+_SHARED_LOCK = threading.Lock()
+_SHARED_CAP = 8
+
+
+def _load_shared(vault_root: Path) -> dict[str, Any] | None:
+    """`load` for the read paths: parsed once per projection file, then shared.
+
+    The projection reaches about 20 MB on a large vault, and decoding it cost
+    0.3 s on every activation. `save` only ever replaces the file, so its token
+    names its bytes. The token is taken before the read, so a file replaced in
+    between is parsed again on the next call, never served stale. Callers never
+    change the result; a writer copies the branches its delta changes.
+    """
+    token = _file_token(state_path(vault_root))
+    if token is None:
+        return None
+    key = str(vault_root)
+    with _SHARED_LOCK:
+        hit = _SHARED.get(key)
+    if hit is not None and hit[0] == token:
+        return hit[1]
+    payload = load(vault_root)
+    if payload is not None:
+        with _SHARED_LOCK:
+            _SHARED.pop(key, None)
+            if len(_SHARED) >= _SHARED_CAP:
+                _SHARED.pop(next(iter(_SHARED)), None)
+            _SHARED[key] = (token, payload)
+    return payload
+
+
 def save(vault_root: Path, payload: dict[str, Any]) -> None:
     """Atomically replace the projection state. Best effort; never raises."""
     path = state_path(vault_root)
@@ -274,6 +313,7 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
                 # fsynced on every governed write, so its size is a per-write cost.
                 # Indentation cost ~2.5x for a machine-read file nobody diffs;
                 # `sort_keys` stays for determinism.
+                # Stream the payload to avoid allocating another full-size string.
                 json.dump(
                     payload,
                     handle,
@@ -294,6 +334,8 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
                 pass
             raise
     except Exception:  # noqa: BLE001 — a projection write never breaks a caller
+        with _SHARED_LOCK:
+            _SHARED.pop(str(vault_root), None)
         log.debug("could not persist the due-state projection", exc_info=True)
 
 
@@ -366,7 +408,7 @@ def _ledger_section(vault_root: Path, payload: dict[str, Any] | None = None) -> 
     if section is not None:
         return _emission_section({"emission": section})
     if payload is None:
-        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+        payload = _load_shared(vault_root) or _UNPERSISTED.get(str(vault_root))
     return _emission_section(payload)
 
 
@@ -1035,6 +1077,27 @@ def _claim_projection_row(manifest: Any, snapshot: Any | None) -> dict[str, Any]
     }
 
 
+def apply_manifest_write_delta(
+    vault_root: Path, manifest: Any, *, snapshot: Any = None,
+) -> None:
+    """Refresh one committed manifest's claims without discovering other collections."""
+    if manifest.semantic_profile != "records":
+        return
+    with _LOCK:
+        current = _load_shared(vault_root)
+        if current is None:
+            return
+        claims = dict(current.get("claims") or {})
+        row = _claim_projection_row(manifest, snapshot)
+        retained = claims.get(str(manifest.path))
+        if snapshot is None and isinstance(retained, Mapping):
+            row["items"] = retained.get("items", [])
+            row["complete"] = retained.get("complete") is True
+        claims[str(manifest.path)] = row
+        save(vault_root, {**current, "claims": claims})
+        _track_batch_path(vault_root, str(manifest.path))
+
+
 @canonical_read
 def _recompute_claims(
     vault_root: Path, *, authorize_path: Any = None
@@ -1120,7 +1183,7 @@ def routing_targets(
 
     root = Path(vault_root)
     writer = bound_writer(root)
-    state = {"claims": _recompute_claims(root)} if writer is not None else payload or load(root)
+    state = {"claims": _recompute_claims(root)} if writer is not None else payload or _load_shared(root)
     rows = (state or {}).get("claims")
     if not isinstance(rows, Mapping):
         return []
@@ -1202,7 +1265,7 @@ def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, 
     root = Path(vault_root)
     if selected_writer(root, manifest_path) is not None:
         return _recompute_claims(root).get(manifest_path, {}).get("items", [])
-    row = ((load(root) or {}).get("claims") or {}).get(manifest_path)
+    row = ((_load_shared(root) or {}).get("claims") or {}).get(manifest_path)
     if not isinstance(row, Mapping) or not isinstance(row.get("items"), list):
         return []
     try:
@@ -1212,7 +1275,7 @@ def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, 
     if keep is not None and not keep(manifest_path):
         return []
     return [
-        dict(item)
+        copy.deepcopy(dict(item))
         for item in row["items"]
         if isinstance(item, Mapping)
         and type(item.get("path")) is str
@@ -1245,13 +1308,41 @@ def collection_observation_coverage(
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
     """Count and name claimed observations after audience recomposition."""
+    return _collection_observation_coverages(
+        vault_root, (manifest_path,), authorize_path=authorize_path, now=now
+    )[manifest_path]
+
+
+@canonical_read
+def _collection_observation_coverages(
+    vault_root: Path,
+    manifest_paths: Iterable[str],
+    *,
+    authorize_path: Any,
+    now: dt.datetime | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Share immutable projection data and lazy routing within one canonical read operation."""
+    paths = tuple(manifest_paths)
+    if not paths:
+        return {}
     effective_now = now or dt.datetime.now(dt.UTC)
     if effective_now.tzinfo is None:
         effective_now = effective_now.replace(tzinfo=dt.UTC)
     effective_now = effective_now.astimezone(dt.UTC)
-    payload = load(vault_root)
+    payload = _load_shared(vault_root)
     if payload is None:
-        return {"complete": False, "unreflected": [], "pending": []}
+        return {path: {"complete": False, "unreflected": [], "pending": []} for path in paths}
+    routing = _routing_snapshot(vault_root, payload, authorize_path)
+    return {
+        path: _observation_coverage(
+            vault_root, path, payload, authorize_path, routing, effective_now
+        )
+        for path in paths
+    }
+
+
+def _observation_coverage(vault_root, manifest_path, payload, authorize_path, routing, effective_now):
+    """Compose one collection using the batch's current operation and decoded projection."""
     categories = payload.get("categories")
     claims = payload.get("claims")
     manifest = _load_manifest(Path(vault_root), manifest_path)
@@ -1275,7 +1366,6 @@ def collection_observation_coverage(
         return {"complete": False, "unreflected": [], "pending": []}
     open_refs: set[str] = set()
     pending_refs: set[str] = set()
-    routing = _routing_snapshot(vault_root, payload, authorize_path)
     for bucket in pages.values():
         for entry in _unbucket(bucket):
             component = entry.get("component")
@@ -1442,12 +1532,13 @@ def apply_write_delta(
     from . import find as find_module
 
     today = today or dt.date.today()
-    payload = load(vault_root)
+    payload = _load_shared(vault_root)
     if payload is None:
         return None
 
     vault_root = Path(vault_root)
     rel = str(rel_path).replace("\\", "/").lstrip("/")
+    _track_batch_path(vault_root, rel)
     page = find_module._CACHE.get(vault_root / rel, vault_root)
     pages = [page] if page is not None else []
 
@@ -1469,7 +1560,7 @@ def apply_write_delta(
     grouped = _entries_from_findings(vault_root, findings)
 
     with _LOCK:
-        current = load(vault_root) or payload
+        current = _load_shared(vault_root) or payload
         categories = dict(current.get("categories") or {})
         role_index = current.get("role_state")
         if isinstance(role_index, dict):
@@ -1479,7 +1570,7 @@ def apply_write_delta(
                 try:
                     artifact_role_state.apply_delta(vault_root, rel, page, families=enabled)
                     if page is not None and page.page_type == "experiment":
-                        role_index["has_origins"] = True
+                        role_index = {**role_index, "has_origins": True}
                 except Exception:  # noqa: BLE001 - committed mutation retains its receipt
                     log.debug("artifact role delta unavailable", exc_info=True)
         for category in PAGE_DELTA_CATEGORIES:
@@ -1525,7 +1616,7 @@ def apply_write_delta(
                 if isinstance(current.get("bindings"), dict)
                 else {}
             ),
-            "claims": dict(current.get("claims") or {}),
+            "claims": current.get("claims") or {},
             "role_state": role_index,
             **_carried_backfill_cursors(current),
         }
@@ -1575,7 +1666,7 @@ def apply_observation_write_delta(
 
     `facets` are the page's type, category, project and tags; they are stored
     so a serve under a narrower audience re-applies `claims.match` exactly as
-    the write did.
+    the write did. Return None when the bucket is unchanged or state is unavailable.
     """
     if not _observations_at_write_time() or not state_path(vault_root).exists():
         return None
@@ -1584,7 +1675,7 @@ def apply_observation_write_delta(
         now = now.replace(tzinfo=dt.UTC)
     now = now.astimezone(dt.UTC)
     with _LOCK:
-        current = load(vault_root)
+        current = _load_shared(vault_root)
         if current is None:
             return None
         categories = dict(current.get("categories") or {})
@@ -1678,10 +1769,16 @@ def apply_observation_write_delta(
                                 retained[key] for key in sorted(retained)
                             ],
                         }
-        if replacement is None:
+        bucket = _bucket([replacement], now.date(), now=now) if replacement is not None else None
+        _track_batch_path(vault_root, str(path))
+        if bucket is None:
+            if str(path) not in pages:
+                return None
             pages.pop(str(path), None)
         else:
-            pages[str(path)] = _bucket([replacement], now.date(), now=now)
+            if bucket == pages.get(str(path)):
+                return None
+            pages[str(path)] = bucket
         categories[_OBSERVATION_FAMILY] = pages
         return _persist_delta(
             Path(vault_root), current, categories, now.date(), count_write=False
@@ -1695,6 +1792,7 @@ def _settle_observations_for_record(
     key: str,
     values: Mapping[str, Any],
     today: dt.date,
+    affected_paths: set[str] | None = None,
 ) -> None:
     """Refresh one record's reflection support without rescanning Records."""
     from . import audit as audit_module
@@ -1754,8 +1852,11 @@ def _settle_observations_for_record(
             changed = True
         if not changed:
             continue
+        replacement = _bucket(retained, today) if retained else None
+        if affected_paths is not None and replacement != pages.get(page_path):
+            affected_paths.add(page_path)
         if retained:
-            pages[page_path] = _bucket(retained, today)
+            pages[page_path] = replacement
         else:
             pages.pop(page_path, None)
 
@@ -1950,7 +2051,7 @@ def _persist_delta(
                 else {}
             )
         ),
-        "claims": claims if claims is not None else dict(current.get("claims") or {}),
+        "claims": claims if claims is not None else current.get("claims") or {},
         "role_state": current.get("role_state"),
         **_carried_backfill_cursors(current),
     }
@@ -1965,7 +2066,8 @@ def _carried_backfill_cursors(current: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _prune_missing_joined(
-    vault_root: Path, pages: dict[str, Any], today: dt.date
+    vault_root: Path, pages: dict[str, Any], today: dt.date,
+    affected_paths: set[str] | None = None,
 ) -> None:
     """Drop joined records whose file is gone, and any entry that empties.
 
@@ -2000,6 +2102,8 @@ def _prune_missing_joined(
                 rebuilt.append(replacement)
         if not changed:
             continue
+        if affected_paths is not None:
+            affected_paths.add(item_path)
         if rebuilt:
             pages[item_path] = _bucket(rebuilt, today)
         else:
@@ -2016,6 +2120,7 @@ def apply_record_write_delta(
     values: Mapping[str, Any],
     previous: Mapping[str, Any] | None = None,
     today: dt.date | None = None,
+    affected_paths: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Fold ONE committed record into the projection. Never reads Records.
 
@@ -2039,7 +2144,7 @@ def apply_record_write_delta(
     if not state_path(vault_root).exists():
         return None
     with _LOCK:
-        current = load(vault_root)
+        current = _load_shared(vault_root)
         if current is None:
             return None
         claims = dict(current.get("claims") or {})
@@ -2075,7 +2180,7 @@ def apply_record_write_delta(
         if _observations_at_write_time():
             observation_pages = dict(categories.get(_OBSERVATION_FAMILY) or {})
             _settle_observations_for_record(
-                observation_pages, manifest, path, key, values, today
+                observation_pages, manifest, path, key, values, today, affected_paths
             )
             categories[_OBSERVATION_FAMILY] = observation_pages
         if not _settles_at_write_time():
@@ -2158,7 +2263,9 @@ def apply_record_write_delta(
                     _compose_outcome_entry(Path(vault_root), component, sorted(joined)),
                     today,
                 )
-        _prune_missing_joined(Path(vault_root), pages, today)
+                if affected_paths is not None:
+                    affected_paths.add(item.source.path)
+        _prune_missing_joined(Path(vault_root), pages, today, affected_paths)
         categories[_OUTCOME_FAMILY] = pages
         return _persist_delta(
             Path(vault_root),
@@ -2180,6 +2287,7 @@ def apply_plan_write_delta(
     values: Mapping[str, Any],
     previous: Mapping[str, Any] | None = None,
     today: dt.date | None = None,
+    affected_paths: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Fold ONE committed plan write into the projection. Usually reads nothing.
 
@@ -2204,7 +2312,7 @@ def apply_plan_write_delta(
     if not state_path(vault_root).exists():
         return None
     with _LOCK:
-        current = load(vault_root)
+        current = _load_shared(vault_root)
         if current is None:
             return None
         if not _settles_at_write_time():
@@ -2226,7 +2334,7 @@ def apply_plan_write_delta(
             # Item-wide, and the only case that is: a closed item is not a
             # finding under ANY binding.
             _drop_item_entries(pages, str(path), str(key), today)
-            _prune_missing_joined(Path(vault_root), pages, today)
+            _prune_missing_joined(Path(vault_root), pages, today, affected_paths)
             categories[_OUTCOME_FAMILY] = pages
             return _persist_delta(Path(vault_root), current, categories, today)
         plan_fields = {str(name) for row in rows for name in dict(row.get("join") or {}).values()}
@@ -2256,7 +2364,7 @@ def apply_plan_write_delta(
                     ),
                     today,
                 )
-            _prune_missing_joined(Path(vault_root), pages, today)
+            _prune_missing_joined(Path(vault_root), pages, today, affected_paths)
             categories[_OUTCOME_FAMILY] = pages
             return _persist_delta(Path(vault_root), current, categories, today)
         planning = _load_projection_manifest(Path(vault_root), str(manifest.path)) or manifest
@@ -2299,7 +2407,7 @@ def apply_plan_write_delta(
                 else None
             )
             _put_outcome_entry(pages, str(path), str(key), records_path, entry, today)
-        _prune_missing_joined(Path(vault_root), pages, today)
+        _prune_missing_joined(Path(vault_root), pages, today, affected_paths)
         categories[_OUTCOME_FAMILY] = pages
         return _persist_delta(Path(vault_root), current, categories, today)
 
@@ -2350,23 +2458,25 @@ def block_for_structured_write(
         return None
     profile = str(getattr(manifest, "semantic_profile", "") or "")
     delta = apply_plan_write_delta if profile == "planning" else apply_record_write_delta
-    if (
-        delta(
-            vault_root,
-            manifest,
-            path=path,
-            key=key,
-            values=values,
-            previous=previous,
-            today=today,
-        )
-        is None
-    ):
+    affected_paths = {path}
+    payload = delta(
+        vault_root,
+        manifest,
+        path=path,
+        key=key,
+        values=values,
+        previous=previous,
+        today=today,
+        affected_paths=affected_paths,
+    )
+    if payload is None:
         return None
+    for affected_path in affected_paths:
+        _track_batch_path(vault_root, affected_path)
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        return served(vault_root, today=today)
+        return _affected_block(vault_root, frozenset(affected_paths), today=today, payload=payload)
 
 
 # --------------------------------------------------------------------------
@@ -2467,6 +2577,16 @@ _BATCH_LOCK = threading.Lock()
 #: batch runs on another thread would read as part of it; this depth is bound
 #: to the context the scope was entered in.
 _IN_BATCH: ContextVar[int] = ContextVar("exomem_due_state_in_batch", default=0)
+# Retained until the post-batch carrier consumes it; each outer scope starts a fresh set.
+_BATCH_PATHS: ContextVar[dict[str, set[str]] | None] = ContextVar(
+    "exomem_due_state_batch_paths", default=None,
+)
+
+
+def _track_batch_path(vault_root: Path, path: str) -> None:
+    tracked = _BATCH_PATHS.get()
+    if tracked is not None:
+        tracked.setdefault(str(vault_root), set()).add(path)
 
 
 @contextmanager
@@ -2485,6 +2605,8 @@ def batch_scope(vault_root: Path | None) -> Iterator[None]:
     the design asks for.
     """
     key = str(vault_root or "")
+    if not _IN_BATCH.get():
+        _BATCH_PATHS.set({})
     with _BATCH_LOCK:
         _BATCH[key] = _BATCH.get(key, 0) + 1
     depth = _IN_BATCH.set(_IN_BATCH.get() + 1)
@@ -2522,6 +2644,93 @@ def in_batch_scope() -> bool:
 # --------------------------------------------------------------------------
 
 
+def relevant_material(packet: Mapping[str, Any]) -> dict[str, str]:
+    """Exact released current page paths and their already served parent identities."""
+    from . import context_refs, retained_inputs
+    from .governance import egress
+
+    if packet.get("abstained"):
+        return {}
+    material = {
+        str(anchor["path"]): str(anchor["ref"])
+        for anchor in packet.get("anchors") or ()
+        if isinstance(anchor, Mapping) and anchor.get("status") == "resolved"
+        and anchor.get("path") and anchor.get("ref")
+    }
+    if not material:
+        return {}
+    for unit in packet.get("units") or ():
+        if not isinstance(unit, Mapping) or unit.get("history") is True:
+            continue
+        provenance = unit.get("provenance") or {}
+        if not isinstance(provenance, Mapping) or not provenance.get("path"):
+            continue
+        path = str(provenance["path"])
+        reference = str(unit.get("ref") or "")
+        try:
+            parent, _ = retained_inputs.parse_reference(reference)
+        except retained_inputs.RetainedInputError:
+            parsed, explicit = egress._unwrap_reference(reference)
+            if parsed != path:
+                continue
+            parent = context_refs.vault_ref(path) if explicit else reference
+        material.setdefault(path, parent)
+    for state in packet.get("current_state") or ():
+        if isinstance(state, Mapping) and state.get("path") and state.get("statement"):
+            # A current-state source releases its path, not its own canonical ref.
+            path = str(state["path"])
+            material.setdefault(path, path)
+    return material
+
+
+def for_activation(
+    vault_root: Path, packet: dict[str, Any], *, purpose: str | None = None,
+) -> None:
+    """Associate one existing due finding with current material, without recovery."""
+    material = relevant_material(packet)
+    if not material:
+        return
+    from . import request_budget, working_set
+
+    # Optional advice must not start source IO without the activation stage reserve.
+    if working_set.budget_exhausted("working_set.relevant_due"):
+        return
+    budget = request_budget.current()
+    try:
+        rows = served_entries(vault_root, paths=frozenset(material), recover=False, purpose=purpose)
+    except Exception:  # noqa: BLE001 - missing advice never prevents current context
+        log.debug("relevant due advice unavailable", exc_info=True)
+        return
+    # A started read cannot be interrupted; late advice is truncated, never skipped.
+    if budget is not None and budget.remaining() <= 0:
+        budget.note_truncated("working_set.relevant_due")
+        return
+    for row in rows:
+        anchor = material.get(str(row.get("path") or ""))
+        if anchor:
+            packet["relevant_due_refs"] = [{
+                "ref": row["ref"], "fingerprint": row["fingerprint"],
+                "category": row["category"], "due_since": row["due_since"], "anchor": anchor,
+            }]
+            return
+
+
+def filter_relevant_refs(packet: dict[str, Any]) -> dict[str, Any]:
+    """Withdraw advice whose exact released material disappeared at final egress."""
+    if "relevant_due_refs" not in packet:
+        return packet
+    material = frozenset(relevant_material(packet).values())
+    kept = [
+        item for item in packet["relevant_due_refs"]
+        if isinstance(item, Mapping) and item.get("anchor") in material
+    ][:1]
+    if kept:
+        packet["relevant_due_refs"] = kept
+    else:
+        packet.pop("relevant_due_refs", None)
+    return packet
+
+
 @canonical_read
 def served_entries(
     vault_root: Path,
@@ -2530,16 +2739,23 @@ def served_entries(
     now: dt.datetime | None = None,
     principal: Any = None,
     purpose: str | None = None,
+    paths: frozenset[str] | None = None,
+    recover: bool = True,
+    payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Every open item this audience may see, most-overdue first -- memoised.
+
+    `paths` selects stored page buckets before recomposition and bypasses this
+    full-view cache. `recover=False` omits a missing or unreadable projection.
+    JSON decoding still reads the whole projection file.
 
     Rebuilding the rows on every recall was the whole cost of a read on the
     personal vault -- 25 s before PR #1279 and still 0.6 s idle to 4 s under
     host load after it, on every call, when nothing had changed; the cost is
     the recomposition of every collection candidate under the audience's
     filter. So one build is kept per (vault, audience, session, purpose, day)
-    and reused while the projection file and the review-state file are the
-    same objects on disk, the clock has not reached the earliest future
+    and reused while the projection and review inputs are unchanged, the clock
+    has not reached the earliest future
     `due_at` the build skipped, and the build is younger than
     `_SERVE_CACHE_TTL_SECONDS`.
 
@@ -2549,9 +2765,11 @@ def served_entries(
     answer rebuilds, so a revocation stays immediate; the artifact-role
     findings are served again and compared, so advice whose source changed
     out of band is omitted until reconcile exactly as before; a page deleted
-    out of band is dropped from the hit the way the build drops it. Every
-    write replaces the projection file, so the next read after a write
-    rebuilds once. A projection that could not be persisted is never cached,
+    out of band is dropped from the hit the way the build drops it. A write
+    that changes the projection beyond its emission ledger rebuilds once on the
+    next read (`_served_content_token`). Review delivery stamps do not affect
+    decisions or dispositions, so they do not rebuild the served view.
+    A projection that could not be persisted is never cached,
     because a write then updates it in memory with no file to notice.
     """
     from .governance import egress as egress_module
@@ -2563,13 +2781,25 @@ def served_entries(
         now = now.astimezone(dt.UTC)
     effective_now = now or dt.datetime.now(dt.UTC)
     today = today or effective_now.date()
+    if paths is not None or not recover:
+        # A partial audience view never populates or reuses the full served cache.
+        return _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=principal,
+            purpose=purpose, paths=paths, recover=recover, payload=payload,
+        )[0]
     writer = bound_writer(vault_root)
     if writer is not None:
         return _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )[0]
-    projection_token = _file_token(state_path(vault_root))
-    if projection_token is None:
+    with call_spans.span("recall.due_state.identity", {}):
+        projection_token = _served_content_token(vault_root)
+        payload = _load_shared(vault_root) if projection_token is not None else None
+        review_token = (
+            _review_content_token(vault_root)
+            if payload is not None and not _owes_nothing(payload) else None
+        )
+    if projection_token is None or review_token is None:
         rows, *_ = _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )
@@ -2583,7 +2813,7 @@ def served_entries(
         purpose,
         today.isoformat(),
         projection_token,
-        _file_token(review_state_module.state_path(vault_root)),
+        review_token,
     )
     monotonic = time.monotonic()
     with _SERVE_LOCK:
@@ -2619,16 +2849,14 @@ def served_entries(
                     for row in hit["rows"]
                     if not row.get("path") or _page_exists(vault_root, row["path"])
                 ]
-    payload = load(vault_root)
-    if payload is None or _owes_nothing(payload):
-        # Unreadable: the build recomputes or recovers, and nothing is filed.
-        # Owes nothing: the empty list under any filter, and -- as in the
-        # build -- no release filter to pay for.
-        rows, *_ = _served_entries_uncached(
-            vault_root, today=today, now=effective_now, principal=who, purpose=purpose
-        )
-        return rows
     with call_spans.span("recall.due_state.build", {}):
+        try:
+            review_payload = review_state_module.ReviewStateStore(vault_root).load()
+        except ValueError:
+            return []
+        # Bind the memo to the review snapshot the build consumes, including a
+        # replacement between the initial identity lookup and this read.
+        key = (*key[:-1], _payload_content_token(review_payload, "surfaced"))
         rows, horizon, asked, role_token = _served_entries_uncached(
             vault_root,
             today=today,
@@ -2636,6 +2864,7 @@ def served_entries(
             principal=who,
             purpose=purpose,
             payload=payload,
+            review_payload=review_payload,
         )
     with _SERVE_LOCK:
         if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
@@ -2650,9 +2879,70 @@ def served_entries(
     return rows
 
 
+def _served_content_token(vault_root: Path) -> str | None:
+    """Identity of the projection without its emission ledger, or None when absent.
+
+    Every governed write rewrites the file to tick the emission ledger, which no
+    served build reads, so keying the served cache on the file would rebuild the
+    served list -- a release decision per due item -- on every write. Everything
+    else is hashed, so a key a build starts reading invalidates by default.
+    """
+    return _content_token(
+        state_path(vault_root), lambda: _load_shared(vault_root), "emission"
+    )
+
+
+def _review_content_token(vault_root: Path) -> str | None:
+    try:
+        return _content_token(
+            review_state_module.state_path(vault_root),
+            lambda: review_state_module.ReviewStateStore(vault_root).load(),
+            "surfaced",
+        )
+    except ValueError:
+        return None
+
+
+def _payload_content_token(payload: dict[str, Any], omitted: str) -> str:
+    # Only the declared bookkeeping field is excluded; new state fields still
+    # invalidate the memo until their consumers establish otherwise.
+    return hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != omitted},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _content_token(
+    path: Path, load_payload: Callable[[], dict[str, Any] | None], omitted: str
+) -> str | None:
+    token = _file_token(path)
+    key = (str(path), token) if token is not None else None
+    if key is not None:
+        with _SERVE_LOCK:
+            known = _CONTENT_TOKENS.get(key)
+        if known is not None:
+            return known
+    payload = load_payload()
+    if payload is None:
+        return None
+    digest = _payload_content_token(payload, omitted)
+    if key is not None and _file_token(path) == token:
+        with _SERVE_LOCK:
+            if len(_CONTENT_TOKENS) >= _SERVE_CACHE_CAP:
+                _CONTENT_TOKENS.pop(next(iter(_CONTENT_TOKENS)), None)
+            _CONTENT_TOKENS[key] = digest
+    return digest
+
+
 #: One served build per (vault, audience, session, purpose, day, projection
 #: file, review-state file); see `served_entries`.
 _SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+#: Served-content identity per projection or review file version.
+_CONTENT_TOKENS: dict[tuple[str, tuple[int, int, int]], str] = {}
 _SERVE_LOCK = threading.Lock()
 _SERVE_CACHE_CAP = 64
 _SERVE_CACHE_TTL_SECONDS = 300.0
@@ -2662,8 +2952,11 @@ def reset_serve_cache() -> None:
     """Drop every memoised served build: tests, and anything editing state files by hand."""
     with _SERVE_LOCK:
         _SERVE_CACHE.clear()
+        _CONTENT_TOKENS.clear()
     with _FINGERPRINTS_LOCK:
         _FINGERPRINTS.clear()
+    with _SHARED_LOCK:
+        _SHARED.clear()
     _LEDGER_WRITE_FAILED.clear()
 
 
@@ -2712,6 +3005,9 @@ def _served_entries_uncached(
     principal: Any = None,
     purpose: str | None = None,
     payload: dict[str, Any] | None = None,
+    review_payload: dict[str, Any] | None = None,
+    paths: frozenset[str] | None = None,
+    recover: bool = True,
 ) -> tuple[list[dict[str, Any]], dt.datetime | None, dict[str, bool], str | None]:
     """The build behind `served_entries`, and what a memo of it must re-check.
 
@@ -2730,7 +3026,10 @@ def _served_entries_uncached(
 
     horizon: dt.datetime | None = None
     if payload is None:
-        payload = load(vault_root)
+        payload = _load_shared(vault_root)
+    if payload is None and not recover:
+        # Activation omits unavailable advice rather than starting a vault scan.
+        return [], None, {}, None
     if payload is None:
         # An unpersistable vault recomputes ONCE per process, not once per read.
         payload = _UNPERSISTED.get(str(vault_root))
@@ -2738,6 +3037,16 @@ def _served_entries_uncached(
         payload = _schedule_reconcile(vault_root, today=today)
         if payload is None:
             return [], None, {}, None
+
+    if paths is not None:
+        payload = {
+            **payload,
+            "categories": {
+                category: {path: pages[path] for path in sorted(paths) if path in pages}
+                for category, pages in (payload.get("categories") or {}).items()
+                if isinstance(pages, dict)
+            },
+        }
 
     if _owes_nothing(payload):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
@@ -2776,7 +3085,7 @@ def _served_entries_uncached(
     role_token: str | None = None
     store = review_state_module.ReviewStateStore(vault_root)
     try:
-        state_payload = store.load()
+        state_payload = store.load() if review_payload is None else review_payload
     except ValueError:
         # Fail closed, exactly as the decision read does — but the carrier's
         # safe direction is SILENCE, not a raise. Every row below is filtered
@@ -2801,7 +3110,10 @@ def _served_entries_uncached(
     if isinstance(role_index, dict):
         from . import artifact_role_review, artifact_role_state
         try:
-            findings, _ = artifact_role_state.served(vault_root, keep)
+            findings, _ = (
+                artifact_role_state.served(vault_root, keep, paths=paths)
+                if paths is not None else artifact_role_state.served(vault_root, keep)
+            )
             role_token = _findings_token(findings)
             role_grouped = _entries_from_findings(vault_root, findings)
             for family in artifact_role_review.FAMILIES:
@@ -2945,10 +3257,8 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
     already past egress, the triage filter and the disposition filter, because
     that is where `served_entries` put it.
 
-    The fingerprints come from the projection the block was built from: the wire
-    block deliberately carries refs and dates only, and widening it to carry a
-    fingerprint would put an internal identity on a public surface for the sake
-    of a ledger write.
+    The delivered rows carry their own category and fingerprint. Reading a newer
+    projection here would stamp an identity the caller never received.
     """
     if not vault_root or not block:
         return
@@ -2956,16 +3266,13 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
     if not rows:
         return
     try:
-        fingerprints = _fingerprints_for(vault_root)
-        if not fingerprints:
-            return
         entries = []
         for row in rows:
             ref = str(row.get("ref") or "")
-            identity = fingerprints.get(ref)
-            if ref and identity:
-                # The row's category is its family on the ledger.
-                entries.append((_ref_id(ref), identity[0], identity[1]))
+            fingerprint = row.get("fingerprint")
+            category = row.get("category")
+            if ref and isinstance(fingerprint, str) and fingerprint and isinstance(category, str) and category:
+                entries.append((_ref_id(ref), fingerprint, category))
         if not entries:
             return
         review_state_module.record_surfaced(vault_root, entries, surface="carrier")
@@ -2994,7 +3301,7 @@ def _fingerprints_for(vault_root: Path) -> dict[str, tuple[str, str, str]]:
             hit = _FINGERPRINTS.get(key)
         if hit is not None and hit[0] == token:
             return hit[1]
-    projection = load(vault_root) or _UNPERSISTED.get(key)
+    projection = _load_shared(vault_root) or _UNPERSISTED.get(key)
     if projection is None:
         return {}
     fingerprints = _fingerprints_by_ref(projection)
@@ -3185,12 +3492,32 @@ def block_for_write(
     Those decisions are real and are collected; they just belong to this advisory
     rather than to the mutation.
     """
-    if apply_write_delta(vault_root, rel_path, today=today) is None:
+    payload = apply_write_delta(vault_root, rel_path, today=today)
+    if payload is None:
         return None
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        return served(vault_root, today=today)
+        return _affected_block(vault_root, frozenset({rel_path}), today=today, payload=payload)
+
+
+def _affected_block(
+    vault_root: Path,
+    paths: frozenset[str],
+    *,
+    today: dt.date | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Count only affected page buckets, with the ordinary disclosure and triage rules."""
+    from .mutation_terminal import DUE_STATE_AFFECTED_PATHS
+
+    if not paths:
+        return None
+    paths = frozenset(path.replace("\\", "/").lstrip("/") for path in paths)
+    result = block(served_entries(
+        vault_root, today=today, paths=paths, recover=False, payload=payload,
+    ))
+    return {**result, "scope": DUE_STATE_AFFECTED_PATHS} if result else None
 
 
 def block_for_batch(
@@ -3210,8 +3537,10 @@ def block_for_batch(
     """
     from .governance import egress as egress_module
 
+    tracked = _BATCH_PATHS.get()
+    paths = frozenset(tracked.pop(str(vault_root), ()) if tracked is not None else ())
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        return served(vault_root, today=today)
+        return _affected_block(vault_root, paths, today=today)
 
 
 # --------------------------------------------------------------------------
@@ -3252,7 +3581,10 @@ def emission_key(vault_root: Path | None = None) -> tuple[str, str, str]:
 
 def _digest(payload: dict[str, Any]) -> str:
     return json.dumps(
-        {"total": payload.get("total"), "categories": payload.get("categories")},
+        {
+            "total": payload.get("total"), "categories": payload.get("categories"),
+            **({"top": payload.get("top")} if payload.get("scope") else {}),
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -3273,7 +3605,8 @@ def would_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None
         # decides once, after the scope exits.
         return False
     with _LOCK:
-        return _EMISSION.get(emission_key(vault_root)) != _digest(payload)
+        key = (*emission_key(vault_root), str(payload.get("scope") or ""))
+        return _EMISSION.get(key) != _digest(payload)
 
 
 def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> None:
@@ -3290,7 +3623,7 @@ def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = No
         return
     if batch_active(vault_root):
         return
-    key = emission_key(vault_root)
+    key = (*emission_key(vault_root), str(payload.get("scope") or ""))
     digest = _digest(payload)
     with _LOCK:
         if _EMISSION.get(key) == digest:
@@ -3336,3 +3669,4 @@ def reset_emission_state() -> None:
         _UNPERSISTED.clear()
     with _BATCH_LOCK:
         _BATCH.clear()
+    _BATCH_PATHS.set(None)

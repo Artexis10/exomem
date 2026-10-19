@@ -119,7 +119,23 @@ def worker(root, socket_path, standby=False):
         return {"marker": marker, "pid": os.getpid()}
 
     @app.tool
-    async def escaped_child() -> dict:
+    async def escaped_child(orphan_after_standby: bool = False) -> dict:
+        if orphan_after_standby:
+            code = """import os, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+os.setsid()
+if os.fork() == 0:
+    os.setsid()
+    (root / 'orphan.pid').write_text(str(os.getpid()))
+    time.sleep(120)
+else:
+    deadline = time.monotonic() + 20
+    while not (root / 'standby.pid').exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+"""
+            child = subprocess.Popen([sys.executable, "-c", code, str(root)])
+            return {"pid": child.pid}
         child = subprocess.Popen(
             [sys.executable, "-c", "import os,time; os.setsid(); time.sleep(120)"]
         )
@@ -170,7 +186,8 @@ async def daemon(root, port, unit, env_file=None):
     await token(root)
 
     class FixtureRuntime(WorkerRuntime):
-        async def _spawn(self, command, *, standby=False):
+        async def _spawn(self, command, *, standby=False, **options):
+            # Forward the real _spawn's other options (a child's environment, its stdout).
             if "worker" in command:
                 socket_path = self.standby_socket if standby else self.socket_path
                 command = [
@@ -185,7 +202,7 @@ async def daemon(root, port, unit, env_file=None):
                     command.append("--standby")
             elif "maintain" in command:
                 command = [sys.executable, __file__, "migrate", str(root)]
-            await super()._spawn(command, standby=standby)
+            await super()._spawn(command, standby=standby, **options)
 
         def migration_required(self, target):
             if (root / "declare-migration").exists():

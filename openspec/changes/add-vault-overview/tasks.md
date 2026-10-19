@@ -14,22 +14,22 @@
 ## 2. Registry wiring
 
 - [ ] 2.1 Add `op_overview` leaf to `src/exomem/commands.py` (Google-style
-      docstring — it IS the MCP/CLI/REST contract) and the `_SPEC` row
-      `("overview", op_overview, 1, False, False, "path", _MCRC)`.
-- [ ] 2.2 CLI-door test (`kb overview --json` pattern) + REST route smoke via the
+      docstring — it IS the MCP/CLI/REST contract) and verify the current Tier 1 public
+      `browse_memory(mode="overview")` door delegates to that leaf on MCP, CLI and REST.
+- [ ] 2.2 CLI-door test (`exomem browse_memory --mode overview --json` pattern) + REST route smoke via the
       registry test machinery; confirm Tier 2-disabled exposure.
 - [ ] 2.3 Regenerate `tests/fixtures/mcp_tool_schemas.json` via
       `scripts/dump-tool-schemas.py` (after the docstring is final).
 
 ## 3. Docs and skill guidance
 
-- [ ] 3.1 Scaffold `SKILL.md`: Tier 1 table row, phrasing mappings, "Assessing a
+- [ ] 3.1 Scaffold `SKILL.md`: Tier 1 table row, phrasing mappings, "Assessing or adopting a
       vault you didn't build" block (generic wording; run
       `tests/test_scaffold_no_leak.py`).
-- [ ] 3.2 README core-tools table row for `overview`.
+- [ ] 3.2 README core-tools table row for `browse_memory`.
 
 ## 4. Verification
 
-- [ ] 4.1 `uv run pytest -q` and `ruff check` green; run `kb overview` once
+- [ ] 4.1 `uv run pytest -q` and `ruff check` green; run `exomem browse_memory --mode overview --json` once
       against a scratch vault shaped like a daily-notes vault and eyeball the
       report.

@@ -1081,6 +1081,112 @@ def test_candidate_insertion_reresolves_forward_and_ambiguous_facts_without_io(
     assert first_target.path not in ambiguous.inbound
 
 
+def test_stable_candidate_keeps_current_activation_data_and_stem_precedence(
+    tmp_path: Path,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/page.md"
+    before = _state(tmp_path, path, _source(exomem_id=_ID_A))
+    after = _state(
+        tmp_path,
+        path,
+        _source(
+            exomem_id=_ID_A,
+            status='" Archived "',
+            body="## Relations\n- supports [[Target]]\n",
+        ),
+    )
+    stem_target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/Target.md",
+        _source(title="Other", exomem_id=_ID_A),
+    )
+    title_target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/other.md",
+        _source(title="Target", page_type="pattern"),
+    )
+    corpus = _corpus(tmp_path, before, stem_target, title_target)
+
+    changed = corpus.with_candidate(after)
+    expected = _corpus(tmp_path, after, stem_target, title_target)
+
+    assert changed.as_dict() == expected.as_dict()
+    assert changed.activation_census == expected.activation_census
+    current = changed.activation_census.by_path[path]
+    assert current.source_hash == after.source_hash
+    assert current.status == " Archived "
+    assert changed.activation_census.unique_path_for_id(_ID_A) is None
+    assert corpus.activation_census.by_path[path].source_hash == before.source_hash
+    assert corpus.activation_census.by_path[path].status == "active"
+    assert changed.outbound[path][0].logical_target_path == stem_target.path
+    assert changed.outbound[path][0].target_status == "resolved"
+
+
+@pytest.mark.parametrize("anchor", ["claim", "renamed-claim"])
+def test_target_revision_refreshes_incoming_exact_claim_bindings(
+    tmp_path: Path, anchor: str
+) -> None:
+    target_path = "Knowledge Base/Notes/Insights/target.md"
+    before = _state(
+        tmp_path, target_path,
+        _source(title="Target", exomem_id=_ID_A, body="- [fact] Original claim. ^claim\n"),
+    )
+    after = _state(
+        tmp_path, target_path,
+        _source(title="Target", exomem_id=_ID_A, body=f"- [fact] Revised claim. ^{anchor}\n"),
+    )
+    source = _state(
+        tmp_path, "Knowledge Base/Notes/Insights/source.md",
+        _source(
+            exomem_id=_ID_B,
+            body="## Relations\n- supports [[Target#claim]]\n",
+        ),
+    )
+    corpus = _corpus(tmp_path, before, source)
+    changed = corpus.with_candidate(after)
+    expected = _corpus(tmp_path, after, source)
+    assert changed.inbound[target_path] == expected.inbound[target_path]
+    incoming, = changed.inbound[target_path]
+    assert incoming.target_unit_fingerprint != corpus.inbound[target_path][0].target_unit_fingerprint
+    assert incoming.target_unit_status == ("found" if anchor == "claim" else "missing")
+
+
+@pytest.mark.parametrize(
+    ("before_compiled", "after_compiled"),
+    ((True, True), (True, False), (False, True), (False, False)),
+)
+def test_stable_candidate_preserves_activation_membership_changes(
+    tmp_path: Path,
+    before_compiled: bool,
+    after_compiled: bool,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/page.md"
+    before = _state(
+        tmp_path, path,
+        _source(exomem_id=_ID_A, extra="" if before_compiled else "tags: [hub]"),
+    )
+    after = _state(
+        tmp_path, path,
+        _source(
+            exomem_id=_ID_A,
+            extra="" if after_compiled else "tags: [hub]",
+            body="Changed body.\n",
+        ),
+    )
+    sibling = _state(tmp_path, "Knowledge Base/Notes/Insights/sibling.md", _source(exomem_id=_ID_B))
+    corpus = _corpus(tmp_path, before, sibling)
+
+    changed = corpus.with_candidate(after)
+    expected = _corpus(tmp_path, after, sibling)
+
+    assert before.structurally_compiled is before_compiled
+    assert after.structurally_compiled is after_compiled
+    assert changed.as_dict() == expected.as_dict()
+    assert changed.activation_census == expected.activation_census
+    assert (path in changed.activation_census.by_path) is after_compiled
+    assert (path in corpus.activation_census.by_path) is before_compiled
+
+
 def test_evaluate_fails_closed_when_after_corpus_does_not_match_after_state(
     tmp_path: Path,
 ) -> None:

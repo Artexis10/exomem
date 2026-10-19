@@ -215,6 +215,217 @@ async def test_store_replacement_cas_does_not_repeat_a_cut_or_clear_a_new_head(
 
 
 @pytest.mark.anyio
+async def test_a_retired_store_fence_readmits_file_mode_writers(tmp_path: Path) -> None:
+    """A store fence that can never be retired locks file-mode writers out of an exported vault."""
+    app = create_app(database=tmp_path / "coordinator.sqlite", operator_token="operator")
+    operator = {"Authorization": "Bearer operator"}
+    fence = {"capability": STORE_CAPABILITY, "store_id": STORE_ID}
+    files = {"replica_id": "files", "ttl_seconds": 30}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://coordinator.example"
+    ) as client:
+        enrolled = await client.put(
+            "/v1/vaults/main/collection-store-fence",
+            headers=operator,
+            json={**fence, "expected_generation": 0},
+        )
+        assert enrolled.status_code == 200
+        before = (await client.post("/v1/vaults/main/lease/acquire", json=files)).json()
+        assert before["granted"] is False
+        retired = await client.post(
+            "/v1/vaults/main/collection-store-fence/retire",
+            headers=operator,
+            json={**fence, "expected_generation": 1},
+        )
+        assert retired.status_code == 200
+        assert retired.json() == {
+            "capability": STORE_CAPABILITY,
+            "enrolled": False,
+            "store_id": None,
+            "generation": 1,
+        }
+        assert (await client.get("/v1/vaults/main/collection-store-fence")).json() == retired.json()
+        after = (await client.post("/v1/vaults/main/lease/acquire", json=files)).json()
+        assert after["granted"] is True
+        assert "required_collection_store_capability" not in after
+
+
+@pytest.mark.anyio
+async def test_retiring_a_store_fence_revokes_the_store_holder(tmp_path: Path) -> None:
+    """A store writer holding the lease across a retire must not keep writing on its old token."""
+    app = create_app(database=tmp_path / "coordinator.sqlite", operator_token="operator")
+    operator = {"Authorization": "Bearer operator"}
+    fence = {"capability": STORE_CAPABILITY, "store_id": STORE_ID}
+    store = {
+        "replica_id": "store",
+        "ttl_seconds": 30,
+        "collection_store_capability": STORE_CAPABILITY,
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://coordinator.example"
+    ) as client:
+        await client.put(
+            "/v1/vaults/main/collection-store-fence",
+            headers=operator,
+            json={**fence, "expected_generation": 0},
+        )
+        acquired = (await client.post("/v1/vaults/main/lease/acquire", json=store)).json()
+        assert acquired["granted"] is True
+        store["fencing_token"] = acquired["fencing_token"]
+        retired = await client.post(
+            "/v1/vaults/main/collection-store-fence/retire",
+            headers=operator,
+            json={**fence, "expected_generation": 1},
+        )
+        assert retired.status_code == 200
+        status = (await client.get("/v1/vaults/main/lease")).json()
+        assert (status["holder"], status["fencing_token"]) == (None, acquired["fencing_token"] + 1)
+        renewed = (await client.post("/v1/vaults/main/lease/renew", json=store)).json()
+        assert renewed["granted"] is False
+        # No enrolled store remains to bind a reported head to.
+        reported = await client.post(
+            "/v1/vaults/main/lease/renew", json={**store, "collection_store_head": STORE_HEAD}
+        )
+        assert reported.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_a_retire_replays_without_revoking_again_and_refuses_a_stale_basis(
+    tmp_path: Path,
+) -> None:
+    """A lost acknowledgement must not revoke the next writer.
+
+    A retire naming another store or generation must not apply.
+    """
+    app = create_app(database=tmp_path / "coordinator.sqlite", operator_token="operator")
+    operator = {"Authorization": "Bearer operator"}
+    fence = {"capability": STORE_CAPABILITY, "store_id": STORE_ID}
+    retire_path = "/v1/vaults/main/collection-store-fence/retire"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://coordinator.example"
+    ) as client:
+        enrolled = await client.put(
+            "/v1/vaults/main/collection-store-fence",
+            headers=operator,
+            json={**fence, "expected_generation": 0},
+        )
+        for stale in ({"expected_generation": 2}, {"store_id": STORE_HEAD["instance_id"]}):
+            conflict = await client.post(
+                retire_path, headers=operator, json={**fence, "expected_generation": 1, **stale}
+            )
+            assert conflict.status_code == 409
+            assert conflict.json()["current"] == enrolled.json()
+        for invalid in ({"expected_generation": True}, {"capability": "unknown"}):
+            malformed = await client.post(
+                retire_path, headers=operator, json={**fence, "expected_generation": 1, **invalid}
+            )
+            assert malformed.status_code == 400
+        retired = await client.post(
+            retire_path, headers=operator, json={**fence, "expected_generation": 1}
+        )
+        assert retired.status_code == 200
+        files = (
+            await client.post(
+                "/v1/vaults/main/lease/acquire", json={"replica_id": "files", "ttl_seconds": 30}
+            )
+        ).json()
+        replay = await client.post(
+            retire_path, headers=operator, json={**fence, "expected_generation": 1}
+        )
+        assert (replay.status_code, replay.json()) == (200, retired.json())
+        assert (await client.get("/v1/vaults/main/lease")).json() == {**files, "granted": False}
+        for stale in ({"expected_generation": 2}, {"store_id": STORE_HEAD["instance_id"]}):
+            conflict = await client.post(
+                retire_path, headers=operator, json={**fence, "expected_generation": 1, **stale}
+            )
+            assert conflict.status_code == 409
+            assert conflict.json()["current"] == retired.json()
+
+
+@pytest.mark.anyio
+async def test_re_enrolment_after_a_retire_takes_the_next_generation(tmp_path: Path) -> None:
+    """Generations never reset: re-enrolment builds on the retired generation.
+
+    So a basis taken before the retire conflicts.
+    """
+    app = create_app(database=tmp_path / "coordinator.sqlite", operator_token="operator")
+    operator = {"Authorization": "Bearer operator"}
+    fence_path = "/v1/vaults/main/collection-store-fence"
+    first = {"capability": STORE_CAPABILITY, "store_id": STORE_ID}
+    second = {"capability": STORE_CAPABILITY, "store_id": STORE_HEAD["instance_id"]}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://coordinator.example"
+    ) as client:
+        await client.put(fence_path, headers=operator, json={**first, "expected_generation": 0})
+        retired = await client.post(
+            f"{fence_path}/retire", headers=operator, json={**first, "expected_generation": 1}
+        )
+        assert retired.status_code == 200
+        files = (
+            await client.post(
+                "/v1/vaults/main/lease/acquire", json={"replica_id": "files", "ttl_seconds": 30}
+            )
+        ).json()
+        stale = await client.put(
+            fence_path, headers=operator, json={**second, "expected_generation": 0}
+        )
+        assert stale.status_code == 409
+        assert stale.json()["current"]["generation"] == 1
+        enrolled = await client.put(
+            fence_path, headers=operator, json={**second, "expected_generation": 1}
+        )
+        assert enrolled.status_code == 200
+        assert enrolled.json() == {**second, "enrolled": True, "generation": 2}
+        # Re-enrolment fences the file-mode writer admitted after the retire.
+        cut = (await client.get("/v1/vaults/main/lease")).json()
+        assert (cut["holder"], cut["fencing_token"]) == (None, files["fencing_token"] + 1)
+        replay = await client.put(
+            fence_path, headers=operator, json={**second, "expected_generation": 1}
+        )
+        assert replay.json() == enrolled.json()
+        assert (await client.get("/v1/vaults/main/lease")).json() == cut
+        old_retire = await client.post(
+            f"{fence_path}/retire", headers=operator, json={**first, "expected_generation": 1}
+        )
+        assert old_retire.status_code == 409
+        await client.post(
+            f"{fence_path}/retire", headers=operator, json={**second, "expected_generation": 2}
+        )
+        assert (await client.get(fence_path)).json()["generation"] == 2
+
+
+@pytest.mark.anyio
+async def test_only_the_operator_credential_retires_a_store_fence(tmp_path: Path) -> None:
+    """The serving writer's credential must not drop the fence that admits its own store."""
+    app = create_app(
+        database=tmp_path / "coordinator.sqlite", bearer_token="lease", operator_token="operator"
+    )
+    fence_path = "/v1/vaults/main/collection-store-fence"
+    fence = {"capability": STORE_CAPABILITY, "store_id": STORE_ID}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://coordinator.example",
+        headers={"Authorization": "Bearer lease"},
+    ) as client:
+        enrolled = await client.put(
+            fence_path,
+            headers={"Authorization": "Bearer operator"},
+            json={**fence, "expected_generation": 0},
+        )
+        retire = {**fence, "expected_generation": 1}
+        assert (await client.post(f"{fence_path}/retire", json=retire)).status_code == 401
+        anonymous = await client.post(
+            f"{fence_path}/retire", json=retire, headers={"Authorization": ""}
+        )
+        assert anonymous.status_code == 401
+        assert (await client.get(fence_path)).json() == enrolled.json()
+        retired = await client.post(
+            f"{fence_path}/retire", json=retire, headers={"Authorization": "Bearer operator"}
+        )
+        assert retired.status_code == 200
+
+
+@pytest.mark.anyio
 async def test_store_head_survives_handoff_expiry_and_restart(tmp_path: Path) -> None:
     """Only a live holder can report a bound head; every lease-clearing path must retain it."""
     now = [100.0]

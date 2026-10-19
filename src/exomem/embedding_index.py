@@ -139,6 +139,21 @@ class _EmbCache(NamedTuple):
     matrix: np.ndarray
 
 
+def _cache_covers_publication(
+    cached: _EmbCache | None, token: tuple[int, ...] | None
+) -> bool:
+    """A failed token probe must not serve a snapshot known to precede publication."""
+    if cached is None:
+        return False
+    if token is None:
+        return True
+    # Semantic-unit generation does not change the chunk matrix.
+    epoch, generation, instance = token[:3]
+    return cached.instance == instance and (
+        cached.epoch, cached.generation
+    ) >= (epoch, generation)
+
+
 class _MaskCache(NamedTuple):
     """One memoized eligibility row mask for `search`'s allowed-paths filter.
 
@@ -1045,19 +1060,15 @@ class EmbeddingIndex:
         return mirror
 
     def _invalidate_before(self, token: tuple[int, int, int]) -> None:
-        """Release only caches older than this completed publication."""
-        epoch, generation, instance = token
+        """Retain compatible immutable rows for verified catch-up after publication."""
+        epoch, _generation, instance = token
         with self._lock:
             cached = self._cache
-            current = (
-                cached is not None
-                and cached.instance == instance
-                and (
-                    cached.epoch > epoch
-                    or (cached.epoch == epoch and cached.generation >= generation)
-                )
-            )
-            if not current:
+            current = _cache_covers_publication(cached, token)
+            # Same-epoch rows can catch up; a changed space or instance must reload.
+            if not current and (
+                cached is None or cached.instance != instance or cached.epoch != epoch
+            ):
                 self._cache = None
             mask = self._mask_cache
             if mask is not None and (not current or mask.metadata is not cached.metadata):
@@ -1543,7 +1554,7 @@ class EmbeddingIndex:
             if c is not None and c.recall_policy_identity == policy_identity
             else None
         )
-        if served is not None:
+        if served is not None and _cache_covers_publication(served, self._identity_token):
             self._hits += 1
             return served.metadata, served.matrix
         with self._lock:
@@ -1555,7 +1566,7 @@ class EmbeddingIndex:
                 if c is not None and c.recall_policy_identity == policy_identity
                 else None
             )
-            if served is not None:
+            if served is not None and _cache_covers_publication(served, self._identity_token):
                 self._hits += 1
                 return served.metadata, served.matrix
             # Bounded catch-up BEFORE the full reload: a cache a couple of
@@ -1713,43 +1724,57 @@ class EmbeddingIndex:
 
     def _load_all_rows(self, policy_identity: tuple[str, str] | None = None) -> _EmbCache:
         """Load one serving snapshot directly into its final float32 matrix."""
-        if policy_identity is None:
-            from . import recall_policy
+        with call_spans.span("embeddings.matrix_load.policy"):
+            if policy_identity is None:
+                from . import recall_policy
 
-            policy_identity = recall_policy.recall_policy_identity(self.vault_root)
-        conn = self._connect()
+                policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+        with call_spans.span("embeddings.matrix_load.connect"):
+            conn = self._connect()
         try:
-            conn.execute("BEGIN")
+            with call_spans.span("embeddings.matrix_load.snapshot"):
+                conn.execute("BEGIN")
             try:
-                snapshot_token = self._build_token(conn)
-                epoch, gen, instance = snapshot_token[:3]
-                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
-                width = identity.dim if identity is not None else recall_space.current_dim()
-                count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-                matrix = np.empty((count, width), dtype=np.float32)
-                metadata: list[tuple[str, int]] = []
-                cursor = conn.execute(
-                    "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
-                )
-                for row, (fp, idx, blob) in enumerate(cursor):
-                    if len(blob) != width * np.dtype(np.float32).itemsize:
-                        raise ValueError("embedding row width differs from stored space")
-                    if row >= count:
-                        raise ValueError("embedding row count differs from snapshot")
-                    matrix[row] = np.frombuffer(blob, dtype=np.float32)
-                    metadata.append((sys.intern(fp), idx))
-                if len(metadata) != count:
-                    raise ValueError("embedding row count differs from snapshot")
+                with call_spans.span("embeddings.matrix_load.snapshot"):
+                    snapshot_token = self._build_token(conn)
+                    epoch, gen, instance = snapshot_token[:3]
+                    identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                    width = identity.dim if identity is not None else recall_space.current_dim()
+                    count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+                with call_spans.span("embeddings.matrix_load.allocate"):
+                    matrix = np.empty((count, width), dtype=np.float32)
+                    metadata: list[tuple[str, int]] = []
+                fields = {"expected_rows": count, "width_sum": width}
+                with call_spans.span("embeddings.matrix_load.rows", fields):
+                    try:
+                        cursor = conn.execute(
+                            "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
+                        )
+                        for row, (fp, idx, blob) in enumerate(cursor):
+                            if len(blob) != width * np.dtype(np.float32).itemsize:
+                                raise ValueError("embedding row width differs from stored space")
+                            if row >= count:
+                                raise ValueError("embedding row count differs from snapshot")
+                            matrix[row] = np.frombuffer(blob, dtype=np.float32)
+                            metadata.append((sys.intern(fp), idx))
+                        if len(metadata) != count:
+                            raise ValueError("embedding row count differs from snapshot")
+                    finally:
+                        fields["rows"] = len(metadata)
+                        fields["vector_bytes"] = len(metadata) * width * np.dtype(np.float32).itemsize
             finally:
-                conn.rollback()
+                with call_spans.span("embeddings.matrix_load.release"):
+                    conn.rollback()
         finally:
-            conn.close()
-        self._observe_identity(identity, snapshot_token)
-        try:
-            mtime = self.path.stat().st_mtime
-        except OSError:
-            mtime = 0.0
-        return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix)
+            with call_spans.span("embeddings.matrix_load.release"):
+                conn.close()
+        with call_spans.span("embeddings.matrix_load.finalize"):
+            self._observe_identity(identity, snapshot_token)
+            try:
+                mtime = self.path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix)
 
     def search(
         self,
@@ -1921,62 +1946,79 @@ class EmbeddingIndex:
         if not self.path.exists():
             return [[] for _ in query_vecs]
         self.unload_cache()
-        conn = self._connect()
+        # Fixed phase names form the disk-scoring instrumentation protocol.
+        with call_spans.span("embeddings.disk_score.connect"):
+            conn = self._connect()
         try:
-            conn.execute("BEGIN")
-            token = self._build_token(conn)
-            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
-            width = identity.dim if identity is not None else recall_space.current_dim()
-            queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, width)
-            if encoded_for is not _UNSPECIFIED_SPACE and len(queries):
-                recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
-            self._observe_identity(identity, token)
+            with call_spans.span("embeddings.disk_score.snapshot"):
+                conn.execute("BEGIN")
+                token = self._build_token(conn)
+                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                width = identity.dim if identity is not None else recall_space.current_dim()
+                queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, width)
+                if encoded_for is not _UNSPECIFIED_SPACE and len(queries):
+                    recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
+                self._observe_identity(identity, token)
             answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
             if k <= 0:
                 return [[] for _ in queries]
             for start in range(0, len(queries), SEARCH_MANY_BLOCK):
-                cursor = conn.execute(
-                    "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
-                )
-                while rows := cursor.fetchmany(self.DISK_BLOCK_ROWS):
-                    matrix = np.empty((len(rows), width), dtype=np.float32)
-                    metadata = []
-                    for n, (path, chunk, blob) in enumerate(rows):
-                        if not isinstance(blob, bytes) or len(blob) != width * 4:
-                            raise ValueError("embedding row width differs from stored space")
-                        matrix[n] = np.frombuffer(blob, dtype=np.float32)
-                        metadata.append((path, chunk))
-                    block = (matrix @ queries[start:start + SEARCH_MANY_BLOCK].T).T
-                    # Only this block's candidate verdicts live across queries.
-                    verdicts: dict[str, bool] = {}
-                    def admitted(row: int, metadata=metadata, verdicts=verdicts) -> bool:
-                        path = metadata[row][0]
-                        if path not in verdicts:
-                            verdicts[path] = bool(admits(path))
-                        return verdicts[path]
-                    for n, scores in enumerate(block, start):
-                        winners = _top_admitted(scores, min(k, len(rows)), len(rows), admitted, metadata)
-                        merged = answers[n] + winners
-                        # Stable sort preserves the existing score/tie contract.
-                        merged.sort(key=lambda hit: (np.isnan(hit[2]), -hit[2]))
-                        answers[n] = merged[:k]
+                with call_spans.span("embeddings.disk_score.fetch"):
+                    # Physical order avoids a table lookup per secondary-index row.
+                    cursor = conn.execute(
+                        "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY rowid"
+                    )
+                while True:
+                    with call_spans.span("embeddings.disk_score.fetch"):
+                        rows = cursor.fetchmany(self.DISK_BLOCK_ROWS)
+                    if not rows:
+                        break
+                    fields = {"rows": 0, "vector_bytes": 0}
+                    with call_spans.span("embeddings.disk_score.decode", fields):
+                        matrix = np.empty((len(rows), width), dtype=np.float32)
+                        metadata = []
+                        for n, (path, chunk, blob) in enumerate(rows):
+                            if not isinstance(blob, bytes) or len(blob) != width * 4:
+                                raise ValueError("embedding row width differs from stored space")
+                            matrix[n] = np.frombuffer(blob, dtype=np.float32)
+                            metadata.append((path, chunk))
+                            fields["rows"] += 1
+                            fields["vector_bytes"] += len(blob)
+                    with call_spans.span("embeddings.disk_score.score"):
+                        block = (matrix @ queries[start:start + SEARCH_MANY_BLOCK].T).T
+                    with call_spans.span("embeddings.disk_score.select"):
+                        # Only this block's candidate verdicts live across queries.
+                        verdicts: dict[str, bool] = {}
+                        def admitted(row: int, metadata=metadata, verdicts=verdicts) -> bool:
+                            path = metadata[row][0]
+                            if path not in verdicts:
+                                verdicts[path] = bool(admits(path))
+                            return verdicts[path]
+                        for n, scores in enumerate(block, start):
+                            winners = _top_admitted(scores, min(k, len(rows)), len(rows), admitted, metadata)
+                            merged = answers[n] + winners
+                            # Stable sort preserves the existing score/tie contract.
+                            merged.sort(key=lambda hit: (np.isnan(hit[2]), -hit[2]))
+                            answers[n] = merged[:k]
                     del matrix, block, rows
-            result = []
-            for hits in answers:
-                hydrated = []
-                for path, chunk, score in hits:
-                    text = ""
-                    if hydrate:
-                        text = conn.execute(
-                            "SELECT chunk_text FROM chunks WHERE file_path=? AND chunk_idx=?",
-                            (path, chunk),
-                        ).fetchone()[0]
-                    hydrated.append((path, chunk, text, score))
-                result.append(hydrated)
+            with call_spans.span("embeddings.disk_score.hydrate"):
+                result = []
+                for hits in answers:
+                    hydrated = []
+                    for path, chunk, score in hits:
+                        text = ""
+                        if hydrate:
+                            text = conn.execute(
+                                "SELECT chunk_text FROM chunks WHERE file_path=? AND chunk_idx=?",
+                                (path, chunk),
+                            ).fetchone()[0]
+                        hydrated.append((path, chunk, text, score))
+                    result.append(hydrated)
             return result
         finally:
-            conn.rollback()
-            conn.close()
+            with call_spans.span("embeddings.disk_score.release"):
+                conn.rollback()
+                conn.close()
 
     def pairwise_current_chunks(
         self, wanted: dict[str, list[str]],

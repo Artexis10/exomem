@@ -200,7 +200,7 @@ _ARTIFACT_ADOPTION_CAPTURE = (
     " Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
     "keeps exact bytes as Source/Evidence by role, never MIME. No handle: non-committing "
     "handoff. Delivery needs an Evidence receipt/Record; no remote byte inference. "
-    "Missing schema: structural_suggestions/restructure_execution; relations: link_acceptance."
+    "Missing collection: structural_suggestions."
 )
 
 #: The episode-completeness pass, appended to `balanced` and `maximal` only.
@@ -381,10 +381,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "decision value are clear. Route a uniquely resolved Entity facet or affiliation "
             "there, else one concise compiled observation; Records only for a "
             "compatible existing measurement. Fleeting preferences, one-offs, incidental "
-            "associations, trivia, and tentative claims stay quiet. A concise observation, "
-            "narrow Entity facet or new Entity follows proactive_capture; an affiliation "
-            "relation requires link_acceptance; merge or structural change requires confirmed "
-            "restructure_execution. Route stated intent to "
+            "associations, trivia, and tentative claims stay quiet. A concise observation or "
+            "narrow Entity facet follows proactive_capture. Route stated intent to "
             "Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
@@ -416,10 +414,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "interpretation, or decision value are clear. Route a uniquely resolved Entity "
             "facet or affiliation there, else one concise compiled observation; "
             "Records only for a compatible existing measurement. Fleeting preferences, one-offs, "
-            "incidental associations, trivia, and tentative claims stay quiet. A concise observation, "
-            "narrow Entity facet or new Entity follows proactive_capture; an affiliation "
-            "relation requires link_acceptance; merge or structural change requires confirmed "
-            "restructure_execution. When torn between "
+            "incidental associations, trivia, and tentative claims stay quiet. A concise observation "
+            "or narrow Entity facet follows proactive_capture. When torn between "
             "capturing and letting it pass, capture. "
             "Prefer a real page over a mental note; do not wait to be asked. "
             "Route stated intent to Planning and observed outcome to Records. "
@@ -566,44 +562,47 @@ def default_for_surface(surface: str | None = None) -> str:
     return DEFAULT_PROMINENCE
 
 
-def _saved_context_level(surface: str | None) -> str | None:
-    """The saved level for the context this request belongs to, if any.
+def default_for_context(context: str) -> str:
+    """The shipped default for an engagement context: the hookless surfaces are
+    exactly the conversation context, so this is `default_for_surface` keyed by
+    the context instead of a detected client."""
+    return WEB_DEFAULT_PROMINENCE if context == CONVERSATION_CONTEXT else DEFAULT_PROMINENCE
 
-    The context is derived from the surface — the detected one when the caller
-    passes none — never from a request argument. `surface` is an internal
-    "what would this surface get?" knob and is not reachable from the public
-    MCP/REST/CLI parameter set.
+
+def resolve_context(context: str) -> dict[str, str]:
+    """The level one engagement context resolves to, and where it came from.
+
+    The single precedence rule: environment → this context's saved value → the
+    identity-wide saved value → machine config → unreadable-record floor → the
+    context default. `resolve` and `_active_source` both answer through here, so
+    the level a request gets and the level reported for its context cannot
+    disagree. The context is a parameter rather than detected, so a caller can
+    ask about both contexts at once (`levels`); it still tunes eagerness only.
     """
-    contexts = _saved_preference().get("contexts")
-    if not isinstance(contexts, dict):
-        return None
-    applied = context_for_surface(surface if surface is not None else detect_surface())
-    return normalize(contexts.get(applied))
-
-
-def resolve(surface: str | None = None) -> str:
-    """Active level: environment → this context's saved value → the identity-wide
-    saved value → machine config → surface default."""
+    if context not in CONTEXTS:
+        raise ValueError(f"unknown engagement context: {context!r}")
     from_env = normalize(os.environ.get(_PROMINENCE_ENV))
     if from_env:
-        return from_env
+        return {"level": from_env, "source": "env"}
 
-    by_context = _saved_context_level(surface)
+    saved = _saved_preference()
+    contexts = saved.get("contexts")
+    by_context = normalize(contexts.get(context)) if isinstance(contexts, dict) else None
     if by_context:
-        return by_context
+        return {"level": by_context, "source": "preference:context"}
 
-    stored = normalize(_saved_preference().get("stored"))
+    stored = normalize(saved.get("stored"))
     if stored:
-        return stored
+        return {"level": stored, "source": "preference"}
 
     raw = mode.read_config().get(_CONFIG_KEY)
     from_config = normalize(raw if isinstance(raw, str) else None)
     if from_config:
-        return from_config
+        return {"level": from_config, "source": "config"}
     if raw not in (None, ""):
         log.warning("ignoring invalid %s=%r in config; using default", _CONFIG_KEY, raw)
 
-    if _saved_preference().get("unavailable"):
+    if saved.get("unavailable"):
         # An unreadable record must never hand a user MORE proactivity than they
         # last chose. The client default is `maximal` on hookless surfaces, so
         # falling through to it turned an identity that may well have saved `off`
@@ -611,9 +610,37 @@ def resolve(surface: str | None = None) -> str:
         # floor: the record is gone, so the client's own default cannot be the
         # thing that widens it. `effective_capture_level` withholds proactive
         # writes on top, in every projection that speaks about capture authority.
-        return DEFAULT_PROMINENCE
+        return {"level": DEFAULT_PROMINENCE, "source": "preference:unavailable"}
 
-    return default_for_surface(surface)
+    return {"level": default_for_context(context), "source": "default"}
+
+
+def levels() -> dict[str, dict[str, str]]:
+    """Every engagement context's level and source, for a settings view."""
+    return {context: resolve_context(context) for context in CONTEXTS}
+
+
+def _applied_context(surface: str | None) -> str:
+    """The context a request belongs to, never from a request argument.
+
+    An explicit `surface` is an internal "what would this surface get?" knob,
+    not reachable from the public MCP/REST/CLI parameter set. Without one: the
+    operator's surface override, then on a Cloud cell the context the gateway
+    declares from the control plane's client registry, then the detected client.
+    """
+    if surface is None and not os.environ.get(_SURFACE_ENV, "").strip():
+        if _REQUEST_PREFERENCE.get() is not None:
+            from .command_surface import gateway_client_context
+
+            declared = gateway_client_context()
+            if declared is not None:
+                return declared
+    return context_for_surface(surface if surface is not None else detect_surface())
+
+
+def resolve(surface: str | None = None) -> str:
+    """Active level for this request's context; see `resolve_context`."""
+    return resolve_context(_applied_context(surface))["level"]
 
 
 def contract(level: str | None = None, surface: str | None = None) -> ProminenceContract:
@@ -727,16 +754,17 @@ def resolved(surface: str | None = None) -> dict:
     # capture authority is handed THIS object -- the served contract here, and
     # the delegation envelope at the call site that attaches it.
     gate = capture_gate(surface=surface)
+    context = _applied_context(surface)
     result = {
         "level": level,
         "source": _active_source(surface),
         "surface": applied_surface,
-        "context": context_for_surface(applied_surface),
+        "context": context,
         "contract": CONTRACTS[level].as_dict(gate),
         "levels": list(CANON),
         "change_with": "exomem prominence <level>",
     }
-    cadence = hook_cadence(applied_surface)
+    cadence = _hook_cadence_for_context(context)
     if cadence is not None:
         result["hook_cadence"] = cadence
     if _REQUEST_PREFERENCE.get() is not None:
@@ -773,7 +801,11 @@ def hook_cadence(surface: str | None) -> dict | None:
     a local install driving the CLI directly. Silence on a hookless surface
     stays, because there is genuinely no cadence there to be out of step with.
     """
-    if context_for_surface(surface) != CODING_CONTEXT:
+    return _hook_cadence_for_context(context_for_surface(surface))
+
+
+def _hook_cadence_for_context(context: str) -> dict | None:
+    if context != CODING_CONTEXT:
         return None
     return {
         "reads": "operator environment, then this client machine's exomem configuration file",
@@ -817,18 +849,7 @@ def custom_instructions_route() -> str:
 
 def _active_source(surface: str | None = None) -> str:
     """Where the active level came from — useful when a setting appears not to apply."""
-    if normalize(os.environ.get(_PROMINENCE_ENV)):
-        return "env"
-    if _saved_context_level(surface):
-        return "preference:context"
-    if normalize(_saved_preference().get("stored")):
-        return "preference"
-    raw = mode.read_config().get(_CONFIG_KEY)
-    if isinstance(raw, str) and normalize(raw):
-        return "config"
-    if _saved_preference().get("unavailable"):
-        return "preference:unavailable"
-    return "default"
+    return resolve_context(_applied_context(surface))["source"]
 
 
 def write_prominence(value: str) -> Path:

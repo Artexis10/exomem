@@ -8,7 +8,7 @@ Record every completed MCP tool call as exactly one tamper-evident ledger row ca
 ### Requirement: Every MCP Call Produces Exactly One Ledger Row
 
 The system SHALL append exactly one ledger row for each completed MCP tool call — read or
-write, success or refusal or error — recorded at the single point where both the call's
+write, success or abstention or refusal or error — recorded at the single point where both the call's
 duration and its outcome are known. A call SHALL NOT produce zero rows and SHALL NOT produce
 more than one row.
 
@@ -21,7 +21,7 @@ more than one row.
 
 #### Scenario: Read call is recorded too
 
-- **WHEN** an MCP read tool call completes normally
+- **WHEN** an MCP read tool call completes normally without activation abstention
 - **THEN** exactly one ledger row is appended with `outcome` of `ok`
 - **AND** the row is present even though no mutation and no writer lease were involved
 
@@ -308,3 +308,120 @@ supports it.
 
 - **WHEN** the ledger file is created on a platform that supports file modes
 - **THEN** its mode is restrictive such as `0600`
+
+### Requirement: The Ledger Write Site Feeds A Rolling Latency Watch
+
+The site that records each MCP call's ledger row SHALL also feed an in-process
+latency watch with the call's tool name, calling client, whether the call was a
+deep recall, its `total_ms`, its timestamp and its dominant stage spans. The
+watch SHALL be bounded in entries, SHALL hold no query text, path, excerpt or
+argument value, and SHALL follow the ledger's own rule that a failure in it
+never breaks or slows the call. The watch SHALL report, per tool, client and
+deep flag over a trailing window, the sample count and the p50 and p90 of
+`total_ms`, SHALL compare the p90 against a ceiling read from one packaged
+source, SHALL require a minimum sample count before reporting a
+breach, SHALL exclude samples recorded within a startup grace period from the
+verdict, and SHALL name the stage spans that dominate the calls over the
+ceiling. When a (tool, client, deep) first breaches its ceiling the watch SHALL
+log one structured `latency_ceiling_exceeded` event with those content-free
+fields, at most once per report interval per key.
+
+#### Scenario: A regression is named by its dominant stage
+
+- **WHEN** at least the minimum number of plain recalls from one client in the window have a p90 over the ceiling, and most of the time in the slow calls sits in one stage
+- **THEN** the watch reports a breach for that tool and client with the sample count, p50, p90 and ceiling
+- **AND** that stage is first among the dominant spans, with its total milliseconds and call count
+
+#### Scenario: The cold window after a promotion is not a regression
+
+- **WHEN** the only calls over the ceiling were recorded within the startup grace period
+- **THEN** the watch reports no breach for that tool and client
+
+#### Scenario: Too few calls is not a verdict
+
+- **WHEN** fewer than the minimum sample count exist for a tool and client in the window
+- **THEN** the watch reports the figures it has and no breach
+
+#### Scenario: A failing watch costs the call nothing
+
+- **WHEN** the watch raises while observing a call
+- **THEN** the ledger row is still written unchanged
+- **AND** the response the client receives is unchanged
+
+### Requirement: Completed Activation Abstention Has A Distinct Outcome
+
+A completed `activate_context` call SHALL record `abstained` when its final served packet has strict `abstained: true`, with a null error code. A refusal SHALL take precedence, and a dispatch or serialization exception SHALL record `error`. Other completed calls SHALL retain `ok`. The system SHALL NOT infer abstention from latency, material size, skipped stages or reason text.
+
+#### Scenario: Budget exhaustion returns an abstention
+
+- **WHEN** request-budget exhaustion produces a final activation packet with strict `abstained: true`
+- **THEN** the ledger row records `outcome: abstained` and a null error code
+- **AND** it does not report `ok`
+
+#### Scenario: Useful budget-limited activation completes normally
+
+- **WHEN** optional activation work reaches the budget and the final packet has strict `abstained: false`
+- **THEN** the ledger row retains `outcome: ok`
+- **AND** that outcome does not certify usefulness, completeness or relevance
+
+#### Scenario: Ordinary activation abstention is also observed
+
+- **WHEN** the final packet abstains for unresolved, ambiguous or warming input without budget exhaustion
+- **THEN** the ledger row records `outcome: abstained`
+- **AND** budget limitation remains a separate observation
+
+#### Scenario: Failure transport retains precedence
+
+- **WHEN** activation returns a refusal envelope or dispatch or serialization raises
+- **THEN** the ledger records the existing refusal or error outcome and error code
+- **AND** it does not substitute activation abstention for that failure
+
+### Requirement: Activation Observations Are Bounded And Content-Free
+
+Schema version 1 SHALL support an optional `activation_result` block containing strict boolean `abstained` and `budget_limited`, plus `reason`. Reasons SHALL use the fixed protocol: `ambiguous`, `unresolved`, `index_warming`, `unavailable`, `disabled`, or `withheld`; unknown reasons become null. Invalid booleans SHALL leave the block absent. Strict observed abstention SHALL still determine the outcome. No packet content SHALL enter the block.
+
+#### Scenario: The final served packet supplies the observation
+
+- **WHEN** the final postfilter changes an activation packet before serving
+- **THEN** the stored observation reflects that final packet
+- **AND** it records no material, query, conversation, page path or packet reference
+
+#### Scenario: Malformed metadata does not erase abstention
+
+- **WHEN** strict abstention is observed but budget metadata is invalid or a reason is unknown
+- **THEN** the outcome remains `abstained`
+- **AND** invalid booleans leave the block absent, while an unknown reason becomes null
+
+#### Scenario: Request observations cannot cross calls
+
+- **WHEN** concurrent, nested or cancelled calls share a client or request identifier
+- **THEN** each stored activation observation belongs only to its own call
+- **AND** a non-activation call receives no activation observation
+
+#### Scenario: Observation failure leaves the response intact
+
+- **WHEN** optional observation capture or ledger serialization fails
+- **THEN** telemetry does not change the tool's response or request deadline
+
+### Requirement: Historical Activation Semantics Remain Unknown
+
+Readers SHALL accept the extended outcome vocabulary without rewriting existing rows or hashes. An activation row without `activation_result` SHALL provide no recorded activation semantics. A timing join MAY accept legacy `ok` with null error when the client observes `ok` or `abstained` without error; it SHALL preserve raw server outcome and unknown server semantics. Current recorded disagreements and failure mismatches SHALL reject the join.
+
+#### Scenario: Old rows remain verifiable
+
+- **WHEN** a reader checks a chain containing historical rows and new activation observations
+- **THEN** the complete chain verifies without changing stored bytes or hashes
+- **AND** the summary reports observation coverage and unknown results separately from execution outcomes
+
+#### Scenario: Legacy timing joins preserve unknown server semantics
+
+- **WHEN** an activation row lacks the observation key and records `ok` with no error
+- **AND** its client observes `ok` or `abstained` with no error
+- **THEN** the timing join succeeds without copying client facts into the server observation
+- **AND** the stored server outcome stays `ok`, with unknown activation semantics
+
+#### Scenario: Current disagreements cannot use the legacy exception
+
+- **WHEN** a row contains an activation observation that disagrees with its outcome or the client observation
+- **THEN** the timing join rejects the inconsistency
+- **AND** refusal or error mismatches remain rejected even for historical rows

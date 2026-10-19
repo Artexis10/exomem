@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from .. import media_types, reserved_paths, vault
@@ -25,6 +27,19 @@ _DATASET_FORMATS = {".csv": "csv", ".tsv": "tsv", ".json": "json"}
 _FRAME_PATH_RE = re.compile(
     r"^(?P<parent>.+)\.frames/(?P<leaf>scene-\d{3,}-t(?P<millis>\d+)ms\.jpg)$"
 )
+_BYTE_PROOFS: ContextVar[tuple[dict[str, reserved_paths.GenericFileCopy], bool] | None] = ContextVar(
+    "companion_byte_proofs", default=None
+)
+
+
+@contextmanager
+def byte_proof_scope(proofs: dict[str, reserved_paths.GenericFileCopy], *, allow_capture: bool):
+    """Reuse request-owned parent bytes while recomputing classification and authority."""
+    token = _BYTE_PROOFS.set((proofs, allow_capture))
+    try:
+        yield
+    finally:
+        _BYTE_PROOFS.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,16 +176,25 @@ def _validate_common(
     return BoundCompanion(**semantics)
 
 
+
+def _digest(snapshot: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy) -> str:
+    return snapshot.sha256 if isinstance(snapshot, reserved_paths.GenericFileCopy) else hashlib.sha256(snapshot.data).hexdigest()
+
+
+def _size(snapshot: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy) -> int:
+    return snapshot.size if isinstance(snapshot, reserved_paths.GenericFileCopy) else len(snapshot.data)
+
+
 def _bind_snapshots(
     companion: BoundCompanion,
-    *snapshots: tuple[str, str, reserved_paths.GenericFileSnapshot],
+    *snapshots: tuple[str, str, reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy],
 ) -> BoundCompanion:
     identities = tuple(
         BoundSnapshot(
             role=role,
             path=path,
-            sha256=hashlib.sha256(snapshot.data).hexdigest(),
-            size=len(snapshot.data),
+            sha256=_digest(snapshot),
+            size=_size(snapshot),
             device=snapshot.identity.device,
             inode=snapshot.identity.inode,
             kind=snapshot.identity.kind,
@@ -184,17 +208,24 @@ def _bind_snapshots(
 def _classify_sibling(
     vault_root,
     artifact_path: str,
-    artifact: reserved_paths.GenericFileSnapshot,
+    artifact: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy,
 ) -> BoundCompanion:
-    companion = _read_companion(vault_root, f"{artifact_path}.md")
+    from ..preserve import _sidecar_path
+    from .raw_protection import marked
+
+    companion_path = (
+        _sidecar_path(Path(artifact_path), protected=marked(artifact_path)).as_posix()
+        if isinstance(artifact, reserved_paths.GenericFileCopy) else f"{artifact_path}.md"
+    )
+    companion = _read_companion(vault_root, companion_path)
     result = classify_proposed_sibling(
-        artifact_path, artifact_sha256=hashlib.sha256(artifact.data).hexdigest(),
-        artifact_size=len(artifact.data), companion=companion.data,
+        artifact_path, artifact_sha256=_digest(artifact),
+        artifact_size=_size(artifact), companion=companion.data,
     )
     return _bind_snapshots(
         result,
         ("artifact", artifact_path, artifact),
-        ("companion", f"{artifact_path}.md", companion),
+        ("companion", companion_path, companion),
     )
 
 
@@ -278,7 +309,7 @@ def _dataset_cards(vault_root, artifact_path: str):
 def _classify_dataset(
     vault_root,
     artifact_path: str,
-    artifact: reserved_paths.GenericFileSnapshot,
+    artifact: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy,
 ) -> BoundCompanion:
     cards = _dataset_cards(vault_root, artifact_path)
     if not cards:
@@ -292,8 +323,8 @@ def _classify_dataset(
         expected_keys={"format"},
         expected_class="dataset",
         artifact_path=artifact_path,
-        artifact_sha256=hashlib.sha256(artifact.data).hexdigest(),
-        artifact_size=len(artifact.data),
+        artifact_sha256=_digest(artifact),
+        artifact_size=_size(artifact),
     )
     expected_format = _DATASET_FORMATS[PurePosixPath(artifact_path).suffix.casefold()]
     if descriptor.get("format") != expected_format or frontmatter.get(
@@ -310,7 +341,7 @@ def _classify_dataset(
 def _classify_scene_frame(
     vault_root,
     artifact_path: str,
-    artifact: reserved_paths.GenericFileSnapshot,
+    artifact: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy,
     match: re.Match[str],
 ) -> BoundCompanion:
     companion = _read_companion(vault_root, f"{artifact_path}.md")
@@ -320,16 +351,46 @@ def _classify_scene_frame(
         expected_keys={"parent_path", "parent_sha256", "frame_timestamp_ms"},
         expected_class="scene_frame",
         artifact_path=artifact_path,
-        artifact_sha256=hashlib.sha256(artifact.data).hexdigest(),
-        artifact_size=len(artifact.data),
+        artifact_sha256=_digest(artifact),
+        artifact_size=_size(artifact),
     )
     parent_path = match.group("parent")
+    if isinstance(artifact, reserved_paths.GenericFileCopy):
+        scope = _BYTE_PROOFS.get()
+        parent = scope[0].get(parent_path) if scope is not None else None
+        if parent is not None:
+            try:
+                if parent.vault_root != vault_root or parent.relative_path != parent_path:
+                    raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
+                reserved_paths.require_generic_copy_source_version(parent)
+            except reserved_paths.ReservedPathLeafError as error:
+                raise CompanionClassificationError("artifact_unsafe") from error
+            return _bind_frame_parent(result, artifact_path, artifact, companion, descriptor, parent_path, parent, match)
+        if scope is not None and not scope[1]:
+            raise CompanionClassificationError("artifact_unsafe")
+        with reserved_paths.private_copy_directory() as temporary:
+            try:
+                parent = reserved_paths.copy_generic_file(
+                    vault_root, parent_path, Path(temporary) / "parent",
+                    max_bytes=None if artifact.max_bytes is None else artifact.max_bytes - artifact.size,
+                    deadline=artifact.deadline,
+                )
+                reserved_paths.require_current_generic_copy(parent)
+                if scope is not None:
+                    scope[0][parent_path] = parent
+                return _bind_frame_parent(result, artifact_path, artifact, companion, descriptor, parent_path, parent, match)
+            except reserved_paths.ReservedPathLeafError as error:
+                raise CompanionClassificationError("artifact_unsafe") from error
     parent = _read_artifact(vault_root, parent_path)
+    return _bind_frame_parent(result, artifact_path, artifact, companion, descriptor, parent_path, parent, match)
+
+
+def _bind_frame_parent(result, artifact_path, artifact, companion, descriptor, parent_path, parent, match):
     timestamp = descriptor.get("frame_timestamp_ms")
     if (
         descriptor.get("parent_path") != parent_path
         or descriptor.get("parent_sha256")
-        != hashlib.sha256(parent.data).hexdigest()
+        != _digest(parent)
         or not isinstance(timestamp, int)
         or isinstance(timestamp, bool)
         or not 0 <= timestamp <= 4_294_967_295
@@ -344,11 +405,13 @@ def _classify_scene_frame(
     )
 
 
-def classify(vault_root, rel_path: str) -> BoundCompanion:
+def classify(vault_root, rel_path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> BoundCompanion:
     """Locate and validate the closed descriptor class for one artifact."""
 
     artifact_path = _canonical_relative_path(rel_path)
-    artifact = _read_artifact(vault_root, artifact_path)
+    if artifact_copy is not None and (artifact_copy.vault_root != vault_root or artifact_copy.relative_path != artifact_path):
+        raise CompanionClassificationError("artifact_mismatch")
+    artifact = artifact_copy if artifact_copy is not None else _read_artifact(vault_root, artifact_path)
     frame_match = _FRAME_PATH_RE.fullmatch(artifact_path)
     if frame_match is not None:
         return _classify_scene_frame(vault_root, artifact_path, artifact, frame_match)

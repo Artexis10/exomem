@@ -116,6 +116,7 @@ classes:
     - ".github/workflows/ci.yml"
     - ".github/workflows/cell-memory-profile.yml"
     - ".github/workflows/cloud-cellctl.yml"
+    - ".github/workflows/cloud-k3s-link.yml"
     - ".github/workflows/cloud-rehearsal.yml"
     - ".github/workflows/cross-platform.yml"
     - ".github/workflows/frozen-verifier.yml"
@@ -190,6 +191,7 @@ semgrep:
   paths: ["src/exomem"]
 
 test_jobs:
+  - "serial timing checks (py3.13)"
   - "core tests (py3.13, shard 1/12)"
   - "core tests (py3.13, shard 2/12)"
   - "core tests (py3.13, shard 3/12)"
@@ -202,10 +204,12 @@ test_jobs:
   - "core tests (py3.13, shard 10/12)"
   - "core tests (py3.13, shard 11/12)"
   - "core tests (py3.13, shard 12/12)"
-  - "harness tests (py3.13, shard 1/4)"
-  - "harness tests (py3.13, shard 2/4)"
-  - "harness tests (py3.13, shard 3/4)"
-  - "harness tests (py3.13, shard 4/4)"
+  - "harness tests (py3.13, shard 1/6)"
+  - "harness tests (py3.13, shard 2/6)"
+  - "harness tests (py3.13, shard 3/6)"
+  - "harness tests (py3.13, shard 4/6)"
+  - "harness tests (py3.13, shard 5/6)"
+  - "harness tests (py3.13, shard 6/6)"
   - "Windows held filesystem (native NTFS)"
   - "terminal UI (textual, headless + snapshots)"
   - "product E2E (installed wheel, stdio + HTTP)"

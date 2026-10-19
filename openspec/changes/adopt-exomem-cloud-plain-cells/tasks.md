@@ -14,6 +14,12 @@
   - no `.env` file is read.
 - [x] 2.2 Add `CloudCellTokenVerifier` to `server_auth.py`, and add the cloud branch of `build_server` in `server.py` on the standalone path (D1)
 - [x] 2.3 Add `CLOUD_SURFACE_EXCLUSIONS` (`transfer_artifact`, `adopt_vault`, `process_media`, `read_media`, each with a reason and a lifting condition) and remove its members from the served surface. Test the listed surface.
+- [x] 2.3a Reconcile the `process_media` exclusion after documents and OCR shipped in [#1661](https://github.com/Artexis10/exomem/pull/1661).
+  Its claim that the image has no media dependencies is stale. Decide the manual-processing contract before amending or lifting the exclusion.
+  Verify the resulting reason, lifting condition and served tool surface together. Automatic ingestion does not prove manual retry or reprocessing.
+  Decision (owner, 2026-10-19): lift the exclusion. Tenants get `status`, `process` and `retry` through the cell's queue, brakes and engine selection; `read_media` stays excluded.
+  Evidence: `tests/test_cloud_cell.py` asserts the exclusion set and the served cloud tool list; `tests/test_media_processing.py::test_process_media_product_leaf_preserves_a_completed_transcript` covers manual process and retry on completed work.
+  The Cloud plugin evaluator now reads `CLOUD_SURFACE_EXCLUSIONS` instead of its own copy. Cells receive the change only through an approved image roll.
 - [x] 2.4 Content-free logging in cloud mode:
   - extend `content_private_logging_enabled` to cloud mode and install the redaction hook;
   - use the content-free call trace;
@@ -48,23 +54,31 @@
 
 - [x] 3.1 Scaffold `infra/cellctl/` as a Python package with its own pyproject and tests, plus `tests/fixtures/exomem_cloud_schema.sql` copied from Substrate migration `0056` (every C1 column, including the write-once key columns and the hold columns) and the grants script
   Evidence (#1368): `infra/cellctl/pyproject.toml`; `tests/test_fixture_schema.py` (`test_generation_bumps_only_on_desired_column_change`, `test_cellctl_role_cannot_write_desired_columns`, `test_gateway_role_cannot_write_desired_state`); fixtures refreshed from Substrate `2b38730` (#1387).
-- [ ] 3.2 Write red-first unit tests for the rendered manifests (D5):
+- [x] 3.2 Write red-first unit tests for the rendered manifests (D5):
   - Pod Security labels, quota, and a default-deny policy with gateway-only ingress;
   - no runtime egress (not even DNS), and backup egress limited to 443 plus DNS;
   - no ServiceAccount token, `readOnlyRootFilesystem`, the `/tmp` emptyDir, and `fsGroup` 10001 with `fsGroupChangePolicy: OnRootMismatch`;
   - the `cell-init` init container;
   - readiness on `/health/ready`, liveness on `/health`;
   - the encrypted `reclaimPolicy: Delete` class.
-- [ ] 3.3 Implement the reconcile loop (D4):
+  Evidence (#1368, #1396): `tests/test_manifests.py` covers security labels, quota, network isolation, runtime mounts, init, probes and PVC class selection.
+  `tests/test_platform_chart_headers.py::test_cloud_storage_class_uses_the_encryption_secret_and_deletes_volumes` covers the rendered encrypted `Delete` class.
+  [Cloud cellctl run 38328922734](https://github.com/Artexis10/exomem/actions/runs/38328922734/job/115073944357) passed both suites on exact release source `886a0a9`.
+  Its chart step rejects skipped cases. The isolated original-image qualification also passed the manifest cases on 2026-10-13.
+- [x] 3.3 Implement the reconcile loop (D4):
   - poll, plus `LISTEN` on a direct session;
   - server-side apply under field manager `cellctl`;
   - readiness from pod conditions;
-  - rendering the current image on every ordinary pass;
+  - rendering the cell's current image whenever ordinary convergence requires an apply;
   - the `exomem.io/hold` marker pinning image and replicas, recorded on the row and resumed after a restart;
   - observed writes and generation matching;
   - transient retry, identity-conflict failure and the init deadline.
   Test against a disposable Postgres with the fixture schema.
-- [ ] 3.4 Implement the rollout (D6) and prove each property:
+  Evidence (#1368): `tests/test_reconcile.py` covers notification reconnects, holds, readiness changes, retries and the init deadline against disposable Postgres.
+  `tests/test_decide.py`, `tests/test_db.py` and `tests/test_k8s_client.py` cover current-image selection, generation matching, observed-column writes and server-side apply.
+  [Cloud cellctl run 38328922734](https://github.com/Artexis10/exomem/actions/runs/38328922734/job/115073944357) passed 504 fast cases, with two skips, on exact release source `886a0a9`.
+  The settled-row optimization in D4 avoids redundant applies; required renders still preserve the cell's current image.
+- [x] 3.4 Implement the rollout (D6) and prove each property:
   - target and initial-image selection, including `last_good_image` set at first provisioning and `NO_GOOD_IMAGE` while paused with none;
   - one attempt at a time, by priority;
   - stop, then backup, then start, with annotations as attempt state;
@@ -73,12 +87,20 @@
   - a failed restore holding the cell stopped with `RESTORE_FAILED` and retrying;
   - resumption of each hold after a cellctl restart;
   - no flap while paused.
-- [ ] 3.5 Implement secrets (D7):
+  Evidence (#1368): `tests/test_rollout.py`, `tests/test_decide.py`, `tests/test_jobs.py` and `tests/test_k8s_client.py` cover these source properties.
+  The isolated original 0.116 controller image passed all 234 selected boundary cases on 2026-10-13, including those rollout cases.
+  Failed-restore, absent-Job retry and recorded-restoration cases jointly prove recovery without repeating Kubernetes TTL behavior.
+  This closes implementation and property-test scope; production rollout and recovery acceptance remain in section 6.
+- [x] 3.5 Implement secrets (D7):
   - the C4 bearer, with current and previous versions;
   - per-cell data keys, AES-GCM envelope, versioned, with a write-once `backup_key_wrapped`;
   - per-cell prefix-restricted B2 keys stored write-once as `b2_key_id` and `b2_key_wrapped`, deleting the losing key on a race;
-  - Secrets rendered from the row on every pass, never read back.
+  - tenant Secrets rendered from the row whenever an apply is required, never read back.
   Test that plaintext keys never reach the database, and that one cell's key cannot read another cell's prefix.
+  Evidence (#1368, #1422): `tests/test_secrets.py` and `tests/test_db.py` cover bearer overlap, authenticated envelopes and atomic, wrapped-only persistence.
+  `tests/test_reconcile.py` covers losing-key deletion and rendering tenant Secrets from stored rows; `tests/test_b2.py` checks the requested bucket and cell prefix.
+  Backblaze's [application-key contract](https://www.backblaze.com/apidocs/b2-create-key) restricts access to the requested prefix; [older Native API versions remain supported](https://www.backblaze.com/docs/cloud-storage-native-api-versions).
+  The exact-source fast suite above passed. Prefix isolation combines the tested adapter request with that provider contract, without claiming a live cross-prefix refusal probe.
 - [x] 3.6 Implement backups (D8):
   - the nightly stop-backup-start window under a `backup` hold, with its deadline;
   - the pre-upgrade backup;
@@ -87,16 +109,19 @@
   - a restore Job using `--delete`.
   The operator export runbook moved to 6.4 (deferred).
   Evidence (#1368): `tests/test_decide.py` (`test_nightly_backup_due_respects_the_window_the_interval_and_the_backoff`, `test_nightly_backup_deadline_miss_restarts_cell_with_backup_failed_and_sets_backoff`, `test_a_successful_pre_upgrade_backup_also_records_last_backup`), `tests/test_jobs.py` (`test_backup_job_runs_as_uid_10001_with_fsgroup`, `test_backup_job_mounts_the_volume_read_only_with_a_cache_emptydir`, `test_backup_job_backs_up_vault_and_host_with_retention`, `test_restore_job_uses_delete_and_writes_the_volume`); the live K3s suite, run 36199720123 on `feat/cloud-cellctl` `24fcb49`, the head that merged as #1368.
-- [ ] 3.7 Implement verified deletion (D10) in this order:
+- [x] 3.7 Implement verified deletion (D10) in this order:
   1. namespace;
   2. PV and Hetzner `volume_id`;
   3. every B2 object version under the prefix;
   4. the per-cell B2 key, by `b2_key_id`;
   5. the wrapped keys.
   A failed observation stays `deleting`. Document the etcd snapshot residual in the runbook.
+  Evidence (#1368, #1395, #1402): `tests/test_reconcile.py` and `tests/test_decide.py` cover ordered absence checks and retaining wrapped keys after failed observations.
+  `tests/test_b2_pagination.py` covers every object version and refuses incomplete listings; `docs/runbooks/cloud-cell-deletion.md` records the etcd snapshot residual.
+  The exact-source fast suite above passed. Task 3.10 records disposable-cluster deletion acceptance.
 - [x] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
   Evidence (#1368): `capacity.py`; `tests/test_capacity.py` (`test_cell_slots_subtracts_headroom_and_non_cell_attachments`, `test_fallback_limit_is_used_when_the_node_has_no_allocatable_count`), `tests/test_db.py::test_write_capacity_inserts_then_updates`, `tests/test_reconcile.py::test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back`.
-- [ ] 3.9 Add platform chart entries:
+- [x] 3.9 Add platform chart entries:
   - cellctl, single replica, `Recreate`, with the RBAC in D4 and the `ValidatingAdmissionPolicy` on its ServiceAccount (cell namespaces only, restricted labels, digest-pinned images from the cell repository);
   - the gateway Deployment and Service consuming the Substrate gateway image digest, rendering exactly the gateway's environment contract (C3), with a chart test pinning that set;
   - the certificate hostname resolving through public DNS in the gateway and cellctl pods, with the database's public `/32` in their egress; preserve tenant admission, and verify both image clients' TLS hostname and trust checks before sealing role DSNs;
@@ -108,10 +133,13 @@
   - SOPS-sourced Secrets.
   - retire legacy Hosted workloads and hooks; the Cloud lifecycle scheduler stays active while either Cloud control workload is enabled and suspends when both are disabled;
   - Extend the existing SOPS handoff, ciphertext validation and apply path to accept complete, exact-key-set Cloud platform Secret bundles while retaining scalar destinations; test bundle rotation shapes and reject incomplete, malformed or plaintext artifacts before publication or apply.
+  Evidence: `infra/helm/platform/templates/`, `infra/cellctl/Dockerfile`, `infra/cellctl/tests/test_platform_chart_headers.py` and `tests/test_cloud_secret_bundle_k3s.py` implement these boundaries.
+  The [disposable K3s run](https://github.com/Artexis10/exomem/actions/runs/38480038320/job/115581227399) passed 15 cases without skips on the source that merged as #1746.
+  Recorded platform deployment receipts establish the applied chart and signed Secret set. This closes chart delivery, not later rollout or client acceptance.
 - [x] 3.9a Classify every hosted scheduler job explicitly in chart values and render `exomem-reconcile` unsuspended whenever either Cloud control workload is enabled, while legacy-only jobs remain suspended; cover Cloud-on, legacy-pause-only and all-off renders.
 - [x] 3.9b Before deploying the lifecycle scheduler chart change, gate Substrate's legacy hosted lifecycle lane inside `/api/cron/exomem-reconcile` when Cloud is enabled, while retaining the Paddle and Cloud lanes. Substrate #190 is deployed; the authenticated production sweep returned zero legacy operations and a successful Cloud reconciliation on 2026-09-30.
 - [x] 3.9c Deploy the scheduler chart after the Substrate gate and verify a successful scheduled Cloud sweep while every legacy-only job remains suspended. Exomem #1490 (`9cdcea434`) deployed as platform revision 71 on 2026-09-30; the actual manifest matched the reviewed server dry-run, changing only reconcile `suspend: true` to `false`. The first scheduled job completed successfully at 19:50:15 UTC, and the scheduler ledger recorded a fresh success with zero consecutive failures.
-- [ ] 3.10 Integration test on disposable K3s:
+- [x] 3.10 Integration test on disposable K3s:
   - create, then pod kill with a governed write after it;
   - owner-only modes asserted after first start, pod replacement and restore;
   - stop, resume and read-only;
@@ -120,6 +148,12 @@
   - cross-cell network denial and runtime egress denial;
   - admission denial of an out-of-scope cellctl write;
   - deletion with absence proofs.
+  Evidence ([#1746](https://github.com/Artexis10/exomem/pull/1746), merged 2026-10-14): the [disposable K3s suite](https://github.com/Artexis10/exomem/actions/runs/38480038320/job/115581227399) passed 15 cases with zero skips in 1,423.34 seconds.
+  The [Cloud rehearsal](https://github.com/Artexis10/exomem/actions/runs/38480038348/job/115581697400) passed all 12 steps with zero failures or blocked steps and `gates_node: true`.
+  The rehearsal interrupts the actual disposable controller mid-canary and verifies the held timestamp through later reconciliation, restore and a committed write.
+  Lifecycle proof explicitly stops and resumes the cell while retaining its PVC, data and owner-only modes.
+  This closes disposable-controller acceptance; production owner and fleet acceptance remain in section 6.
+  The original harness execution timeout cause remains unknown; this proof does not claim a timeout repair.
 
 ## 4. Control database server (lane D)
 
@@ -216,10 +250,18 @@
   - resolve published image digests from the final reviewed release and render the complete platform change against captured live values;
   - prepare original DNS/tunnel snapshots, Terraform ownership reconciliation and phase-specific rollback;
   - retain the preparation-only boundary until the owner agrees a deployment/cutover window.
+  Reconciliation: the migration packet supported the recorded signed platform deployment and original image rollout.
+  The complete personal-client acceptance inventory is not reconciled here, so this box remains open. Reuse that packet; do not repeat completed migration stages.
 - [ ] 6.1 At the start of the agreed deployment window, scale the old platform's in-cluster gateway, provisioner and workers to zero (Substrate D8 step 1). Then apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem. If the database cutover has already completed, verify its closure evidence and current live state rather than repeating it.
   - Role apply on the control server starts every unit; `systemctl is-active` for postgresql, pgbouncer, the certbot and pgbackrest timers.
   - A pgbackrest full backup to B2 completes and the restore-verify timer's script passes against B2 before the Neon cutover.
-- [ ] 6.2 Deploy cellctl and the gateway beside the old platform, and set `cell_image`
+  Reconciliation: the database cutover and Neon project deletion are already closed.
+  This task retains the unreconciled service, timer and pre-cutover backup evidence; it does not request another cutover or provider deletion.
+- [x] 6.2 Deploy cellctl and the gateway beside the old platform, and set `cell_image`
+  Recorded platform receipts reach revision 92 on 2026-10-17, with the gateway and cellctl Ready.
+  The fleet default and the three running cells follow published [0.124.0](https://github.com/Artexis10/exomem/releases/tag/v0.124.0), without per-cell pins.
+  The two stopped cells remain stopped and unpinned; they have no observed running image.
+  These are dated deployment receipts, not a fresh production inspection.
 - [ ] 6.3 Owner acceptance on the real node:
   1. invite and connect the claude.ai custom connector;
   2. capture;
@@ -228,22 +270,46 @@
   5. image upgrade and recall;
   6. backup present in B2;
   7. token refresh after 15 minutes.
-- [ ] 6.4 Operator export runbook: restore into a scratch namespace and produce the tenant vault archive; needed before P5 friends. Moved from 3.6, where it was deferred; the P3 rehearsal's step 11 restores into a scratch namespace with cellctl's renderers as a stand-in.
+  Recorded capture, recall, upgrades and backups cover those individual checks. The existing ChatGPT connection also passed refresh and unchanged recall on 2026-10-14.
+  Claude-specific acceptance remains distinct and unverified here, so this box stays open. Later attachment ingestion does not prove that client's refresh.
+- [x] 6.4 Operator export runbook: restore into a scratch namespace and produce the tenant vault archive; needed before P5 friends.
+  Evidence: [#1409](https://github.com/Artexis10/exomem/pull/1409) delivered [the export procedure](../../../docs/runbooks/cloud-operator-export.md); #1418 added break-glass access.
+  The procedure binds the tenant, snapshot and recipient set, streams only the vault to age, and verifies recipient decryption before scratch cleanup.
+  The runbook records a successful 2026-09-28 export using the earlier admin identity.
+  Task 6.12 retains current-release acceptance through the current operator identity; this closes the delivered procedure only.
 
 ### Launch and resilience roadmap
 
-Current evidence separates healthy service from recovery and launch acceptance.
-On 2026-10-11, the operator API reports three ready cells on 0.114, with no active holds.
-Their requests remain `1Gi/250m`, with limits `3Gi/2CPU`.
-Shared selection remains off. Capacity currently charges scheduler requests rather than measured peaks.
-Today's backup rows do not prove a B2 restore. Endpoint probes pass; connector sign-in and refresh remain unverified.
-The 0.116 release is not yet published. Existing per-cell pins do not prove that the fleet default selects the reviewed release.
-The Neon cutover and project deletion are closed; do not repeat them.
-Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
+The original 0.116 qualification and image-only deployment remain historical evidence.
+They establish no current latency percentile, worst warm peak or full-fleet admission qualification.
+Recorded deployment receipts from 2026-10-17 place the three running cells and fleet default on published 0.124.0.
+The rollout left no per-cell pins and did not change the existing resource profile.
+Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`; task 6.11 retains memory and CPU qualification.
 
-- [ ] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
+Documents and OCR, plus artifact-broker access for every cell, are enabled in the recorded deployment.
+PDF, English OCR and Japanese OCR ingestion and keyword recall passed through the Cloud MCP connector.
+That proof covers the accepted connector route, not claude.ai's own attachment-link format or access rules.
+Image search and speech remain unfinished scope in `add-cloud-multimodal-processing`.
+Its documents/OCR delivery does not close that entire change or its broader performance gates.
+
+The 0.124.0 source includes the large-page graph-read fix, cell-health alerts and a configurable upgrade readiness deadline.
+[Source delivery](https://github.com/Artexis10/exomem/releases/tag/v0.124.0) does not prove the graph fix's production outcome.
+Alert-delivery receipts cover `cell-unavailable` and `cell-disk-low`; they do not establish functional-health job activation.
+That activation remains separate work in `add-hosted-functional-health-jobs`.
+
+A deployed-image B2 scratch restore matched vault and host state, with custody, authentication and cleanup verified.
+It does not close in-place failure recovery or historical rollback. Preserve those boundaries in tasks 6.6–6.9.
+The recipient-encrypted export in 6.12 used 0.116; it is not a fresh acceptance run on every later release.
+Tasks 6.0, 6.1 and 6.3 retain their specific unreconciled evidence, without repeating completed deployment or database-cutover stages.
+
+- [x] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
   Evidence from 2026-10-09: scratch restores matched 45/45 and 9,324/9,324 vault files.
-  That proof did not compare `/data/host` runtime state. Complete vault and host comparisons, cleanup absence proofs and the recurring operator procedure.
+  That historical proof did not compare `/data/host` runtime state.
+  The reviewed [helper correction](https://github.com/Artexis10/exomem/pull/1704) compares every declared backup root; its 20 scoped cases passed.
+  On 2026-10-13, maintained helpers restored a snapshot correlated with stopped-source references: all 45 vault and 116 host entries matched.
+  Custody, service authentication and scratch absence checks passed.
+  The current top-level wrapper was not invoked; its source wiring, existing tests and maintained-helper recovery establish repeatability.
+  This closes repeatable dual-root comparison and deployed-image scratch recovery, without claiming a current-wrapper production run, in-place recovery or historical rollback.
 - [ ] 6.6 Resilience 2: qualify a per-cell historical rollback and return through the existing release API.
   Use an exclusive writer window for the QA cell, a fresh post-write pre-attempt backup S1 and a copied vault plus host state.
   Verify old-image route reads/writes, custody and durable debt before any live pin.
@@ -254,7 +320,9 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   Never restore pre-upgrade S0 over later committed writes or add a downmigration.
 - [ ] 6.7 Resilience 3: recheck damaged-volume or bad-import recovery through the existing in-place B2 restore helper.
   The 2026-10-09 QA restore matched 45/45 vault files with 93 seconds of downtime.
-  Host-state comparison was absent. Reconcile that missing scope and verify authenticated service, custody, holds and cleanup.
+  Host-state comparison was absent from that historical in-place run.
+  The 2026-10-13 deployed-image scratch recovery matched both roots and verified custody, service authentication and cleanup.
+  Scratch recovery does not close the in-place failure path or gateway OAuth acceptance. Keep those scopes open.
 - [ ] 6.8 Resilience 4: prove recovery after actual CSI node loss on approved disposable infrastructure.
   Verify surviving-volume reattachment or B2 recovery, canonical data, host custody and service readiness.
   The older local-storage CI node-loss run does not prove the current CSI deployment's failure path.
@@ -278,14 +346,27 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   Verify full-capacity refusal preserves the unconsumed invitation and keeps existing access working.
   A production request change to `512Mi/125m` requires separate operator restart go.
   If qualification fails, retain `1Gi/250m` for an image-only roll; do not enable shared-node MemoryQoS.
-- [ ] 6.12 Resilience 8: repeat the existing recipient-encrypted operator export on the reviewed current release.
+  The maintained memory profiler preserves and reports the selected Cloud resource policy instead of silently measuring the legacy profile.
+  Its configuration regression test protects that binding; worst-supported warm-peak qualification remains open.
+- [x] 6.12 Resilience 8: repeat the existing recipient-encrypted operator export on the reviewed current release.
   Restore from the selected B2 snapshot into scratch, encrypt to the tenant's age recipient and verify recipient decryption and canonical content.
   The 2026-09-28 exercise does not close this current-release acceptance.
-- [ ] 6.13 Complete the friend end-to-end journey through invite, paid entitlement with a 100%-off QA code, provisioning and connector sign-in.
+  - Done on 2026-10-16 with the 0.116 cell image (`sha256:5d665b47…`), following `docs/runbooks/cloud-operator-export.md` at `886a0a9bf`.
+    - The QA cell's 02:00 UTC B2 snapshot was restored into a scratch namespace (45 files).
+    - The archive was encrypted to the QA tenant's age recipient, which the operator holds (543,048 bytes). It was then decrypted and compared with the restored scratch content: identical.
+    - The scratch namespace, its volume, the break-glass directories and the work directory were then confirmed absent.
+    - Deviations from the runbook: the node's system Python rendered the export, in-pod error text was reduced to a generic message, and the control-database read ran as the database superuser inside a verified read-only transaction with fixed SQL.
+- [ ] 6.13 Complete the friend end-to-end journey through invite, paid entitlement, provisioning and connector sign-in.
+  The inline checkout accepts no typed discount code; the friend price comes from the invitation through the configured friend discount, and the paid step is a real friend checkout. A complimentary ("Covered") invitation exercises the same invite, provisioning and connector steps without a payment.
   Verify save, cited recall, token refresh, a restorable backup, recipient export and ordered deletion without operator repair.
   Select the friend discount through the product configuration; do not encode a historical price.
-  After capacity qualification, set and verify the fleet default `cellImage` through the existing release API.
-  Existing per-cell pins alone do not qualify a new friend's image. Keep invitations pending until the required journey and resilience evidence passes.
+  The recorded 2026-10-17 rollout already set the fleet default to 0.124.0 and cleared the existing pins.
+  Verify that the new cell selects the then-current published default through the existing release API; do not repeat a default change merely for this task.
+  A production-shaped Sandbox checkout already proved payment and signed webhooks with a stand-in controller. Production acceptance uses one paid onboarding journey.
+  That Sandbox proof does not establish a fresh production cell, connector sign-in or this full journey.
+  Public admission stays on the waitlist; operator invitations admit directly when capacity is available.
+  Resilience drills 6.6–6.9 are deferred until after launch; their unchecked boxes remain evidence limits, not newly imposed invitation gates.
+  Keep refresh, restorable backup, recipient export and ordered deletion acceptance explicit. Do not delete a paying tenant merely to complete a checklist.
 
 ## 7. Retirement (R)
 
@@ -300,10 +381,14 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   `hosted-agent-surface` also has no active delta and is retired after its generic contracts were reconciled.
   Registry, bootstrap, capture doctrine, and Cloud parity remain in their current command-surface, bootstrap, portable-agent, and Cloud cell contracts.
   Historical Hosted packages and their original receipts remain immutable. Three capabilities remain blocked by active deltas.
+  The retired browser transfer routes, provisioning v2, security SQLite authority, credential state machine and operator probe requirements are removed.
+  Private authenticated ingress retains its generic authentication and tenant-isolation requirements without the deleted transfer exceptions.
+  Session outage tolerance, portability, memory limits and frozen-verifier requirements remain with their active consumers and deltas.
   Generic V1/V2 archive, protected restore, collection replica, history, and schema contracts remain in `hosted-vault-portability` under `vault_portability.py`.
   Hosted delivery, lifecycle, release, deletion, fingerprint, and restore-candidate bindings are retired.
   Mixed changes retain their open local and Cloud tasks. Task 7.2 remains open until their active deltas are reconciled.
-- [ ] 7.3 After seven clean days, delete the Neon project, and retire merged worktrees and branches
+- [ ] 7.3 After seven clean days, retire merged worktrees and branches whose ownership and clean, pushed state permit retirement.
+  The Neon project deletion is already closed; do not repeat it. Other sessions' worktrees and running processes remain outside this task.
 
 - [ ] 7.4 Complete the [Hosted retirement disposal inventory](../../../docs/runbooks/cloud-hosted-retirement.md).
   Repository deletion leaves provider credentials, manually managed Secrets and retained data intact.

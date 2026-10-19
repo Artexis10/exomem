@@ -25,8 +25,10 @@ CHAPTERS = ("collections", "import")
 #: Where a refusal points the caller, and whether the same request can succeed later.
 _REPAIRS = {
     "QUERY_BUSY": ("query", "Retry shortly; the store's readers are in use.", True),
-    "QUERY_TIMEOUT": ("query", "Narrow the local-day window or use execution_profile analytics.", True),
-    "QUERY_COST_LIMIT": ("query", "Narrow the local-day window, coarsen the bucket or use analytics.", False),
+    "QUERY_TIMEOUT": ("query", "Lower page.limit or narrow the local-day window. "
+                      "Aggregates can use execution_profile analytics.", True),
+    "QUERY_COST_LIMIT": ("query", "Lower page.limit or narrow the local-day window. "
+                         "Aggregates can coarsen the bucket or use analytics.", False),
     "QUERY_GROUP_LIMIT": ("group_by", "Narrow the local-day window or coarsen the bucket.", False),
     "QUERY_RESULT_TOO_LARGE": ("page.limit", "Lower page.limit or select fewer fields.", False),
     "QUERY_CURSOR_INVALID": ("page.after", "Send next_cursor unchanged with the same query.", False),
@@ -121,13 +123,14 @@ def _admitted_rows(session, query, limits) -> dict:
                                    as_of=as_of)
     declared = dict(zip(admitted.projection.index_names, (index.name for index in admitted.projection.indexes),
                         strict=True))
-    seek = admitted.uniform and admitted.compiled.usable_index in declared
+    # The implicit item-key index is usable but has no declared field index name.
+    seek = admitted.uniform and admitted.compiled.usable_index is not None
     result = {"source": asdict(query.source), "query_version": query.version,
               "schema_version": admitted.schema_version, "mode": query.mode, "as_of": admitted.compiled.as_of,
               "execution_profile": limits.profile, "bounds": limits.bounds(),
               "plan": {"kind": "rows", "release": "uniform" if admitted.uniform else "admitted",
                        "access": "index" if seek else "admitted_scan",
-                       "index": declared[admitted.compiled.usable_index] if seek else None,
+                       "index": declared.get(admitted.compiled.usable_index) if seek else None,
                        "fields": list(admitted.fields)}}
     if query.mode == "explain":
         return result

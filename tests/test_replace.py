@@ -168,7 +168,7 @@ def test_replace_writes_new_and_flips_old(vault: Path) -> None:
     assert old_rel.removesuffix(".md") in str(supersedes)
 
 
-def test_legacy_replace_uses_logical_hash_for_crlf_predecessor(vault: Path) -> None:
+def test_legacy_replace_uses_stored_bytes_for_crlf_predecessor(vault: Path) -> None:
     old_rel = _make_insight(vault, "CRLF predecessor")
     old_abs = vault / old_rel
     old_abs.write_bytes(
@@ -187,6 +187,7 @@ def test_legacy_replace_uses_logical_hash_for_crlf_predecessor(vault: Path) -> N
 
     assert result.old_path == old_rel
     assert _fm(old_abs)["status"] == "superseded"
+    assert b"\r\n" in old_abs.read_bytes()
 
 
 def test_replace_renders_supersession_links_for_kb_rooted_obsidian(vault: Path) -> None:

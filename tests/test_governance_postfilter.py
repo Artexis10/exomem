@@ -1380,6 +1380,7 @@ def test_nested_adoption_payload_gates_every_existing_artifact_kind_once(
     """
     from urllib.parse import quote
 
+    from exomem import call_spans
     from exomem import server as server_module
 
     _as_external_connector_client(monkeypatch)
@@ -1416,7 +1417,12 @@ def test_nested_adoption_payload_gates_every_existing_artifact_kind_once(
             for name in names
         ],
     }
-    out = server_module._gated_adoption_egress(vault, "adoption_run", payload)
+    token = call_spans.MCP_CALL_TOKEN.set("artifact-observation-fixture")
+    try:
+        out = server_module._gated_adoption_egress(vault, "adoption_run", payload)
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(token)
+        spans = call_spans.pop_call_spans("artifact-observation-fixture")
     serialized = json.dumps(out, default=str)
     assert "Private Artifacts" not in serialized
     assert "Private%20Artifacts" not in serialized
@@ -1437,6 +1443,12 @@ def test_nested_adoption_payload_gates_every_existing_artifact_kind_once(
         == __import__("hashlib").sha256(b"governed-artifact").hexdigest()
     ]
     assert len(report_outcomes) == len(names)
+    measured = next(span for span in spans if span["name"] == "egress.artifact_gate")
+    assert measured["count"] == 1
+    assert measured["fields"]["index_calls"] == 1
+    assert measured["fields"]["thread_cpu_us"] >= 0
+    assert measured["fields"]["thread_cpu_calls"] == 1
+    assert set(measured["fields"]) == {"index_calls", "thread_cpu_us", "thread_cpu_calls"}
 
 
 def test_nested_adoption_payload_gates_artifact_references_in_mapping_keys(
@@ -2040,6 +2052,28 @@ def test_a_blocked_policy_fails_the_error_path_closed(vault: Path) -> None:
     text = str(excinfo.value)
     assert ERROR_VOLUNTEERED_STEM not in text, f"a blocked policy leaked: {text!r}"
     assert egress.WITHHELD_REFERENCE in text
+
+
+def test_a_page_added_after_an_earlier_error_is_withheld_from_the_next(vault: Path) -> None:
+    """The gate reuses its census of the vault's files between requests.
+
+    A census kept past a change would let the first error that names a new
+    withheld page carry its name. The earlier error runs the gate on the same
+    folder, so the reused census is the one that must see the new page.
+    """
+    _govern_patterns_shut(vault)
+    _seed_volunteered(vault)
+    added = "Knowledge Base/Notes/Patterns/added-after-the-census.md"
+    with _external_scope():
+        egress.postfilter_error("get", ValueError(f"could not read {ERROR_VOLUNTEERED}"), vault)
+    (vault / added).write_text("---\ntype: pattern\n---\nx\n", encoding="utf-8")
+
+    error = ValueError(f"could not read {added}")
+    with _external_scope():
+        egress.postfilter_error("get", error, vault)
+
+    assert "added-after-the-census" not in str(error)
+    assert egress.WITHHELD_REFERENCE in str(error)
 
 
 def test_postfilter_error_redacts_the_exception_in_place(vault: Path) -> None:

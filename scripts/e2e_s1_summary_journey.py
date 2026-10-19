@@ -6,15 +6,10 @@ independent expected rows and daily results) over the parent change
 move-structured-collections-to-sqlite. It runs as one step of the product E2E
 (`scripts/e2e_product_loop.py`) on the wheel that run already built and installed.
 
-The journey runs twice on the same installed bytes:
-
-* Dark phase: the wheel as built. `capability.RELEASED` is empty, so creating a
-  summary collection refuses `RECORDS_SUMMARY_UNAVAILABLE`, as does the owner's
-  offline enrolment, and no import has a store collection to run into.
-* Released phase: the one line of `capability.py` in site-packages that holds
-  `RELEASED` is rewritten to enable `records-summary-v1`, and the service restarts.
-  Those are the bytes the S1.8 release would ship. No environment variable,
-  argument or vault state can turn the capability on, so nothing else is set.
+The journey requires a wheel that releases summary collections and keeps its
+installed capability bytes unchanged. It proves that an unenrolled vault
+refuses MCP summary creation, then exercises owner enrolment and the released
+workflow. It never changes an installed release capability.
 
 All data is invented and generated here from a fixed seed. The expected values
 come from `reference_daily` below, written from the raw rows with `datetime`
@@ -35,7 +30,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import difflib
 import hashlib
 import importlib.util
 import io
@@ -59,12 +53,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import cell_memory_profile as memory_profile  # noqa: E402
 import e2e_product_loop as loop  # noqa: E402
 
 # --- the invented export and its independent reference -------------------------
 
-#: Enough rows for ten import batches, so the service stops well before the job ends.
-EXPORT_ROWS = 5000
+#: Enough rows for an interrupted import to leave work for the restarted service.
+EXPORT_ROWS = 1600
 EXPORT_SEED = 20261007
 WINDOW_START = date(2026, 3, 1)
 WINDOW_DAYS = 80
@@ -115,7 +110,7 @@ def export_rows() -> list[dict[str, Any]]:
             ]}
             row["place"] = {"label": f"Invented place {index % 7}", "region": "Invented region"}
         # The preview never sees this source subtree; its undeclared values must stay private.
-        if index >= 4200:
+        if index >= EXPORT_ROWS - 800:
             row["context"] = {"unreviewed": {"place": f"Late invented place {index}"}}
         shape = index % 10
         if shape < 4:
@@ -365,7 +360,7 @@ def member_documents() -> tuple[dict[str, bytes], dict[str, dict[str, Any]]]:
     The reference uses those stated offsets, never the product or the host zone database.
     """
     documents, expected = {}, {}
-    for month, days in ((10, range(1, 32)), (11, range(1, 8))):
+    for month, days in ((10, range(24, 32)), (11, range(1, 8))):
         nested = []
         for day in days:
             clocks = [(minute, 120 if month == 10 and day < 25 else 60) for minute in range(0, 1440, 10)]
@@ -524,7 +519,7 @@ async def compare_sample_days(journey: Journey, service: Session) -> None:
 
 
 async def compare_samples(journey: Journey, service: Session) -> None:
-    rows, _ = await paged(service, SAMPLE_ROWS, "rows", 1000, SAMPLES_ID)
+    rows, _ = await paged(service, SAMPLE_ROWS, "rows", None, SAMPLES_ID)
     expect(len(rows) == len(journey.sample_reference)
            and {row["sample_id"]: row for row in rows} == journey.sample_reference,
            "derived rows differ from the independent source reference, including the October fold",
@@ -566,12 +561,12 @@ async def discover_and_plan(journey: Journey, service: Session) -> None:
     schema_bytes = sum(row["total"] for row in measure.measure(
         [tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in tools]))
     bootstrap = await service.call("bootstrap", profile="compact")
-    journey.measurements = {"source": "installed stdio MCP discovery on the invented journey vault",
+    journey.measurements.update({"source": "installed stdio MCP discovery on the invented journey vault",
                             "query_chapter_bytes": sizes, "zone_rules": described["import"]["zone_rules"],
                             "installed_schema_bytes": schema_bytes,
                             "installed_surface": tool_surface.discovery_contract(wires),
                             "compact_core_bytes": len(json.dumps(bootstrap)),
-                            "derived_source_rows": len(journey.sample_reference)}
+                            "derived_source_rows": len(journey.sample_reference)})
 
 
 async def protected_members(journey: Journey, owner: Session, recipient: Session) -> None:
@@ -604,8 +599,6 @@ LEASE_TOKEN = "s1-journey-writer-token"
 OPERATOR_TOKEN = "s1-journey-operator-token"
 LEASE_TTL = 4.0
 RECIPIENT_ID = 20261007
-CAPABILITY_OFF = "RELEASED: frozenset[str] = frozenset()"
-CAPABILITY_ON = "RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1})"
 
 
 class Refused(RuntimeError):
@@ -623,11 +616,79 @@ def expect(condition: object, message: str, observed: object = None) -> None:
         raise RuntimeError(f"{message}{detail}")
 
 
+def process_starttime(pid: int) -> int:
+    """Read Linux's process identity without interpreting spaces or parentheses in its name."""
+    # Fields after the final comm delimiter start at 3; Linux fixes starttime at field 22.
+    fields = (Path("/proc") / str(pid) / "stat").read_text().rpartition(")")[2].split()
+    return int(fields[19])
+
+
+def process_memory(pid: int) -> dict[str, Any]:
+    """Observe one process, including native allocations, with identity checks around the reads."""
+    try:
+        starttime = process_starttime(pid)
+        memory = memory_profile.read_smaps_rollup(pid)
+        peak = memory_profile.read_peak_rss(pid)
+        if starttime != process_starttime(pid) or memory is None or peak is None:
+            raise ValueError("process identity or memory observation unavailable")
+        return {"status": "observed", "pid": pid, "starttime_ticks": starttime,
+                "rss_bytes": memory["rss_bytes"], "peak_rss_bytes": peak,
+                "monotonic_ns": time.monotonic_ns()}
+    except (OSError, ValueError, IndexError, KeyError) as error:
+        return {"status": "unavailable", "reason": type(error).__name__}
+
+
+def record_process_observation(path: Path, launch: str) -> None:
+    """Publish launch metadata before the installed entry point; observation never controls startup."""
+    record = {**process_memory(os.getpid()), "launch_id": launch}
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, path)
+
+
+def memory_window(service, baseline, *, scope, progress) -> dict[str, Any]:
+    """Keep separate process windows and their raw observations; do not sum their peaks."""
+    final = service.memory_snapshot()
+    result = {"scope": scope, "baseline": baseline, "final": final, "progress": progress,
+              "method": "final process VmHWM minus baseline smaps_rollup Rss",
+              "limits": "earlier peaks can inflate; kernel accounting is approximate; children and swap excluded"}
+    if baseline["status"] != "observed" or final["status"] != "observed":
+        return {**result, "status": "unavailable"}
+    if (baseline["pid"], baseline["starttime_ticks"]) != (final["pid"], final["starttime_ticks"]):
+        return {**result, "status": "unavailable", "reason": "process_identity_changed"}
+    delta = final["peak_rss_bytes"] - baseline["rss_bytes"]
+    if delta < 0:
+        return {**result, "status": "unavailable", "reason": "peak_below_baseline"}
+    return {**result, "status": "observed", "additional_reported_mib": delta / memory_profile.MIB}
+
+
 class Session:
     """One MCP session on a running service."""
 
-    def __init__(self, client, timeout: float) -> None:
+    def __init__(self, client, timeout: float, *, process_observation=None) -> None:
         self.client, self.timeout = client, timeout
+        self.process_observation = process_observation
+
+    def memory_snapshot(self, *, startup=False) -> dict[str, Any]:
+        if self.process_observation is None:
+            return {"status": "unavailable", "reason": "worker_not_observed"}
+        path, launch = self.process_observation
+        try:
+            recorded = json.loads(path.read_text(encoding="utf-8"))
+            if recorded["launch_id"] != launch:
+                raise ValueError("observation belongs to another launch")
+            if recorded["status"] != "observed":
+                return recorded
+            current = process_memory(int(recorded["pid"]))
+            if current["status"] != "observed":
+                return current
+            if current["starttime_ticks"] != recorded["starttime_ticks"]:
+                raise ValueError("observation belongs to another process")
+            return recorded if startup else current
+        except (OSError, ValueError, IndexError, KeyError, TypeError) as error:
+            return {"status": "unavailable", "reason": type(error).__name__}
 
     async def call(self, tool: str, **arguments: Any) -> Any:
         result = await asyncio.wait_for(
@@ -704,6 +765,9 @@ class Journey:
         # The outer E2E collector rescues this directory before scratch cleanup.
         self.observer_log_root = self.home / "logs" / "query-observation"
         self.timeout = args.request_timeout
+        self.initial_records_summary_enabled = loop._installed_records_summary_enabled(
+            self.python, env=loop._clean_env(self.home, self.vault), cwd=self.work,
+        )
         self.rows = export_rows()
         self.export = export_bytes(self.rows)
         self.timings: dict[str, float] = {}
@@ -759,16 +823,19 @@ class Journey:
             self.timings[name] = round(time.monotonic() - started, 1)
 
     @contextlib.asynccontextmanager
-    async def service(self, label: str) -> AsyncIterator[Session]:
+    async def service(self, label: str, *, measure_memory=False) -> AsyncIterator[Session]:
         """The installed stdio service on this vault, holding the writer lease while it runs."""
         from fastmcp import Client
         from fastmcp.client.transports import StdioTransport
 
         log = self.work / f"service-{label}.log"
+        observation = ((self.observer_log_root / label / (secrets.token_hex(16) + ".json"), secrets.token_hex(16))
+                       if measure_memory else None)
+        server = self.observed_server(label, "--transport", "stdio", process_observation=observation)
         client = Client(
             StdioTransport(
-                command=str(self.executable),
-                args=["--transport", "stdio"],
+                command=server[0],
+                args=server[1:],
                 env=self.lease_env(),
                 cwd=str(self.work),
                 keep_alive=False,
@@ -785,16 +852,18 @@ class Journey:
                 raise RuntimeError(
                     f"service '{label}' did not start ({error})\n--- {log.name} tail ---\n{tail}"
                 ) from error
-            yield Session(client, self.timeout)
+            yield Session(client, self.timeout, process_observation=observation)
 
-    def observed_server(self, label: str, *arguments: str) -> list[str]:
+    def observed_server(self, label: str, *arguments: str, process_observation=None) -> list[str]:
         """Launch the same installed module with temporary failure-only observation."""
         from _recipient_query_observer import LOG_NAME
 
         # Labels name the harness's observed process launches, not user categories.
         log_path = self.observer_log_root / label / LOG_NAME
+        observation = ([] if process_observation is None else
+                       ["--observe-process", str(process_observation[0]), process_observation[1]])
         return [str(self.python), str(Path(__file__).resolve()),
-                "--observe-query-timeouts", str(log_path), *arguments]
+                "--observe-query-timeouts", str(log_path), *observation, *arguments]
 
     @contextlib.asynccontextmanager
     async def recipient_service(self) -> AsyncIterator[tuple[str, Session]]:
@@ -915,33 +984,6 @@ def tree_digest(root: Path, relative: str) -> str:
     return digest.hexdigest()
 
 
-def release_records_summary(capability_file: Path) -> None:
-    """Rewrite the one `RELEASED` line, as the S1.8 release would, and prove nothing else moved."""
-    before = capability_file.read_text(encoding="utf-8").splitlines(keepends=True)
-    hits = [index for index, line in enumerate(before) if line.rstrip("\r\n") == CAPABILITY_OFF]
-    expect(len(hits) == 1, f"{capability_file} must hold exactly one line '{CAPABILITY_OFF}'", hits)
-    after = list(before)
-    ending = before[hits[0]][len(CAPABILITY_OFF):]
-    after[hits[0]] = CAPABILITY_ON + ending
-    # Replace the file, never write through it: uv hard-links installed files to its wheel
-    # cache, and an in-place write would change the cached wheel for every later install.
-    staged = capability_file.with_name(capability_file.name + ".release")
-    staged.write_text("".join(after), encoding="utf-8")
-    shutil.copymode(capability_file, staged)
-    os.replace(staged, capability_file)
-    written = capability_file.read_text(encoding="utf-8").splitlines(keepends=True)
-    changed = [
-        line
-        for line in difflib.unified_diff(before, written, n=0)
-        if line[:1] in "+-" and not line.startswith(("+++", "---"))
-    ]
-    expect(
-        changed == [f"-{before[hits[0]]}", f"+{CAPABILITY_ON}{ending}"],
-        "the released-phase rewrite must change exactly the one RELEASED line",
-        changed,
-    )
-
-
 async def until(check: Callable, *, within: float, what: str, pause: float = 0.1) -> Any:
     """Poll an async check until it returns something truthy."""
     deadline = time.monotonic() + within
@@ -955,7 +997,6 @@ async def until(check: Callable, *, within: float, what: str, pause: float = 0.1
 
 # --- the journey ------------------------------------------------------------------
 
-UNAVAILABLE = "RECORDS_SUMMARY_UNAVAILABLE"
 ENROLMENT_REQUIRED = "COLLECTION_STORE_ENROLLMENT_REQUIRED"
 SERVICE_ACTIVE = "COLLECTION_STORE_SERVICE_ACTIVE"
 #: What the owner's offline enrolment leaves in the vault: the replica and the routing marker.
@@ -1084,49 +1125,31 @@ async def preserve_export(journey: Journey, service: Session) -> None:
     )
 
 
-async def dark_phase(journey: Journey) -> None:
-    async with journey.service("dark") as service:
+async def refuse_unenrolled(journey: Journey, service: Session) -> None:
+    with journey.step("0. released phase: MCP create on an unenrolled vault refuses"):
+        await service.refused(
+            ENROLMENT_REQUIRED,
+            "record_memory",
+            action="create",
+            manifest_path=WORKOUTS_PATH,
+            manifest_text=summary_manifest(WORKOUTS_ID, "Workout summaries"),
+            why="a NEW summary collection on an unenrolled vault",
+        )
+        await file_collections_unchanged(journey, service, "while the vault is unenrolled")
+
+
+async def unenrolled_phase(journey: Journey) -> None:
+    async with journey.service("unenrolled") as service:
         with journey.step("A/B: file Records and Planning collections, created before the store"):
             await create_file_collections(journey, service)
             await file_collections_unchanged(journey, service, "right after creation")
         with journey.step("1. preserve the invented export and check its receipt"):
             await preserve_export(journey, service)
-        with journey.step("0. dark phase: create and import refuse"):
-            await service.refused(
-                UNAVAILABLE,
-                "record_memory",
-                action="create",
-                manifest_path=WORKOUTS_PATH,
-                manifest_text=summary_manifest(WORKOUTS_ID, "Workout summaries"),
-                why="a NEW summary collection, before the release",
-            )
-            # With no store in the vault, an import has no store collection to run into. It
-            # refuses as the file collection or the absent one, not RECORDS_SUMMARY_UNAVAILABLE,
-            # which an enrolled vault under a dark release answers (test_collection_store_service).
-            for target, code in (
-                (journey.file_collections["records"], "IMPORT_UNAVAILABLE"),
-                (WORKOUTS_ID, "COLLECTION_NOT_FOUND"),
-            ):
-                await service.refused(
-                    code,
-                    "record_memory",
-                    action="import",
-                    collection=target,
-                    import_request={"mode": "preview", **journey.import_request},
-                )
+        await refuse_unenrolled(journey, service)
     enrolment = journey.work / "enrolment.md"
     enrolment.write_text(summary_manifest(ENROLMENT_ID, "Enrolment"), encoding="utf-8")
-    refused = journey.owner_cli(
-        "create", "--manifest-path", ENROLMENT_PATH, "--manifest-file", str(enrolment),
-        "--why", "enrol before the release",
-    )  # fmt: skip
-    expect(
-        refused.returncode == 1 and UNAVAILABLE in refused.stderr,
-        "the owner's offline create did not refuse in the dark phase",
-        {"returncode": refused.returncode, "stderr": refused.stderr[-800:]},
-    )
     leftovers = [name for name in STORE_FILES if (journey.vault / name).exists()]
-    expect(not leftovers, "the dark phase left store files in the vault", leftovers)
+    expect(not leftovers, "the unenrolled phase left store files in the vault", leftovers)
 
 
 def installed_capability_file(journey: Journey) -> Path:
@@ -1142,25 +1165,12 @@ def installed_capability_file(journey: Journey) -> Path:
         timeout=60,
     ).stdout.strip()
     path = Path(found)
-    # The rewrite is of the installed wheel only; never of a source checkout.
+    # Inspect the installed wheel's capability bytes, not a source checkout.
     expect("site-packages" in path.parts, "capability.py is not an installed-wheel file", found)
     return path
 
 
 async def released_phase_enrol(journey: Journey) -> None:
-    with journey.step("0. released phase: rewrite the RELEASED line in site-packages"):
-        release_records_summary(installed_capability_file(journey))
-    with journey.step("0. released phase: MCP create on an unenrolled vault refuses"):
-        async with journey.service("unenrolled") as service:
-            await service.refused(
-                ENROLMENT_REQUIRED,
-                "record_memory",
-                action="create",
-                manifest_path=WORKOUTS_PATH,
-                manifest_text=summary_manifest(WORKOUTS_ID, "Workout summaries"),
-                why="a NEW summary collection on an unenrolled vault",
-            )
-            await file_collections_unchanged(journey, service, "while the vault is unenrolled")
     with journey.step("2. owner enrols the vault: offline `exomem collections create`"):
         enrolment = journey.work / "enrolment.md"
         enrolled = journey.owner_cli_after_stop(
@@ -1194,7 +1204,7 @@ def revised_manifest(recommended: dict[str, Any]) -> str:
 async def create_and_start_import(journey: Journey) -> tuple[str, int]:
     """Steps 2 and 3 up to the interruption; returns the job token and the rows imported at the stop."""
     expected = len(reference_rows(journey.rows))
-    async with journey.service("import") as service:
+    async with journey.service("import", measure_memory=True) as service:
         await file_collections_unchanged(journey, service, "when the store first serves")
         with journey.step("2. record_memory creates the NEW summary collection"):
             created = await service.mutate(
@@ -1244,6 +1254,7 @@ async def create_and_start_import(journey: Journey) -> tuple[str, int]:
                 why="declare the recommended daily rollups and the field-release lookup",
                 **guards,
             )
+            baseline = service.memory_snapshot()
             job = await service.import_job(WORKOUTS_ID, mode="start", **journey.import_request)
             expect(job["state"] == "running", "the import did not start running", job)
         with journey.step("3. stop the service mid-job"):
@@ -1261,6 +1272,9 @@ async def create_and_start_import(journey: Journey) -> tuple[str, int]:
                 "the import was not mid-job when the service stopped; enlarge the export",
                 at_stop,
             )
+            journey.measurements.setdefault("import_memory", []).append(memory_window(
+                service, baseline, scope="warm import start through the observed interrupted batch",
+                progress=at_stop["rows"]))
     return job["continuation"], imported
 
 
@@ -1272,7 +1286,8 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
         "rejected": len(journey.rows) - valid_lines,
         "duplicates": valid_lines - len(rows),
     }
-    async with journey.service("resume") as service:
+    async with journey.service("resume", measure_memory=True) as service:
+        baseline = service.memory_snapshot(startup=True)
         with journey.step("3. restart: the job resumes and completes with exact counts"):
             first = await service.import_job(WORKOUTS_ID, mode="status", continuation=continuation)
             expect(
@@ -1309,6 +1324,9 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
                 "the import did not reject the export's invalid rows",
                 done["rejections"],
             )
+            journey.measurements.setdefault("import_memory", []).append(memory_window(
+                service, baseline, scope="before installed entry point through resumed import completion",
+                progress=done["rows"]))
         with journey.step("4. query and compare with the independent reference"):
             await compare_queries(journey, service)
         with journey.step("7. file collections A and B unchanged"):
@@ -1320,12 +1338,14 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
     )
 
 
-async def paged(service: Session, query: dict[str, Any], key: str, size: int,
+async def paged(service: Session, query: dict[str, Any], key: str, size: int | None,
                 collection: str = WORKOUTS_ID) -> tuple[list, list]:
     """Every row or group of a query across its cursor pages, with each page's plan."""
     items, plans, after = [], [], None
     while True:
-        page = await service.query({**query, "page": {"limit": size, **({"after": after} if after else {})}}, collection)
+        # Row acceptance uses the product's default page instead of its maximum.
+        paging = {**({"limit": size} if size is not None else {}), **({"after": after} if after else {})}
+        page = await service.query({**query, "page": paging}, collection)
         items.extend(page[key])
         plans.append(page.get("plan"))
         after = page.get("next_cursor")
@@ -1376,7 +1396,7 @@ async def compare_queries(journey: Journey, service: Session) -> None:
         service,
         {"version": 1, "select": ROW_FIELDS, "order_by": [{"field": "local_date"}]},
         "rows",
-        1000,
+        None,
     )
     ids = [row["exercise_id"] for row in scan]
     expect(len(ids) == len(set(ids)), "an exercise_id came back twice: the import duplicated a row")
@@ -1392,7 +1412,7 @@ async def compare_queries(journey: Journey, service: Session) -> None:
 
     day = "2026-03-11"  # holds an instant whose own offset moved it from UTC's 10 March
     on_day = {"version": 1, "select": ROW_FIELDS, "where": {"field": "local_date", "op": "eq", "value": day}}
-    found, _ = await paged(service, on_day, "rows", 1000)
+    found, _ = await paged(service, on_day, "rows", None)
     expected_ids = {key for key, row in rows.items() if _local_day(row).isoformat() == day}
     expect(
         {row["exercise_id"] for row in found} == expected_ids and "wk-edge-0" in expected_ids,
@@ -1592,25 +1612,17 @@ async def copy_and_adopt(journey: Journey) -> None:
 
 async def unsupported_launcher(journey: Journey) -> None:
     """The store fence must refuse an actual older reader without a RAW fence masking it."""
+    from exomem.governance import raw_protection
+
     with journey.step("6. refuse an actual unsupported interpreter through the launcher"):
         expect(journey.older_python, "the launcher proof needs --older-python")
         fixture = journey.fork("older-reader", journey.work / "older-reader-vault")
-        loop._run([str(fixture.executable), "init", "--vault", str(fixture.vault)],
-                  env=fixture.lease_env(), cwd=fixture.work, timeout=60)
-        async with fixture.service("files") as service:
-            await create_file_collections(fixture, service)
-        manifest = fixture.work / "summary.md"
-        manifest.write_text(summary_manifest(WORKOUTS_ID, "Reader compatibility fixture"), encoding="utf-8")
-        created = fixture.owner_cli("create", "--manifest-path", WORKOUTS_PATH,
-                                    "--manifest-file", str(manifest), "--why", "create compatibility fixture")
-        expect(created.returncode == 0, "compatibility fixture create refused", created.stderr)
-        async with fixture.service("summary") as service:
-            await service.mutate("record_memory", action="append", collection=WORKOUTS_ID,
-                                 item={"exercise_id": "reader-proof", "calories": 7, "local_date": "2026-03-11"},
-                                 why="compatibility proof row")
-        copied_root = fixture.work / "copied-vault"
-        shutil.copytree(fixture.vault, copied_root)
-        result = fixture.installed_helper("--unsupported-launcher", copied_root,
+        # Exclude RAW-marked paths only in this refusal copy, so RAW cannot mask the store fence.
+        shutil.copytree(
+            journey.vault, fixture.vault,
+            ignore=lambda _directory, names: [name for name in names if raw_protection.marked(name)],
+        )
+        result = fixture.installed_helper("--unsupported-launcher", fixture.vault,
                                           older_python=journey.older_python)
         expect(result["store_fence_refused"] is True, "the unsupported launcher accepted the copy", result)
 
@@ -1670,7 +1682,7 @@ async def narrowing_rollback(journey: Journey) -> None:
 
 def inspect_unsupported_launcher(args: argparse.Namespace) -> int:
     """Probe the real older installation through production candidate admission."""
-    from exomem.collection_store import authority
+    from exomem.collection_store import authority, schema
     from exomem.governance import raw_protection
     from exomem.service_manager import WorkerRuntime
     from exomem.state_migration import COLLECTION_MARKER_COMPATIBILITY_ID
@@ -1678,8 +1690,8 @@ def inspect_unsupported_launcher(args: argparse.Namespace) -> int:
     root = args.unsupported_launcher.resolve()
     expect(not raw_protection.required_compatibility(root), "RAW would mask the store fence in this fixture")
     expect(authority.required_state_compatibility_ids(root) == frozenset({
-        "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
-    }), "the compatibility fixture does not require the store and marker formats")
+        "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID, *schema.compatibility_ids(),
+    }), "the compatibility fixture does not require the current store, marker and schema formats")
     os.environ["EXOMEM_VAULT_PATH"] = str(root)
     fresh_state = Path(args.work) / "unsupported-state"
     os.environ["EXOMEM_STATE_ROOT"] = str(fresh_state)
@@ -1795,8 +1807,15 @@ def print_log_tails(work: Path, chars: int = 1500, *, observer_log_root: Path | 
 
 
 def run(args: argparse.Namespace) -> int:
-    journey = Journey(args)
     started = time.monotonic()
+    journey = Journey(args)
+    expect(journey.initial_records_summary_enabled, "the installed release does not enable summary collections")
+    capability_file = installed_capability_file(journey)
+    capability_before = capability_file.read_bytes()
+    journey.measurements["installed_capability"] = {
+        "initially_enabled": journey.initial_records_summary_enabled,
+        "initial_sha256": hashlib.sha256(capability_before).hexdigest(),
+    }
     with journey.step("setup: init the vault, start the lease coordinator"):
         loop._run(
             [str(journey.executable), "init", "--vault", str(journey.vault)],
@@ -1806,7 +1825,7 @@ def run(args: argparse.Namespace) -> int:
         )
         coordinator, handle = start_coordinator(journey)
     try:
-        asyncio.run(dark_phase(journey))
+        asyncio.run(unenrolled_phase(journey))
         asyncio.run(released_phase_enrol(journey))
         continuation, imported = asyncio.run(create_and_start_import(journey))
         asyncio.run(resume_import(journey, continuation, imported))
@@ -1815,6 +1834,9 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(copy_and_adopt(journey))
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
+        capability_after = capability_file.read_bytes()
+        expect(capability_after == capability_before, "the journey changed installed capability bytes")
+        journey.measurements["installed_capability"]["final_sha256"] = hashlib.sha256(capability_after).hexdigest()
     except BaseException:
         print_log_tails(journey.work, observer_log_root=journey.observer_log_root)
         raise
@@ -1834,8 +1856,15 @@ def main() -> int:
         from _recipient_query_observer import observe_query_timeouts
 
         log_path = Path(sys.argv[2])
-        sys.argv = ["exomem", *sys.argv[3:]]
+        observation_parser = argparse.ArgumentParser(add_help=False)
+        observation_parser.add_argument("--observe-process", nargs=2)
+        observed, arguments = observation_parser.parse_known_args(sys.argv[3:])
+        sys.argv = ["exomem", *arguments]
         with observe_query_timeouts(log_path):
+            if observed.observe_process:
+                path, launch = observed.observe_process
+                # runpy preserves this address space; PID/starttime cannot detect a future exec replacement.
+                record_process_observation(Path(path), launch)
             runpy.run_module("exomem", run_name="__main__", alter_sys=True)
         return 0
     parser = argparse.ArgumentParser(description=__doc__)

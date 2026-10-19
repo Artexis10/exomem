@@ -1,0 +1,47 @@
+# Real /metrics output of quay.io/prometheus/node-exporter:v1.12.1
+# (sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0), run with
+# --collector.disable-defaults --collector.mdadm --web.disable-exporter-metrics
+# --path.procfs=<dir>, where <dir>/mdstat holds the arrays of node_exporter's own
+# collector/fixtures/proc/mdstat at v1.12.1 that are named below.
+# Arrays: md127 and md0, both raid1 [2/2] [UU].
+# HELP node_exporter_build_info A metric with a constant '1' value labeled by version, revision, branch, goversion from which node_exporter was built, and the goos and goarch for the build.
+# TYPE node_exporter_build_info gauge
+node_exporter_build_info{branch="HEAD",goarch="amd64",goos="linux",goversion="go1.26.5",revision="6044da783597cc3b57aef7580ddcdcff58a4ee99",tags="unknown",version="1.12.1"} 1
+# HELP node_md_blocks Total number of blocks on device.
+# TYPE node_md_blocks gauge
+node_md_blocks{device="md0"} 248896
+node_md_blocks{device="md127"} 3.12319552e+08
+# HELP node_md_blocks_synced Number of blocks synced on device.
+# TYPE node_md_blocks_synced gauge
+node_md_blocks_synced{device="md0"} 248896
+node_md_blocks_synced{device="md127"} 3.12319552e+08
+# HELP node_md_disks Number of active/failed/spare disks of device.
+# TYPE node_md_disks gauge
+node_md_disks{device="md0",state="active"} 2
+node_md_disks{device="md0",state="failed"} 0
+node_md_disks{device="md0",state="spare"} 0
+node_md_disks{device="md127",state="active"} 2
+node_md_disks{device="md127",state="failed"} 0
+node_md_disks{device="md127",state="spare"} 0
+# HELP node_md_disks_required Total number of disks of device.
+# TYPE node_md_disks_required gauge
+node_md_disks_required{device="md0"} 2
+node_md_disks_required{device="md127"} 2
+# HELP node_md_state Indicates the state of md-device.
+# TYPE node_md_state gauge
+node_md_state{device="md0",state="active"} 1
+node_md_state{device="md0",state="check"} 0
+node_md_state{device="md0",state="inactive"} 0
+node_md_state{device="md0",state="recovering"} 0
+node_md_state{device="md0",state="resync"} 0
+node_md_state{device="md127",state="active"} 1
+node_md_state{device="md127",state="check"} 0
+node_md_state{device="md127",state="inactive"} 0
+node_md_state{device="md127",state="recovering"} 0
+node_md_state{device="md127",state="resync"} 0
+# HELP node_scrape_collector_duration_seconds node_exporter: Duration of a collector scrape.
+# TYPE node_scrape_collector_duration_seconds gauge
+node_scrape_collector_duration_seconds{collector="mdadm"} 0.000128113
+# HELP node_scrape_collector_success node_exporter: Whether a collector succeeded.
+# TYPE node_scrape_collector_success gauge
+node_scrape_collector_success{collector="mdadm"} 1

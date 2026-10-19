@@ -10,6 +10,7 @@ port 8765, so `/health/ready` never answers and the pod never becomes Ready
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
 
@@ -36,6 +37,8 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "cell-init":
         cell_init()
         return
+    # PID 1 ignores default SIGTERM; this fixture must exit during the real pod grace period.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     while True:
         time.sleep(3600)
 

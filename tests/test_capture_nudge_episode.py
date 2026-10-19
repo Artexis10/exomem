@@ -185,6 +185,43 @@ def test_only_a_successful_record_resets_coverage(
     assert _is_episode_ask(_stop(monkeypatch, capsys, other))
 
 
+def test_a_record_refused_with_the_error_envelope_leaves_the_episode_pending(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """MCP answers a coded refusal as normal content, so the result has no `is_error`."""
+    k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
+    _stops(monkeypatch, capsys, tmp_path, k - 1)
+    refusal = {
+        "success": False,
+        "error": {"code": "EPISODE_INVALID", "message": "subject is required", "remediation": None},
+    }
+    record = {"action": "record", "subject": "Harbor Lamp purchase"}
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "q"}]}},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tool-1", "name": "mcp__exomem__episode_memory", "input": record},
+                    {"type": "text", "text": SUBSTANTIVE},
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": json.dumps(refusal)}],
+            },
+        },
+    ]
+    refused = tmp_path / "refused.jsonl"
+    refused.write_text("\n".join(json.dumps(line) for line in lines), encoding="utf-8")
+
+    assert _is_episode_ask(_stop(monkeypatch, capsys, refused))
+
+
 def test_a_successful_record_resets_coverage(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

@@ -84,7 +84,7 @@ def test_upload_requires_auth(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     r = client.post(
         "/upload",
         files={"file": ("shot.png", b"\x89PNGdata", "image/png")},
-        data={"scope": "Yolo", "category": "01 - Check-in"},
+        data={"scope": "Rental", "category": "01 - Check-in"},
     )
     assert r.status_code == 401
 
@@ -94,12 +94,12 @@ def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPa
     r = client.post(
         "/upload",
         files={"file": ("shot.png", b"\x89PNGrealbytes", "image/png")},
-        data={"scope": "Yolo", "category": "01 - Check-in"},
+        data={"scope": "Rental", "category": "01 - Check-in"},
         headers={"Authorization": "Bearer sekret"},
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert "Evidence/Yolo/01 - Check-in/shot.png" in body["path"]
+    assert "Evidence/Rental/01 - Check-in/shot.png" in body["path"]
     assert body["stored_path"] == body["path"]
     assert body["size"] == len(b"\x89PNGrealbytes")
     assert body["hash"] == hashlib.sha256(b"\x89PNGrealbytes").hexdigest()
@@ -583,7 +583,7 @@ def test_upload_text_field_writes_searchable_sidecar(vault, monkeypatch: pytest.
         "/upload",
         files={"file": ("invoice.png", b"\x89PNGbytes", "image/png")},
         data={
-            "scope": "Yolo",
+            "scope": "Rental",
             "category": "01 - Check-in",
             "text": "Invoice total 4200 EUR, vendor Acme Plumbing, dated 2026-05-20.",
         },
@@ -609,7 +609,7 @@ def test_upload_of_a_markdown_file_is_preserved_byte_for_byte(
     r = client.post(
         "/upload",
         files={"file": ("packing-list.md", payload, "text/markdown")},
-        data={"scope": "Yolo", "category": "01 - Check-in"},
+        data={"scope": "Rental", "category": "01 - Check-in"},
         headers={"Authorization": "Bearer sekret"},
     )
     assert r.status_code == 201, r.text
@@ -621,10 +621,10 @@ def test_upload_of_a_markdown_file_is_preserved_byte_for_byte(
 
 def test_upload_get_serves_prefilled_form(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
-    r = client.get("/upload?scope=Yolo&category=01%20-%20Check-in")
+    r = client.get("/upload?scope=Rental&category=01%20-%20Check-in")
     assert r.status_code == 200
     assert "Add evidence" in r.text
-    assert 'value="Yolo"' in r.text
+    assert 'value="Rental"' in r.text
     assert "name=text" in r.text  # searchable-text field present
 
 

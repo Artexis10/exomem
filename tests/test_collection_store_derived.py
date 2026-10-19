@@ -13,9 +13,14 @@ import contextlib
 import hashlib
 import io
 import json
+import runpy
 import sqlite3
+import threading
+import time
 import zipfile
 from contextlib import closing
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_collection_store_import_exports import (
@@ -36,10 +41,11 @@ from test_collection_store_service import (  # noqa: F401 - the service fixture
     call,
     imported,
     service,
+    titles,
 )
-from test_collection_store_writer import manifest_path
+from test_collection_store_writer import CID, manifest_path
 
-from exomem import archive_members, commands, writer_lease
+from exomem import archive_members, commands, foreground_priority, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
     capability,
@@ -48,7 +54,7 @@ from exomem.collection_store import (
     importer,
     owner,
     replica,
-    schema,
+    runtime,
     tokens,
 )
 from exomem.collection_store.preview import preview_store
@@ -109,6 +115,8 @@ def _rows_file(found, cid=DERIVED):
 def _digests_of_rebuilt_rows(store_path, cid=DERIVED):
     """Each logged member's digest recomputed from the rebuilt rows: a SHA-256 chained over the item key
     and payload hash of each of the member's rows, taken in row order, member by member."""
+    from exomem.collection_store import native_identity, typed_storage
+
     with closing(connection.open_reader(store_path)) as main, \
             closing(sqlite3.connect(derived_rows.path(store_path))) as derived:
         goal = derived_rows.target(main, cid)
@@ -116,17 +124,17 @@ def _digests_of_rebuilt_rows(store_path, cid=DERIVED):
                            (cid,)).fetchall()
         columns = ",".join((*goal.layout.value_columns, "r"))
         rows = derived.execute(f"SELECT item_key,{columns} FROM {goal.table} ORDER BY row_id").fetchall()
-    from exomem.collection_store import typed_storage
-
-    found, offset = [], 0
-    for accepted, logged in log:
-        running = hashlib.sha256(b"").hexdigest()
-        for key, *encoded in rows[offset:offset + accepted]:
-            payload = tokens.payload_hash(1, key, typed_storage.decode_row(goal.layout, encoded), "")
-            running = hashlib.sha256(f"{running}\0{key}\0{payload}".encode()).hexdigest()
-        found.append((running, logged))
-        offset += accepted
-    return found
+        found, offset = [], 0
+        for accepted, logged in log:
+            running = hashlib.sha256(b"").hexdigest()
+            for key, *encoded in rows[offset:offset + accepted]:
+                if goal.layout.encoding == typed_storage.TYPED_V2:
+                    key = native_identity.decode(key, goal.layout.identity)
+                payload = tokens.payload_hash(1, key, typed_storage.decode_row(goal.layout, encoded, connection=derived), "")
+                running = hashlib.sha256(f"{running}\0{key}\0{payload}".encode()).hexdigest()
+            found.append((running, logged))
+            offset += accepted
+        return found
 
 
 def agent(writer, handle=None, **request):
@@ -180,13 +188,7 @@ def test_a_derived_import_keeps_rows_out_of_the_store_and_rebuilds_them_while_ro
         assert reader.execute("SELECT MAX(row_count_after) FROM import_members WHERE collection_id=?",
                               (DERIVED,)).fetchone() == (12,)
 
-    def published():
-        with closing(connection.open_reader(store_path)) as reader:
-            meta = dict(reader.execute("SELECT key,value FROM store_meta"))
-        head = json.loads(meta.get(schema.META_PUBLISHED_REPLICA_HEAD) or "null")
-        return head is not None and str(head["commit_seq"]) == meta[schema.META_COMMIT_SEQ]
-
-    _until(published, 30)
+    runtime.flush_for_export(root)
     page = root / PATH.replace("_collection.md", "Items/_summary.md")
     _until(lambda: page.exists() and "12 imported rows after 3 imported members" in page.read_text(), 30)
     portable = owner.backup(root, destination=tmp_path / "portable.sqlite")
@@ -227,6 +229,117 @@ def test_a_derived_import_keeps_rows_out_of_the_store_and_rebuilds_them_while_ro
         restarted.stop()
 
 
+def _restart_into_a_slow_rebuild(running, monkeypatch):
+    """Import one member of six batches, drop its rows file and restart the service, which rebuilds them.
+
+    Each replayed batch takes 0.3 s, as a batch does beside CPU-bound requests, and the service's mutation
+    timeout is one second: longer than one batch, shorter than the member's six. Returns the restarted
+    service, the rows the import left and the start of each replayed batch.
+    """
+    root = running.root
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 3)
+    store_path = connection.store_path(root)
+    call(root, "record_memory", action="create", manifest_path=PATH, manifest_text=TEXT, why="derived samples")
+    day = {"samples/2026-11-01.json": samples(("2026-11-01", at("2026-11-01", *(
+        (f"{hour:02d}:00", hour) for hour in range(18)))))}
+    job = imported(root, collection=DERIVED, mode="start", source_ref=_preserve(root, _archive(day))["path"],
+                   format="json-document", members="samples/*", mapping=SAMPLES)
+    _until(lambda: imported(root, collection=DERIVED, mode="status", continuation=job["continuation"])["state"]
+           == "complete", 30)
+    before = _rows_file(derived_rows.path(store_path))
+    running.stop()
+    for suffix in ("", "-wal", "-shm"):
+        derived_rows.path(store_path).with_name(derived_rows.FILENAME + suffix).unlink(missing_ok=True)
+    batches, apply = [], importer._derived_apply
+
+    def slow_batch(*args, **kwargs):
+        batches.append(time.monotonic())
+        time.sleep(0.3)
+        return apply(*args, **kwargs)
+
+    monkeypatch.setattr(importer, "_derived_apply", slow_batch)
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1")
+    return Service(root, writer_lease.start_server_lifecycle()), before, batches
+
+
+def _rebuilt(root):
+    store_path = connection.store_path(root)
+    with closing(connection.open_reader(store_path)) as reader:
+        return derived_rows.rebuild_status(reader, store_path, DERIVED)["state"] == "ready"
+
+
+@pytest.mark.parametrize("awaiting_bulk", [False, True], ids=["alone", "beside-a-request-awaiting-bulk-work"])
+def test_a_writer_that_waits_for_the_boundary_during_a_rebuild_gets_it_after_one_batch(
+    service: Service,  # noqa: F811 - the imported fixture, by name
+    monkeypatch,
+    awaiting_bulk,
+):
+    """Defect: a rebuild step kept the vault mutation boundary through every batch of its member while a
+    writer waited, and the next step followed at once. On a service rebuilding a large derived collection,
+    background commits waited out the mutation timeout and failed MUTATION_BUSY for the whole rebuild.
+    A request that awaits bulk work, such as a governed write joining a corpus build, lets every bulk pass
+    run, so a step that asked only about foreground work missed the writer queued on the boundary."""
+    root = service.root
+    restarted, before, batches = _restart_into_a_slow_rebuild(service, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+
+    def joining():
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk():
+            entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=joining)
+    try:
+        _until(lambda: batches, 30)
+        if awaiting_bulk:
+            thread.start()
+            assert entered.wait(5)
+        with restarted.manager.mutation_guard(root, operation="media_commit", holder_kind="background"):
+            pass  # MUTATION_BUSY raises here
+        release.set()
+        _until(lambda: _rebuilt(root), 30)
+        assert _rows_file(derived_rows.path(connection.store_path(root))) == before
+        assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(connection.store_path(root)))
+    finally:
+        release.set()
+        restarted.stop()
+
+
+def test_a_request_in_flight_holds_the_rebuild_and_the_store_still_answers_at_once(
+    service: Service,  # noqa: F811 - the imported fixture, by name
+    monkeypatch,
+):
+    """Defect: the rebuild stepped on beside every request, which then shared the interpreter with it for its
+    whole run, so requests ran many times slower while a large rebuild ran. The store thread now waits while
+    a request runs, and that wait must not hold a store request, which would time out behind it."""
+    root = service.root
+    restarted, before, batches = _restart_into_a_slow_rebuild(service, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+
+    def request():  # foreground work that never reaches the store, such as an activation
+        with foreground_priority.foreground():
+            entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=request)
+    try:
+        _until(lambda: batches, 30)
+        thread.start()
+        assert entered.wait(5)
+        begun = len(batches)
+        time.sleep(0.9)  # three batches' time
+        assert len(batches) - begun <= 1  # at most the one it was starting when the request arrived
+        # Within the store's one-second deadline, or COLLECTION_STORE_BUSY raises.
+        assert titles(root, CID) == ["Canonical"]
+        release.set()
+        thread.join(10)
+        _until(lambda: _rebuilt(root), 30)
+        assert _rows_file(derived_rows.path(connection.store_path(root))) == before
+    finally:
+        release.set()
+        restarted.stop()
+
+
 @pytest.fixture
 def derived(tmp_path, monkeypatch):
     """An in-process derived collection with an invented three-day export preserved for it."""
@@ -254,12 +367,84 @@ def derived(tmp_path, monkeypatch):
         writer.handle.close()
 
 
+@pytest.mark.query_deadline
+def test_timeout_observation_separates_derived_metadata_without_changing_the_refusal(derived, monkeypatch, tmp_path):
+    """A metadata admission timeout must retain its CPU and offsets without claiming SQL wait or changing results."""
+    from exomem.query_engine import route, runtime
+
+    writer, job = derived("metadata-timeout")
+    assert finish(writer, job)["state"] == "complete"
+    before = route.run(writer, DERIVED, ROWS, facade_profile="records")
+    assert len(before["rows"]) == 12
+    observe = runpy.run_path(str(
+        Path(__file__).parents[1] / "scripts" / "_recipient_query_observer.py"
+    ))["observe_query_timeouts"]
+    log = tmp_path / "metadata-timeout.jsonl"
+    real_assess, real_target = derived_rows.assess, derived_rows.target
+    real_time = runtime.time
+    real_flag, real_clock, real_check = derived_rows.is_derived, real_time.monotonic, runtime.ReadSession.check
+    offset, errors = [0.0], []
+    clock = SimpleNamespace(monotonic=lambda: real_clock() + offset[0], perf_counter=real_time.perf_counter,
+                            thread_time=real_time.thread_time, process_time=real_time.process_time,
+                            time_ns=real_time.time_ns)
+
+    def assess(*args, **kwargs):
+        result = real_assess(*args, **kwargs)
+        if runtime._CURRENT_SESSION.get() is not None:
+            offset[0] += 0.201  # Expire the unchanged interactive deadline after metadata admission, without sleeping.
+        return result
+
+    def check(session):
+        try:
+            return real_check(session)
+        except runtime.QueryError as error:
+            errors.append(error)
+            raise
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "time", clock)
+        patch.setitem(observe.__wrapped__.__globals__, "time", clock)
+        patch.setattr(derived_rows, "assess", assess)
+        patch.setattr(runtime.ReadSession, "check", check)
+        with observe(log):
+            with pytest.raises(runtime.QueryError, match="QUERY_TIMEOUT") as failure:
+                route.run(writer, DERIVED, ROWS, facade_profile="records")
+        assert failure.value is errors[0]
+        assert derived_rows.assess is assess
+        assert derived_rows.is_derived is real_flag
+        assert derived_rows.target is real_target
+        assert real_time.monotonic is real_clock
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    phases = record["phases"]
+    parent = phases["derived.row_source"]
+    assert record["timeout_ms"] == 200
+    assert record["query_deadline_elapsed_ms"] >= 201
+    assert record["largest_selected_values"] is None
+    assert parent["thread_cpu_ms"] >= 0
+    for name in ("is_derived", "target", "assess"):
+        child = phases[f"derived.row_source.{name}"]
+        assert child["calls"] == 1
+        assert child["thread_cpu_ms"] >= 0
+        assert 0 <= parent["first_started_after_query_ms"] <= child["first_started_after_query_ms"]
+        assert child["last_finished_after_query_ms"] <= parent["last_finished_after_query_ms"]
+    assert DERIVED not in log.read_text()
+    assert "samples/" not in log.read_text()
+    assert route.run(writer, DERIVED, ROWS, facade_profile="records")["rows"] == before["rows"]
+
+
 def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_digests(derived):
     """A rebuild drops the guard identity, rejects strings, or reconstructs a different scalar subtype."""
+    from exomem import structured_collections as collections
+    from exomem.collection_store.typed_storage import canonical_json
+
     text = manifest_text(DERIVED, "Mixed", MIXED_FIELDS).replace(
-        "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n")
+        "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n").removesuffix("---\n") + (
+        "rollups:\n  daily:\n    bucket: day\n    timestamp: local_date\n"
+        "    values:\n      numeric: [sum, max]\n---\n")
     writer, job = derived("mixed", {"samples/mixed.json": MIXED_DOCUMENT}, text=text, mapping=MIXED_MAPPING)
-    assert finish(writer, job)["rows"]["imported"] == 8
+    done = finish(writer, job)
+    assert {name: done["rows"][name] for name in ("inserted", "updated", "unchanged", "imported", "duplicates", "rejected")} == {
+        "inserted": 8, "updated": 0, "unchanged": 0, "imported": 8, "duplicates": 0, "rejected": 0}
 
     def rows(handle):
         with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, handle):
@@ -270,7 +455,28 @@ def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_d
     expected = [{"day": day["day"], "position": position,
                  "text" if type(value) is str else "numeric": value}
                 for day in MIXED_DOCUMENT["days"] for position, value in enumerate(day["values"])]
-    assert rows(writer.handle) == expected
+    assert canonical_json(rows(writer.handle)) == canonical_json(expected)
+    parsed = collections.parse_manifest_bytes(writer.root, writer.root / PATH, text.encode())
+    expected_digest = hashlib.sha256(b"").hexdigest()
+    for row in expected:
+        values = {**row, "local_date": row["day"]}
+        key = collections.derived_item_key(parsed, values)
+        payload = tokens.payload_hash(1, key, values, "")
+        expected_digest = hashlib.sha256(f"{expected_digest}\0{key}\0{payload}".encode()).hexdigest()
+    assert writer.connection.execute("SELECT accepted,rejected,rows_digest,row_count_after FROM import_members").fetchall() == [
+        (8, 0, expected_digest, 8)]
+    daily = {"version": 1, "group_by": [{"field": "local_date", "bucket": "day"}],
+             "aggregates": {"total": {"op": "sum", "field": "numeric"}, "peak": {"op": "max", "field": "numeric"}}}
+
+    def buckets(handle):
+        with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, handle):
+            result = commands.op_record_memory(writer.root, action="query", collection=DERIVED, query=daily)
+            assert result["plan"]["strategy"] == "rollup"
+            return result["groups"]
+
+    expected_buckets = [{"local_date": "2026-11-01", "total": 17.25, "peak": 7},
+                        {"local_date": "2026-11-02", "total": 3.0, "peak": 3}]
+    assert buckets(writer.handle) == expected_buckets
     path = writer.handle.path
     before = _rows_file(derived_rows.path(path))
     writer.handle.close()
@@ -285,9 +491,30 @@ def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_d
                     break
             else:
                 raise AssertionError("the guarded rebuild did not settle")
-        assert rows(handle) == expected
+        assert canonical_json(rows(handle)) == canonical_json(expected)
+        assert buckets(handle) == expected_buckets
         assert _rows_file(derived_rows.path(path)) == before
         assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(path))
+
+
+def test_a_rebuild_leaves_the_vault_commit_generation_where_it_was(derived):
+    """Defect: every rebuild step advanced the vault's commit generation, though it writes only the derived
+    rows file, which the store's import log rebuilds. A governed write compares the generation it read before
+    the boundary with the one inside it, so for the whole rebuild every write missed its validity stamp and
+    repeated its corpus walk inside the boundary."""
+    writer, job = derived("generation")
+    assert finish(writer, job)["state"] == "complete"
+    root, path = writer.root, writer.handle.path
+    writer.handle.close()
+    for suffix in ("", "-wal", "-shm"):
+        derived_rows.path(path).with_name(derived_rows.FILENAME + suffix).unlink(missing_ok=True)
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        restarted = CollectionWriter(root, handle)
+        generation = writer_lease.read_commit_generation(root)
+        with preview_store(root, handle):
+            outcomes = [derived_rows.step(root, restarted) for _ in range(8)]
+        assert "done" in outcomes
+        assert writer_lease.read_commit_generation(root) == generation
 
 
 def test_a_row_page_continued_after_another_batch_of_the_open_member_is_stale(derived):
@@ -324,6 +551,35 @@ def test_a_writer_that_lost_the_lease_stages_no_derived_rows(derived):
         run_jobs(writer, max_batches=1)
 
     assert not derived_rows.path(writer.handle.path).exists() or _rows_file(derived_rows.path(writer.handle.path)) == []
+
+
+def test_writer_contention_keeps_a_derived_import_running_and_preserves_committed_rows(derived, monkeypatch):
+    """A transient vault-writer refusal must not fail an acknowledged job or discard its checkpoint."""
+    writer, job = derived("busy")
+    run_jobs(writer, max_batches=1)
+    before = agent(writer, mode="status", continuation=job["continuation"])
+    rows = _rows_file(derived_rows.path(writer.handle.path))
+
+    def busy_stage(self, *args, **kwargs):
+        # The native mutation boundary refuses before the derived batch writes.
+        raise OpError("MUTATION_BUSY", "another writer holds the vault", "retry later",
+                      details={"status": "retryable", "committed": False})
+
+    with monkeypatch.context() as patch:
+        patch.setattr(derived_rows.Store, "stage", busy_stage)
+        run_jobs(writer, max_batches=1)
+    blocked = agent(writer, mode="status", continuation=job["continuation"])
+    assert (blocked["state"], blocked["reason"]) == ("partial", "store_unavailable")
+    assert blocked["error"]["code"] == "MUTATION_BUSY"
+    assert blocked["next_position"] == before["next_position"]
+    assert blocked["rows"] == before["rows"]
+    assert _rows_file(derived_rows.path(writer.handle.path)) == rows
+
+    done = finish(writer, job)
+    assert done["state"] == "complete"
+    assert (done["rows"]["imported"], done["rows"]["duplicates"], done["rows"]["rejected"]) == (12, 0, 0)
+    assert len(_rows_file(derived_rows.path(writer.handle.path))) == 12
+    assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(writer.handle.path))
 
 
 def _imported_state(writer):

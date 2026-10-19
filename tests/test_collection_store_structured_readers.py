@@ -72,6 +72,18 @@ def test_current_state_uses_canonical_contract_when_manifest_view_is_stale(store
     assert result[0]["statement"] == "status: ready"
 
 
+def test_planning_command_inventory_reads_canonical_store_collections(store):
+    from exomem.plan_memory import plan_memory
+
+    create(store, "planning")
+    with preview_store(store.root, store.handle):
+        result = plan_memory(store.root, "inspect")
+    assert result["kind"] == "planning_inventory"
+    assert len(result["collections"]) == 1
+    assert result["collections"][0]["collection_id"] == CID
+    assert result["collections"][0]["semantic_profile"] == "planning"
+
+
 def test_outcome_audit_joins_canonical_rows_without_manifest_or_item_views(store):
     store.create_collection(PLANNING_PATH, planning_manifest(), why="create", scaffold=False)
     store.create_collection(RECORDS_PATH, records_manifest(), why="create", scaffold=False)
@@ -162,13 +174,15 @@ def test_routing_read_cannot_reuse_a_snapshot_for_an_explicit_different_principa
             assert len(record_governance.inventory_collections(store.root)["collections"]) == 1
 
 
-def test_bound_manifest_resolution_never_falls_back_to_a_file_collection(store):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_bound_resolution_keeps_file_only_and_canonical_authority_distinct(store, canonical):
+    if canonical:
+        create(store)
     path = store.root / manifest_path()
-    path.parent.mkdir(parents=True)
-    path.write_text(manifest_text())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(manifest_text().replace(CID, OTHER))
     with preview_store(store.root, store.handle):
-        with pytest.raises(collections.CollectionError):
-            collections.load_manifest(store.root, path)
+        assert collections.load_manifest(store.root, path).collection_id == (CID if canonical else OTHER)
 
 
 def test_claims_census_reads_canonical_rows_without_views(store):

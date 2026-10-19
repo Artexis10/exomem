@@ -9,6 +9,7 @@ import posix as _native
 import secrets
 import stat
 import sys
+import time
 from collections.abc import Callable, Iterator
 from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, c_uint64
 from pathlib import Path
@@ -16,6 +17,7 @@ from pathlib import Path
 from .held_fs import (
     Capabilities,
     Chunks,
+    FileVersion,
     HeldDirectory,
     HeldFile,
     HeldFilesystem,
@@ -284,6 +286,11 @@ class PosixHeldFile(HeldFile):
         if current != self.identity:
             raise OSError(errno.ESTALE, "held name identity changed")
 
+    def version(self) -> FileVersion:
+        self.check()
+        info = _fstat(self.descriptor)
+        return FileVersion(_identity(info), info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
     def close(self) -> None:
         if not self.closed:
             _close(self.descriptor)
@@ -440,12 +447,17 @@ class PosixHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def read(self, file: HeldFile) -> HeldResult[bytes]:
+    def read(self, file: HeldFile, *, max_bytes: int | None = None) -> HeldResult[bytes]:
         try:
             checked = self._check_file(file)
+            if max_bytes is not None and checked.version().size > max_bytes:
+                return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))
             _lseek(checked.descriptor, 0, os.SEEK_SET)
-            chunks = []
+            chunks, size = [], 0
             while chunk := _read(checked.descriptor, 65536):
+                size += len(chunk)
+                if max_bytes is not None and size > max_bytes:
+                    return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))
                 chunks.append(chunk)
             return HeldResult(value=b"".join(chunks))
         except OSError as error:
@@ -649,7 +661,8 @@ class PosixHeldFilesystem(HeldFilesystem):
             return HeldResult(error=_error(error))
 
     def copy(
-        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str
+        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str,
+        *, max_bytes: int | None = None, deadline: float | None = None,
     ) -> HeldResult[None]:
         temporary = f".exomem-held-{secrets.token_hex(16)}"
         temporary_descriptor: int | None = None
@@ -681,7 +694,17 @@ class PosixHeldFilesystem(HeldFilesystem):
                 temporary,
                 _WRITE_FLAGS | os.O_CREAT | os.O_EXCL,
             )
-            while chunk := _read(checked.descriptor, 65536):
+            copied_size = 0
+            while True:
+                # Bounds apply between syscalls; an in-progress filesystem syscall cannot be interrupted here.
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise OSError(errno.ETIMEDOUT, "copy deadline expired")
+                chunk = _read(checked.descriptor, 65536)
+                if not chunk:
+                    break
+                copied_size += len(chunk)
+                if max_bytes is not None and copied_size > max_bytes:
+                    raise OSError(errno.EFBIG, "copy byte budget exceeded")
                 view = memoryview(chunk)
                 written = 0
                 while written < len(view):
@@ -697,7 +720,7 @@ class PosixHeldFilesystem(HeldFilesystem):
             )
             _fsync(destination.descriptor)
             return HeldResult(value=None)
-        except OSError as error:
+        except BaseException as error:
             if temporary_descriptor is not None:
                 _close(temporary_descriptor)
             if destination is not None:
@@ -705,6 +728,8 @@ class PosixHeldFilesystem(HeldFilesystem):
                     _unlink(temporary, dir_fd=destination.descriptor)
                 except OSError:
                     pass
+            if not isinstance(error, OSError):
+                raise
             return HeldResult(error=_error(error))
 
     def enumerate(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:

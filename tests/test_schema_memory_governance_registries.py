@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -508,20 +509,123 @@ def _history(root: Path, subject: str) -> list[dict]:
 
 
 @pytest.mark.parametrize("subject", sorted(_SUBJECTS))
+@pytest.mark.parametrize("alias", ["symlink", "hardlink"])
+def test_history_does_not_use_an_aliased_current_override(
+    bare_vault: Path, tmp_path: Path, subject: str, alias: str
+) -> None:
+    from exomem.governance.principal import library_scope
+
+    module = context_roles if subject == "context-roles" else ac
+    shipped_hash = _SUBJECTS[subject][2](bare_vault)
+    outside = tmp_path / "outside.yaml"
+    original = yaml.safe_dump(_SUBJECTS[subject][1]("outsideword")).encode("utf-8")
+    outside.write_bytes(original)
+    path = module.override_path(bare_vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if alias == "symlink":
+        path.symlink_to(outside)
+    else:
+        path.hardlink_to(outside)
+
+    with library_scope():
+        result = commands.op_schema_memory(bare_vault, subject=subject, operation="history")
+
+    assert result["content_hash"] == shipped_hash
+    assert result["versions"] == []
+    registry = module.load_roles(bare_vault) if subject == "context-roles" else module.load_conventions(bare_vault)
+    assert registry.source == "shipped"
+    assert [item["code"] for item in registry.findings] == ["unreadable"]
+    assert outside.read_bytes() == original
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("subject", sorted(_SUBJECTS))
+def test_history_refuses_a_current_fifo_without_waiting_for_a_writer(
+    bare_vault: Path, subject: str
+) -> None:
+    from exomem.governance.principal import library_scope
+
+    module = context_roles if subject == "context-roles" else ac
+    shipped_hash = _SUBJECTS[subject][2](bare_vault)
+    path = module.override_path(bare_vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(path)
+
+    with library_scope():
+        result = commands.op_schema_memory(bare_vault, subject=subject, operation="history")
+
+    assert result["content_hash"] == shipped_hash
+    assert result["versions"] == []
+
+
+def test_role_history_refuses_an_aliased_semantic_dependency(
+    bare_vault: Path, tmp_path: Path
+) -> None:
+    from exomem import semantic_language_registry
+    from exomem.governance.principal import library_scope
+
+    outside = tmp_path / "outside.yaml"
+    original = b"schema_version: 1\ncategories:\n  extra_fact:\n    description: A test category.\n"
+    outside.write_bytes(original)
+    path = semantic_language_registry.registry_path(bare_vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(outside)
+
+    with library_scope(), pytest.raises(vault.PathGuardError):
+        commands.op_schema_memory(bare_vault, subject="context-roles", operation="history")
+
+    assert outside.read_bytes() == original
+
+
+@pytest.mark.parametrize("subject", sorted(_SUBJECTS))
+def test_registry_restore_keeps_crlf_bytes_and_the_effective_hash(
+    bare_vault: Path, subject: str
+) -> None:
+    from exomem.governance.principal import library_scope
+
+    module = context_roles if subject == "context-roles" else ac
+    path = module.override_path(bare_vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    first = yaml.safe_dump(_SUBJECTS[subject][1]("firstword"))
+    path.write_bytes(first.encode("utf-8"))
+    expected = _SUBJECTS[subject][2](bare_vault)
+    original = first.replace("\n", "\r\n").encode("utf-8")
+    path.write_bytes(original)
+    assert _SUBJECTS[subject][2](bare_vault) == expected
+
+    with library_scope():
+        saved = _governed_save(bare_vault, subject, "secondword", "second")
+        version = saved["saved"]["history"]["version"]
+        assert registry_history.read_version(bare_vault, stem=subject, version=version).encode("utf-8") == original
+        restored = commands.op_schema_memory(
+            bare_vault, subject=subject, operation="restore", version=version,
+            why="restore the original text", expected_hash=_SUBJECTS[subject][2](bare_vault),
+        )
+
+    assert restored["saved"]["content_hash"] == expected
+    assert _SUBJECTS[subject][2](bare_vault) == expected
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("subject", sorted(_SUBJECTS))
 def test_first_save_snapshots_a_restorable_empty_override(bare_vault: Path, subject: str) -> None:
+    from exomem.governance.principal import library_scope
+
     before_roles = context_roles.load_roles(bare_vault).roles
     before_conventions = ac.load_conventions(bare_vault).conventions
     _governed_save(bare_vault, subject, "firstword", "first")
     version = _history(bare_vault, subject)[0]["version"]
 
-    restored = commands.op_schema_memory(
-        bare_vault,
-        subject=subject,
-        operation="restore",
-        version=version,
-        why="return to shipped behavior",
-        expected_hash=_SUBJECTS[subject][2](bare_vault),
-    )
+    with library_scope():
+        restored = commands.op_schema_memory(
+            bare_vault,
+            subject=subject,
+            operation="restore",
+            version=version,
+            why="return to shipped behavior",
+            expected_hash=_SUBJECTS[subject][2](bare_vault),
+        )
 
     assert restored["valid"] is True
     if subject == "context-roles":
@@ -556,6 +660,8 @@ def test_a_governed_save_logs_its_why_and_hashes(vault: Path, subject: str) -> N
 
 @pytest.mark.parametrize("subject", sorted(_SUBJECTS))
 def test_restore_returns_a_registry_to_a_previous_version(vault: Path, subject: str) -> None:
+    from exomem.governance.principal import library_scope
+
     context_roles.clear_cache()
     ac.clear_cache()
     current = _SUBJECTS[subject][2]
@@ -566,14 +672,15 @@ def test_restore_returns_a_registry_to_a_previous_version(vault: Path, subject: 
     # The newest version is the state the second save replaced: the first.
     version = _history(vault, subject)[0]["version"]
 
-    restored = commands.op_schema_memory(
-        vault,
-        subject=subject,
-        operation="restore",
-        version=version,
-        why="the second change was wrong",
-        expected_hash=current(vault),
-    )
+    with library_scope():
+        restored = commands.op_schema_memory(
+            vault,
+            subject=subject,
+            operation="restore",
+            version=version,
+            why="the second change was wrong",
+            expected_hash=current(vault),
+        )
 
     assert restored["valid"] is True
     assert current(vault) == first_hash
@@ -584,13 +691,15 @@ def test_restore_returns_a_registry_to_a_previous_version(vault: Path, subject: 
 
 
 def test_restore_refuses_a_stale_hash(bare_vault: Path) -> None:
+    from exomem.governance.principal import library_scope
+
     _governed_save(bare_vault, "activation-conventions", "Vorlagen", "first")
     version = _history(bare_vault, "activation-conventions")[0]["version"]
     stale = ac.load_conventions(bare_vault).content_hash
     _governed_save(bare_vault, "activation-conventions", "Modelle", "second")
     on_disk = ac.override_path(bare_vault).read_bytes()
 
-    with pytest.raises(ValueError, match="STALE_ACTIVATION_CONVENTIONS_REGISTRY"):
+    with library_scope(), pytest.raises(ValueError, match="STALE_ACTIVATION_CONVENTIONS_REGISTRY"):
         commands.op_schema_memory(
             bare_vault,
             subject="activation-conventions",

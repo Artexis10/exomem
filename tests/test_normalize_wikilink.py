@@ -95,9 +95,7 @@ def test_bare_name_resolves_to_unique_stem(vault: Path) -> None:
 
 def test_title_fallback_resolves_date_prefixed_file(vault: Path, tmp_path: Path) -> None:
     """A bare wikilink should resolve to a file whose frontmatter title matches,
-    even when the filename is date-prefixed. This is the `North-Led Content
-    Manual` case: 19 refs failed audit because the source file is named
-    `2026-05-15-tu-north-led-content-manual.md` but referenced bare.
+    even when the filename is date-prefixed.
     """
     source = vault / "Knowledge Base" / "Sources" / "Articles" / "2026-05-15-tu-test-manual.md"
     source.write_text(

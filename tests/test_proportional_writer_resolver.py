@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import find, freshness, semantic_contract, vault
+from exomem import call_spans, find, freshness, semantic_contract, vault
 from exomem.vault import WikilinkResolver
 
 
@@ -85,6 +85,23 @@ def test_warm_corpus_supplies_cold_writer_snapshot_without_body_rebuild(
     assert snapshot.titles == fresh.titles
 
 
+def test_startup_writer_prime_avoids_repeated_membership_proof(
+    warm_corpus: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first writer can fork the warmed broad view without walking the vault again."""
+    from exomem import warmup
+
+    warmup.prime_writer_resolver(warm_corpus)
+
+    def no_walk(_root):
+        raise AssertionError("a warmed writer walked unrelated pages")
+
+    monkeypatch.setattr(vault, "walk_vault_md", no_walk)
+    snapshot = find.writer_resolver_snapshot(warm_corpus)
+    assert "Knowledge Base/Records/record" in snapshot.full_paths
+    assert warm_corpus not in find._RECALL_RESOLVER_CACHE
+
+
 def test_warm_corpus_snapshot_is_detached_from_pending_destination(
     warm_corpus: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -116,6 +133,25 @@ def test_resolver_entries_decline_when_direct_freshness_differs(
     assert semantic_contract.current_writer_resolver_entries(
         warm_corpus, freshness_key=direct_key
     ) is None
+
+
+def test_a_moved_corpus_caption_remains_visible_in_writer_timing(warm_corpus: Path) -> None:
+    """A disk fallback must retain its checkpoint cause in the bounded span fields."""
+    alpha = warm_corpus / "Knowledge Base/Notes/Insights/alpha.md"
+    alpha.write_text(_page("Alpha renamed", "[[Beta]]"), encoding="utf-8")
+    freshness.on_files_changed(warm_corpus, changed=(alpha,))
+    token = "writer-caption-decline"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        snapshot = find.writer_resolver_snapshot(warm_corpus)
+        assert snapshot.titles["alpha renamed"] == ["Knowledge Base/Notes/Insights/alpha"]
+        rows = call_spans.pop_call_spans(token)
+        fields = next(row["fields"] for row in rows if row["name"] == "writer.resolver_snapshot")
+        assert fields["disk"] == 1
+        assert fields["declined_checkpoint_differs"] == 1
+    finally:
+        call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
 
 
 def test_resolver_entries_decline_when_broad_membership_exceeds_semantic_entries(

@@ -1,5 +1,5 @@
 ### {{date}} · Pull
-- Deadlift | grey short paraforce | 
-- Bent Row | white short paraforce | 
-- Bicep Curl | white short paraforce | 
-- Calf Raise | grey short paraforce | 
+- Deadlift | green short | 
+- Bent Row | blue short | 
+- Bicep Curl | blue short | 
+- Calf Raise | green short | 

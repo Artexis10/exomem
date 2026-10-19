@@ -115,3 +115,15 @@
 - [ ] 6.4 Validate the change with the strict OpenSpec validator, run the lint pass, and
       confirm the full suite on Linux CI.
 - [ ] 6.5 After deploy, re-verify connector **content** reads, not only connection.
+
+## Shipped relation-contract overlap
+
+[PR #369](https://github.com/Artexis10/exomem/pull/369) merged as
+`6107d7bb9c74aeeb6c9b8d1f336c91f3d815a6bf` after final head
+`a2bd4daefb2832a973ca16cf77ef7abff33fc092` passed all 11 reported checks.
+The merge is an ancestor of release `v0.115.0`.
+Only its overlapping relation-disposition contract is synchronized in this closure.
+The later shipped `connect-body-wikilinks` contract supersedes the withdrawn
+body-fact scenario through direct normalized target membership.
+This active MODIFIED block retains that final behavior and every canonical scenario.
+Other capabilities and all task acceptance remain open; no independent public approval is claimed.

@@ -15,9 +15,9 @@ name: cross-platform
 # with WinError 32 -- a failure mode Linux does not have. Four such defects were
 # found manually against this suite before this lane existed.
 #
-# It is intentionally a diagnostic lane: nightly and manual only. Ordinary and
-# release PRs already exercise the focused native-NTFS contract in the required
-# workflow, while release PRs additionally run the full Linux confidence lanes.
+# It is intentionally a diagnostic lane: nightly and manual only. Ordinary PRs
+# already exercise the focused native-NTFS contract in the required workflow;
+# release PRs run no test job and rely on the full run at their base revision.
 # Repeating eight advisory shards there spends the repository runner allowance
 # and lets a platform-wide diagnostic failure block an otherwise proven patch.
 

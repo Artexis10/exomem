@@ -126,7 +126,7 @@ MINIO_SECRET_KEY = "cellctltestsecret1"
 BUCKET_NAME = "exomem-cloud-backups"
 
 # Short but real deadlines so the live test exercises the actual D6/D8 timeout
-# branches without waiting on the 10/15-minute production defaults.
+# branches without waiting on the 30/15-minute readiness and backup production defaults.
 LIVE_CONFIG = ReconcileConfig(
     init_deadline=timedelta(seconds=90),
     # The StatefulSet's terminationGracePeriodSeconds is 30s, and the real
@@ -1297,6 +1297,33 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         timeout=60, interval=2, description="cell to resume running before the upgrade scenarios",
     )
 
+    print("[3.10] scenario: explicit stop and resume preserve the volume and stored data")
+    pvc_before = json.loads(
+        _kubectl(k3s.name, ["get", "pvc", "cell-data", "--namespace", namespace, "--output=json"]).stdout
+    )["metadata"]["uid"]
+    # C1 fixes these desired states; the fixture owner supplies controller inputs.
+    asyncio.run(_exec_admin("UPDATE exomem_cloud_cells SET desired_state = 'stopped' WHERE cell_id = $1", cell_id))
+    _wait_for(
+        lambda: _reconciled_to("stopped"),
+        timeout=120, interval=2, description="the explicit stopped input to stop the runtime",
+    )
+    assert asyncio.run(_row())["ready"] is False
+    runtime_pods = json.loads(
+        _kubectl(k3s.name, ["get", "pods", "--namespace", namespace, f"--selector=!{JOB_KIND_LABEL}", "--output=json"]).stdout
+    )["items"]
+    assert not runtime_pods, runtime_pods
+    asyncio.run(_exec_admin("UPDATE exomem_cloud_cells SET desired_state = 'running' WHERE cell_id = $1", cell_id))
+    _wait_for(
+        _converged, timeout=180, interval=2, description="the stopped cell to resume Ready",
+    )
+    resumed_pod = _pod_name()
+    assert _exec_py(k3s.name, namespace, resumed_pod, read_source).stdout.strip() == "k3s-integration-canary"
+    _assert_owner_only_modes_intact(resumed_pod)
+    pvc_after = json.loads(
+        _kubectl(k3s.name, ["get", "pvc", "cell-data", "--namespace", namespace, "--output=json"]).stdout
+    )["metadata"]["uid"]
+    assert pvc_after == pvc_before
+
     # === B1/H9 regression, at the live-cluster level: this row already
     # carries a `last_backup_snapshot` from the nightly backup above (this
     # is deliberate -- both this scenario and the outage scenario below
@@ -2063,10 +2090,97 @@ def test_artifact_broker_selected_cell_edge_and_admission(k3s: K3sCluster) -> No
     dns_result = _exec_py(k3s.name, specs[0].namespace, "artifact-client",
                           "import socket; socket.setdefaulttimeout(3); socket.gethostbyname('kubernetes.default.svc.cluster.local')", check=False)
     assert dns_result.returncode != 0
+    # The fleet switch gives the unlisted cell the same edge: its runtime reaches
+    # the broker, and a Job pod in its namespace still does not.
+    fleet = _render_platform("templates/cellctl.yaml", "templates/artifact-broker.yaml",
+                             settings=(*settings, "--set", "artifactBroker.allCells=true"))
+    _apply_server_side(k3s.name, [doc for doc in fleet if doc["kind"] != "Deployment"])
+    unlisted = CellManifestSpec(cell_id=specs[1].cell_id, image=image, replicas=1, read_only=False,
+                                artifact_broker_url=endpoint)
+    _apply_server_side(k3s.name, list(render_network_policies(unlisted)))
+    unlisted_job = _probe_pod("artifact-job-client", unlisted.namespace, image,
+                              labels={**clients[1]["metadata"]["labels"], "exomem.io/cell-job": "backup"})
+    _apply_server_side(k3s.name, [unlisted_job])
+    _wait_pods_ready(k3s.name, unlisted.namespace, "artifact-job-client")
+    _wait_for(lambda: _tcp_probe(k3s.name, unlisted.namespace, "artifact-client", "10.43.0.25", 8767),
+              timeout=30, description="unlisted runtime to broker under the fleet switch")
+    assert not _tcp_probe(k3s.name, unlisted.namespace, "artifact-job-client", "10.43.0.25", 8767)
     disabled = _render_platform("templates/cellctl.yaml")
     _apply_server_side(k3s.name, [doc for doc in disabled if doc["kind"] == "ValidatingAdmissionPolicy"])
     _wait_for(lambda: "exomem-cellctl-scope" in _dry_run(selected).stderr, timeout=30,
               description="disabled admission to refuse even the exact broker edge")
+
+
+@pytest.mark.parametrize("all_cells", [True, False])
+def test_artifact_broker_admission_for_an_unlisted_cell_follows_the_fleet_switch(
+    k3s: K3sCluster, all_cells: bool,
+) -> None:
+    from cellctl.manifests import CellManifestSpec, render_namespace, render_network_policies
+
+    listed_id, unlisted_id = _cell_id(), _cell_id()
+    endpoint = "http://10.43.0.25:8767"
+    image = STANDIN_REPOSITORY + "@sha256:" + "a" * 64
+    documents = _render_platform("templates/cellctl.yaml", settings=(
+        "--set", "artifactBroker.enabled=true",
+        "--set-string", f"artifactBroker.image={image}",
+        "--set-string", f"artifactBroker.endpoint={endpoint}",
+        "--set-json", f'artifactBroker.cellIds=["{listed_id}"]',
+        "--set", f"artifactBroker.allCells={str(all_cells).lower()}",
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    ))
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+    # cellctl renders the broker edge for a cell the switch selects, listed or not.
+    specs = [CellManifestSpec(cell_id=cell_id, image=image, replicas=0, read_only=False,
+                             artifact_broker_url=endpoint) for cell_id in (listed_id, unlisted_id)]
+    exact = {}
+    for spec in specs:
+        _apply_server_side(k3s.name, [render_namespace(spec)])
+        exact[spec.cell_id] = next(p for p in render_network_policies(spec)
+                                   if p["metadata"]["name"] == "runtime-ingress")
+
+    def dry_run(policy: dict) -> subprocess.CompletedProcess[str]:
+        return _kubectl(k3s.name, ["apply", "--dry-run=server", "--filename=-",
+                                  "--as=system:serviceaccount:exomem-cloud:cellctl"],
+                        documents=[policy], check=False)
+
+    def policy_settled() -> bool:
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                                              "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        # Type-check status can precede enforcement of an updated policy, so
+        # wait until the unlisted cell's exact edge gets the answer under test.
+        return (dry_run(exact[unlisted_id]).returncode == 0) == all_cells
+
+    _wait_for(policy_settled, timeout=60, description="admission to follow the fleet switch")
+    assert dry_run(exact[listed_id]).returncode == 0
+    if not all_cells:
+        refused = dry_run(exact[unlisted_id])
+        assert "exomem-cellctl-scope" in refused.stderr, refused.stderr
+
+    def wrong_port(policy: dict) -> None:
+        policy["spec"]["egress"][0]["ports"][0]["port"] = 8768
+
+    def wrong_peer(policy: dict) -> None:
+        policy["spec"]["egress"][0]["to"][0]["podSelector"]["matchLabels"] = {
+            "app.kubernetes.io/name": "exomem-cloud-gateway"}
+
+    def extra_dns_rule(policy: dict) -> None:
+        policy["spec"]["egress"].append({"ports": [{"protocol": "UDP", "port": 53}]})
+
+    def public_destination(policy: dict) -> None:
+        policy["spec"]["egress"][0]["to"] = [{"ipBlock": {"cidr": "0.0.0.0/0"}}]
+
+    # The switch widens who gets the exact broker edge, never what the edge is.
+    for cell_id in (listed_id, unlisted_id):
+        for widen in (wrong_port, wrong_peer, extra_dns_rule, public_destination):
+            attack = copy.deepcopy(exact[cell_id])
+            widen(attack)
+            denied = dry_run(attack)
+            assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, (
+                all_cells, cell_id, widen.__name__, denied.stderr)
 
 
 # === harden-exomem-cloud-operator-access: the edge, the Cloud issuer and cell
@@ -2334,10 +2448,27 @@ def test_the_edge_reads_no_key_and_still_reaches_the_gateway(k3s: K3sCluster, ed
     print("[edge] scenario: a request through the public route reaches the gateway")
 
     def _routed() -> bool:
-        status, _ = _public_request(k3s, "/mcp")
-        return status == 200
+        status, body = _public_request(k3s, "/mcp")
+        assert status == 200, f"public /mcp returned HTTP {status}: {body[:1024]!r}"
+        return True
 
-    _wait_for(_routed, timeout=120, interval=3, description="Traefik to route the Cloud MCP path to the gateway")
+    try:
+        _wait_for(_routed, timeout=120, interval=3, description="Traefik to route the Cloud MCP path to the gateway")
+    except AssertionError:
+        try:
+            for args in (
+                ["logs", "--namespace", edge_platform.traefik_namespace,
+                 f"deployment/{EDGE_RELEASE}-traefik", "--all-containers", "--tail=100"],
+                ["get", "service", "exomem-cloud-gateway", "--namespace", "exomem-cloud", "--output=wide"],
+                ["get", "endpointslices", "--namespace", "exomem-cloud",
+                 "--selector=kubernetes.io/service-name=exomem-cloud-gateway", "--output=wide"],
+                ["get", "pod", "gateway-standin", "--namespace", "exomem-cloud", "--output=wide"],
+            ):
+                code, output = _kubectl_bounded(k3s.name, args, seconds=5)
+                print(f"[edge] route diagnostics {args!r}: exit={code}\n{output}")
+        except Exception as error:  # noqa: BLE001 - diagnostics must not replace the route failure
+            print(f"[edge] route diagnostics failed: {error}")
+        raise
     status, body = _public_request(k3s, "/mcp")
     assert status == 200, (status, body)
     echoed = json.loads(body)
@@ -2683,12 +2814,15 @@ def test_the_operator_access_runbook_on_real_k3s(
 
 def test_local_storage_admission_confines_backup_clones_and_retains_before_a_claim_delete(k3s: K3sCluster) -> None:
     from cellctl.manifests import (
+        CORDON_TOLERATION,
         CellManifestSpec,
+        render_backup_job,
         render_clone_claim,
         render_namespace,
         render_network_policies,
         render_pvc,
         render_resource_quota,
+        render_statefulset,
         render_volume_snapshot,
     )
     from cellctl.reconcile import RETAINED_DELETE_POLICY_NAME
@@ -2729,11 +2863,22 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
                      render_volume_snapshot(spec, snapshot_class=local.snapshot_class)):
         result = create(admitted)
         assert result.returncode == 0, result.stderr
+    # Tasks 6.4 and 7.3: a local backup Job tolerates its node's cordon, so a
+    # move's stopped backup runs on the cordoned agent the move leaves. No
+    # wider toleration, and no cell pod, may.
+    backup = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example", retention=None)
+    assert backup["spec"]["template"]["spec"]["tolerations"] == [CORDON_TOLERATION]
+    result = create(backup)
+    assert result.returncode == 0, result.stderr
+    every_taint = copy.deepcopy(backup)
+    every_taint["spec"]["template"]["spec"]["tolerations"][0].pop("key")
+    serving = render_statefulset(spec)
+    serving["spec"]["template"]["spec"]["tolerations"] = [dict(CORDON_TOLERATION)]
     foreign = render_clone_claim(spec, clone_class=local.clone_class)
     foreign["spec"]["dataSourceRef"]["name"] = "cell-snapshot-" + "0" * 10
     unconfigured = render_pvc(spec)
     unconfigured["spec"]["storageClassName"] = "local-path"
-    for refused in (foreign, unconfigured):
+    for refused in (foreign, unconfigured, every_taint, serving):
         result = create(refused)
         assert result.returncode != 0 and "exomem-cellctl-scope" in result.stderr, result.stderr
 

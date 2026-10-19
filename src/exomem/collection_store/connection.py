@@ -20,7 +20,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -118,7 +118,7 @@ def check_sqlite_version(version_info: tuple[int, ...] | None = None) -> None:
 def _connect(
     database: str, *, uri: bool = False, busy_timeout_ms: int = BUSY_TIMEOUT_MS
 ) -> sqlite3.Connection:
-    return sqlite3.connect(
+    conn = sqlite3.connect(
         database,
         isolation_level=None,
         factory=_CONNECTION_FACTORY,
@@ -126,6 +126,14 @@ def _connect(
         timeout=busy_timeout_ms / 1000,
         check_same_thread=False,
     )
+    try:
+        from .native_operands import FileRole, register_native_operands
+
+        register_native_operands(conn, databases={FileRole.STORE: "main", FileRole.DERIVED: "derived"})
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:
@@ -158,7 +166,38 @@ def _writer_engine(database: str):
 
 
 @contextmanager
-def staging_store(path: Path) -> Iterator[sqlite3.Connection]:
+def checked_sql(conn, check):
+    """Keep the caller's interruption when SQLite or a migration wraps its progress error."""
+    if check is None:
+        yield
+        return
+    from sqlalchemy.exc import DBAPIError
+
+    interrupted = None
+
+    def progress():
+        nonlocal interrupted
+        try:
+            check()
+        except BaseException as error:  # noqa: BLE001 - SQLite otherwise discards the caller's interruption
+            interrupted = error
+            return 1
+        return 0
+
+    conn.set_progress_handler(progress, 1000)
+    try:
+        check()
+        yield
+    except (sqlite3.DatabaseError, CollectionStoreError, DBAPIError) as error:
+        if interrupted is not None:
+            raise interrupted from error
+        raise
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
+@contextmanager
+def staging_store(path: Path, *, check: Callable[[], None] | None = None) -> Iterator[sqlite3.Connection]:
     """A private, unpublished store at ``path`` with the current schema, for a proof that never publishes.
 
     It takes no writer lease: only its caller opens it, and the caller removes it.
@@ -169,10 +208,11 @@ def staging_store(path: Path) -> Iterator[sqlite3.Connection]:
     try:
         with engine.connect() as core:
             conn = core.connection.driver_connection
-            conn.execute("PRAGMA recursive_triggers=ON")
-            conn.execute("PRAGMA foreign_keys=ON")
-            schema.ensure_schema(core)
-            yield conn
+            with checked_sql(conn, check):
+                conn.execute("PRAGMA recursive_triggers=ON")
+                conn.execute("PRAGMA foreign_keys=ON")
+                schema.ensure_schema(core)
+                yield conn
     finally:
         engine.dispose()
 
@@ -224,6 +264,7 @@ class WriterConnection:
         self._closed = False
         self._release_cache = None
         self._inspection_identity = object()
+        self._write_scope, self._owns_transaction = None, False
         # Host-local import job facts (``importer``), keyed by job id: this handle's
         # proofs of bound source bytes, the store refusal blocking a running job, and
         # a streamed job's open reader. A new handle, as after a takeover, starts with none.
@@ -233,6 +274,17 @@ class WriterConnection:
         # This handle's connection to the derived-rows file (``derived_rows``), opened and
         # reconciled on first use, so a new handle, as after a takeover, reconciles again.
         self.derived: Any = None
+        self.view_census: Any = None
+
+    def census(self, root):
+        """This writer tenure's disposable view evidence; replacing the handle starts a fresh sweep."""
+        self.require_owner_thread()
+        if self.view_census is None:
+            from .census import Census
+
+            self.view_census = Census(self)
+            self.view_census.bind_root(root)
+        return self.view_census
 
     @property
     def release_cache(self):
@@ -246,7 +298,7 @@ class WriterConnection:
     def require_owner_thread(self) -> None:
         if threading.get_ident() != self._owner_thread:
             raise CollectionStoreError(
-                "COLLECTION_STORE_WRITER_THREAD", "the opening thread owns the writer connection"
+                "COLLECTION_STORE_WRITER_THREAD", "only the current owner thread may use the writer connection"
             )
 
     def require_write_authority(self, *, allow_diverged: bool = False) -> None:
@@ -283,6 +335,7 @@ class WriterConnection:
         except DBAPIError as error:
             raise error.orig from error
         cache.begin()
+        self._owns_transaction = True
         try:
             yield self.connection
             cache.prepare()
@@ -294,6 +347,25 @@ class WriterConnection:
             if isinstance(error, DBAPIError):
                 raise error.orig from error
             raise
+        finally:
+            self._close_write_scope()
+
+    @property
+    def write_scope(self):
+        """This transaction's native metadata scope, opened on first use and closed when the transaction ends."""
+        if not self._owns_transaction:
+            raise RuntimeError("a native metadata scope belongs to this handle's open transaction")
+        if self._write_scope is None:
+            from .native_metadata import WriteScope
+
+            self._write_scope = WriteScope(self.connection)
+        return self._write_scope
+
+    def _close_write_scope(self) -> None:
+        self._owns_transaction = False
+        if self._write_scope is not None:
+            self._write_scope.close()
+            self._write_scope = None
 
     def execute(self, statement, parameters=None):
         """Execute Core statements only within this handle's mutation scope."""
@@ -334,6 +406,9 @@ class WriterConnection:
             if self.derived is not None:
                 self.derived.close()
                 self.derived = None
+            if self.view_census is not None:
+                self.view_census.close()
+                self.view_census = None
             self.core.close()
             self.core.engine.dispose()
             self._closed = True
@@ -350,14 +425,22 @@ class WriterConnection:
 def open_writer(
     path: Path, *, vault_root: Path | None = None,
     lease_check: Callable[[], bool] | None = None,
+    schema_guard: Callable[[int], None] | None = None,
 ) -> WriterConnection:
     """Open the vault's single writer, under its mutation boundary.
 
     ``vault_root`` binds the default authority and store placement to the same
     vault. Opening (including schema repair/migration) and each transaction
-    require that boundary. The opening thread owns this connection until close.
+    require that boundary. The opening thread owns this connection except during
+    the runtime's exclusive coalesced-publication loan (design A3).
     ``lease_check`` is a trusted adapter/test seam: its caller must supply the
     exact store's scoped authority, never the process-wide scheduler predicate.
+    ``schema_guard(version)`` runs under that authority around the migration of a
+    store that an earlier release wrote. A vault's writer passes it to make the
+    vault state manifest record what a store at ``version`` requires of a release:
+    the current schema before migrating, so a crash between the two never leaves a
+    migrated store without that record, and the earlier schema again after a
+    migration that rolled back, so the release that wrote the store may open it.
     """
     check_sqlite_version()
     load_store_libraries()
@@ -381,7 +464,20 @@ def open_writer(
         _apply_writer_pragmas(conn.connection.driver_connection)
         _require_lease(check)
         try:
-            schema.ensure_schema(conn)
+            raw = conn.connection.driver_connection
+            found = schema.schema_version(raw, ceiling=schema.SCHEMA_VERSION)
+            guarded = schema_guard is not None and found < schema.SCHEMA_VERSION
+            if guarded:
+                schema_guard(schema.SCHEMA_VERSION)
+                _require_lease(check)
+            try:
+                schema.ensure_schema(conn)
+            except BaseException:
+                # A guard that cannot lower the record keeps it: refusing an earlier release is the safe side.
+                with suppress(Exception):
+                    if guarded and schema.schema_version(raw) == found:
+                        schema_guard(found)
+                raise
         except schema.SchemaVersionError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
         except schema.SchemaMetadataError as error:
@@ -401,6 +497,117 @@ def open_writer(
 
 def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
     """Open an existing store read-only at the current schema version."""
+    conn, found = _open_read_only(path, busy_timeout_ms)
+    if found < schema.SCHEMA_VERSION:
+        conn.close()
+        raise CollectionStoreError(
+            "COLLECTION_STORE_SCHEMA_PENDING",
+            "the collection store has not been migrated by its writer yet",
+        )
+    return conn
+
+
+# What every schema version keeps unchanged: the store's metadata and the columns of its commit chain.
+_HEAD_COLUMNS = {
+    "store_meta": frozenset({"key", "value"}),
+    "txns": frozenset({"commit_seq", "event_hash", "store_head_hash"}),  # nosemgrep: ep-word-set -- chain columns
+}
+_HEAD_ACTIONS = frozenset({sqlite3.SQLITE_SELECT, sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_FUNCTION})
+
+
+def _head_only(action: int, table: str | None, column: str | None, *_: object) -> int:
+    if action == sqlite3.SQLITE_READ:
+        return sqlite3.SQLITE_OK if column in _HEAD_COLUMNS.get(table, ()) else sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK if action in _HEAD_ACTIONS else sqlite3.SQLITE_DENY
+
+
+def open_head_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
+    """Open a store at its current or an earlier schema, able to read only its head.
+
+    A store that an earlier release wrote keeps ``store_meta`` and the ``txns`` chain in
+    every schema, so its identity, head, chain and pending intent read the same before its
+    writer migrates it. SQLite refuses any other table or column, so no row reader can see
+    a store that its writer has not migrated yet. A newer schema refuses as in ``open_reader``.
+    """
+    conn, _ = _open_read_only(path, busy_timeout_ms)
+    conn.set_authorizer(_head_only)
+    return conn
+
+
+# These closed SQL columns let a file writer verify routing without reading canonical item payloads.
+_OWNERSHIP_COLUMNS = {
+    **_HEAD_COLUMNS,
+    "collections": frozenset({"collection_id", "manifest_path", "manifest_version", "source_path", "layout"}),
+    "collection_manifests": frozenset({"collection_id", "manifest_version", "manifest_text"}),
+}
+
+
+def _ownership_only(action: int, table: str | None, column: str | None, *_: object) -> int:
+    if action == sqlite3.SQLITE_READ:
+        return sqlite3.SQLITE_OK if column in _OWNERSHIP_COLUMNS.get(table, ()) else sqlite3.SQLITE_DENY
+    return _head_only(action, table, column)
+
+
+def open_ownership_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
+    """Read head and canonical ownership metadata at the supported schema ceiling, without migration."""
+    conn, _ = _open_read_only(path, busy_timeout_ms)
+    conn.set_authorizer(_ownership_only)
+    return conn
+
+
+def schema_pending(path: Path) -> bool:
+    """Whether the store an earlier release wrote still awaits its writer's migration."""
+    conn, found = _open_read_only(path, BUSY_TIMEOUT_MS)
+    conn.close()
+    return found < schema.SCHEMA_VERSION
+
+
+def recorded_meta(path: Path, key: str) -> str | None:
+    """One ``store_meta`` value that a store records, or None if it is absent or unreadable.
+
+    It reads one row with the standard library, so a launcher can ask without the store libraries.
+    It neither validates nor migrates the store.
+    """
+    try:
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
+                                     timeout=BUSY_TIMEOUT_MS / 1000)) as conn:
+            row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else row[0]
+    except (sqlite3.Error, OSError):
+        return None
+
+
+#: The reserved-path family of the migration's retained staging directories (``migration`` owns them).
+MIGRATION_STAGING = "collection-migration"
+
+
+def migration_staging_directories(vault_root: Path) -> list[Path]:
+    """The migration staging directories retained beside this vault's live store, by name.
+
+    The launcher reads them here, without the store libraries, to learn whether a handoff
+    has a pre-import to finish; ``migration`` reads the same list for its own steps.
+    """
+    from .. import reserved_paths, state_paths
+
+    state = state_paths.vault_state_dir(Path(vault_root))
+    if not state.is_dir():
+        return []
+    return sorted(path for path in state.iterdir()
+                  if reserved_paths.classify_logical(path.name).descriptor_id == MIGRATION_STAGING
+                  and path.is_dir() and not path.is_symlink())
+
+
+def recorded_schema(path: Path) -> int | None:
+    """The schema that a store records, also one newer than this release opens, or None if unreadable."""
+    value = recorded_meta(path, schema.META_SCHEMA_VERSION)
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _open_read_only(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connection, int]:
+    """An existing store opened read-only at any schema up to the current one, with that schema."""
     if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:
         raise ValueError("busy_timeout_ms must be a non-negative integer")
     check_sqlite_version()
@@ -422,15 +629,10 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", str(error)) from error
         except schema.SchemaVersionError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
-        if found < schema.SCHEMA_VERSION:
-            raise CollectionStoreError(
-                "COLLECTION_STORE_SCHEMA_PENDING",
-                "the collection store has not been migrated by its writer yet",
-            )
     except BaseException:
         conn.close()
         raise
-    return conn
+    return conn, found
 
 
 def open_query_reader(path: Path, *, busy_timeout_ms: int = 200) -> sqlite3.Connection:

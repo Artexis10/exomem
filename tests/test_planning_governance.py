@@ -45,6 +45,29 @@ def test_planning_authorizes_manifest_before_loading_its_identity(tmp_path: Path
         )
 
 
+def test_planning_inventory_cannot_distinguish_withheld_from_absent(tmp_path: Path) -> None:
+    from exomem.plan_memory import plan_memory
+    from exomem.planning import create_collection
+
+    present, absent = tmp_path / "present", tmp_path / "absent"
+    for root in (present, absent):
+        (root / "Knowledge Base").mkdir(parents=True)
+        (root / "Knowledge Base/log.md").write_text("# Log\n", encoding="utf-8")
+    create_collection(
+        present, "Knowledge Base/Planning/Work/_collection.md", _manifest(),
+        why="create the withheld fixture",
+    )
+    for root in (present, absent):
+        _write_planning_rule(root, 5)
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        withheld = plan_memory(present, "inspect")
+        missing = plan_memory(absent, "inspect")
+
+    assert withheld == missing
+    assert withheld["collections"] == []
+    assert withheld["unreadable_manifests"] == []
+
+
 @pytest.mark.parametrize("ceiling", range(7))
 def test_planning_requires_l6_for_every_query_and_inspection_artifact(
     tmp_path: Path, ceiling: int

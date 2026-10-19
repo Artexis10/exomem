@@ -168,9 +168,6 @@ def mint_principal(signing_root: str, principal, *, ttl: int = DEFAULT_TTL) -> s
 
 
 def bound_principal(presented: str, signing_root: str | None, *, now: int | None = None):
-    from .governance.authorization_session_lifecycle import AuthorizationSessionContext
-    from .governance.principal import ClientBinding, OriginSessionBinding, RequestPrincipal
-
     if signing_root is None or len(presented) > 16384:
         return None
     parts = presented.split(".")
@@ -186,20 +183,27 @@ def bound_principal(presented: str, signing_root: str | None, *, now: int | None
         return None
     try:
         values = json.loads(bytes.fromhex(claim))
-        session = values.get("verified_authorization_session")
-        if session is not None:
-            values["verified_authorization_session"] = AuthorizationSessionContext(**session)
-        client = values.get("client_binding")
-        if client is not None:
-            values["client_binding"] = ClientBinding(**client)
-        origin = values.get("origin_session")
-        if origin is not None:
-            values["origin_session"] = OriginSessionBinding(**origin)
-        # Delegation preserves identity, never local administrative ingress.
-        values["administrative_ingress"] = False
-        return RequestPrincipal(**values)
+        return _principal_from_values(values)
     except (ValueError, TypeError, AttributeError):
         return None
+
+
+def _principal_from_values(values):
+    from .governance.authorization_session_lifecycle import AuthorizationSessionContext
+    from .governance.principal import ClientBinding, OriginSessionBinding, RequestPrincipal
+
+    session = values.get("verified_authorization_session")
+    if session is not None:
+        values["verified_authorization_session"] = AuthorizationSessionContext(**session)
+    client = values.get("client_binding")
+    if client is not None:
+        values["client_binding"] = ClientBinding(**client)
+    origin = values.get("origin_session")
+    if origin is not None:
+        values["origin_session"] = OriginSessionBinding(**origin)
+    # Delegation preserves identity, never local administrative ingress.
+    values["administrative_ingress"] = False
+    return RequestPrincipal(**values)
 
 
 #: Destination lanes an upload capability may be minted for. `evidence` signs the
@@ -300,3 +304,58 @@ def mint_for_endpoint(
     if large_base_url:
         out["large_upload_url"] = f"{large_base_url}/upload"
     return out
+
+
+# Fixed protocol audiences keep a native resource grant out of a browser URL.
+ARTIFACT_HTTPS = "artifact-https"
+ARTIFACT_NATIVE = "artifact-native"
+
+
+def mint_artifact(signing_root: str, principal, descriptor: dict, *,
+                  deployment: str, delivery: str, ttl: int = DEFAULT_TTL,
+                  now: int | None = None) -> tuple[str, int]:
+    """Delegate one stored version under the issuing principal, never a path wildcard."""
+    if delivery not in (ARTIFACT_HTTPS, ARTIFACT_NATIVE):
+        raise ValueError("invalid artifact delivery audience")
+    exp = int(time.time() if now is None else now) + ttl
+    payload = {"principal": asdict(principal), "artifact": descriptor, "deployment": deployment}
+    claim = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode().hex()
+    message = f"exomem.artifact-recovery/v4\0{delivery}\0{exp}\0{claim}"
+    signature = hmac.new(signing_root.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return f"v4.{exp}.{claim}.{signature}", exp
+
+
+def artifact_claim(presented: str, signing_root: str | None, *, deployment: str,
+                   delivery: str, now: int | None = None) -> tuple[dict, object, int] | None:
+    """Verify the fixed artifact audience before restoring its issuing authority."""
+    if signing_root is None or not isinstance(presented, str) or len(presented) > 32768:
+        return None
+    parts = presented.split(".")
+    if len(parts) != 4 or parts[0] != "v4":
+        return None
+    _, expires, claim, signature = parts
+    exp = _parse_exp(expires)
+    if exp is None or int(time.time() if now is None else now) >= exp:
+        return None
+    message = f"exomem.artifact-recovery/v4\0{delivery}\0{exp}\0{claim}"
+    expected = hmac.new(signing_root.encode(), message.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature.encode(), expected.encode()):
+        return None
+    try:
+        payload = json.loads(bytes.fromhex(claim))
+        if set(payload) != {"principal", "artifact", "deployment"} or payload["deployment"] != deployment:
+            return None
+        who = _principal_from_values(payload["principal"])
+        descriptor = payload["artifact"]
+        if (not isinstance(descriptor, dict)
+                or set(descriptor) != {"path", "sha256", "size", "file_name", "mime_type", "mime_type_source"}
+                or any(not isinstance(descriptor[key], str) or not descriptor[key]
+                       for key in ("path", "sha256", "file_name", "mime_type", "mime_type_source"))
+                or type(descriptor["size"]) is not int or descriptor["size"] < 0
+                or len(descriptor["sha256"]) != 64
+                or bytes.fromhex(descriptor["sha256"]).hex() != descriptor["sha256"]
+                or not who.resolved):
+            return None
+        return descriptor, who, exp
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None

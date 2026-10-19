@@ -1,24 +1,7 @@
-"""The emission ledger, and batch-once emission.
-
-The due-state emission governor is per-process memory, so no projector can read
-it and the bench declares the counters surface unavailable. This module pins the
-persisted ledger — how many governed writes the projection absorbed, how many
-blocks were actually emitted — and the batch scope that makes "one command, at
-most one block" a mechanism rather than an accident of where the terminal sits.
-
-The first test is the GAP PROOF: the projection file records neither count, and
-there is no batch scope to wrap a bulk command in.
-
-Two tests here were built as tripwires on the missing bulk carrier and have
-been INVERTED by `extend-due-state-to-bulk-carriers`, which made the operation
-leaves carriers: `test_a_multi_write_command_carries_one_block` and
-`test_the_batch_scope_on_this_leaf_suppresses_nothing_today`. Their old
-expectation — the measured zero — is what their red run proved had changed.
-"""
+"""Persisted write and emission counts, including commands with no affected due pages."""
 
 from __future__ import annotations
 
-import contextlib
 import datetime as dt
 import json
 from pathlib import Path
@@ -49,11 +32,11 @@ def _command(name: str):
     return next(c for c in commands.PRODUCT_COMMANDS if c.name == name)
 
 
-def _observe(vault: Path, content: str) -> dict:
+def _observe(vault: Path, content: str, *, path: str = SCRATCH) -> dict:
     return writer_lease.invoke_command(
         _command("observe_memory"),
         vault,
-        path=SCRATCH,
+        path=path,
         operation="add",
         category="finding",
         content=content,
@@ -153,7 +136,7 @@ def test_an_emitted_block_increments_the_emission_count(vault: Path) -> None:
     due_state_module.reset_emission_state()
     before = due_state_module.emission_ledger(vault)["emissions"]
 
-    result = _observe(vault, "Reader saturation reproduces on the replica too.")
+    result = _observe(vault, "Reader saturation reproduces on the replica too.", path="Knowledge Base/Notes/Insights/nag-backlog.md")
 
     assert "due_state" in result
     ledger = due_state_module.emission_ledger(vault)
@@ -260,106 +243,21 @@ def test_a_batch_scope_is_per_vault(vault: Path, tmp_path: Path) -> None:
         assert not due_state_module.batch_active(other)
 
 
-def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
-    """The product-level statement, read off the RESPONSE rather than the ledger.
-
-    The scenario is about what the caller receives, so this inspects the
-    command's own response for `due_state` blocks instead of inferring delivery
-    from a counter. Driven through `writer_lease.invoke_command` — the normal
-    command path — so the mutation terminal that admits the block actually runs;
-    calling the leaf directly skips the only code that can put one there.
-
-    INVERTED on purpose, and this was the tripwire that said so. Until the
-    operation leaves became carriers, this asserted the measured zero — the
-    response carried no block at all — and its docstring named the day it would
-    have to change. That day is `extend-due-state-to-bulk-carriers`: twelve
-    governed writes in one invocation, one block at its terminal, one emission
-    in the ledger.
-
-    Still not the weaker `<= 1`. A dict cannot hold a key twice, so counting
-    `due_state` keys in a response could only ever return 0 or 1 and `<= 1` was
-    a tautology dressed as a governance check. What bounds this leaf to one is
-    the response terminal, which runs once per invocation — and that is still
-    NOT the batch scope: see
-    `test_the_batch_scope_on_this_leaf_suppresses_nothing_today` below.
-    """
+def test_source_adoption_omits_unrelated_due_advice(vault: Path) -> None:
+    """Adopting Sources must not repeat due findings from untouched compiled pages."""
     overdue_prediction(vault)
     scratch_page(vault)
     commands.op_bootstrap(vault, section="all")
     due_state_module.reset_emission_state()
-    before = due_state_module.emission_ledger(vault)
+    before = due_state_module.emission_ledger(vault)["emissions"]
 
     response = _adopt_twelve(vault)
 
-    assert "due_state" in response, response
-    ledger = due_state_module.emission_ledger(vault)
-    assert ledger["writes"] - before["writes"] == 12
-    assert ledger["emissions"] - before["emissions"] == 1
+    assert response["status"] == "committed"
+    assert "due_state" not in response
+    assert due_state_module.emission_ledger(vault)["emissions"] == before
 
 
-def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> None:
-    """Compare independent sessions, because the leaf's scope suppresses nothing.
-
-    `op_adopt_vault` still reaches the PER-WRITE carrier ZERO times, and that
-    half of the measurement is unchanged by
-    `extend-due-state-to-bulk-carriers`: `op_adopt` copies files through the
-    vault writer and `_apply_batch_deltas` applies the projection deltas with
-    `apply_write_delta`, which produces no block. The block the leaf now carries
-    is a BATCH block — `due_state.block_for_batch`, served once at the end of the
-    invocation — so the scope on this leaf still suppresses nothing, and removing
-    it still changes nothing. What bounds the caller to one block is the response
-    terminal (D9), which runs once per invocation whatever the scope did.
-
-    Both independent-session runs now carry: reset the process-local governor
-    between them so change-only quieting cannot mask whether removing the scope
-    altered the terminal delivery.
-
-    This is pinned rather than left implicit because the scope IS load-bearing
-    at the per-write carrier
-    (`test_removing_the_batch_scope_emits_once_per_write`), and the difference
-    between "defends nothing yet" and "defends nothing ever" matters: the day
-    this leaf commits through `semantic_writes`, the carrier count below stops
-    being zero and this test says so.
-
-    The unscoped leg is a real removal — `due_state.batch_scope` monkeypatched
-    to a no-op, so the leaf genuinely runs without it. An earlier version wrapped
-    the second call in `contextlib.nullcontext()`, which changed nothing and made
-    the A and the B the same run twice.
-    """
-    overdue_prediction(vault)
-    scratch_page(vault)
-    commands.op_bootstrap(vault, section="all")
-    due_state_module.reset_emission_state()
-
-    carried: list[str] = []
-    real_block = due_state_module.block_for_write
-    real_scope = due_state_module.batch_scope
-
-    def counting(vault_root, rel_path, **kwargs):
-        carried.append(rel_path)
-        return real_block(vault_root, rel_path, **kwargs)
-
-    due_state_module.block_for_write = counting
-    try:
-        scoped = _adopt_twelve(vault)
-        scoped_calls = list(carried)
-
-        carried.clear()
-        due_state_module.reset_emission_state()
-        due_state_module.batch_scope = lambda *a, **k: contextlib.nullcontext()
-        try:
-            unscoped = _adopt_twelve(vault, directory="legacy2")
-        finally:
-            due_state_module.batch_scope = real_scope
-        unscoped_calls = list(carried)
-    finally:
-        due_state_module.block_for_write = real_block
-        due_state_module.batch_scope = real_scope
-
-    assert scoped_calls == [], "the scoped leaf reached the write carrier"
-    assert unscoped_calls == [], "the leaf reached the write carrier without the scope"
-    assert "due_state" in scoped, scoped
-    assert "due_state" in unscoped, unscoped
 
 
 def test_the_ledger_records_the_size_of_the_block_it_delivered(vault: Path) -> None:

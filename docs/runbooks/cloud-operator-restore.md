@@ -11,7 +11,11 @@ The restore Job's deadline is 900 s. The packaged in-place helper from PR #1641 
 The retained release files matched that merged implementation. Its restore Job took 44 seconds; service downtime was 93 seconds.
 The separate scratch drill took 49 seconds. Each proof compared 45 vault files, with zero differences and verified scratch cleanup.
 These runs did not compare `/data/host` runtime state. They do not close a full vault-and-host recovery proof.
-The current helper compares each backup root. Its release-specific vault-and-host proof remains unverified until an operator run.
+On 2026-10-13, maintained helpers restored a snapshot correlated with stopped-source references for both backup roots.
+All 45 vault and 116 host entries matched; custody, service authentication and scratch cleanup passed.
+The exercise did not invoke the current top-level `drill` wrapper.
+The reviewed helper, its tests and the deployed-image recovery support repeatable comparison of both roots.
+This proof does not close in-place failure recovery, historical rollback or acceptance of a new runtime image.
 
 This runbook covers two operator tools for cells on Hetzner network volumes (storage class `exomem-cloud-encrypted`). One script, `infra/scripts/cloud_restore.sh`, runs both:
 

@@ -692,13 +692,23 @@ class FindTimings:
         }
 
     @contextmanager
-    def span(self, name: str, *, source: str = SOURCE_COMPUTED, **fields: Any):
+    def span(
+        self,
+        name: str,
+        *,
+        source: str = SOURCE_COMPUTED,
+        measured: Mapping[str, Any] | None = None,
+        **fields: Any,
+    ):
         """Time one stage, record where its answer came from, and what held it.
 
         `source` is the stage's static answer. A stage that only learns it
         inside the span calls `mark_source` instead; this exit still performs
         the write. `**fields` carries small scalar facts a stage knows about
         itself and may not touch the accounting — see `_validated_fields`.
+        `measured` is the integer counts the body collected (usually a
+        `call_spans.meter`), read on the way out and recorded as the ledger
+        span's fields; it never enters this table.
         """
         _validated_source(source)
         _validated_fields(name, fields)
@@ -706,10 +716,15 @@ class FindTimings:
         parent = stack[-1] if stack else None
         stack.append(name)
         t0 = time.perf_counter()
+        cpu_started = time.thread_time_ns() if call_spans.MCP_CALL_TOKEN.get() is not None else None
         try:
             yield
         finally:
             t1 = time.perf_counter()
+            ledger_fields = (
+                {**(measured or {}), call_spans.THREAD_CPU_US: (time.thread_time_ns() - cpu_started) // 1000}
+                if cpu_started is not None else measured
+            )
             if stack and stack[-1] == name:
                 stack.pop()
             with self._intervals_lock:
@@ -737,7 +752,7 @@ class FindTimings:
             # semantic.search, and their own costs explain a slow call. The
             # ledger keeps its existing name bound; spans are inclusive timings.
             # Off the MCP path record_span is a no-op.
-            call_spans.record_span(f"recall.{name}", elapsed)
+            call_spans.record_span(f"recall.{name}", elapsed, ledger_fields)
             entry.update(fields)
 
     def mark_source(self, name: str, source: str) -> None:
@@ -819,12 +834,13 @@ def timing_span(
     name: str,
     *,
     source: str = SOURCE_COMPUTED,
+    measured: Mapping[str, Any] | None = None,
     **fields: Any,
 ):
     """A timing span when a collector is present, else a no-op context."""
     if timings is None:
         return nullcontext()
-    return timings.span(name, source=source, **fields)
+    return timings.span(name, source=source, measured=measured, **fields)
 
 
 def timing_mark_source(timings: FindTimings | None, name: str, source: str) -> None:

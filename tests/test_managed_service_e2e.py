@@ -7,18 +7,59 @@ import signal
 import socket
 import subprocess
 import sys
+import traceback
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
 
 import httpx
 import pytest
-from mcp import MCPError
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Managed service runtime is Linux-only"
 )
 FIXTURE = Path(__file__).parent / "fixtures/managed_service.py"
+
+
+@pytest.fixture
+def observe_managed_requests(monkeypatch):
+    """Retain failed request identity until the managed transport diagnosis closes."""
+    import httpx2
+    from fastmcp import Client
+
+    send = httpx2.AsyncClient.send
+    exit_client = Client.__aexit__
+
+    async def observed_send(client, request, *args, **kwargs):
+        try:
+            return await send(client, request, *args, **kwargs)
+        except Exception as error:
+            try:
+                body = json.loads(request.content)
+            except (ValueError, httpx2.RequestNotRead):
+                body = None
+            if isinstance(body, dict):
+                # JSON-RPC fixes these fields; omit arguments, headers and tokens.
+                identity = {key: body.get(key) for key in ("id", "method")}
+                params = body.get("params")
+                if isinstance(params, dict):
+                    identity["tool"] = params.get("name")
+                error.add_note(f"Managed fixture request: {json.dumps(identity)}")
+            else:
+                error.add_note("Managed fixture request identity unavailable")
+            raise
+
+    async def observed_exit(client, exc_type, exc_value, exc_tb):
+        # FastMCP can replace this body error while awaiting its failed session task.
+        if exc_value is not None:
+            try:
+                traceback.print_exception(exc_value)
+            except (OSError, ValueError):
+                pass  # A broken capture stream must not prevent client cleanup.
+        return await exit_client(client, exc_type, exc_value, exc_tb)
+
+    monkeypatch.setattr(httpx2.AsyncClient, "send", observed_send)
+    monkeypatch.setattr(Client, "__aexit__", observed_exit)
 
 
 async def control(root: Path, command: str):
@@ -112,6 +153,18 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
                         pass
                     await asyncio.sleep(0.05)
         yield f"http://127.0.0.1:{port}/mcp", (tmp_path / "token").read_text(), child
+    except BaseException as error:
+        error.add_note(f"Managed supervisor before cleanup: {child.poll()!r}")
+        for name in ("events.jsonl", "service.log"):
+            try:
+                with (tmp_path / name).open("rb") as evidence:
+                    size = evidence.seek(0, os.SEEK_END)
+                    evidence.seek(max(0, size - 20000))
+                    tail = evidence.read(20000).decode(errors="replace")
+                error.add_note(f"Managed fixture {name} ({size} bytes, tail):\n{tail}")
+            except OSError as observation_error:
+                error.add_note(f"Managed fixture {name} unavailable: {observation_error}")
+        raise
     finally:
         if child.poll() is None:
             child.terminate()
@@ -121,7 +174,7 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
                 os.killpg(child.pid, signal.SIGKILL)
                 await asyncio.to_thread(child.wait)
         # A failed fixture must not leave a separately-sessioned worker behind.
-        for name in ("worker.pid", "standby.pid", "escaped.pid"):
+        for name in ("worker.pid", "standby.pid", "escaped.pid", "orphan.pid"):
             path = tmp_path / name
             if path.exists():
                 try:
@@ -139,7 +192,7 @@ def test_same_authenticated_context_survives_real_worker_handoff(tmp_path, mode)
         async with live_fixture(tmp_path) as (url, token, _):
             async with Client(url, auth=token, mode=mode, timeout=20) as client:
                 before = await client.call_tool("counted", {"marker": "before"})
-                await client.call_tool("escaped_child")
+                escaped = await client.call_tool("escaped_child")
                 active = asyncio.create_task(
                     client.call_tool("counted", {"marker": "active", "delay": 0.7})
                 )
@@ -156,9 +209,14 @@ def test_same_authenticated_context_survives_real_worker_handoff(tmp_path, mode)
                 during = asyncio.create_task(client.call_tool("counted", {"marker": "during"}))
                 active_result, during_result, result = await asyncio.gather(active, during, handoff)
                 assert result["ok"], result
+                assert result["handoff"]["standby"] == "ready", result
                 after = await client.call_tool("counted", {"marker": "after"})
                 assert active_result.data["pid"] == before.data["pid"]
-                assert during_result.data["pid"] == after.data["pid"] != before.data["pid"]
+                assert after.data["pid"] != before.data["pid"]
+                # Warm-up serves the old worker; cutover can queue the call for the new one.
+                assert during_result.data["pid"] in {before.data["pid"], after.data["pid"]}
+                with pytest.raises(ProcessLookupError):
+                    os.kill(escaped.data["pid"], 0)
                 for marker in ("before", "active", "during", "after"):
                     assert (
                         sum(
@@ -174,22 +232,23 @@ def test_same_authenticated_context_survives_real_worker_handoff(tmp_path, mode)
     asyncio.run(scenario())
 
 
-def test_same_client_recovers_after_failed_candidate_without_reauthorizing(tmp_path):
+def test_same_client_retries_a_failed_candidate_without_reauthorizing(tmp_path):
     from fastmcp import Client
 
     async def scenario():
         async with live_fixture(tmp_path) as (url, token, _):
             async with Client(url, auth=token, timeout=20) as client:
-                await client.call_tool("counted", {"marker": "before-failure"})
+                before = await client.call_tool("counted", {"marker": "before-failure"})
                 (tmp_path / "fail-start").touch()
                 result = await transition(tmp_path)
                 assert not result["ok"]
-                assert (await control(tmp_path, "status"))["phase"] == "recovery-required"
-                with pytest.raises(MCPError):
-                    await client.call_tool("counted", {"marker": "refused"})
-                assert not any(e.get("marker") == "refused" for e in events(tmp_path))
+                status = await control(tmp_path, "status")
+                assert status["phase"] == "ready"
+                assert status["pending"] is None
+                after_failure = await client.call_tool("counted", {"marker": "after-failure"})
+                assert after_failure.data["pid"] == before.data["pid"]
                 (tmp_path / "fail-start").unlink()
-                assert (await transition(tmp_path, command="resume"))["ok"]
+                assert (await transition(tmp_path))["ok"]
                 after = await client.call_tool("counted", {"marker": "after-recovery"})
                 assert after.data["marker"] == "after-recovery"
 
@@ -476,25 +535,52 @@ def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(tmp_pat
 
     async def scenario():
         (tmp_path / "standby-stalls").write_text("1")
-        async with live_fixture(tmp_path, warm_seconds="8") as (url, token, _):
+        async with live_fixture(tmp_path, warm_seconds="8") as (url, token, manager):
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
                 before = await client.call_tool("counted", {"marker": "before"})
                 serving = before.data["pid"]
-                result = await transition(tmp_path)
-                # The candidate never reaches cutover readiness, so the upgrade
-                # falls back to the one-worker sequence with the waiting
-                # component recorded; the endpoint is never left unserved.
-                assert result["ok"] is True, result
+                await client.call_tool("escaped_child", {"orphan_after_standby": True})
+                active = (await control(tmp_path, "status"))["active"]
+                handoff = asyncio.create_task(transition(tmp_path))
+                await eventually(lambda: (tmp_path / "orphan.pid").exists())
+                orphan = int((tmp_path / "orphan.pid").read_text())
+
+                def adopted_by_manager():
+                    fields = Path(f"/proc/{orphan}/stat").read_text().rsplit(")", 1)[1].split()
+                    return int(fields[1]) == manager.pid
+
+                await eventually(adopted_by_manager)
+                while not handoff.done():
+                    during = await client.call_tool("counted", {"marker": "during"})
+                    assert during.data["pid"] == serving
+                    await asyncio.sleep(0.05)
+                result = await handoff
+                assert result["ok"] is False, result
                 assert result["handoff"]["standby"] == "discarded"
                 assert result["handoff"]["waiting"] == "graph_snapshot"
-                assert result["handoff"]["unavailable_ms"] > 0
+                assert "unavailable_ms" not in result["handoff"]
                 after = await client.call_tool("counted", {"marker": "after"})
-                assert after.data["pid"] != serving
+                assert after.data["pid"] == serving
+                os.kill(orphan, 0)
+                status = await control(tmp_path, "status")
+                assert status["active"] == active
+                assert status["pending"] is None
+                assert status["phase"] == "ready"
+                (tmp_path / "standby-stalls").unlink()
+                result = await transition(tmp_path)
+                assert result["ok"] is True, result
+                assert result["handoff"]["standby"] == "ready"
+                with pytest.raises(ProcessLookupError):
+                    os.kill(orphan, 0)
+                after_retry = await client.call_tool("counted", {"marker": "after-retry"})
+                assert after_retry.data["pid"] != serving
 
     asyncio.run(scenario())
 
 
-def test_a_standby_is_spawned_with_the_current_service_environment_file(tmp_path):
+def test_a_standby_is_spawned_with_the_current_service_environment_file(
+    tmp_path, observe_managed_requests
+):
     """An edited service environment reaches the next worker without a restart."""
     from fastmcp import Client
 

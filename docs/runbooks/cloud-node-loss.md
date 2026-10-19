@@ -10,9 +10,9 @@ Run the `kubectl` steps as break-glass ([cloud operator access](cloud-operator-a
 
 ## Relocate the cells of a lost agent
 
-Relocation restores each cell on the lost agent from its last hourly backup onto other capacity. It loses the writes since that backup, at most an hour's. Never start it for a node that is only unreachable: a cell still running there would keep writing to a volume nobody reads again.
+Relocation restores each cell on the lost agent from its last hourly backup onto other capacity. It loses the writes since that backup, at most an hour's. Never start it for a node that is only unreachable: a cell still running there would keep writing to a volume nobody reads again. To take cells off a healthy node, move them instead ([move a cell](cloud-dedicated-host.md#move-a-cell-to-a-new-claim)): a move backs the cell up when it stops, so it loses no write.
 
-1. Make sure replacement capacity exists: a surviving agent with free slots, or a new or recovery agent that has joined.
+1. Make sure replacement capacity exists: a surviving agent with free slots, or a new or recovery agent that has joined. It must run the cluster's CPU architecture ([one cluster, one architecture](#change-the-cpu-architecture)).
 2. Confirm the agent stopped, by the rule node removal uses: the host is reachable and shows no container process, no pod or CSI mount and no open storage mapping, or you have confirmed the server is destroyed.
 3. Tell the cluster, with Kubernetes' own out-of-service taint. cellctl acts on it only while the node is not Ready:
 
@@ -63,6 +63,23 @@ Never list snapshots through K3s, `k3s etcd-snapshot ls --s3` included. K3s list
    ```
 
    Expect K3s to report the reset complete and exit.
+
+Step 5 starts the server on the CAs that the snapshot holds. Warning: if the
+snapshot is older than the last completed
+[client-CA rotation](cloud-dedicated-host.md#rotate-the-client-ca), the server
+runs on the old client CA again. Every agent holds certificates from the new
+one, so the agents get 401 and stay NotReady until they restart. In that case,
+after step 6, restart K3s on every agent at once, so that they return on the
+snapshot's client CA:
+
+```bash
+cd infra/ansible && ansible k3s_agents --forks 20 -m ansible.builtin.systemd_service -a 'name=k3s-agent state=restarted'
+```
+
+Then issue a new everyday operator certificate, as in
+[cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate),
+and rotate the client CA again.
+
 5. Start K3s: `systemctl start k3s`. Expect the agents to rejoin within a few minutes.
 6. As soon as the API answers, pause cellctl. It restarts with the snapshot's state:
 
@@ -203,3 +220,98 @@ Never clear the backup record to get past this refusal: the cell would then serv
 4. If cellctl must stay rolled back, set the row's `storage_gib` to that number, as the control database owner. The cell restarts once.
 5. Check that the row's error code clears within an hour. The refusal stays parked until its backoff passes, because `grown_storage_gib` does not change the render digest.
 6. Check that the next hourly backup records a new `last_backup_at`.
+
+## Change the CPU architecture
+
+Newly built Exomem Cloud cell and cellctl release images support
+`linux/amd64` and `linux/arm64` under one index digest. One cluster runs one
+architecture: the fleet server and every agent are all x86, or all Arm64 (a
+Hetzner CAX server). Agent types are x86 only, so Terraform refuses agents
+beside a CAX fleet server. The k3s role refuses an agent whose architecture
+differs from the server's.
+
+### Before you change any node
+
+Every image that the cluster runs must list the target architecture. The gateway index inspected on 2026-10-15 lists `linux/amd64` only. Before changing architecture, select a gateway image that lists the target platform. Historical single-platform cell images also need replacement.
+
+1. On the node, under a break-glass identity, list every image that the
+   cluster's workloads name. The list covers the platform chart, its
+   dependencies and every cell:
+
+   ```bash
+   { kubectl get deployments,statefulsets,daemonsets,jobs -A -o jsonpath='{range .items[*]}{range .spec.template.spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}'; kubectl get cronjobs -A -o jsonpath='{range .items[*]}{range .spec.jobTemplate.spec.template.spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.jobTemplate.spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}'; } | sort -u > cluster-images.txt
+   ```
+
+2. Copy `cluster-images.txt` to a machine with Docker Buildx and `jq`, signed
+   in to every private registry in the list.
+3. Check each image for the target platform. The loop prints each image that
+   lacks it:
+
+   ```bash
+   target=linux/arm64; while read -r image; do docker buildx imagetools inspect --raw "$image" | jq -e --arg target "$target" 'any(.manifests[]?.platform; .os + "/" + .architecture == $target)' >/dev/null || echo "no $target: $image"; done < cluster-images.txt
+   ```
+
+4. Go on only when the loop prints nothing.
+
+### Rebuild each cell's vector index
+
+The same chunk's bge-m3 int8 vectors differ between architectures (cosine
+0.9685–0.987 between a cx33 and a cax21, 1.000000 on either alone, measured
+2026-10-10). The recall sidecar records its model, not the architecture, so no
+check rebuilds it. After the node change, rebuild each cell's index on the new
+architecture before you accept the cell.
+
+Do not use `maintain_memory --mode fix --rebuild-embeddings` for this. Fix mode
+also rewrites notes, and it reports success when the rebuild fails.
+
+The recall sidecar is in the cell's derived state,
+`/data/host/.local/state/exomem/state/vault-<hash>/`. The pointer file
+`.embeddings.active` names the sidecar that serves, `.embeddings.<16 hex>.sqlite`.
+A cell from before the pointer existed serves `.embeddings.sqlite`. Each
+sidecar can have `-wal` and `-shm` files beside it. The procedure moves all of
+them.
+
+For each cell:
+
+1. Stop the cell and start the helper pod, as
+   [import steps 5 and 6](cloud-operator-import.md#5-stop-the-cell) do.
+2. Move every `.embeddings.*` file into a dated directory on the cell's
+   volume, then delete the helper pod. Backups do not include `/data/.vectors-aside-*`:
+
+   ```bash
+   no_runtime_pod && helper sh -euc 'state=$(ls -d /data/host/.local/state/exomem/state/vault-*); aside=/data/.vectors-aside-$(date -u +%F); [ "$(printf "%s\n" "$state" | wc -l)" -eq 1 ] || { echo "expected one vault state directory; nothing moved" >&2; exit 1; }; [ ! -e "$aside" ] || { echo "$aside exists; nothing moved" >&2; exit 1; }; mkdir -m 700 "$aside"; mv "$state"/.embeddings.* "$aside"/; ls -A "$aside"' && kubectl -n "$NS" delete pod owner-restore --wait=true
+   ```
+
+3. Start the cell, as [import step 7](cloud-operator-import.md#7-start-the-cell)
+   does. The cell's own initial build recreates the index. Meanwhile recall
+   answers from the pages built so far and adds `embeddings` to
+   `warming.components`.
+4. Read the build's state from the cell's doctor report. Doctor reads the
+   sidecars from disk:
+
+   ```bash
+   kubectl -n "$NS" exec cell-0 -- python3 -I -c 'import json, subprocess; report = json.loads(subprocess.run(["exomem", "doctor", "--json"], capture_output=True, text=True).stdout); checks = {check["id"]: check for check in report["checks"]}; reembed = checks["embeddings.reembed"]; details = reembed.get("details") or {}; sidecar = (checks.get("embeddings.sidecar") or {}).get("details") or {}; print(json.dumps({"reembed": reembed["status"], "serving": details.get("serving"), "building": details.get("building"), "pages": details.get("paths_total"), "chunks": sidecar.get("vector_count")}, indent=1))'
+   ```
+
+   While the build runs, `reembed` is `warn` and `building.paths_done` counts
+   up to `pages`. Record the last `pages` value.
+5. Repeat step 4 until the build is done: `reembed` is `pass`, `building` is
+   null, and `serving.sidecar` names a `.embeddings.<16 hex>.sqlite` file.
+   `chunks` must be at least the last `pages` value, because every page with
+   text has at least one chunk.
+6. Accept the cell with recall, governance status and a governed write. A
+   recall answer must carry no `warming` block that names `embeddings`.
+7. After cellctl's next scheduled backup of the cell succeeds, delete the
+   moved-aside directory. The backup has succeeded when `last_backup_at` on the
+   cell's row is later than the move. The runtime never reads the directory, so
+   the cell keeps running:
+
+   ```bash
+   kubectl -n "$NS" exec cell-0 -- rm -rf -- "/data/.vectors-aside-${VECTOR_ASIDE_DATE:?date from the completed move}"
+   ```
+
+On 2026-10-10 the move, doctor reader and delete were checked against the amd64 cloud image under Docker, on 300-page and 60-page
+volumes. The 300-page rebuild took about 50 s and ended at 300 chunks. Doctor
+raised the cell's memory from 265 MiB to 728 MiB at most. No real cell has
+moved between architectures yet, and the `kubectl` commands above have not run
+against a cluster.

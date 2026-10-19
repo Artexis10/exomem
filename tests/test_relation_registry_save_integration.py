@@ -41,6 +41,30 @@ def _delta() -> dict[str, object]:
     }
 
 
+def test_presentation_metadata_survives_save_without_changing_relation_meaning(
+    tmp_path: Path,
+) -> None:
+    proposal = _proposal()
+    definition = proposal["extensions"]["vault.applies_to"]
+    definition["presentation_role"] = "future_renderer_role"
+    saved = relation_registry.save_registry(tmp_path, proposal)
+    loaded = relation_registry.load_registry(tmp_path).definition("vault.applies_to")
+    assert loaded.presentation_role == "future_renderer_role"
+    assert loaded.family == relation_registry.core_registry().definition("relates_to").family
+    assert loaded.description == "A reviewed relation."
+
+    changed = relation_registry.merge_extension_delta(proposal, {
+        "upsert": {"vault.applies_to": {"presentation_role": "conflict"}},
+    })
+    relation_registry.save_registry(tmp_path, changed, expected_hash=saved["content_hash"])
+    reloaded = relation_registry.load_registry(tmp_path).definition("vault.applies_to")
+    assert reloaded.presentation_role == "conflict"
+    assert reloaded.key == loaded.key
+    assert reloaded.family == loaded.family
+    assert reloaded.description == loaded.description
+    assert reloaded.aliases == loaded.aliases
+
+
 @pytest.fixture(autouse=True)
 def owner_library_scope():
     from exomem.governance.principal import library_scope
@@ -124,7 +148,9 @@ def test_invalid_full_registry_change_never_reaches_canonical_batch(
 
 
 def test_stale_delta_merge_converges_without_a_second_registry_write(tmp_path: Path) -> None:
-    created = relation_registry.save_registry(tmp_path, _proposal())
+    proposal = _proposal()
+    proposal["extensions"]["vault.applies_to"]["presentation_role"] = "conflict"
+    created = relation_registry.save_registry(tmp_path, proposal)
     current = relation_registry.load_registry(tmp_path)
     delta = {
         "upsert": {
@@ -146,6 +172,7 @@ def test_stale_delta_merge_converges_without_a_second_registry_write(tmp_path: P
         )
 
     assert relation_registry.load_registry(tmp_path).extension_hash == first["content_hash"]
+    assert relation_registry.load_registry(tmp_path).definition("vault.applies_to").presentation_role == "conflict"
 
 
 def test_public_delta_save_replays_without_recommit(

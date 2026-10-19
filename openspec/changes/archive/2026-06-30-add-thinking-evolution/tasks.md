@@ -51,6 +51,6 @@
       claims/reasons are verbatim note text; vault + `find` ordering unchanged.
 - [x] 4.6 `openspec validate add-thinking-evolution --strict` passes.
 
-## 5. Deploy (Hugo)
+## 5. Deploy (operator)
 - [ ] 5.1 `reset --hard origin/main` (or ff-pull) on the deploy checkout + restart; reconnect
       the claude.ai connector so the new `evolution` MCP tool appears. (Additive, read-only.)

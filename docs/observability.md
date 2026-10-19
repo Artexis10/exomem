@@ -33,6 +33,7 @@ directory independently.
 | `mutations.jsonl`        | One record per mutation attempt (the mutation journal).          |
 | `ledger.jsonl`           | One record per **MCP tool call** — the call ledger (below).       |
 | `ledger-archive/`        | The call ledger's rotated segments, content-addressed.           |
+| `ledger.gap`             | Empty; its mtime marks the latest call whose row failed to append. |
 | `archive/exomem-*.log`   | Prior sessions' `exomem.log`, archived (not deleted) on restart.  |
 
 Each JSONL file rotates at a size cap (`EXOMEM_JSONL_MAX_MB`, default 64MB),
@@ -129,6 +130,15 @@ edges — while a governed write on an unaffected path takes the incremental pat
 as usual. `freshness.snapshot()["external_pending_paths"]` names what is still
 unrepaired.
 
+When an incremental pass reports `stored_resolver_entries_unreadable`, the
+preceding `graph stored resolver proof declined` record identifies its proof
+branch. The reason distinguishes retained deletions, a caller create outside
+the delta, a changed path outside the knowledge base, a missing row without
+create proof, and an existing row with create proof. The record contains only
+numeric counts; it emits no paths, titles or source text. These are provenance
+failures, not evidence of a SQLite read error. A later sidecar snapshot cannot
+identify which branch a historical attempt took.
+
 ## Event schema
 
 A structured log record (`src/exomem/log_events.py`) carries:
@@ -156,6 +166,25 @@ access log (`event=http_request`), the tool trace
 `reads.jsonl` (additive `request_id` field), and `mutations.jsonl` all carry
 it, so one request id joins every source that touched that request.
 
+The access event keeps `duration_ms` as the inner ASGI application await.
+It excludes earlier authentication and body handling, plus its own logging and metrics.
+Two additive fields describe the worker boundary:
+
+- `worker_pre_access_ms` measures worker middleware entry through the existing access timer start.
+- `worker_to_final_body_ms` measures that entry through completion of the final body send await.
+  A successful final send remains known if later cleanup fails.
+
+The entry stamp precedes FastMCP authentication and carrier handling.
+The server error middleware and configured body limit can remain outside that stamp.
+Missing entry wiring or an unfinished final send produces `null`, never zero.
+Absent fields in older records also mean unknown.
+Early refusals before access still produce no access event.
+
+These intervals overlap; do not add them.
+Final body timing excludes trailers, later cleanup, managed forwarding and client receipt.
+A streaming response measures stream lifetime when its final send completes.
+Compare finite MCP calls separately from streaming responses.
+
 ## The call ledger (`ledger.jsonl`)
 
 One durable, structured row per **MCP tool call** — read or write, success or
@@ -173,7 +202,7 @@ it with `exomem logs verify`.
 `session_id`, `client_name`, `client_version`, `transport`,
 `caller_principal_hash`, `principal_kind`, `tool`, `arg_names`, `args`,
 `target_paths`, `outcome`, `error_code`, `duration_ms`, `total_ms`,
-`request_bytes`, `truncated`.
+`request_bytes`, `truncated`, `access`, `item_count`.
 
 - **Latency, on every call — read, write, success, refusal.** `duration_ms` is
   the tool leaf, the number the prose trace and `exomem_tool_duration_ms` have
@@ -216,7 +245,9 @@ it with `exomem logs verify`.
   client's calls separable when several are connected to one vault at once. It
   is client-declared, so treat it as a diagnostic hint, not an authorization
   input. `caller_principal_hash` is the separate, hashed, authenticated
-  identity.
+  identity. A stateless request carries no handshake; there the name comes
+  from `User-Agent`. On a cloud cell, the gateway's `x-exomem-oauth-client`
+  header comes first, because the gateway forwards no `User-Agent`.
 - **`principal_kind`** says which kind of caller that is: `owner` (stdio, the
   CLI or the REST key), `owner-oauth` (a remote sign-in the host bound as the
   owner with `EXOMEM_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An
@@ -230,6 +261,18 @@ it with `exomem logs verify`.
   client retrying the same call?".
 - **`target_paths`** records the page a call addresses, verbatim. A path is
   structure, not content, and it is the first thing a forensic pass needs.
+- **`access`** and **`item_count`** arrive with schema version 2. `access` is
+  `read` or `write`, as the dispatcher classified the call, or null when no
+  classification reached the row. `item_count` counts what a successful call
+  touched: the distinct items a read released, or the distinct pages a write
+  committed. The dispatcher reports the pages a commit names, so a write whose
+  destination the server chose still counts. Only when a commit reports no page
+  does a write count the distinct targets its arguments name; the two are never
+  added, because an argument can name a committed page by its reference. It is null
+  for any other outcome and for a write that names no page. Null means
+  unknown, never zero. Both fields carry no content, so a cloud cell keeps
+  them. A version 1 row lacks both; readers treat them as unknown, and
+  `exomem logs verify` accepts a chain that runs from version 1 into version 2.
 
 ### Where a write's time went (`spans`)
 
@@ -254,6 +297,11 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `advisory.overlap_groups` | Grouping and emitting that sweep's candidates — a ref batch and a review-state read per candidate. |
 | `preflight.contract_eval`, `preflight.corpus_context`, `preflight.page_states`, `preflight.read_guarded`, `preflight.registries`, `preflight.relation_review`, `preflight.validity_token` | The write's preflight stages, from the per-stage collector (`MutationTimings`). |
 | `commit.boundary_acquire`, `commit.creation_lock`, `commit.embedding_prewarm`, `commit.locked_commit`, `commit.manifest`, `commit.resolver_prime`, `commit.revalidate`, `commit.stamp_check` | Its commit stages, from the same collector. These are emitted into every row regardless of `EXOMEM_WRITE_TIMINGS`; that flag governs only whether the *caller* is handed a timing envelope on its response. |
+| `writer.resolver_snapshot` | The wikilink resolver a writer prepares its draft with. One field names the route: `forked` from the warm resolver cache, `corpus_entries` from the current corpus context, or `disk`, a full read of the vault's titles. When the corpus route declines, one `declined_<reason>` field says why: `external_pending`, `events_not_live`, `checkpoint_absent`, `freshness_differs`, `corpus_absent`, `checkpoint_differs`, `proof_failed`, `identity_changed`, `changed_during_proof` or `unkeyable`. |
+| `preflight.creation` | A page creation's preflight, before the commit. `structural_ms` is its structural evaluation and `relation_review_ms` its relation review when the page needs one, both in whole milliseconds; the commit reuses that relation review while its validity stamp stays current. |
+| `commit.source_closure`, `commit.relation_review_prepare`, `commit.catalog_prepare`, `commit.relation_review`, `commit.relation_review_attempt` | A page creation's commit stages, recorded directly. Before the guard: the source closure, the relation-review preparation and the model warm-up (`commit.embedding_prewarm`). Inside it: the catalog preparation and the relation-review commit. `commit.relation_review_attempt` is the commit's in-lock revalidation, with one field for its outcome: `reused`, `revalidated` or `unavailable`. `commit.relation_review_prepare` carries the same field for the preliminary attempt before the guard, which is offered the preflight's relation review: `reused` means the commit did not repeat it. |
+| `post_commit.structure_suggestion`, `post_commit.records_routing`, `post_commit.observation_delta`, `post_commit.records_delivery`, `post_commit.due_state`, `post_commit.capture_sweep`, `post_commit.entity_candidate` | The advisory blocks a write attaches after its commit, one span each, for a page creation and an existing-page commit alike. |
+| `advisory.default_sweep` | The whole default duplicate and overlap sweep that a write runs after its commit. `advisory.best_cosine` and `advisory.overlap_groups` are parts of it. |
 | `derived.receipt_prepare`, `derived.receipt_proof`, `derived.acknowledgement`, `derived.pending_visibility` | The receipt and acknowledgement path. |
 | `index.upsert_after_write` | The whole derived fan-out, and the sum the per-component spans below break down. |
 | `index.completion_check` | Verifying full-index completion after component dispatch, including current publication state. `paths` counts the written paths checked. |
@@ -264,6 +312,21 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `embeddings.model_load` | Lazy load of the embedding model weights. |
 | `embeddings.encode` | Encoding text to vectors. |
 | `embeddings.matrix_load` | A full vector-matrix load from the sidecar; the log line `embedding matrix full load: … rows=… cached_gen=…` names the reason. |
+| `embeddings.matrix_load.policy` | Read the recall policy identity. |
+| `embeddings.matrix_load.connect` | Open the sidecar, including identity coordination and connection setup. |
+| `embeddings.matrix_load.snapshot` | Begin the snapshot and read its generation, vector space and row count. |
+| `embeddings.matrix_load.allocate` | Allocate the final matrix and metadata list. Physical pages can be allocated later during row copying. |
+| `embeddings.matrix_load.rows` | Read, validate and copy vector rows. Fields report `expected_rows`, completed `rows`, `width_sum` and copied `vector_bytes`, including failed loads. |
+| `embeddings.matrix_load.release` | Sum transaction rollback and connection close. |
+| `embeddings.matrix_load.finalize` | Observe the snapshot identity, read the sidecar timestamp and construct the cache. |
+| `embeddings.disk_score.connect` | Open the sidecar for the bounded, read-only `service-v1` chunk scan. |
+| `embeddings.disk_score.snapshot` | Begin the snapshot, read its generation and vector space, prepare queries and check the producer space. |
+| `embeddings.disk_score.fetch` | Execute the ordered vector query and fetch each block, including the final empty fetch. |
+| `embeddings.disk_score.decode` | Allocate each block, validate vector widths and copy vectors. Fields report completed `rows` and copied `vector_bytes`, including failed scans. |
+| `embeddings.disk_score.score` | Compute each block's matrix product. |
+| `embeddings.disk_score.select` | Apply admission, select each query's winners and merge them into the stable top-k. |
+| `embeddings.disk_score.hydrate` | Build results and, for searches that return text, read winning chunks from the scoring snapshot. |
+| `embeddings.disk_score.release` | Roll back the read transaction and close the connection. |
 | `embeddings.matrix_catch_up` | The bounded alternative to that full load. |
 | `embeddings.unit_matrix_load` | A full load of the semantic-unit vectors into the resident unit matrix: the first unit query in a process, and the first after each unit write; the log line `semantic-unit matrix full load: … rows=…` names the reason. |
 | `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
@@ -271,17 +334,38 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `recall.*` | Retrieval phases, named by `find`'s own timings. |
 | `recall.due_state` | Serving the advisory due-state block a recall carries. On a memo hit its re-checks are `recall.due_state.verdicts` (`paths` = release verdicts re-asked), `recall.due_state.role` and `recall.due_state.exists` (`rows`); on a miss, `recall.due_state.build`. |
 | `recall.due_state.emit` | Deciding whether that block is new to the session and recording its delivery. |
-| `command.leaf`, `command.postfilter` | The two halves of a tool's `duration_ms`: the command itself, then the MCP-layer post-filter and scrub of its result. |
+| `recall.working_set.carry.phrase`, `recall.working_set.carry.title` | An activation's retrieval carry, one span per rung inside `recall.working_set.carry`: the phrase rung, which names pages by a phrase of distinctive words, and the title rung, which lists pages whose title the turn says. Fields: `admitted` (the request's admitted pages), `stem_rows` (admitted catalogue rows its per-word rarity counts examined, summed over the words), `candidates` (rows its corroboration test examined) and `stats_rebuilt` (1 when the rung rebuilt ranking statistics over the admitted pages instead of reusing them; summed over calls). An owner whose configuration can withhold no page (no governance policy, collection-store marker or lifecycle marker) ranks on the catalogue's own statistics, so its `stats_rebuilt` stays 0. A restricted reader, and the owner under a governance policy, ranks on its admitted pages and rebuilds once per catalogue revision, whether or not any page is withheld. |
+| `recall.working_set.lanes.<position>` | One activation role lane, named by its position, never by its role. Fields: `rows_read` (rows the lane's maintained-catalogue reads returned), `pages_parsed` (unit-parent pages it read from Markdown and parsed), `catalogue_ms` and `hydration_ms` (whole milliseconds inside those two reads, rounded down). The rest of the lane's duration is its own selection work. |
+| `runtime.gc` | Garbage-collection pauses inside one `activate_context` call: the duration is the pause time and `collections` the number of collections. A collection stops every thread, so the pauses counted are those inside the call's interval, whichever thread triggered them. Absent when no collection ran. |
+| `command.leaf`, `command.postfilter` | The dispatcher envelope, then the MCP-layer filter and scrub. The dispatcher envelope includes its command body, first terminal filter and disclosure receipt. |
+| `command.body`, `command.terminal_filter`, `command.disclosure_receipt` | Dispatcher stages on the read-only and the mutation path: invoke the command, filter its result or error, then, on a read, emit the disclosure receipt. Failed stages retain their duration. |
+| `mutation.idempotency_claim` | Keyed claim attempts in the command body, including SQLite commit and close. Excludes capture queue waits, pending-replay polling, and the mutation operation. Wall and thread CPU totals aggregate repeated attempts. |
+| `command.refusal_floor` | A restricted caller's direct-read refusal, held to the fixed disclosure floor. `work_ms` is the refusal's work, from dispatch to the refusal, rounded up to whole milliseconds. `overrun` is 1 when that work alone ran past the floor, so the refusal completed late, and 0 otherwise. `deferred` is 1 when the MCP or REST surface waits out the floor after its own handling of the refusal; the span's duration is then near 0. Otherwise the dispatcher's thread waits, and the duration is that wait. Absent on successes and on owner refusals. |
+| `egress.cross_check`, `egress.scrub` | The terminal filter's withheld cross-check and credential scrub, beside `egress.artifact_gate`. On MCP the filter runs twice, under `command.terminal_filter` and again under `command.postfilter`, so each sums both passes. A raised error has no cross-check; its filter runs the gate and the scrub once per text value. |
+| `spans.overflow` | Every span recorded under a name past the per-call name bound, summed: how many and how long. Present only when a call ran out of names. |
+| `egress.artifact_gate` | Artifact-gate construction and payload filtering, including failures. Fields report observed `thread_cpu_us`, measured `thread_cpu_calls`, and vault census `index_calls`. |
 | `lexical.publication_wait` | Time a request spent waiting for the lexical publication barrier, with `timeout_ms` (the bound it chose) and `acquired` (1 or 0). Recorded only on the MCP path. |
 | `recall.pack.parents`, `recall.pack.units`, `recall.pack.neighborhood`, `recall.pack.tension` | The deep pack's phases: reading the packed parents, extracting claims and packing semantic units, the one-hop wikilink neighbourhood, and supersession plus proximity tension (the sidecar reads). `recall.graph_enrich` remains the fifth. |
 | `encode.by.<module>` | Beside every `embeddings.encode`: the Exomem module that asked for the encode (`context_pack`, `semantic_segments`, `index_sync`, ...). The name is the attribution because span fields are integers. |
 | `index.embeddings.reuse` | Inside `index.embeddings`, once for the page's chunks and once for its semantic units: `texts` the write needed vectors for and `reused` how many came from the page's published rows instead of the encoder. `reused` near `texts` is an append; `reused` 0 on a long page is a first index or a rewrite. `reused` counts only texts whose vector came from the page's own published rows, the same meaning as on `advisory.best_cosine`. `recalled`, when present and disjoint from `reused`, counts texts that took an advisory sweep's just-encoded vector instead: an `add` commit taking the vectors its pre-commit sweep encoded. The encoder was handed `texts` minus both. |
-| `read.page`, `read.history`, `read.links` | A direct read's phases: the page read, the edit log (`entries`), and the wikilink summary (`inbound`, `outbound`). |
+| `read.page`, `read.history`, `read.links` | Decode the prepared page, read the edit log (`entries`), and build the wikilink summary (`inbound`, `outbound`). Page preparation precedes `read.page`. |
+| `read.resolve_identifier` | Resolve the requested page identifier. `pending_custody_unknown` counts refusals caused by unprovable custody. `pending_identity_unknown` counts refusals because pending identities cannot prove uniqueness. These counters describe only this phase. Missing counters leave the branch unknown. |
+| `memory_refs.identity_census` | Resolve the requested page identifier through the current identity projection, or a full KB scan. Vault state chooses the source before identifier lookup. `snapshot` is 1 for projection reuse and 0 for a scan. `cpu_ms` records thread CPU time; `pages` records readable pages after a scan. One `declined_<reason>` counter names a namespace mismatch, acquisition failure or revalidation failure. Fields sum across calls and contain no paths or identities; an absent decline counter leaves the cause unknown. |
+| `read.prepare`, `read.reference`, `read.release` | Acquire the page snapshot, resolve its stable reference and pending custody, then apply its release policy. These phases sit outside `read.page`; their durations include any waits. For a restricted caller, `read.release` also runs before `read.history` and `read.links` to refuse a withheld page early, so a read that is not refused counts it twice. |
+| `read.prepare.resolve_path` | Check the literal and shortcut paths, then resolve the canonical vault path. Exclusion checks follow this phase. |
+| `read.prepare.resolve_physical`, `read.prepare.inspect`, `read.prepare.held_read` | Resolve the physical spelling, inspect its identity, then acquire the held byte snapshot. These intervals include nested identity work. |
+| `reserved.identity.baseline_build`, `reserved.identity.baseline_wait` | Build the cold baseline catalogue, or wait on another caller's build. These spans carry no flight or holder identity. A background builder without a call token emits no request span. |
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
-never raises: a missing span means that path did not run, not that the call
-failed.
+never raises. A missing span leaves that phase's duration unknown.
+Nested intervals overlap; do not add them to enclosing spans.
+A wait span does not identify its leader or guard holder.
+Missing baseline spans do not prove a cache hit.
+
+Artifact-gate CPU is partial when `thread_cpu_calls` is less than the span's
+`count`. An unavailable clock contributes no CPU sample. Both filtering passes
+share this aggregate; it does not identify their separate costs.
 
 Some spans also carry `fields`: named integer counts beside the duration. A
 duration alone cannot separate a slow step from a large one — `embeddings.encode`
@@ -291,6 +375,43 @@ items they covered (`paths` on the `index.*` components, `texts`/`chars` on
 `embeddings.encode` and `advisory.best_cosine`, `candidates` on
 `advisory.overlap_groups`). The key is absent on a span that measured only time,
 so nothing about an existing row changes.
+
+Recall stage spans also carry `thread_cpu_us` during MCP calls, including stages
+that raise. This measures CPU on the executing thread, excluding other threads.
+Nested stage measurements overlap; do not add them. These fields do not change
+public wall-time diagnostics. Outside MCP, recall does not sample this CPU clock.
+Missing CPU fields leave consumption unknown.
+
+The existing retrieval-refusal log names its validated site and the bound MCP
+`request_id`. Direct calls and invalid request IDs report `unbound`; they do not
+mint an ID. Match a valid ID to the call ledger before attributing a refusal site.
+A nearby log timestamp alone does not bind the site to a call.
+
+Matrix-load child spans break down the outer load. They do not include the caller's
+lock wait or vector scoring. Snapshot and release each aggregate two intervals.
+The ledger retains the 32 slowest spans. A row that dropped any carries
+`spans_truncated`, the number it dropped; a complete row has no such key. An
+omitted phase has no retained duration. A call that records more distinct names
+than that bound sums the rest under `spans.overflow`, its count and time.
+The row fields sum across loads, so `width_sum` equals the vector width only for one load.
+A slow row phase alone does not distinguish storage, row conversion, copying or
+memory pressure.
+
+Disk-score spans describe chunk scans that keep vectors in bounded blocks rather
+than a resident corpus matrix. Repeated phases aggregate within the call. Decode
+fields sum completed work across blocks and scans, including repeated scans for
+query blocks. They carry only integer counts, never paths, chunk text, queries or
+identifiers. These phases can sit inside broader search or advisory spans, so
+overlapping durations must not be added blindly. The same 32-span retention limit
+applies: an omitted phase means unknown duration, never zero.
+
+Governed walks reuse membership only for the same canonical path, vault, exact
+source bytes, policy fingerprint and current registry assignment. A valid hit
+skips Markdown parsing. Each walk still checks source freshness, tombstones,
+content floors, projection authority, grants, sessions and bridges. Each fresh
+carry still admits the whole non-raw corpus. Reuse depends on resident entries
+in the bounded memo. A corpus walk larger than that memo can still parse every
+page. This reuse does not establish a live latency improvement.
 
 ### Mutation-lock events dominate the log under writes
 
@@ -463,6 +584,22 @@ its legacy inner-timing boundary and reports full acceptance as not measured.
 The owning task 6.1 remains open until reference, principal, encoder, contention
 and stage evidence cover its current contract. Missed diagnostic targets fail
 neither a ceiling nor a release.
+
+## Recall availability
+
+The packaged MCP canary checks private cases through the existing public tools.
+On a schema mismatch, the attempt can retain `schema_failure` with the validator
+keyword and `schema_path_sha256`. The hash covers the first rejected schema
+path encoded with compact JSON separators. It comes from the same validation
+pass and does not include raw paths, messages, constants or response content.
+
+Join this fingerprint to the case-file digest, case identity and observer
+version. It supports correlation; different assertions can share a validator
+path through references or composition. It does not uniquely identify an
+assertion, establish its product cause or list every failure. Predictable paths
+can have guessable hashes;
+the fingerprint permits correlation and does not guarantee secrecy. Missing
+diagnostic metadata does not change the failed result.
 
 ## Doctor
 

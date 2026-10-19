@@ -30,12 +30,28 @@ an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Simple front door
 
-For a Planning change, discover the collection with `browse_memory`, then
-`plan_memory(action="inspect", collection=...)` and a bounded `query` to
-identify exactly one item. `inspect` requires a collection. Use the returned
+For a correction to observed state, inspect Records independently of ordinary
+Note recall. Raw Records items do not appear in ordinary recall results.
+Call `record_memory(action="inspect")` to list admitted collections, then inspect
+one compatible collection using its returned `manifest_path` as `collection`.
+Run a bounded `query` for the known item identity before choosing a write.
+For `update`, copy the returned internal UUID into `item_key`, the row's
+`item_version` into `expected_item_version`, and `snapshot` into
+`expected_container_hash`. Preserve provenance and verify the updated row.
+Do not infer that a matching row exists or create another collection when
+the inventory, schema, or query does not establish one.
+
+For a Planning change, call `plan_memory(action="inspect")` to list admitted
+collections. Copy the chosen `manifest_path` into `collection`, then inspect
+that collection and run a bounded `query` to identify exactly one item.
+If collection titles repeat, use their separate manifest paths. Use the returned
 `snapshot` as `expected_container_hash`, and that query row's `plan_id`
 and `item_version` as `plan_id` and `expected_item_version`. These are
 returned identities and versions, not filenames or values to invent.
+
+The `area` and `parent` fields require `exomem://plan/<collection-uuid>/<plan-uuid>`
+references. Query the chosen collection for `collection_id` and `plan_id` before
+writing those fields. Display titles do not identify relationship targets.
 
 Pass `changes={"title": "..."}` to `update`; for an explicit intent change
 pass `transition` to `triage`, with the same guards and an audit `why`.
@@ -55,11 +71,11 @@ canonical operations are implementation leaves underneath them. Do not ask the
 user to choose `Sources`, `Notes`, `Entities`, `Evidence`, graph sidecars, schema
 blocks, or supersession internals unless that detail changes what will happen.
 
-Native assistant memory (Claude, ChatGPT, Codex, and similar) is short-term or
-behavioural memory for preferences, style, identity facts, working context, and
-routing rules such as "use Exomem for my project knowledge." Exomem is long-term
-governed memory for sourced conclusions, project context, decisions, failures,
-experiments, proof-bearing records, review, and supersession.
+Keep temporary working context in the current conversation. Exomem is the durable
+home for preferences, feedback, personal baselines, project context, decisions,
+sourced conclusions, failures, experiments, and proof-bearing records.
+Capture follows the live engagement policy. Native memory is an explicit fallback
+when Exomem cannot capture; move durable results to Exomem when it can.
 
 | Simple action | User phrasing | Product route |
 |---|---|---|

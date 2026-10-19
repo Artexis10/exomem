@@ -7,10 +7,11 @@ import time
 from contextlib import closing
 
 import pytest
-from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
+from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 
+from exomem import held_fs
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection, replica, schema
+from exomem.collection_store import connection, replica, schema, views
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.runtime import CollectionStoreRuntime
 from exomem.writer_lease import LeaseConfig, LeaseManager, LeaseRecord
@@ -93,6 +94,21 @@ def _create(runtime):
                              manifest_text=manifest_text(), why="capture", scaffold=False)
 
 
+def test_a_cached_handle_cannot_bypass_an_older_reader_ceiling_or_leak_a_borrower(runtime, monkeypatch):
+    """A previously cached schema 12 writer must refuse schema 13 installation semantics."""
+    _create(runtime)
+    cached = runtime._handle
+    assert cached is not None
+    with monkeypatch.context() as older:
+        older.setattr(schema, "SCHEMA_VERSION", 12)
+        with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+            with preview_store(runtime.root, runtime):
+                pytest.fail("an older cached handler entered the newer store")
+        assert runtime.manager._store_borrowers == {}
+    with preview_store(runtime.root, runtime) as writer:
+        assert writer.connection.execute("SELECT COUNT(*) FROM collections").fetchone() == (1,)
+
+
 def test_runtime_handoff_drains_read_and_publishes_acknowledged_rows(runtime):
     _create(runtime)
     manager, client = runtime.manager, runtime.manager.client
@@ -114,6 +130,107 @@ def test_runtime_handoff_drains_read_and_publishes_acknowledged_rows(runtime):
     manager.close()
     assert client.holder is None
     assert client.token == 1
+
+
+def _pending_item_views(runtime, monkeypatch):
+    _create(runtime)
+
+    def interrupted(batch, publication):
+        raise held_fs.HeldFsError("IO_REFUSED", "installation interrupted")
+
+    with runtime.manager.consistency_guard(runtime.root), preview_store(runtime.root, runtime) as writer:
+        writer.reconcile_views()
+        with monkeypatch.context() as blocked:
+            blocked.setattr(views.PublicationBatch, "_install", interrupted)
+            writer.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
+            writer.append_record(CID, item={"title": "Two"}, item_key=OTHER, why="capture")
+        paths = [row[0] for row in writer.connection.execute(
+            "SELECT path FROM projection_state WHERE kind='item' AND state='pending' ORDER BY path")]
+    assert len(paths) == 2 and all(not (runtime.root / path).exists() for path in paths)
+    return paths
+
+
+def _resume_pending_views(runtime, paths, released):
+    from exomem.collection_store.writer import CollectionWriter
+    from exomem.governance.principal import library_scope
+
+    with connection.open_writer(runtime.path, lease_check=lambda: True) as handle, library_scope():
+        writer = CollectionWriter(runtime.root, handle)
+        writer.reconcile_views(pending_only=True)
+        writer.reconcile_views(pending_only=True)
+        assert writer.connection.execute("SELECT COUNT(*) FROM txns").fetchone() == (3,)
+        assert writer.connection.execute("SELECT COUNT(*) FROM projection_state WHERE state='pending'").fetchone() == (0,)
+    assert all((runtime.root / path).exists() for path in paths)
+    assert runtime.sample_head() == released
+
+
+def test_handoff_stops_before_the_next_view_when_an_install_uses_the_drain_share(runtime, monkeypatch):
+    paths = _pending_item_views(runtime, monkeypatch)
+    installed = []
+    monotonic, offset = time.monotonic, [0.0]
+    install = views.PublicationBatch._install
+
+    def exhaust_share(batch, publication):
+        install(batch, publication)
+        installed.append(publication.path)
+        if len(installed) == 1:
+            offset[0] += 12
+
+    with monkeypatch.context() as drain:
+        drain.setattr(time, "monotonic", lambda: monotonic() + offset[0])
+        drain.setattr(views.PublicationBatch, "_install", exhaust_share)
+        runtime.manager.close(deadline=time.monotonic() + 20)
+    assert installed == paths[:1]
+    assert (runtime.root / paths[0]).exists() and not (runtime.root / paths[1]).exists()
+    released = runtime.manager.client.release_head
+    assert runtime.manager.client.released.is_set() and released == runtime.sample_head()
+    with closing(connection.open_reader(replica.replica_path(runtime.root))) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
+        assert reader.execute("SELECT state FROM projection_state WHERE path=?", (paths[1],)).fetchone() == ("pending",)
+    _resume_pending_views(runtime, paths, released)
+
+
+def test_handoff_leaves_views_pending_when_batch_setup_uses_the_drain_share(runtime, monkeypatch):
+    paths = _pending_item_views(runtime, monkeypatch)
+    monotonic, offset = time.monotonic, [0.0]
+    initialize = views.PublicationBatch.__init__
+
+    def exhaust_share(batch, *args, **kwargs):
+        initialize(batch, *args, **kwargs)
+        offset[0] += 12
+
+    with monkeypatch.context() as drain:
+        drain.setattr(time, "monotonic", lambda: monotonic() + offset[0])
+        drain.setattr(views.PublicationBatch, "__init__", exhaust_share)
+        runtime.manager.close(deadline=time.monotonic() + 20)
+    assert all(not (runtime.root / path).exists() for path in paths)
+    released = runtime.manager.client.release_head
+    assert runtime.manager.client.released.is_set() and released == runtime.sample_head()
+    with closing(connection.open_reader(replica.replica_path(runtime.root))) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
+        assert reader.execute("SELECT COUNT(*) FROM projection_state WHERE kind='item' AND state='pending'").fetchone() == (2,)
+    _resume_pending_views(runtime, paths, released)
+
+
+def test_cancelled_reconcile_continuation_keeps_the_unfinished_path(runtime, monkeypatch):
+    paths = _pending_item_views(runtime, monkeypatch)
+    cancelled = threading.Event()
+    capture = views.PublicationBatch.capture_previous
+
+    def cancel_after_capture(batch, path):
+        previous = capture(batch, path)
+        cancelled.set()
+        return previous
+
+    with runtime.manager.consistency_guard(runtime.root), preview_store(runtime.root, runtime) as writer:
+        with monkeypatch.context() as recovery:
+            recovery.setattr(views.PublicationBatch, "capture_previous", cancel_after_capture)
+            result = writer.reconcile_views(after=paths[0], pending_only=True, stop=cancelled.is_set)
+        assert result["next_path"] == paths[0] and "projection_pending" in result["warnings"]
+        assert not (runtime.root / paths[1]).exists()
+        writer.reconcile_views(after=result["next_path"], pending_only=True)
+        assert (runtime.root / paths[1]).exists()
+        assert writer.connection.execute("SELECT COUNT(*) FROM txns").fetchone() == (3,)
 
 
 def test_shutdown_leaves_the_released_head_in_the_store_file_while_another_reader_is_open(runtime, tmp_path):
@@ -163,6 +280,140 @@ def test_warm_operations_reuse_cache_and_retained_bindings_expire(runtime, monke
     with preview_store(runtime.root, runtime):
         assert record_memory(runtime.root, "inspect", collection=CID)
     assert len(created) == 3  # normal cache, lifecycle cache, reopened normal cache
+
+
+def test_coalesced_publication_keeps_warm_release_work_bounded(runtime, monkeypatch):
+    """Publication must not make unchanged foreground authority scan every row again."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from exomem.collection_store import governance, snapshot
+    from exomem.record_memory import record_memory
+
+    _create(runtime)
+    with preview_store(runtime.root, runtime):
+        record_memory(runtime.root, "append", collection=CID,
+                      item={"title": "One"}, item_key=KEY, why="capture")
+        assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 1
+
+    full_catalogs = []
+    subjects = governance.subjects
+
+    def observed_subjects(conn, cid, logical_vault_id, **kwargs):
+        if cid == CID and kwargs.get("identity") is None:
+            full_catalogs.append(threading.get_ident())
+        return subjects(conn, cid, logical_vault_id, **kwargs)
+
+    monkeypatch.setattr(governance, "subjects", observed_subjects)
+    copying, resume = threading.Event(), threading.Event()
+    staged_snapshot = snapshot.staged_snapshot
+
+    @contextmanager
+    def paused_copy(*args, **kwargs):
+        copying.set()
+        assert resume.wait(5), "publication copy was not resumed"
+        with staged_snapshot(*args, **kwargs) as artifact:
+            yield artifact
+
+    monkeypatch.setattr(snapshot, "staged_snapshot", paused_copy)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        published = pool.submit(runtime.manager._publish_collection_store,
+                                runtime.manager._fencing_token, deadline=time.monotonic() + 15)
+        try:
+            assert copying.wait(5), "publication did not reach its outside copy"
+            with preview_store(runtime.root, runtime):
+                assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 1
+                record_memory(runtime.root, "append", collection=CID,
+                              item={"title": "Two"}, item_key=OTHER, why="capture")
+        finally:
+            resume.set()
+        assert published.result(timeout=10) is not None
+
+    with preview_store(runtime.root, runtime):
+        assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 2
+    with closing(connection.open_reader(replica.replica_path(runtime.root))) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
+    assert not full_catalogs, "publication discarded an unchanged warm authorization catalogue"
+
+
+def test_external_sql_during_publication_invalidates_warm_data_without_a_head_change(runtime, monkeypatch):
+    """A trusted publication must not hide a foreign commit behind its metadata accounting."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from exomem.collection_store import snapshot
+    from exomem.record_memory import record_memory
+
+    _create(runtime)
+    with preview_store(runtime.root, runtime):
+        record_memory(runtime.root, "append", collection=CID,
+                      item={"title": "Initial"}, item_key=KEY, why="capture")
+        assert record_memory(runtime.root, "inspect", collection=CID)["observed_values"]["title"]["values"][0]["value"] == "Initial"
+    head = runtime.sample_head()
+    copying, resume = threading.Event(), threading.Event()
+    staged_snapshot = snapshot.staged_snapshot
+
+    @contextmanager
+    def paused_copy(*args, **kwargs):
+        copying.set()
+        assert resume.wait(5), "publication copy was not resumed"
+        with staged_snapshot(*args, **kwargs) as artifact:
+            yield artifact
+
+    monkeypatch.setattr(snapshot, "staged_snapshot", paused_copy)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        published = pool.submit(runtime.manager._publish_collection_store,
+                                runtime.manager._fencing_token, deadline=time.monotonic() + 15)
+        try:
+            assert copying.wait(5), "publication did not reach its outside copy"
+            with closing(sqlite3.connect(runtime.path)) as external:
+                external.execute("UPDATE items SET values_json=? WHERE item_key=?",
+                                 ('{"title":"Changed elsewhere"}', KEY))
+                external.commit()
+            assert runtime.sample_head() == head
+        finally:
+            resume.set()
+        assert published.result(timeout=10) is not None
+
+    with preview_store(runtime.root, runtime):
+        current = record_memory(runtime.root, "inspect", collection=CID)
+    assert current["observed_values"]["title"]["values"][0]["value"] == "Changed elsewhere"
+
+
+def test_failed_publication_transaction_returns_foreground_ownership_and_keeps_rows(runtime, monkeypatch):
+    """A failed loan must not strand foreground requests on the publication thread's writer."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from exomem.record_memory import record_memory
+
+    _create(runtime)
+    with preview_store(runtime.root, runtime):
+        record_memory(runtime.root, "append", collection=CID,
+                      item={"title": "Committed"}, item_key=KEY, why="capture")
+    foreground, injected = threading.get_ident(), []
+    transaction = connection.WriterConnection.transaction
+
+    @contextmanager
+    def fail_publication_commit(handle, **kwargs):
+        with transaction(handle, **kwargs) as conn:
+            yield conn
+            if threading.get_ident() != foreground and not injected:
+                injected.append(True)
+                raise sqlite3.OperationalError("synthetic publication transaction failure")
+
+    monkeypatch.setattr(connection.WriterConnection, "transaction", fail_publication_commit)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        published = pool.submit(runtime.manager._publish_collection_store,
+                                runtime.manager._fencing_token, deadline=time.monotonic() + 15)
+        with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_FLUSH_PENDING"):
+            published.result(timeout=10)
+    assert injected == [True]
+    with preview_store(runtime.root, runtime):
+        assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 1
+        assert record_memory(runtime.root, "append", collection=CID,
+                             item={"title": "After failure"}, item_key=OTHER, why="capture")["outcome"] == "committed"
+        assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 2
 
 
 def test_fresh_head_sample_rejects_absent_or_inconsistent_enrolled_store(runtime):
@@ -324,7 +575,7 @@ def test_head_identity_and_tail_are_sampled_from_one_snapshot(runtime, monkeypat
     _create(runtime)
     before = runtime.sample_head()
     metadata_read, resume = threading.Event(), threading.Event()
-    original_open = connection.open_reader
+    original_open = connection.open_head_reader
 
     class PausedReader:
         def __init__(self, reader):
@@ -343,7 +594,7 @@ def test_head_identity_and_tail_are_sampled_from_one_snapshot(runtime, monkeypat
         reader = original_open(*args, **kwargs)
         return PausedReader(reader) if threading.current_thread().name.startswith("snapshot") else reader
 
-    monkeypatch.setattr(connection, "open_reader", open_reader)
+    monkeypatch.setattr(connection, "open_head_reader", open_reader)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot") as pool:
         sample = pool.submit(runtime.sample_head)
         assert metadata_read.wait(2)
@@ -452,7 +703,7 @@ def test_retained_inspection_provenance_cannot_expose_a_live_connection(runtime)
         result = writer.inspect_collection(CID)
         assert egress.postfilter("record_memory", result, runtime.root) == result
     assert not runtime.manager._store_borrowers
-    evidence = result._canonical_inspection_evidence
+    evidence = result._canonical_metadata_evidence
     assert getattr(evidence.handle, "connection", None) is None
     with ThreadPoolExecutor(max_workers=1) as pool:
         assert pool.submit(getattr, evidence.handle, "connection", None).result(timeout=2) is None
@@ -501,6 +752,65 @@ def test_idle_boundary_wait_crossing_ttl_keeps_lease_until_publication(runtime, 
         assert release.result(timeout=3)
     assert client.release_head == runtime.sample_head()
     assert time.monotonic() < expiry[0]
+
+
+def test_warm_read_revalidates_authority_without_acquire_or_write_activity(runtime, monkeypatch):
+    _create(runtime)
+    manager, client = runtime.manager, runtime.manager.client
+    manager._last_activity_monotonic -= 10
+    activity = manager._last_activity_monotonic
+    calls = []
+    acquire, status = client.acquire, client.status
+
+    def counted_acquire(**kwargs):
+        calls.append("acquire")
+        return acquire(**kwargs)
+
+    def counted_status():
+        calls.append("status")
+        return status()
+
+    monkeypatch.setattr(client, "acquire", counted_acquire)
+    monkeypatch.setattr(client, "status", counted_status)
+    with preview_store(runtime.root, runtime) as writer:
+        assert writer.inspect_collection(CID)["coverage"]["committed"] == 0
+    assert "status" in calls
+    assert "acquire" not in calls
+    assert manager._last_activity_monotonic == activity
+
+
+def test_read_after_schema_fence_cut_rechecks_acquisition_compatibility(runtime, monkeypatch):
+    _create(runtime)
+    client = runtime.manager.client
+    # The coordinator's schema CAS revokes the holder and advances its token.
+    client.holder = None
+    client.token += 1
+
+    def incompatible_acquire(**kwargs):
+        return LeaseRecord("local", time.time() + 30, client.token, True,
+                           governance_enrolled=True, required_schema_version=999)
+
+    monkeypatch.setattr(client, "acquire", incompatible_acquire)
+    with pytest.raises(OpError, match="WRITER_SCHEMA_FENCE_MISMATCH"):
+        with preview_store(runtime.root, runtime):
+            pytest.fail("read borrowed a store after the schema fence cut")
+
+
+def test_warm_read_propagates_coordinator_failure_without_acquisition(runtime, monkeypatch):
+    _create(runtime)
+    client = runtime.manager.client
+
+    def unavailable_status():
+        raise OpError("WRITER_COORDINATOR_UNAVAILABLE", "coordinator unavailable")
+
+    def unexpected_acquire(**kwargs):
+        pytest.fail("coordinator failure must not trigger acquisition")
+
+    monkeypatch.setattr(client, "status", unavailable_status)
+    monkeypatch.setattr(client, "acquire", unexpected_acquire)
+    with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+        with preview_store(runtime.root, runtime):
+            pytest.fail("read borrowed a store without current authority")
 
 
 def test_expired_cached_writer_reopens_on_new_owner_thread(runtime):

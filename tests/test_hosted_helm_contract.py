@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -159,8 +160,10 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     }
     # Scheduler CronJobs are prefixed so that a contract name cannot collide
     # with another CronJob in the same namespace.
-    assert set(cronjobs) == {f"exomem-hosted-scheduler-{job['name']}" for job in contract["jobs"]}
-    for job in contract["jobs"]:
+    assert set(cronjobs) == {"exomem-hosted-scheduler-exomem-access-delivery", "exomem-hosted-scheduler-exomem-reconcile"}
+    policies = yaml.safe_load((PLATFORM / "values.yaml").read_text(encoding="utf-8"))["scheduler"]["jobs"]
+    enabled_jobs = [job for job in contract["jobs"] if policies[job["name"]].get("enabled", True)]
+    for job in enabled_jobs:
         rendered = cronjobs[f"exomem-hosted-scheduler-{job['name']}"]
         spec = rendered["spec"]
         job_spec = spec["jobTemplate"]["spec"]
@@ -180,11 +183,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         assert env["TARGET_URL"] == contract["origin"] + job["path"]
         assert env["CONNECT_TIMEOUT_SECONDS"] == "5"
         assert env["TOTAL_TIMEOUT_SECONDS"] == "20"
-        assert env["CADENCE_SECONDS"] == {
-            "* * * * *": "60",
-            "*/5 * * * *": "300",
-            "17 * * * *": "3600",
-        }[job["schedule"]]
+        assert env["CADENCE_SECONDS"] == str(job["cadenceSeconds"])
         assert container["command"] == [
             "python",
             "/opt/exomem-hosted/scheduler_runtime.py",
@@ -472,7 +471,8 @@ def test_scheduler_cronjobs_are_namespaced_away_from_workload_cronjobs() -> None
     schedules = json.loads(
         (PLATFORM / "files/exomem-hosted-schedules-v1.json").read_text(encoding="utf-8")
     )
-    expected = {f"exomem-hosted-scheduler-{job['name']}" for job in schedules["jobs"]}
+    policies = yaml.safe_load((PLATFORM / "values.yaml").read_text(encoding="utf-8"))["scheduler"]["jobs"]
+    expected = {f"exomem-hosted-scheduler-{job['name']}" for job in schedules["jobs"] if policies[job["name"]].get("enabled", True)}
     rendered = {
         document["metadata"]["name"]
         for document in documents
@@ -572,3 +572,237 @@ def test_cellctl_renders_the_media_engine_switch_under_the_name_the_runtime_read
         and any(isinstance(target, ast.Name) and target.id == "MEDIA_ENGINES_ENV" for target in node.targets)
     ]
     assert rendered == media_engines.ENGINES_ENV
+
+
+def test_chart_schema_names_exactly_the_engines_the_runtime_knows() -> None:
+    """The schema's engine list is a copy of `media_engines.ENGINES`. A name the runtime does
+    not know, in a fleet default, renders into every cell's environment and restarts them all."""
+    from exomem import media_engines
+
+    schema = json.loads((PLATFORM / "values.schema.json").read_text(encoding="utf-8"))
+    cellctl = schema["properties"]["cellctl"]["properties"]
+    one_definition = {"$ref": "#/$defs/mediaEngineName"}
+    assert cellctl["mediaEngineCellIds"]["propertyNames"] == one_definition
+    assert cellctl["mediaEngineFleetDefault"]["items"] == one_definition
+    assert set(schema["$defs"]["mediaEngineName"]["enum"]) == set(media_engines.ENGINES)
+
+
+def test_disabled_health_jobs_have_no_workload_state_or_alert_target() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    names = {doc["metadata"]["name"] for doc in documents}
+    for job in ("exomem-health-control", "exomem-health-email"):
+        assert f"exomem-hosted-scheduler-{job}" not in names
+        assert f"exomem-hosted-scheduler-state-{job}" not in names
+    assert "exomem-memory-health-runner" not in names
+    assert "exomem-memory-health-ingress" not in names
+    for name in ("exomem-hosted-scheduler-collector", "exomem-hosted-scheduler-alerts"):
+        container = _find(documents, "Deployment", name)["spec"]["template"]["spec"]["containers"][
+            0
+        ]
+        env = {entry["name"]: entry.get("value") for entry in container["env"]}
+        assert env["SCHEDULER_JOBS"] == "exomem-access-delivery,exomem-reconcile"
+    for name in (
+        "exomem-hosted-scheduler-state-writer",
+        "exomem-hosted-scheduler-state-reader",
+        "exomem-hosted-scheduler-alert-evaluator",
+    ):
+        role = _find(documents, "Role", name)
+        assert "exomem-health" not in json.dumps(role["rules"])
+
+
+def test_enabled_scheduler_jobs_use_contract_cadence_and_explicit_disable() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=(
+            "--set",
+            "scheduler.jobs.exomem-access-delivery.enabled=false",
+            "--set",
+            "scheduler.jobs.exomem-health-control.enabled=true",
+            "--set",
+            "scheduler.jobs.exomem-health-email.enabled=true",
+        ),
+    )
+    names = {doc["metadata"]["name"] for doc in documents}
+    assert "exomem-hosted-scheduler-exomem-access-delivery" not in names
+    assert "exomem-hosted-scheduler-state-exomem-access-delivery" not in names
+    contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    for job in contract["jobs"]:
+        if job["name"] == "exomem-access-delivery":
+            continue
+        cronjob = _find(documents, "CronJob", f"exomem-hosted-scheduler-{job['name']}")
+        container = cronjob["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        env = {entry["name"]: entry.get("value") for entry in container["env"]}
+        assert env["TARGET_URL"] == contract["origin"] + job["path"]
+        assert env["CADENCE_SECONDS"] == str(job["cadenceSeconds"])
+        state = _find(documents, "ConfigMap", f"exomem-hosted-scheduler-state-{job['name']}")
+        assert json.loads(state["data"]["state.json"])["cadence_seconds"] == job["cadenceSeconds"]
+    for name in ("exomem-hosted-scheduler-collector", "exomem-hosted-scheduler-alerts"):
+        container = _find(documents, "Deployment", name)["spec"]["template"]["spec"]["containers"][
+            0
+        ]
+        env = {entry["name"]: entry.get("value") for entry in container["env"]}
+        assert env["SCHEDULER_JOBS"] == "exomem-reconcile,exomem-health-control,exomem-health-email"
+    evaluator = _find(documents, "Deployment", "exomem-hosted-scheduler-alerts")
+    env = {
+        entry["name"]: entry.get("value")
+        for entry in evaluator["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["MISSED_RUN_SECONDS"] == "900"
+
+
+def test_memory_health_runner_has_only_synthetic_cell_and_database_authority() -> None:
+    cell_id = "abcdefghijklmnop"
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=(
+            "--set",
+            "memoryHealth.enabled=true",
+            "--set",
+            f"memoryHealth.cellId={cell_id}",
+            "--set-string",
+            "memoryHealth.page=Knowledge Base/Notes/Insights/synthetic-health.md",
+            "--set-string",
+            "memoryHealth.bodyTemplate=Synthetic proof {{nonce}}",
+            "--set",
+            "memoryHealth.databaseSecretName=synthetic-health-database",
+            "--set",
+            "memoryHealth.bearerSecretName=synthetic-cell-bearer",
+        ),
+    )
+    cronjob = _find(documents, "CronJob", "exomem-memory-health-runner")
+    assert cronjob["spec"]["schedule"] == "* * * * *"
+    assert cronjob["spec"]["concurrencyPolicy"] == "Forbid"
+    job = cronjob["spec"]["jobTemplate"]["spec"]
+    assert job["backoffLimit"] == 0
+    assert job["activeDeadlineSeconds"] == 30
+    pod = job["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["restartPolicy"] == "Never"
+    assert pod["securityContext"]["runAsUser"] == pod["securityContext"]["runAsGroup"] == 1000
+    assert pod["nodeSelector"] == {"node-role.kubernetes.io/control-plane": "true"}
+    container = pod["containers"][0]
+    assert container["image"] == "ghcr.io/substrate-systems/substrate-gateway@sha256:" + "b" * 64
+    assert container["command"] == ["node", "/app/gateway/memory-health-runner.cjs"]
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert set(env) == {
+        "DATABASE_URL",
+        "EXOMEM_HEALTH_MEMORY_BEARER",
+        "EXOMEM_HEALTH_MEMORY_PAGE",
+        "EXOMEM_HEALTH_MEMORY_BODY_TEMPLATE",
+        "EXOMEM_HEALTH_MEMORY_TIMEOUT_MS",
+        "EXOMEM_HEALTH_MEMORY_MCP_URL",
+    }
+    assert env["DATABASE_URL"]["valueFrom"]["secretKeyRef"] == {
+        "name": "synthetic-health-database",
+        "key": "url",
+    }
+    assert env["EXOMEM_HEALTH_MEMORY_BEARER"]["valueFrom"]["secretKeyRef"] == {
+        "name": "synthetic-cell-bearer",
+        "key": "bearer",
+    }
+    assert (
+        env["EXOMEM_HEALTH_MEMORY_MCP_URL"]["value"]
+        == f"http://cell.exo-cell-{cell_id}.svc.cluster.local:8765/mcp"
+    )
+    runner = _find(documents, "NetworkPolicy", "exomem-memory-health-runner")
+    assert runner["spec"]["ingress"] == []
+    assert len(runner["spec"]["egress"]) == 3
+    cell_rule = runner["spec"]["egress"][1]
+    assert cell_rule["to"][0]["namespaceSelector"]["matchLabels"] == {
+        "kubernetes.io/metadata.name": f"exo-cell-{cell_id}"
+    }
+    selector = cell_rule["to"][0]["podSelector"]
+    assert selector["matchLabels"] == {
+        "app.kubernetes.io/name": "exomem-cell",
+        "exomem.io/cell": cell_id,
+    }
+    assert selector["matchExpressions"] == [
+        {"key": "exomem.io/cell-job", "operator": "DoesNotExist"}
+    ]
+    assert cell_rule["ports"] == [{"port": 8765, "protocol": "TCP"}]
+    assert runner["spec"]["egress"][2]["to"] == [{"ipBlock": {"cidr": "10.0.1.5/32"}}]
+    ingress = _find(documents, "NetworkPolicy", "exomem-memory-health-ingress")
+    assert ingress["metadata"]["namespace"] == f"exo-cell-{cell_id}"
+    assert ingress["spec"]["podSelector"] == selector
+    peer = ingress["spec"]["ingress"][0]["from"][0]
+    assert peer == {
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}},
+        "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-memory-health-runner"}},
+    }
+    assert not any(
+        doc.get("kind") == "Namespace" and doc["metadata"]["name"] == f"exo-cell-{cell_id}"
+        for doc in documents
+    )
+
+
+@pytest.mark.parametrize("contract", ["exomem-hosted-schedules-v1.json", "observability-v1.json"])
+def test_chart_copy_of_a_contract_matches_the_canonical_contract(contract: str) -> None:
+    # A copy, not a symlink: Helm reads only files inside the chart, and the
+    # plugin directory scanner refuses to unpack a repository with symlinks.
+    copy = PLATFORM / "files" / contract
+    assert not copy.is_symlink()
+    assert copy.read_bytes() == (ROOT / "infra/contracts" / contract).read_bytes(), (
+        f"copy infra/contracts/{contract} into the chart's files/"
+    )
+
+
+def test_packaged_chart_materializes_the_canonical_scheduler_contract(tmp_path: Path) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm packaging")
+    package = subprocess.run(
+        [str(HELM), "package", str(PLATFORM), "--destination", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert package.returncode == 0, package.stdout + package.stderr
+    archive_path = next(tmp_path.glob("*.tgz"))
+    with tarfile.open(archive_path) as archive:
+        member = archive.getmember("exomem-platform/files/exomem-hosted-schedules-v1.json")
+        assert member.isfile()
+        content = archive.extractfile(member)
+        assert content is not None
+        assert content.read() == CONTRACT.read_bytes()
+    rendered = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "packaged-contract",
+            str(archive_path),
+            "--namespace",
+            "exomem-platform",
+            "--values",
+            str(PLATFORM / "values.validation.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    policy = _find(_documents(rendered.stdout), "ConfigMap", "exomem-hosted-scheduler-contract")
+    assert json.loads(policy["data"]["contract.json"]) == json.loads(CONTRACT.read_text())
+
+
+def test_disabling_all_jobs_cannot_create_an_unrestricted_scheduler_writer() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        extra_args=(
+            "--set",
+            "scheduler.jobs.exomem-access-delivery.enabled=false",
+            "--set",
+            "scheduler.jobs.exomem-reconcile.enabled=false",
+        ),
+    )
+    assert not any(
+        doc.get("kind") in {"Role", "RoleBinding"}
+        and doc["metadata"]["name"] == "exomem-hosted-scheduler-state-writer"
+        for doc in documents
+    )

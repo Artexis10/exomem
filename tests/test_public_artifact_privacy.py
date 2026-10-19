@@ -33,6 +33,8 @@ from exomem.public_artifact_privacy import (
     scan_repository_inputs,
 )
 
+pytestmark = pytest.mark.reads_repository_docs
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VAULT_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures"
 SYNTHETIC_FIXTURES = (
@@ -140,6 +142,128 @@ def test_repository_gate_does_not_read_ignored_maintainer_inputs(
 
     assert report.findings == ()
     assert report.scanned_files == 2
+
+
+@pytest.mark.parametrize("target_population", ["tracked", "tracked-ignored", "untracked"])
+def test_repository_alias_uses_declared_target_provenance_and_scans_canonical_content(
+    tmp_path: Path, target_population: str
+) -> None:
+    repository = tmp_path / "synthetic-checkout"
+    target = repository / "data" / "canonical.txt"
+    alias = repository / "docs" / "alias.ico"
+    target.parent.mkdir(parents=True)
+    alias.parent.mkdir()
+    target.write_text("generic public content\n", encoding="utf-8")
+    (repository / ".gitignore").write_text(
+        "data/\n" if target_population == "tracked-ignored" else "", encoding="utf-8"
+    )
+    alias.symlink_to("../data/canonical.txt")
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    if target_population != "untracked":
+        subprocess.run(
+            ["git", "add", "--force", "data/canonical.txt"], cwd=repository, check=True
+        )
+
+    assert scan_repository_inputs(repository).findings == ()
+    canary = "C:" + "\\Users\\" + "SyntheticOperator\\Private-Notebook"
+    target.write_text(f"origin: {canary}\n", encoding="utf-8")
+
+    report = scan_repository_inputs(repository)
+
+    # The alias's binary suffix must not hide the independently scanned text target.
+    assert [(item.rule, item.file, item.line) for item in report.findings] == [
+        ("absolute_local_path", "data/canonical.txt", 1)
+    ]
+    assert canary not in " ".join(str(item) for item in report.findings)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "absolute",
+        "windows-drive",
+        "unc",
+        "outside",
+        "ignored-untracked",
+        "dangling",
+        "chained",
+        "loop",
+        "directory",
+        "symlink-parent",
+        "symlink-before-parent",
+        "inventory-symlink-parent",
+    ],
+)
+def test_repository_rejects_undeclared_aliases_before_reading_target_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    repository = tmp_path / "synthetic-checkout"
+    target = repository / "data" / "canonical.txt"
+    alias = repository / "docs" / "alias.md"
+    outside = tmp_path / "private" / "canonical.txt"
+    target.parent.mkdir(parents=True)
+    alias.parent.mkdir()
+    outside.parent.mkdir()
+    target.write_text("generic public content\n", encoding="utf-8")
+    outside.write_text("private target must not be read\n", encoding="utf-8")
+    ignored = repository / "data" / "ignored.txt"
+    ignored.write_text("ignored target must not be read\n", encoding="utf-8")
+    (repository / ".gitignore").write_text("data/ignored.txt\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    if case == "chained":
+        (repository / "data" / "chain.txt").symlink_to("canonical.txt")
+    if case in {"symlink-parent", "symlink-before-parent"}:
+        (repository / "redirect").symlink_to(outside.parent, target_is_directory=True)
+    if case == "inventory-symlink-parent":
+        declared = repository / "declared"
+        declared.mkdir()
+        child = declared / "canonical.txt"
+        child.write_text("generic public content\n", encoding="utf-8")
+        subprocess.run(["git", "add", "declared/canonical.txt"], cwd=repository, check=True)
+        child.unlink()
+        declared.rmdir()
+        declared.symlink_to(outside.parent, target_is_directory=True)
+    link_text = {
+        "absolute": str(outside),
+        "windows-drive": "C:" + "\\Users\\" + "SyntheticOperator\\Private-Notebook",
+        "unc": "\\\\" + "synthetic-host\\PrivateShare\\canonical.txt",
+        "outside": "../../private/canonical.txt",
+        "ignored-untracked": "../data/ignored.txt",
+        "dangling": "../data/missing.txt",
+        "chained": "../data/chain.txt",
+        "loop": "alias.md",
+        "directory": "../data",
+        "symlink-parent": "../redirect/canonical.txt",
+        "symlink-before-parent": "../redirect/../data/canonical.txt",
+        "inventory-symlink-parent": "../declared/canonical.txt",
+    }[case]
+    alias.symlink_to(link_text)
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path not in {target, repository / ".gitignore"}:
+            pytest.fail("public inventory read content without declared regular provenance")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    report = scan_repository_inputs(repository)
+
+    assert ("external_input_provenance", "docs/alias.md", 0) in [
+        (item.rule, item.file, item.line) for item in report.findings
+    ]
+    if case == "inventory-symlink-parent":
+        assert ("external_input_provenance", "declared/canonical.txt", 0) in [
+            (item.rule, item.file, item.line) for item in report.findings
+        ]
+    if case in {"windows-drive", "unc"}:
+        assert ("absolute_local_path", "docs/alias.md", 1) in [
+            (item.rule, item.file, item.line) for item in report.findings
+        ]
+    rendered = " ".join(str(item) for item in report.findings)
+    assert "SyntheticOperator" not in rendered
+    assert "PrivateShare" not in rendered
+    assert str(outside) not in rendered
 
 
 @pytest.mark.parametrize(

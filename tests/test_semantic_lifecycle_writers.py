@@ -137,6 +137,32 @@ def test_grandfathered_missing_unit_allows_nonworsening_edit_with_visible_debt(
     assert path.read_text(encoding="utf-8") == after
 
 
+# Init, migration, and the first governed write record the same stored-byte boundary.
+@pytest.mark.parametrize("built_up_front", [True, False], ids=["built-up-front", "installed-by-write"])
+def test_an_idless_crlf_legacy_page_stays_grandfathered_under_either_boundary_producer(
+    tmp_path: Path, built_up_front: bool
+) -> None:
+    before = _source("Legacy prose without semantic units.", page_id=None).replace("\n", "\r\n")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    path = _write(tmp_path, _PAGE, before)
+    if built_up_front:
+        activation_manifest.ensure_manifest(tmp_path)
+    assert (activation_manifest.load_manifest(tmp_path) is not None) is built_up_front
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.grandfathered is True
+    committed = semantic_writes.commit_existing(tmp_path, preflight=preflight)
+    assert committed.mutated is True
+    assert activation_manifest.load_manifest(tmp_path) is not None
+    assert path.read_bytes() == after.encode("utf-8")
+
+
 def test_compliant_page_cannot_remove_its_final_unit(tmp_path: Path) -> None:
     activation_manifest.ensure_manifest(tmp_path)
     before = _source(
@@ -355,7 +381,7 @@ def test_stable_id_move_prepares_exact_lifecycle_and_indexes_each_path_once(
     assert deletes == [[old_path]]
 
 
-def test_move_with_crlf_inbound_referrer_uses_logical_hash_for_semantic_preflight(
+def test_move_with_crlf_inbound_referrer_uses_stored_byte_identity_for_semantic_preflight(
     tmp_path: Path,
 ) -> None:
     new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
@@ -372,6 +398,8 @@ def test_move_with_crlf_inbound_referrer_uses_logical_hash_for_semantic_prefligh
     activation_manifest.ensure_manifest(
         tmp_path, census=before_corpus.activation_census
     )
+    assert before_corpus.pages[_PAGE].source_hash == hashlib.sha256(old.read_bytes()).hexdigest()
+    assert before_corpus.pages[_OTHER_PAGE].source_hash == hashlib.sha256(inbound.read_bytes()).hexdigest()
 
     result = move_module.move_file(
         tmp_path,
@@ -385,6 +413,23 @@ def test_move_with_crlf_inbound_referrer_uses_logical_hash_for_semantic_prefligh
     assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in inbound.read_text(
         encoding="utf-8"
     )
+
+
+def test_existing_preflight_refuses_newline_only_drift_from_the_callers_hash(tmp_path: Path) -> None:
+    before = _source(_semantic_body("Keep the current decision."))
+    path = _write(tmp_path, _PAGE, before)
+    expected = hashlib.sha256(path.read_bytes()).hexdigest()
+    changed = before.replace("\n", "\r\n").encode("utf-8")
+    path.write_bytes(changed)
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as raised:
+        semantic_writes.preflight_existing(
+            tmp_path, path=_PAGE, after_source=before + "\nAdditional prose.\n",
+            operation="edit", expected_before_hash=expected,
+        )
+
+    assert raised.value.code == "STALE_SEMANTIC_WRITE"
+    assert path.read_bytes() == changed
 
 
 def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus(
@@ -3469,10 +3514,11 @@ def test_tier2_append_detects_concurrent_change_without_losing_bytes(
     assert page.read_text(encoding="utf-8") == source + "\nConcurrent writer.\n"
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
-    tmp_path: Path,
+    tmp_path: Path, newline: str
 ) -> None:
-    source = _source("A").rstrip("\n")
+    source = _source("A").rstrip("\n").replace("\n", newline)
     page = _write(tmp_path, _PAGE, source)
     preview = append_module.append_to_file(
         tmp_path,
@@ -3489,7 +3535,7 @@ def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
         semantic_transition_token=preview.transition_token,
         today=dt.date(2026, 7, 14),
     )
-    after = page.read_text(encoding="utf-8")
+    after = page.read_bytes()
 
     replay = append_module.append_to_file(
         tmp_path,
@@ -3502,8 +3548,8 @@ def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
     assert replay.semantic is not None
     assert replay.semantic["mutated"] is False
     assert replay.semantic["lifecycle_state"] == "committed_replay"
-    assert page.read_text(encoding="utf-8") == after
-    assert after.count("Appended once.") == 1
+    assert page.read_bytes() == after
+    assert after.count(b"Appended once.") == 1
 
 
 def test_canonical_decision_and_prepared_round_trip_with_direct_current_lookup(

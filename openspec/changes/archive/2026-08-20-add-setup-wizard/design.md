@@ -12,7 +12,7 @@ that exomem leaves their current files alone.
 **Goals:**
 - One command from `uv sync` to a working Claude Code integration.
 - Idempotent convergers; a full re-run is a no-op ending in `[skipped]`s.
-- The "Yusuke moment": before `init`, show what's in the vault (via
+- The onboarding preview: before `init`, show what's in the vault (via
   `overview()`) and state the write contract explicitly.
 - Fully testable without touching `~/.claude` or spawning real subprocesses.
 

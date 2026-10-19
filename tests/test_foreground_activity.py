@@ -6,6 +6,7 @@ import json
 import os
 import select
 import signal
+import sys
 import threading
 from pathlib import Path
 
@@ -269,12 +270,25 @@ def test_interrupted_foreground_entry_restores_background_scope(tmp_path) -> Non
             acquired.set()
             assert release.wait(5)
 
+    main_thread = threading.get_ident()
+    stop_interrupting = threading.Event()
+
+    def interrupt_once_entry_starts() -> None:
+        # Signal only once the main thread is inside foreground entry. A fixed
+        # timer can fire before entry on a loaded runner, and the interrupt
+        # then escapes the test and stops the whole pytest process.
+        while not stop_interrupting.wait(0.001):
+            frame = sys._current_frames().get(main_thread)
+            if frame is not None and frame.f_code is foreground_activity.foreground_scope.__wrapped__.__code__:
+                os.kill(os.getpid(), signal.SIGINT)
+                return
+
     holder = threading.Thread(target=hold_lock)
     holder.start()
-    interrupt: threading.Timer | None = None
+    interrupt: threading.Thread | None = None
     try:
         assert acquired.wait(5)
-        interrupt = threading.Timer(0.05, lambda: os.kill(os.getpid(), signal.SIGINT))
+        interrupt = threading.Thread(target=interrupt_once_entry_starts)
         interrupt.start()
         with foreground_activity.background_scope(vault):
             with pytest.raises(KeyboardInterrupt):
@@ -283,7 +297,7 @@ def test_interrupted_foreground_entry_restores_background_scope(tmp_path) -> Non
             assert foreground_activity.background_active(vault)
     finally:
         if interrupt is not None:
-            interrupt.cancel()
+            stop_interrupting.set()
             interrupt.join(5)
         release.set()
         holder.join(5)

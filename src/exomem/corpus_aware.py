@@ -638,6 +638,7 @@ class SkippedWriteAdvisory:
     warning: str
 
 
+@call_spans.timed("advisory.default_sweep")
 def write_advisory_for(
     vault_root: Path,
     inputs: WriteAdvisoryInputs,

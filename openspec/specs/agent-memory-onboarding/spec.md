@@ -9,10 +9,13 @@ without presenting either as a replacement for the other.
 
 #### Scenario: Boundary is visible to users and agents
 - **WHEN** a user reads the built-in memory comparison or assistant guide
-- **THEN** the documentation identifies native memory/custom instructions as the
-  place for preferences, tone, identity facts, and routing reminders
+- **THEN** the documentation identifies current chat context and custom instructions
+  as the place for temporary working context and client routing reminders
 - **AND** identifies Exomem as the place for durable governed knowledge with
-  provenance, review, and supersession
+  provenance, review, and supersession, including eligible durable preferences,
+  feedback, personal baselines, and decisions under the live capture policy
+- **AND** native memory is only an explicit fallback when Exomem cannot capture,
+  with durable results moved to Exomem when capture becomes available
 
 #### Scenario: Non-memory uses are excluded
 - **WHEN** a user needs to store secrets, transient scratch, reminders, or task

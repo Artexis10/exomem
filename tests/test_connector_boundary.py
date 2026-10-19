@@ -118,6 +118,28 @@ def test_a_filter_built_in_a_request_scope_follows_a_change_after_the_scope_ends
     assert not keep(PRIVATE)
 
 
+def test_each_terminal_pass_sees_host_changes_despite_an_outer_request_memo(
+    configured_boundary, vault,
+):
+    """A body or earlier release decision cannot hide a changed connector ceiling."""
+    from exomem import state_paths
+    from exomem.governance import connector_boundary
+
+    config, authenticate = configured_boundary
+    who = authenticate("full")
+    payload = {"items": [{"path": PUBLIC}, {"path": PRIVATE}]}
+    data = json.loads(config.read_text())
+    with principal.request_scope(who), state_paths.resolution_scope():
+        assert connector_boundary.permits(vault, PRIVATE, who)
+        data["clients"][1]["denied_scope_ids"] = [SCOPE]
+        config.write_text(json.dumps(data))
+        restricted = egress.postfilter("activate_context", payload, vault)
+        assert restricted == {"items": [{"path": PUBLIC}]}
+        data["clients"][1]["denied_scope_ids"] = []
+        config.write_text(json.dumps(data))
+        assert egress.postfilter("activate_context", payload, vault) == payload
+
+
 def test_unknown_scope_never_turns_configuration_into_unrestricted_access(configured_boundary, vault):
     config, authenticate = configured_boundary
     who = authenticate("full")
@@ -662,6 +684,56 @@ def test_private_registry_blocks_vocabulary_currency_before_work_item_lookup(con
         ):
             with pytest.raises(ValueError, match="^GOVERNANCE_OPERATION_UNAVAILABLE:"):
                 operation()
+
+
+@pytest.mark.parametrize("public_registry_available", [False, True])
+@pytest.mark.parametrize("operation", ["context", "decide"])
+def test_review_lookup_hides_missing_and_withheld_work_alike(
+    configured_boundary, vault, public_registry_available, operation,
+):
+    """A hidden ordinary row or proposal cannot change a lookup's complete refusal."""
+    import hashlib
+
+    from exomem import entity_types, vocabulary_review
+    from exomem.vocabulary import contract, registry
+    from exomem.vocabulary_state import VocabularyState
+    from exomem.vocabulary_workflow import make_item
+
+    _, authenticate = configured_boundary
+    store = VocabularyState(vault)
+    with principal.request_scope(authenticate("full")):
+        item = make_item(
+            family="relation-type/v1", signal="generic-pair",
+            targets={PRIVATE: hashlib.sha256((vault / PRIVATE).read_bytes()).hexdigest()},
+            evidence=[], registry_hashes=vocabulary_review.registry_hashes(vault),
+            projection_status="current",
+        )
+        store.observe(item)
+        proposal = contract.queue_for_owner(
+            vault, entity_types.SPEC, registry.load(entity_types.SPEC, vault),
+            {"upsert": {"venue": {"label": "Venue", "guidance": "A recurring place.",
+                                   "attributes": {"folder": "Venues"}}}},
+            "Recurring places", "audience_restricted",
+        )
+    if public_registry_available:
+        (vault / "Knowledge Base/_Governance/scopes/private.yaml").write_text(
+            f'governance_version: 1\nid: {SCOPE}\npaths: ["Notes/private.md"]\n',
+            encoding="utf-8",
+        )
+    before = store.store.load()
+    outcomes = []
+    with principal.request_scope(authenticate("limited")):
+        for ref in ("missing-work-item", item.ref, proposal["item_ref"]):
+            with pytest.raises(ValueError) as refused:
+                if operation == "context":
+                    vocabulary_review.context(vault, ref=ref)
+                else:
+                    vocabulary_review.decide(vault, ref=ref, decision={})
+            outcomes.append(str(refused.value))
+    expected = ("VOCABULARY_ITEM_NOT_FOUND: refresh observed work" if public_registry_available
+                else "GOVERNANCE_OPERATION_UNAVAILABLE: registry observation is unavailable")
+    assert outcomes == [expected] * 3
+    assert store.store.load() == before
 
 
 @pytest.mark.parametrize("implicit", [False, True], ids=["explicit", "implicit"])

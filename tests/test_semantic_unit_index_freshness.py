@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+
+import pytest
 
 from exomem import (
     epistemic_graph,
@@ -54,6 +57,34 @@ def _write_language_registry(root: Path, *, alias: str, canonical: str) -> None:
         "kinds: {}\n",
         encoding="utf-8",
     )
+
+
+def test_parent_validation_accepts_a_symlink_to_the_vault_root(tmp_path: Path) -> None:
+    from exomem import activation_manifest, deferred_write_advisory
+
+    root = tmp_path / "vault"
+    path = _write(root, "- [fact] current token ^current\n")
+    alias = tmp_path / "vault-alias"
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    state = semantic_index.build_parent_index_state(root, _REL)
+    expected = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert semantic_index.current_parent_index_state(alias, _REL).parent_source_hash == expected
+    assert activation_manifest.build_census(alias).by_path[_REL].source_hash == expected
+    assert deferred_write_advisory._observe_fingerprint(alias, _REL) == expected
+
+    validated = semantic_index.validate_parent_record(
+        alias,
+        parent_path=_REL,
+        parent_generation_value=state.parent_generation,
+        parent_source_hash=expected,
+        parser_version=state.parser_version,
+    )
+
+    assert validated.current, validated.code
+    assert validated.current_parent_source_hash == expected
 
 
 def test_index_sync_parses_each_changed_parent_once_for_all_unit_sidecars(
@@ -203,7 +234,7 @@ def test_registry_change_updates_selected_units_without_rebuilding_structural_ro
 
     _write_language_registry(tmp_path, alias="local_setting", canonical="setting")
     scheduled: list[Path] = []
-    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda root, **_kwargs: scheduled.append(root))
 
     # Definition changes reinterpret the unchanged structural projection immediately.
     assert lexstore.search_semantic_units(

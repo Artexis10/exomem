@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -153,7 +154,7 @@ def test_a_slow_availability_proof_does_not_block_a_canonical_write(
         conn.close()
 
 
-@pytest.mark.parametrize("change", ["source", "policy", "registry", "sidecar"])
+@pytest.mark.parametrize("change", ["source", "policy", "sidecar"])
 def test_availability_rejects_changes_after_its_source_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
@@ -173,12 +174,6 @@ def test_availability_rejects_changes_after_its_source_proof(
             os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
         elif change == "policy":
             (root / "Knowledge Base/_access.yaml").write_text("default_tier: public\n")
-        elif change == "registry":
-            from exomem.relation_registry import extension_registry_path
-
-            path = extension_registry_path(root)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("version: 1\n")
         else:
             with sqlite3.connect(index.path) as writer:
                 writer.execute("UPDATE graph_nodes SET source_hash = ? WHERE kind = 'file'", ("0" * 64,))
@@ -193,6 +188,27 @@ def test_availability_rejects_changes_after_its_source_proof(
         ).fetchone() is None
     finally:
         conn.close()
+
+
+def test_neutral_graph_republication_survives_an_unrelated_overlay_edit(tmp_path, monkeypatch):
+    """Definition changes must not strand neutral topology whose source seal still holds."""
+    root = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(root)
+    index.withdraw_availability()
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def changed_overlay(self, conn, **kwargs):
+        result = real_proof(self, conn, **kwargs)
+        path = root / "Knowledge Base/_Schema/relation-registry.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("schema_version: 1\nextensions: {}\n")
+        return result
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", changed_overlay)
+    assert index.republish_availability_if_current() is True
+    snapshot = index._open_read_snapshot()
+    assert snapshot is not None
+    snapshot.close()
 
 
 def test_a_queued_write_is_drained_without_waiting_for_the_reconcile_tick(
@@ -305,6 +321,74 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
         f"backoff dropped below one retry interval: {backoff}"
     )
     assert backoff == sorted(backoff), f"expected backoff to grow, got {backoff}"
+
+
+@pytest.mark.parametrize("readable_for", [0.0, 400.0])
+def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_the_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readable_for: float
+) -> None:
+    """A queue that never drains still converges, but not inside a write storm.
+
+    The availability arm stays out while receipts are queued, because the queue
+    owns that repair. A queue that can never drain would then leave the graph
+    unreadable forever, so the loop asks for a whole-vault rebuild once queued
+    work has been stuck behind an unreadable graph for the whole backoff
+    ladder. Write signals cut each backoff wait short, so the bound is wall
+    time, not a count of passes: a burst of transient refusals must not buy a
+    whole-vault pass. Time the graph stayed readable does not count either.
+
+    Simulated time: each wait returns at the next write signal, 0.2 s apart,
+    or at its own timeout when that comes first.
+    """
+    now = [1000.0]
+    signal_every = 0.2
+    unreadable_from = now[0] + readable_for
+    horizon = unreadable_from + 400.0
+    stop = threading.Event()
+
+    def wait(timeout: float | None = None) -> bool:
+        if now[0] >= horizon:
+            stop.set()
+            return True
+        signalled = timeout is None or signal_every < timeout
+        now[0] += signal_every if signalled else timeout
+        return signalled
+
+    monkeypatch.setattr(graph_drain, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(graph_drain._DEBT, "wait", wait)
+    monkeypatch.setattr(graph_drain, "_stop", stop)
+    monkeypatch.setattr(graph_drain, "_PROGRESS", threading.Event())
+    monkeypatch.setattr(graph_drain, "_last_debt", 0.0)
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 5.0)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 120.0)
+    monkeypatch.setattr(epistemic_graph, "last_whole_vault_pass_seconds", lambda _root: None)
+    monkeypatch.setattr(graph_drain, "_requeue_quarantined", lambda _root: None)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
+    monkeypatch.setattr(
+        graph_drain, "_availability_pending", lambda _root: now[0] >= unreadable_from
+    )
+    monkeypatch.setattr(graph_drain, "_work_once", lambda _root: 0)
+    requests: list[float] = []
+    # The requested marker stands from then on, as the real one does.
+    monkeypatch.setattr(graph_drain, "_marker_pending", lambda _root: bool(requests))
+
+    def request(_root: Path, **_kwargs: Any) -> bool:
+        requests.append(now[0])
+        return True
+
+    monkeypatch.setattr(graph_drain, "_request_full_rebuild", request)
+
+    graph_drain._run_owned(tmp_path)
+
+    # The ladder: 5 + 10 + 20 + 40 + 80, then the 120 s ceiling, makes 275 s.
+    assert requests, "a queue that never drained never asked for a whole-vault rebuild"
+    stalled_for = requests[0] - unreadable_from
+    assert stalled_for >= 275.0, f"whole-vault requested {stalled_for:.1f}s into the stall"
+    assert stalled_for < 275.0 + signal_every * 3, (
+        f"whole-vault requested {stalled_for:.1f}s into the stall, well after the ladder"
+    )
+    assert len(requests) == 1, f"{len(requests)} whole-vault requests for one stall"
 
 
 def test_a_failing_drain_never_kills_the_daemon(
@@ -580,6 +664,102 @@ def test_a_stopped_first_rebuild_leaves_whole_vault_debt_the_drain_converges(
 
     assert graph_drain._work_once(vault) == 1
     assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_cover_that_cannot_acknowledge_escalates_on_the_next_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """The bounded cover is tried once per generation, then whole-vault takes over.
+
+    With coverage that never holds, no per-path drain can move the
+    acknowledgement. The first pass spends its one covering drain, the second
+    queues the whole-vault marker, and the third converges through it.
+    """
+    vault = _published_vault(tmp_path)
+    created = vault / "Knowledge Base/Notes/Insights/c.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(epistemic_graph, "graph_scheduling_enabled", lambda: False)
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, _page("C", "C is a new plain claim."))],
+            vault_root=vault,
+        )
+    committed = graph_sync.read_checkpoint(vault)
+    assert committed is not None
+    real_coverage = EpistemicGraphIndex._drained_graph_checkpoint
+
+    def never_covers(self: EpistemicGraphIndex, batch: list[Path]) -> Any:
+        return real_coverage(self, [])
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_drained_graph_checkpoint", never_covers)
+
+    graph_drain._work_once(vault)
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert not EpistemicGraphIndex(vault).available()
+
+    assert graph_drain._work_once(vault) == 1
+    assert deferred_index.graph_full_rebuild_pending(vault) is not None
+
+    graph_drain._work_once(vault)
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert graph_sync.acknowledged_generation(vault) == committed.generation
+    assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_cover_whose_drain_raises_leaves_its_paths_to_the_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """Once the cover has queued the checkpoint, the queue owns the repair.
+
+    A drain that raises after that -- a busy store, say -- leaves receipts the
+    ordinary drain retries. Escalating in the same pass spent a whole-vault
+    rebuild on work that was already queued.
+    """
+    vault = _published_vault(tmp_path)
+    created = vault / "Knowledge Base/Notes/Insights/c.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(epistemic_graph, "graph_scheduling_enabled", lambda: False)
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, _page("C", "C is a new plain claim."))],
+            vault_root=vault,
+        )
+    committed = graph_sync.read_checkpoint(vault)
+    assert committed is not None
+    # A drain that publishes without acknowledging empties the queue.
+    real_coverage = EpistemicGraphIndex._drained_graph_checkpoint
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            EpistemicGraphIndex,
+            "_drained_graph_checkpoint",
+            lambda self, _batch: real_coverage(self, []),
+        )
+        index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert not EpistemicGraphIndex(vault).available()
+
+    real_drain = index_sync.drain_graph_work
+    failures: list[int] = []
+
+    def fails_once(root: Path, **kwargs: Any) -> int:
+        if not failures:
+            failures.append(1)
+            raise sqlite3.OperationalError("database is locked")
+        return real_drain(root, **kwargs)
+
+    monkeypatch.setattr(index_sync, "drain_graph_work", fails_once)
+
+    graph_drain._work_once(vault)
+    assert failures == [1]
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert deferred_index.list_graph_paths(vault) == ["Knowledge Base/Notes/Insights/c.md"]
+
+    graph_drain._work_once(vault)
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert graph_sync.acknowledged_generation(vault) == committed.generation
     assert EpistemicGraphIndex(vault).available()
 
 
