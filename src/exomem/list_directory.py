@@ -218,13 +218,16 @@ def list_directory(
                 continue
             batch.append(relative_path)
             if len(batch) >= want:
-                chosen.extend(released(batch))
+                kept = released(batch)
+                chosen.extend(kept)
+                dropped = len(batch) - len(kept)
                 batch = []
                 if len(chosen) > limit:
                     break
-                # Released entries fell short: a doubled batch keeps a long run
-                # of dropped entries to a logarithmic count of egress calls.
-                want = max(limit + 1 - len(chosen), 2 * want)
+                # Ask for what the page still needs, doubling while drops go on:
+                # a long run of dropped entries costs a logarithmic count of
+                # egress calls, and a single drop one small batch.
+                want = max(limit + 1 - len(chosen), 2 * dropped)
         chosen.extend(released(batch))
         truncated = len(chosen) > limit
         return chosen[:limit]
