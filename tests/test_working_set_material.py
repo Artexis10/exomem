@@ -541,3 +541,47 @@ def test_material_pointer_respects_role_priority(role: str):
         assert packet["pointers"] == []
     assert packet["missing"] == [{"role": role if material_first else "material", "reason": "budget"}]
     assert packet["budget"]["used_chars"] <= 500
+
+
+@pytest.fixture
+def crowded_project(material_vault: Path) -> str:
+    # Ten recent pages give every default lens of the project more than its
+    # cap; one older note answers a specific question about the same project.
+    filler = ("Winter bales at the north depot stay stacked by color for the visiting "
+              "auditors while the shelving keeps every crate label facing the aisle, ")
+    for i in range(10):
+        _note(material_vault, f"depot-{i}", "\n".join(
+            f"- [{category}] {filler}{filler}{filler}{category} {i}. ^{category}-{i}"
+            for category in ("preference", "constraint", "decision")
+        ), updated=f"2026-10-{10 + i:02d}")
+    relay = _note(material_vault, "relay-handoff",
+        "- [observation] The quarry relay handoff waits for the second tide reading before "
+        "the crews rotate, so the next shift starts from the ledger the night crew signs. ^relay",
+        updated="2025-03-01")
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+    return relay
+
+
+def test_default_lenses_of_a_broad_project_leave_room_for_the_turns_material(
+    material_vault: Path, crowded_project: str,
+):
+    packet = working_set.compile_packet(material_vault, turn="harbor-study quarry relay handoff")
+
+    served = {role: [u for u in packet["units"] if u["role"] == role]
+              for role in ("preferences", "constraints", "recent_change", "material")}
+    assert [u["provenance"]["path"] for u in served["material"]] == [crowded_project]
+    assert all(served[role] for role in ("preferences", "constraints", "recent_change"))
+    assert packet["budget"]["used_chars"] <= 4000
+
+
+def test_a_name_only_turn_keeps_every_default_lens_of_a_broad_project(
+    material_vault: Path, crowded_project: str,
+):
+    packet = working_set.compile_packet(material_vault, turn="harbor-study")
+
+    assert {"role": "material", "reason": "no_material"} in packet["missing"]
+    for role in ("preferences", "constraints", "recent_change"):
+        served = [u for u in packet["units"] if u["role"] == role]
+        assert len(served) == working_set.MAX_ITEMS_PER_ROLE
