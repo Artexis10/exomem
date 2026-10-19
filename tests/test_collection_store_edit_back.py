@@ -1563,6 +1563,77 @@ def held_issues(store):
         for issue in diagnostic.get("issues", ())]
 
 
+@pytest.mark.parametrize(("problem", "issue"), [
+    ("duplicate_identity", "DUPLICATE_RECORD_ID"),
+    ("mixed_unstamped", "VIEW_UNSTAMPED"),
+    ("natural_key_conflict", "RECORD_NATURAL_KEY_CONFLICT"),
+])
+def test_a_refused_log_save_preserves_records_and_the_complete_rejected_input(store, problem, issue):
+    """An invalid whole log or block must preserve its bytes without changing either stored row."""
+    from test_collection_store_writer import OTHER, log_manifest_text
+
+    from exomem import record_formats
+    from exomem.collection_store import log_view
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    receipt = store.append_record(CID, item={"title": "Two", "details": []}, item_key=OTHER, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    rendered = path.read_bytes()
+    _, manifest, _ = store._collection(CID)
+    authored, _ = log_view.split_frame_stamp(manifest, rendered)
+    adapter = record_formats.MarkdownLogAdapter(store.root, manifest)
+    parsed = adapter.read_bytes(authored)
+    assert not parsed.diagnostics and len(parsed.records) == 2
+    record = next(record for record in parsed.records if record.identity.key == KEY)
+    block = authored[record.span.start:record.span.end]
+    if problem == "duplicate_identity":
+        edited = expected = rendered + block
+    else:
+        changed = block
+        if problem == "mixed_unstamped":
+            stamp = record_formats.read_log_block_stamp(block)
+            assert stamp is not None
+            marker = record_formats._log_block_stamp_line(stamp).encode()
+            changed = changed.replace(marker + b"\n", b"")
+        expected = changed.replace(b"### One", b"### Two" if problem == "natural_key_conflict" else b"### Edited")
+        edited = rendered.replace(block, expected, 1)
+    assert edited != rendered
+    proposed, _ = log_view.split_frame_stamp(manifest, edited)
+    parsed_edit = adapter.read_bytes(proposed)
+    if problem == "duplicate_identity":
+        assert [diagnostic.code for diagnostic in parsed_edit.diagnostics] == [issue]
+    else:
+        assert not parsed_edit.diagnostics and len(parsed_edit.records) == 2
+    rows = store.connection.execute("SELECT * FROM items ORDER BY item_key").fetchall()
+    versions = store.connection.execute("SELECT * FROM item_versions ORDER BY row_id,row_version").fetchall()
+    history = txns(store)
+    path.write_bytes(edited)
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    [(_, code, raw)] = holds(store)
+    assert (code, raw) == ("VIEW_INVALID", expected)
+    assert held_issues(store) == [issue]
+    assert store.connection.execute("SELECT * FROM items ORDER BY item_key").fetchall() == rows
+    assert store.connection.execute("SELECT * FROM item_versions ORDER BY row_id,row_version").fetchall() == versions
+    assert txns(store) == history and path.read_bytes() == rendered
+
+
+def test_a_conflict_copy_keeps_its_bytes_without_moving_the_canonical_record(store):
+    """A copied stamp must not make a conflict file a move or an edit of the stored record."""
+    _, original = appended(store, count=1)
+    raw = original.read_bytes()
+    copied = original.with_name("One.sync-conflict-20261019-000000-node.md")
+    copied.write_bytes(raw)
+    rows = store.connection.execute("SELECT * FROM items").fetchall()
+    history = txns(store)
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    assert [(code, held) for _, code, held in holds(store)] == [("VIEW_CONFLICT_COPY", raw)]
+    assert store.connection.execute("SELECT * FROM items").fetchall() == rows
+    assert txns(store) == history
+    assert original.read_bytes() == copied.read_bytes() == raw
+
+
 def test_a_log_block_edit_that_also_adds_text_is_held_with_the_text(store):
     """Defect: a block edit that changes a value and adds a line of prose applies the value and
     drops the prose when the log is rendered again."""

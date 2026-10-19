@@ -10,6 +10,8 @@
 - [ ] 2.1 Add degraded overlays and fresh footprint fallback; verify one bad page and sustained writes preserve unaffected recall.
 - [ ] 2.2 Move retirement off reader threads; verify recall performs bounded hydration without component-retirement work.
 - [ ] 2.3 Apply suppression before ranking and caching across retrieval consumers; verify overflow, tombstones, units, and widening.
+- [ ] 2.4 Retain one catalogue during selection; verify concurrent publication preserves membership, eligibility, rows, statistics, and nested request isolation.
+- [ ] 2.5 Close selection before provider work; verify cheap cache hits, exact byte hydration, retained pending evidence, widening order, independent strict readiness, and publisher recovery.
 
 ## 3. Reference and disclosure boundaries
 
