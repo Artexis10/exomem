@@ -738,9 +738,6 @@ class EmbeddingIndex:
         # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
         # stalls a chunk write's `_patch_cache`.
         self._unit_lock = threading.Lock()
-        # At most one background corpus-matrix load (`start_corpus_matrix_load`).
-        self._matrix_load_lock = threading.Lock()
-        self._matrix_load: threading.Thread | None = None
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -1604,38 +1601,6 @@ class EmbeddingIndex:
             self._cache = loaded
             self._hits += 1
             return loaded.metadata, loaded.matrix
-
-    def corpus_matrix_cold(self) -> bool:
-        """Whether a search here would first load every corpus row into memory.
-
-        A resident matrix under the current recall policy answers directly, or
-        catches up from the changed paths alone. service-v1 retains no matrix
-        and scores from disk by design, so it is never cold.
-        """
-        if not self.path.exists() or cloud_cell.resource_policy() == "service-v1":
-            return False
-        from . import recall_policy
-
-        c = self._cache
-        return c is None or c.recall_policy_identity != recall_policy.recall_policy_identity(
-            self.vault_root
-        )
-
-    def start_corpus_matrix_load(self) -> None:
-        """Load the corpus matrix on one background thread, at most one at a time."""
-        with self._matrix_load_lock:
-            if self._matrix_load is not None and self._matrix_load.is_alive():
-                return
-            self._matrix_load = threading.Thread(
-                target=self._load_corpus_matrix, name="exomem-matrix-load", daemon=True
-            )
-            self._matrix_load.start()
-
-    def _load_corpus_matrix(self) -> None:
-        try:
-            self.all_vectors()
-        except Exception:  # noqa: BLE001 - a later request retries the load
-            log.info("background corpus matrix load failed", exc_info=True)
 
     def unload_cache(self) -> bool:
         """Drop the resident chunk and unit matrices without deleting sidecar rows."""
