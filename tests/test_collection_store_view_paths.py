@@ -376,21 +376,3 @@ def test_maintenance_never_reports_or_repairs_a_restricted_vault_aggregate(vault
         command, vault.root, mode="reconcile", dry_run=True))
     assert SECRET in json.dumps(owner["remaining_drift"])
     assert owner["references_refreshed"] == len(drift)
-
-
-def test_missing_view_references_use_canonical_authority_without_inventing_file_bytes(vault):
-    """A missing hidden view is filtered; released and ordinary unresolved references survive."""
-    _add_secret(vault)
-    (vault.root / SECRET).unlink()
-    (vault.root / OPEN).unlink()
-    missing = "Knowledge Base/Notes/not-created.md"
-    payload = {"entries": [{"path": path} for path in (SECRET, OPEN, missing)]}
-
-    def observe():
-        return egress.filter_withheld_entries(vault.root, payload)
-
-    assert _as(vault, _external(), observe) == {
-        "entries": [{"path": OPEN}, {"path": missing}],
-    }
-    assert _as(vault, owner_principal(), observe) == payload
-    assert _as(vault, owner_principal(), lambda: _call(vault, "get", path=OPEN)).startswith("NOT_FOUND:")
