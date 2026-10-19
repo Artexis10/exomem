@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -32,13 +33,14 @@ REPO = Path(__file__).resolve().parents[1]
 TOKEN = "smoke-token"
 
 
-def _wait(predicate, *, timeout=120.0, what="condition"):
+def _wait(predicate, *, timeout=120.0, what="condition", explain=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return True
         time.sleep(0.5)
-    raise AssertionError(f"timed out waiting for {what}")
+    detail = f"\n{explain()}" if explain is not None else ""
+    raise AssertionError(f"timed out waiting for {what}{detail}")
 
 
 def _missing_dependencies() -> list[str]:
@@ -96,8 +98,11 @@ def _smoke(vault: Path) -> int:
 def _lanes(vault: Path, client) -> int:
     from PIL import Image, ImageDraw
 
-    from exomem import embeddings, upload_tokens
+    from exomem import embeddings, media_jobs, upload_tokens
     from exomem import find as find_module
+
+    def queue():
+        return json.dumps(media_jobs.status(vault), indent=1, default=str)
 
     def up_token():
         return upload_tokens.mint(TOKEN, scope="upload")
@@ -123,7 +128,7 @@ def _lanes(vault: Path, client) -> int:
     post("notice.png", b.getvalue(), "image/png", "Smoke", "01")
     sidecar = vault / "Knowledge Base/Evidence/Smoke/01/notice.png.md"
     _wait(lambda: sidecar.exists() and "extracted_by: pending" not in sidecar.read_text("utf-8"),
-          what="OCR of notice.png")
+          what="OCR of notice.png", explain=queue)
     body = sidecar.read_text("utf-8")
     assert "whitechapel" in body.lower() or "eviction" in body.lower(), (
         f"OCR text missing:\n{body[:400]}"
@@ -159,6 +164,7 @@ def _lanes(vault: Path, client) -> int:
         lambda: pdf_sidecar.exists()
         and "extracted_by: pending" not in pdf_sidecar.read_text("utf-8"),
         what="PDF extraction",
+        explain=queue,
     )
     assert "cardiology" in pdf_sidecar.read_text("utf-8").lower(), "PDF text not extracted"
     find_module.clear_cache()
