@@ -657,6 +657,27 @@ The retained `measurement.json` hashes bind the observed values:
 | Before | 10,000 | `c6a859d93944c36139da2f8dcddc485b6fb30c0b2386cdfad2ad0d6e569a2777` |
 | After | 10,000 | `a5e903736438dd720c58973a3a4d2aa855570199a7d9e96b2452bc87558ad35f` |
 
+**Baseline at `f8cd6c119`, 2026-10-19.** This rerun uses the same frozen service probes, Python 3.13.14 and SQLite 3.53.1, on a Linux/WSL host with no free swap. Each size ran once.
+
+| Initial rows | Inspect p50/p95, ms | Append p50/p95, ms | Partial refusal, ms | Bulk 500, ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 46.03 / 78.49 | 95.81 / 226.53 | 101.35 | 632.65 |
+| 10,000 | 101.44 / 182.25 | 74.29 / 179.85 | 341.18 | 497.06 |
+
+The 1,000-row tail is host noise, not a regression: an instrumented run of the same probe minutes later measured append p50/p95 66.55/75.50 ms. Exact values, counts and unchanged refusal fingerprints pass at both sizes.
+
+The isolated diagnostic (`scripts/measure-records-append-latency.py`, 10,000 rows, store-preview, phase probes) measured guarded append p50/p95 28.81/36.53 ms and inspect 107.98/134.14 ms; the inspect is almost all thread CPU. Four exclusive stages exceed their p95 budgets: dispatcher 7.69 ms (budget 5), lease 7.36 ms (budget 2), governance 10.63 ms (budget 2) and store transaction plus view 10.38 ms (budget 4). The 10,000-row inspect response is about 330 KB; its 2,000 `source_versions` entries are 324 KB of that, and terminal egress scrubs about 4,100 strings per call.
+
+**Coordinator request attribution, 2026-10-19.** One instrumented 1,000-row run used the same probe with a real loopback coordinator. It timed each coordinator request on the client and on the server, and recorded one call stack per request. Each of the 30 warm appends made eight coordinator requests:
+
+| Requests per append | Call sites | Client p50, ms | Server p50, ms |
+| ---: | --- | ---: | ---: |
+| 4 status reads | canonical ownership proof: one on the caller thread, three inside the store dispatch | 1.2–1.4 each | 0.5 |
+| 2 status reads | store runtime fencing admission: checkout, and the write-authority check before the transaction | 1.3 each | 0.5 |
+| 2 acquires | `ensure_writer` in the operation guard and in the mutation guard | 11.3 each | 10.5 |
+
+Each acquire's server time is mostly its `COMMIT` (6.6 ms, WAL with `synchronous=FULL`) and closing its per-request connection (3.4 ms). The close is consistent with a last-connection WAL checkpoint; no system-call trace was taken. The coordinator windows total 31.38/47.13 ms p50/p95 of a 66.55/75.50 ms append. Each inspect also makes four or five status reads, about 6 ms. Removing every coordinator request would still leave the append above 20 ms.
+
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
 **End-to-end append budget.** #1457's SQLite prototype confirms the storage layer is flat: 2.6–3.8 ms with synchronous projection at both 1,000 and 10,000 items. Its end-to-end estimate of about 93/100 ms p50/p95 is dominated by about 90 ms of shared cost outside storage, which that composite carried over unchanged from today's writer. That 90 ms is the real target of the 20 ms goal. The budget, per stage at p95:
