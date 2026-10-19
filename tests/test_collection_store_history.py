@@ -150,6 +150,38 @@ def test_a_warm_history_page_decodes_only_the_returned_prior_payload(store, monk
     assert len(decoded) == 1
 
 
+def test_cold_bulk_history_does_not_decode_the_whole_receipt_for_every_item(store, monkeypatch, record_property):
+    """A cold history page after bulk import must not multiply receipt parsing by its item count."""
+    from test_records_bulk_upsert import EVIDENCE, _evidence
+
+    from exomem.collection_store import history
+
+    create(store)
+    _evidence(store.root)
+    inserted = store.bulk_upsert_records(CID, rows=[{"item": {"title": f"Sample {number}", "count": number}}
+                                                   for number in range(100)],
+        expected_container_hash=store.current_guards(CID)[0], source=EVIDENCE, why="capture observations")
+    assert inserted["counts"]["inserted"] == 100
+    receipt = store.connection.execute("SELECT receipt_json FROM txns WHERE operation='bulk_upsert'").fetchone()[0]
+    receipt_bytes, decoded_bytes = len(receipt.encode()), 0
+    decode = history.json.loads
+
+    def counted(raw, *args, **kwargs):
+        nonlocal decoded_bytes
+        if raw == receipt:
+            decoded_bytes += receipt_bytes
+        return decode(raw, *args, **kwargs)
+
+    monkeypatch.setattr(history.json, "loads", counted)
+    manifest = store._projection_manifest(CID)
+    rendered = history.render_page(store.connection, store.root, manifest, history.main_path(manifest))[1]
+    assert "capture observations" in rendered
+    assert all(row["item_key"] in rendered for row in inserted["rows"])
+    record_property("bulk_receipt_bytes", receipt_bytes)
+    record_property("decoded_bulk_receipt_bytes", decoded_bytes)
+    assert decoded_bytes <= 8 * receipt_bytes, (decoded_bytes, receipt_bytes)
+
+
 def test_invalid_derived_watermark_reverifies_without_inventing_a_gap(store):
     create(store)
     _append(store)
