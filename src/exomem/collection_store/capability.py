@@ -110,7 +110,7 @@ def require_records_summary(root=None) -> None:
         )
 
 
-def require_records_summary_route(vault_root, writer, action, values) -> None:
+def require_records_summary_route(vault_root, writer, action, values, *, prove=None) -> None:
     """Refuse the slice's routes on a production session while the release keeps it off.
 
     Those are an import, whatever its target, and every request on a store-routed summary
@@ -125,7 +125,7 @@ def require_records_summary_route(vault_root, writer, action, values) -> None:
     selector = values.get("collection")
     from .preview import selected_writer
 
-    if selector is None or selected_writer(vault_root, selector) is None:
+    if selector is None or selected_writer(vault_root, selector, prove=prove) is None:
         return
     with writer.read_collection(selector) as manifest:
         open_ = summary_route_open(vault_root, manifest)

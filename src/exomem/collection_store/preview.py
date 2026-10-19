@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from functools import wraps
+from functools import cache, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -80,13 +80,14 @@ def production_bound(vault_root: Path) -> bool:
     return binding is not None and binding[0] == Path(vault_root).resolve() and binding[2]
 
 
-def selected_writer(vault_root, selector):
+def selected_writer(vault_root, selector, *, prove=None):
     from . import ownership
 
     writer = bound_writer(vault_root)
     if writer is None:
         return None
-    proof = ownership.current(vault_root, conn=writer.connection, private=not production_bound(vault_root))
+    proof = prove() if prove is not None else ownership.current(
+        vault_root, conn=writer.connection, private=not production_bound(vault_root))
     entry = proof.selected(vault_root, selector)
     if entry is None:
         return None
@@ -303,13 +304,19 @@ def dispatch(
     binding = _BOUND.get()
     if binding is None or binding[0] != Path(vault_root).resolve():
         return False, None
+    writer = binding[1]
+    from . import ownership
+
+    @cache
+    def prove():
+        # One ownership proof serves this dispatch's checks; the next dispatch proves again.
+        return ownership.current(vault_root, conn=writer.connection, private=not binding[2])
+
     if binding[2]:
         from .capability import require_records_summary_route
 
-        require_records_summary_route(vault_root, binding[1], action, values)
-    writer = binding[1]
+        require_records_summary_route(vault_root, writer, action, values, prove=prove)
     args = {name: value for name, value in values.items() if value is not None}
-    from . import ownership
 
     if action == "describe" and profile == "records":
         from ..query_engine import route
@@ -319,7 +326,7 @@ def dispatch(
         writer._require_operation_context()
         return True, {**parse_manifest_contract(store_mode=True), "import": contract(), "query": route.contract()}
 
-    proof = ownership.current(vault_root, conn=writer.connection, private=not binding[2])
+    proof = prove()
     if proof.marker is not None:
         selector = args.get("collection", args.get("manifest_path"))
         if action == "create" and binding[2]:
@@ -328,7 +335,7 @@ def dispatch(
             created = served_create(vault_root, args)
             if created is not None:
                 return True, created
-        if selector is None or selected_writer(vault_root, selector) is None:
+        if selector is None or selected_writer(vault_root, selector, prove=prove) is None:
             return False, None
         if action == "create":
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")

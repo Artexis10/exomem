@@ -243,6 +243,24 @@ def test_editing_a_rich_target_unit_rederives_the_source_edge(
     assert after != before
 
 
+def test_a_drained_target_deletion_keeps_the_edges_a_rebuild_keeps(tmp_path: Path) -> None:
+    """A queued repair of a deleted target must not erase its surviving authors' edges."""
+    assert SOURCE < TARGET  # the sorted drain re-derives the source before the deletion
+    root, index = _built(tmp_path)
+    target = root / TARGET
+    target.unlink()
+    deferred_index.add_graph(root, [TARGET])
+    freshness.on_files_changed(root, deleted=[target])
+    find_module.on_resolver_files_changed(root, [], [TARGET])
+    index.drain_paths([target])
+    drained = index.edges(source_path=SOURCE)
+
+    index.rebuild_all()
+
+    assert drained == index.edges(source_path=SOURCE)
+    assert any(edge["dst_key"] == epistemic_graph._file_key(TARGET) for edge in drained)
+
+
 def test_graph_context_shows_the_owning_page_of_a_unit_destination(tmp_path: Path) -> None:
     _root, index = _built(tmp_path)
 
