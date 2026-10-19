@@ -380,6 +380,38 @@ def test_failed_catalog_warm_retries_before_optional_preloads_finish(
     assert repairs == [tmp_path]
 
 
+@pytest.mark.parametrize("catalogue_state", ["published", "malformed"])
+def test_initial_warm_keeps_retained_catalogue_repair_with_the_warm_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, catalogue_state: str,
+) -> None:
+    """Restart recall must not start repair before the warm owner seeds projections."""
+    import sqlite3
+    from contextlib import closing
+
+    _write_page(tmp_path, "Knowledge Base/Notes/retained.md", "retainedwarmmarker")
+    _materialize_live_catalog(tmp_path, "retainedwarmmarker")
+    store = lexstore.get_store(tmp_path)
+    if catalogue_state == "malformed":
+        with closing(sqlite3.connect(store.path)) as connection:
+            connection.execute("PRAGMA writable_schema=ON")
+            connection.execute("UPDATE sqlite_schema SET sql = 'broken SQL' WHERE name = 'meta'")
+            connection.commit()
+    freshness.clear()
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    repairs: list[Path] = []
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", repairs.append)
+
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        find_module.find(
+            tmp_path, query="retainedwarmmarker", mode="keyword", scope="kb",
+            graph=False, temporal=False,
+        )
+
+    assert raised.value.status == "warming"
+    assert repairs == []
+
+
 def test_catalog_proof_cannot_admit_runtime_without_live_projections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

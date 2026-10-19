@@ -1190,6 +1190,12 @@ def _with_catalog_scope(function):
             )
             if values["catalog_proof_out"] is not None:
                 values["catalog_proof_out"].clear()
+            # Initial warm admission precedes catalogue access and repair.
+            if (
+                readiness.retrieval_admission()["state"] == "warming"
+                and not readiness.required_warm_finished()
+            ):
+                return function(vault_root, *args, **kwargs)
 
             def select(call_kwargs):
                 pending = _request_pending_coverage(
@@ -1212,9 +1218,7 @@ def _with_catalog_scope(function):
                             _mark_source(
                                 values["timings"], "recall_projection", find_types.SOURCE_DECLINED
                             )
-                            # The initial warm owns projection seeding before repair.
-                            if state == "unavailable" or readiness.required_warm_finished():
-                                lexstore.request_repair(vault_root)
+                            lexstore.request_repair(vault_root)
                             raise RetrievalIndexWarming(
                                 site="catalog_proof_incomplete",
                                 status=(
