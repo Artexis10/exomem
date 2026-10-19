@@ -1795,10 +1795,11 @@ def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: P
     assert retried["requeued"] == 1
 
 
-def test_process_media_status_shows_memory_blocked_work_only_as_waiting(vault: Path) -> None:
-    # A tool caller, such as a Cloud tenant, sees memory-blocked work as waiting.
-    # The memory reason and the worker's process detail stay with doctor.
-    binary = _drop_media(vault, "status-memory-blocked.m4a")
+def test_process_media_shows_memory_blocked_work_only_as_waiting(vault: Path) -> None:
+    # A tool caller, such as a Cloud tenant, sees memory-blocked work as waiting
+    # from every operation. The memory reason and the worker's detail stay with doctor.
+    binary = _drop_media(vault, "tool-memory-blocked.m4a")
+    relative = binary.relative_to(vault).as_posix()
     _media_processing().reconcile_media(vault, binary)
     store = media_jobs.MediaJobStore(vault)
     claimed = store.claim_next()
@@ -1809,12 +1810,28 @@ def test_process_media_status_shows_memory_blocked_work_only_as_waiting(vault: P
     )
 
     status = commands_module.op_process_media(vault, operation="status")
+    processed = commands_module.op_process_media(vault, path=relative, operation="process")
+    retried = commands_module.op_process_media(vault, path=relative, operation="retry")
+    selected = commands_module.op_process_media(vault, paths=[relative], operation="process")
 
-    assert set(status) == {"operation", "healthy", "counts", "jobs", "errors", "index_refresh"}
+    assert set(status) == {
+        "operation",
+        "healthy",
+        "counts",
+        "reconciliation_required_count",
+        "jobs",
+        "errors",
+        "index_refresh",
+    }
     assert status["counts"][media_jobs.PENDING] == 1
     [job] = status["jobs"]
     assert job["state"] == media_jobs.PENDING
     assert job["error"] is None
+    assert processed["state"] == retried["state"] == media_jobs.PENDING
+    assert retried["requeued"] == 0
+    [row] = selected["results"]
+    assert row["outcome"] == "processed"
+    assert row["state"] == media_jobs.PENDING
     assert media_jobs.status(vault)["memory_blocked_count"] == 1
 
 

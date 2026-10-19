@@ -140,9 +140,11 @@ The ledger stores each reason in its `blocked_reason` column. Runtime status rep
 
 Cloud cells serve `process_media`, the same tool as the personal service. A tenant's assistant can call it with these operations:
 
-- `status` reads the media job counts and each job's state. It shows memory-blocked and engine-waiting work only as pending. The reasons, the worker process and the store path stay in `exomem doctor`.
+- `status` reads the media job counts and each job's state.
 - `process` queues one file, or a list of files, now instead of waiting for automatic ingestion. Without a path it does bounded work over all media.
 - `retry` queues a failed file again after the cause is fixed.
+
+Every operation shows memory-blocked and engine-waiting work only as pending. The reasons, the worker process and the store path stay in `exomem doctor`.
 
 All three use this cell's queue, memory brakes and engine selection. A file whose engine is off waits, and no operation runs it on an engine the cell does not select. A retry never returns over-budget work (see Job states). A new OCR pack or OCR fix leaves completed text unchanged, and no operation re-extracts it. A cell serves the tool only from the first image release that includes it, so roll that image before you tell a tenant about it.
 
