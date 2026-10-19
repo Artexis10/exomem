@@ -344,7 +344,7 @@ def test_admitted_catalog_scope_is_nested_and_vault_local(
 
 
 @pytest.mark.parametrize("boundary", ["projection", "query"])
-@pytest.mark.parametrize("changed_identity", ["access", "checkpoint"])
+@pytest.mark.parametrize("changed_identity", ["access", "semantic"])
 def test_admitted_catalog_refuses_a_mid_request_identity_change(
     vault: Path, monkeypatch: pytest.MonkeyPatch, boundary: str, changed_identity: str
 ) -> None:
@@ -370,17 +370,10 @@ def test_admitted_catalog_refuses_a_mid_request_identity_change(
                     "excluded:\n  - Private\n", encoding="utf-8"
                 )
             else:
-                conn = store._connect()
-                try:
-                    checkpoint = store._meta_checkpoint(conn, "kb")
-                    store._write_checkpoint(
-                        conn, "kb", checkpoint._replace(
-                            triple=(checkpoint.triple[0] + 1, *checkpoint.triple[1:])
-                        )
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
+                identity = lexstore.catalog_semantic_identity(vault)
+                monkeypatch.setattr(
+                    lexstore, "catalog_semantic_identity", lambda _root: identity + "-changed"
+                )
         return original(store, *args, **kwargs)
 
     monkeypatch.setattr(lexstore.LexicalStore, method, change_then_read)

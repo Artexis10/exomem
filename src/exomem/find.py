@@ -18,9 +18,11 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import date
 from functools import wraps
+from inspect import signature as inspect_signature
 from pathlib import Path
 from typing import Any
 
@@ -702,8 +704,9 @@ class FreshnessSnapshot:
                 # projection the admission already identity-checked, so it does
                 # not additionally require a live registry.
                 stale = scope in self._stale_recall_scopes
-                if stale:
-                    from . import lexstore
+                from . import lexstore
+
+                if stale or lexstore._admitted_catalog_view(self._root) is not None:
 
                     expected = self._expected_recall_checkpoints.get(scope)
                     if expected is None:
@@ -875,6 +878,8 @@ def _resolve_page(
     vault_root: Path,
     rel: str,
     pending: Any | None = None,
+    *,
+    catalog_view: Any | None = None,
 ) -> ParsedPage | None:
     """Hydrate one candidate identity under the current request's policy.
 
@@ -889,7 +894,36 @@ def _resolve_page(
         return None
     if pending is not None and pending.covers(rel):
         return pending.page(rel)
-    return _CACHE.get(target, vault_root)
+    page = _CACHE.get(target, vault_root)
+    from . import lexstore
+
+    view = catalog_view or lexstore._admitted_catalog_view(vault_root)
+    if view is not None:
+        view.capture_page_hashes([rel])
+        expected = view.page_hashes.get(rel)
+        # One changed page loses its evidence, not unrelated admitted recall.
+        if page is None or not expected or page.snapshot_hash != expected:
+            view.incomplete = True
+            return None
+    return page
+
+
+def _cached_selection_hits(vault_root: Path, hits: list[Any], pending: Any) -> list[Any]:
+    """Retain cache speed while checking only the pages its answer discloses."""
+    from . import lexstore
+
+    view = lexstore._admitted_catalog_view(vault_root)
+    if view is None:
+        return hits
+    selected = []
+    for hit in hits:
+        path = getattr(hit, "parent_path", None) or hit.path
+        page = _resolve_page(vault_root, path, pending)
+        if page is not None and hit.snapshot_hash == page.snapshot_hash:
+            selected.append(hit)
+        else:
+            view.incomplete = True
+    return selected
 
 
 def _without_shadowed(by_path: dict, pending: Any) -> dict:
@@ -1072,13 +1106,168 @@ def _freshness_key(
     return tuple(parts)
 
 
+@dataclass
+class _SelectedHits:
+    hits: list[Hit]
+    finish: Callable[[], list[Hit]]
+
+
+@dataclass(frozen=True)
+class _QueryPreparation:
+    unit: bool
+    page: bool
+
+
+@dataclass
+class _OutsideSelection:
+    finish: Callable[[set[str] | None], list[Hit]]
+    source: str
+
+
+def _validated_find_limit(
+    scope: str, mode: str, limit: int, rerank_max_candidates: int | None,
+) -> int:
+    # nosemgrep: ep-word-membership -- The find API fixes these scope tokens.
+    if scope not in ("kb", "vault", "kb-only"):
+        raise ValueError(f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}")
+    # nosemgrep: ep-word-membership -- The find API fixes these mode tokens.
+    if mode not in ("hybrid", "keyword", "vector"):
+        raise ValueError(f"find: mode must be 'hybrid', 'keyword', or 'vector', got {mode!r}")
+    if limit < 1:
+        limit = 1
+    limit = min(limit, 100)
+    if rerank_max_candidates is not None and (
+        isinstance(rerank_max_candidates, bool) or not isinstance(rerank_max_candidates, int)
+    ):
+        raise ValueError(
+            "find: rerank_max_candidates must be an integer "
+            f"from {limit} to {MAX_RERANK_CANDIDATES}, got "
+            f"{rerank_max_candidates!r}"
+        )
+    if rerank_max_candidates is not None and not (
+        limit <= rerank_max_candidates <= MAX_RERANK_CANDIDATES
+    ):
+        raise ValueError(
+            "find: rerank_max_candidates must be an integer "
+            f"from {limit} to {MAX_RERANK_CANDIDATES}, got "
+            f"{rerank_max_candidates!r}"
+        )
+    return limit
+
+
+def _request_pending_coverage(vault_root: Path, *, managed: bool, timings: FindTimings | None):
+    with _span(timings, "pending_visibility", source=find_types.SOURCE_INDEX):
+        pending = freshness.recall_pending_coverage(vault_root)
+        if not pending.servable:
+            if managed:
+                _set_recall_projection_timing_outcome(timings, "pending_unavailable")
+                _mark_source(timings, "pending_visibility", find_types.SOURCE_DECLINED)
+                raise RetrievalIndexWarming(
+                    site="pending_visibility_incomplete", status="temporarily_unavailable",
+                )
+            pending = _EMPTY_PENDING_COVERAGE
+        return pending
+
+
 def _with_catalog_scope(function):
+    request_signature = inspect_signature(function)
+
     @wraps(function)
     def scoped(vault_root: Path, *args, **kwargs):
-        from . import lexstore
+        from . import lexstore, readiness
 
         with lexstore.admitted_catalog_scope(vault_root):
-            return function(vault_root, *args, **kwargs)
+            if (
+                not readiness.runtime_managed() or not freshness.event_indexes_enabled()
+                or lexstore.backend() == "python"
+            ):
+                return function(vault_root, *args, **kwargs)
+            bound = request_signature.bind(vault_root, *args, **kwargs)
+            bound.apply_defaults()
+            values = bound.arguments
+            _validated_find_limit(
+                values["scope"], values["mode"], values["limit"],
+                values["rerank_max_candidates"],
+            )
+            if values["catalog_proof_out"] is not None:
+                values["catalog_proof_out"].clear()
+            # Initial warm admission precedes catalogue access and repair.
+            if (
+                readiness.retrieval_admission()["state"] == "warming"
+                and not readiness.required_warm_finished()
+            ):
+                with _span(
+                    values["timings"], "recall_projection", source=find_types.SOURCE_DECLINED
+                ):
+                    _set_recall_projection_timing_outcome(values["timings"], "warming")
+                    raise RetrievalIndexWarming(site="catalog_proof_incomplete", status="warming")
+
+            def select(call_kwargs):
+                pending = _request_pending_coverage(
+                    vault_root, managed=True, timings=values["timings"]
+                )
+                selection = ExitStack()
+                try:
+                    with _span(
+                        values["timings"], "recall_projection", source=find_types.SOURCE_INDEX
+                    ):
+                        admitted = selection.enter_context(
+                            lexstore.catalog_selection_scope(vault_root)
+                        )
+                        if admitted is None:
+                            readiness.mark_unready("retrieval_catalog")
+                            state = str(readiness.retrieval_admission()["state"])
+                            _set_recall_projection_timing_outcome(
+                                values["timings"], state
+                            )
+                            _mark_source(
+                                values["timings"], "recall_projection", find_types.SOURCE_DECLINED
+                            )
+                            lexstore.request_repair(vault_root)
+                            raise RetrievalIndexWarming(
+                                site="catalog_proof_incomplete",
+                                status=(
+                                    "temporarily_unavailable"
+                                    if state == "unavailable" else "warming"
+                                ),
+                            )
+                    selected_kwargs = dict(
+                        call_kwargs, _catalog_admission=admitted, _pending_coverage=pending,
+                    )
+                    return function(vault_root, *args, **selected_kwargs)
+                finally:
+                    with _span(
+                        values["timings"], "recall_projection", source=find_types.SOURCE_INDEX
+                    ):
+                        selection.close()
+
+            # Cacheable model requests first get a short lookup view. The miss
+            # marker owns no catalogue, pending, filter, or page evidence.
+            needs_encoding = values["mode"] != "keyword" and bool((values["query"] or "").strip())
+            if needs_encoding:
+                probe_degraded: list[str] = []
+                probe_failed: list[str] = []
+                probe_proof: dict = {}
+                probe_kwargs = dict(
+                    kwargs, _cache_probe=True, degraded_out=probe_degraded,
+                    failed_out=probe_failed, catalog_proof_out=probe_proof,
+                )
+                result = select(probe_kwargs)
+                if not isinstance(result, _QueryPreparation):
+                    if values["degraded_out"] is not None:
+                        values["degraded_out"].extend(probe_degraded)
+                    if values["failed_out"] is not None:
+                        values["failed_out"].extend(probe_failed)
+                    if values["catalog_proof_out"] is not None:
+                        values["catalog_proof_out"].update(probe_proof)
+                    return result
+                prepared = find_candidates.prepare_query_inputs(
+                    vault_root, values["query"], unit=result.unit, page=result.page,
+                    timings=values["timings"],
+                )
+                result = select(dict(kwargs, _prepared_queries=prepared, _defer_finish=True))
+                return result.finish() if isinstance(result, _SelectedHits) else result
+            return select(kwargs)
 
     return scoped
 
@@ -1143,6 +1332,11 @@ def find(
     admit_path: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
+    _catalog_admission: Any | None = None,
+    _pending_coverage: Any | None = None,
+    _cache_probe: bool = False,
+    _prepared_queries: find_candidates.PreparedQueryInputs | None = None,
+    _defer_finish: bool = False,
 ) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -1269,29 +1463,7 @@ def find(
 
     if catalog_proof_out is not None:
         catalog_proof_out.clear()
-    if scope not in ("kb", "vault", "kb-only"):
-        raise ValueError(f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}")
-    if mode not in ("hybrid", "keyword", "vector"):
-        raise ValueError(f"find: mode must be 'hybrid', 'keyword', or 'vector', got {mode!r}")
-    if limit < 1:
-        limit = 1
-    limit = min(limit, 100)
-    if rerank_max_candidates is not None and (
-        isinstance(rerank_max_candidates, bool) or not isinstance(rerank_max_candidates, int)
-    ):
-        raise ValueError(
-            "find: rerank_max_candidates must be an integer "
-            f"from {limit} to {MAX_RERANK_CANDIDATES}, got "
-            f"{rerank_max_candidates!r}"
-        )
-    if rerank_max_candidates is not None and not (
-        limit <= rerank_max_candidates <= MAX_RERANK_CANDIDATES
-    ):
-        raise ValueError(
-            "find: rerank_max_candidates must be an integer "
-            f"from {limit} to {MAX_RERANK_CANDIDATES}, got "
-            f"{rerank_max_candidates!r}"
-        )
+    limit = _validated_find_limit(scope, mode, limit, rerank_max_candidates)
     effective_rerank_candidate_limit = min(
         3 * limit,
         rerank_max_candidates or MAX_RERANK_CANDIDATES,
@@ -1305,7 +1477,7 @@ def find(
         decision="skipped",
         reason="not_reached",
     )
-    if retrieval_trace is not None:
+    if retrieval_trace is not None and not _cache_probe:
         retrieval_trace.record_rerank_bound(
             requested=rerank_max_candidates,
             effective=effective_rerank_candidate_limit,
@@ -1315,6 +1487,7 @@ def find(
 
     from . import lexstore, readiness
 
+    catalog_view = lexstore._admitted_catalog_view(vault_root)
     managed_runtime = readiness.runtime_managed()
     # Trustworthy pending suppression precedes every persistent catalogue read.
     # Incomplete bodies reduce coverage; unknown custody refuses managed recall.
@@ -1324,17 +1497,10 @@ def find(
     # answer that is already exact.
     # The durable pending-custody rows ARE an index; reading them is the
     # alternative to proving custody by reading the corpus.
-    with _span(timings, "pending_visibility", source=find_types.SOURCE_INDEX):
-        pending = freshness.recall_pending_coverage(vault_root)
-        if not pending.servable:
-            if managed_runtime:
-                _set_recall_projection_timing_outcome(timings, "pending_unavailable")
-                _mark_source(timings, "pending_visibility", find_types.SOURCE_DECLINED)
-                raise RetrievalIndexWarming(
-                    site="pending_visibility_incomplete",
-                    status="temporarily_unavailable",
-                )
-            pending = _EMPTY_PENDING_COVERAGE
+    pending = (
+        _pending_coverage if _pending_coverage is not None
+        else _request_pending_coverage(vault_root, managed=managed_runtime, timings=timings)
+    )
     # Admission is part of resolving the projection, and used to be the one
     # material region between two spans: measured at request level it looked
     # like unattributed time. Folding it into `recall_projection` reports it
@@ -1365,7 +1531,10 @@ def find(
             # published projection instead of blanking semantic recall. Repair
             # and health probes can revoke strict readiness during this window;
             # re-prove request admission even when that ready bit is clear.
-            admitted = lexstore.runtime_retrieval_catalog_admission(vault_root)
+            admitted = (
+                _catalog_admission if _catalog_admission is not None
+                else lexstore.runtime_retrieval_catalog_admission(vault_root)
+            )
             raw_proof = admitted.checkpoints if admitted is not None else None
             if raw_proof is None:
                 readiness.mark_unready("retrieval_catalog")
@@ -1476,7 +1645,7 @@ def find(
         result_level,
         filter_plan,
     )
-    if retrieval_trace is not None:
+    if retrieval_trace is not None and not _cache_probe:
         retrieval_trace.record_plan(
             query=query,
             intent=intent or find_policy.classify_intent(query),
@@ -1541,6 +1710,36 @@ def find(
     resolved_config = config if config is not None else _active_ranking()
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
+
+    def _note_projection_lag() -> None:
+        with _span(
+            timings, _nested_name(timings, "recall_projection"), source=find_types.SOURCE_INDEX
+        ):
+            if catalog_view is not None:
+                from .vocabulary.registry import RegistryError
+
+                try:
+                    interpretation_current = (
+                        catalog_view.semantic_identity
+                        == lexstore.catalog_semantic_identity(vault_root)
+                        and all(
+                            lexstore._checkpoint_policy_current(vault_root, checkpoint)
+                            for checkpoint in catalog_view.checkpoints.values()
+                        )
+                    )
+                except RegistryError:
+                    interpretation_current = False
+                # Interpretation changes invalidate every selected row; data lag does not.
+                if not interpretation_current:
+                    raise RetrievalIndexWarming(site="catalog_proof_incomplete")
+            incomplete = catalog_view is not None and catalog_view.incomplete
+            lagging = _catalog_admission is not None and any(
+                freshness.live_recall_checkpoint(vault_root, projection_scope) != checkpoint
+                for projection_scope, checkpoint in _catalog_admission.checkpoints.items()
+            )
+            if (incomplete or lagging) and _RECALL_PROJECTION_STALE_COMPONENT not in degraded:
+                degraded.append(_RECALL_PROJECTION_STALE_COMPONENT)
+
     pending_active = not pending.empty or not pending.ready
     if pending_active:
         # Disclose pending omissions through the existing envelope. Appending
@@ -1595,6 +1794,8 @@ def find(
                     if cached_units is not None:
                         _FIND_CACHE.move_to_end(unit_cache_key)
             if cached_units is not None and _current(cached_units[1]):
+                cached_hits = _cached_selection_hits(vault_root, cached_units[0], pending)
+                _note_projection_lag()
                 if timings is not None:
                     timings.cache["hit"] = True
                 if unit_algebra.status == "complete":
@@ -1605,7 +1806,9 @@ def find(
                 # and it is proportional to `limit`. Unspanned it was reported
                 # as unattributed remainder on every hot request.
                 with _span(timings, "cache_copy", source=find_types.SOURCE_CACHE):
-                    return copy.deepcopy(cached_units[0])
+                    return copy.deepcopy(cached_hits)
+        if _cache_probe:
+            return _QueryPreparation(unit=not unit_algebra.definitely_empty, page=False)
         unit_hits = _find_semantic_units(
             vault_root,
             query=query,
@@ -1622,6 +1825,7 @@ def find(
             failed_out=failed,
             retrieval_trace=retrieval_trace,
             timings=timings,
+            prepared_queries=_prepared_queries,
         )
         if relation_paths is not None:
             # A unit qualifies through its parent page (per-unit edge anchoring is
@@ -1632,6 +1836,7 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
+        _note_projection_lag()
         if unit_cache_key is not None and not degraded and not failed:
             with _FIND_CACHE_LOCK:
                 _FIND_CACHE[unit_cache_key] = (copy.deepcopy(unit_hits), _dependency())
@@ -1798,6 +2003,8 @@ def find(
                         _FIND_CACHE_CHECKPOINTS[cache_key] = advanced
                         _FIND_CACHE.move_to_end(cache_key)
         if cached is not None and _current(cached[1]):
+            cached_hits = _cached_selection_hits(vault_root, cached[0], pending)
+            _note_projection_lag()
             if timings is not None:
                 timings.cache["hit"] = True
             _set_rerank_timing_profile(
@@ -1816,7 +2023,7 @@ def find(
                 _record_filter_eligibility_cache_hit(timings)
                 _set_catalog_timing_profile(timings, cache_hit=True)
             with _span(timings, "cache_copy", source=find_types.SOURCE_CACHE):
-                return copy.deepcopy(cached[0])
+                return copy.deepcopy(cached_hits)
 
     # Track warm-window degradation even when the caller passed no list —
     # internal callers (suggest_links, evolution, note/add sweeps) must never
@@ -1824,6 +2031,8 @@ def find(
     # Same rationale for POST-WARM lane failures: a BM25-only result produced
     # because the vector lane threw must not be cached and served after the
     # sidecar/model recovers. Tracked internally even when the caller passes None.
+    if _cache_probe:
+        return _QueryPreparation(unit=mixed, page=True)
     mixed_unit_hits: list[SemanticUnitHit] = []
     if mixed:
         # Decided before the span: `filter_eligibility` is a top-level stage.
@@ -1845,6 +2054,7 @@ def find(
                 failed_out=failed,
                 retrieval_trace=retrieval_trace,
                 query_vector_provider=_query_vector,
+                prepared_queries=_prepared_queries,
             )
         if retrieval_trace is not None:
             retrieval_trace.snapshot_result_plan("unit")
@@ -1953,185 +2163,242 @@ def find(
                 retrieval_trace=retrieval_trace,
                 query_vector_provider=_query_vector if mixed else None,
                 pending=pending,
+                prepared_queries=_prepared_queries,
+                defer_finish=_defer_finish,
             )
 
-    if retrieval_trace is not None and (mode == "keyword" or not query_norm):
-        retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
-    if mode == "keyword" or not query_norm:
-        _set_rerank_timing_profile(
-            timings,
-            requested=rerank_max_candidates,
-            effective=effective_rerank_candidate_limit,
-            scorer_input_count=0,
-            unscored_tail_count=0,
-            decision="skipped",
-            reason="empty_query" if not query_norm else "requested_mode_keyword",
-        )
-
-    # Requested widening: reach into the wider vault (sibling folders like
-    # Tracking/, Reference/, plus curated trees) so content outside
-    # Knowledge Base/ isn't silently invisible. Only for scope="kb" (not
-    # "kb-only"/"vault"), non-empty queries (an empty query has no signal to
-    # widen on), and only when the caller asked for it.
-    #
-    # OPT-IN since `accelerate-governed-recall`. It used to run on every
-    # default recall and cost 7.6 s on the live cell, because it resolved
-    # eligibility a second time at vault scope and then ranked the whole
-    # non-KB corpus — building a Python BM25 corpus whenever the maintained
-    # catalogue was not fresh enough to serve it. The behaviour is reachable,
-    # not free: a caller that relies on the reserve asks for it, and the
-    # default stops paying for a lane most callers never read.
-    #
-    # We RESERVE a few result slots for out-of-KB hits rather than only
-    # back-filling when the KB underfills. The reason is empirical: on a real
-    # vault a bare query like "X3" finds 8+ KB files that literally mention the
-    # term, which fills `limit` — so a count- or even quality-gated back-fill
-    # never fires, and the actual out-of-KB target (e.g. `Tracking/X3 Full
-    # Reps.md`, whose title IS the query) stays hidden. Reserving guarantees
-    # such a match surfaces. The KB keeps the majority of slots (strong literal
-    # hits first, then weak graph/recency filler); the reserve never starves
-    # the KB (capped at limit-1) and is empty when nothing outside matches.
-    if scope == "kb" and query_norm and widen_outside_kb:
-        with _span(timings, "outside_kb"):
-            seen = {h.path for h in hits}
-            outside = [
-                h
-                for h in _find_outside_kb(
-                    vault_root,
-                    query=query,
-                    query_norm=query_norm,
-                    types=types,
-                    projects=projects,
-                    tags=tags,
-                    speakers=speakers,
-                    file_types=file_types,
-                    exclude_file_types=exclude_file_types,
-                    limit=limit,
-                    snapshot=snapshot,
-                    admit_path=admit_path,
-                    filter_plan=filter_plan if filter_plan.root is not None else None,
-                    exclude_paths=seen,
-                    failed_out=failed,
-                    retrieval_trace=retrieval_trace,
-                    timings=timings,
-                )
-                if h.path not in seen
-            ]
-            if outside:
-                strong: list[Hit] = []
-                weak: list[Hit] = []
-                for h in hits:
-                    page = _page_of(h.path)
-                    # Word/stem-level, not substring: a bare "x3" query must not
-                    # treat files that merely contain "x3" inside a longer token
-                    # (a hash, "max3...", a log copy) as strong topical matches.
-                    if page is not None and _stem_tokens_present(page, query_norm):
-                        strong.append(h)
-                    else:
-                        weak.append(h)
-                reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
-                kb_keep = limit - reserve
-                hits = ((strong + weak)[:kb_keep] + outside)[:limit]
-                if retrieval_trace is not None:
-                    retrieval_trace.record_auto_widen(
-                        hits,
-                        strong_paths=[hit.path for hit in strong[:kb_keep]],
-                        weak_paths=[hit.path for hit in weak[: max(0, kb_keep - len(strong))]],
-                        outside_paths=[hit.path for hit in outside],
-                        reserve=reserve,
-                        kb_keep=kb_keep,
-                    )
-    elif timings is not None:
-        # Silence and "ran, found nothing" are the same shape in a stage table,
-        # and the spec asks for the difference: a default recall must SAY the
-        # widening was skipped. `skipped` carries no `ms`, so the attribution
-        # partition is untouched.
-        timings.skipped("outside_kb")
-
-    # Explicit recency window (off by default) — drop out-of-window hits last,
-    # after the requested widening, so it governs every mode uniformly.
-    with _span(timings, "date_filter"):
-        hits = _filter_by_date(
-            hits,
-            updated_after=updated_after,
-            updated_before=updated_before,
-            recency_days=recency_days,
-        )
-
-    # A hit kept on a bound that could not actually be ordered is reported as
-    # such rather than presented as a clean match. Runs after every filtering
-    # lane so it sees exactly the hits the caller will receive.
-    if bound_after is not None or bound_before is not None:
-        bound_shortcuts = structured_filters.FilterShortcuts(
-            updated_after=bound_after, updated_before=bound_before
-        )
-        for hit in hits:
-            vague = structured_filters.indeterminate_bounds(
-                {"updated": hit.updated}, shortcuts=bound_shortcuts
-            )
-            if vague:
-                hit.order_indeterminate = list(vague)
-
-    if retrieval_trace is not None:
-        retrieval_trace.finalize_page_results(
-            hits,
-            updated_after=updated_after,
-            updated_before=updated_before,
-            recency_days=recency_days,
-        )
-        if mixed:
-            retrieval_trace.snapshot_result_plan("page")
-
-    if filter_plan.has_unit_predicate:
-        with _span(timings, "matched_units"):
-            _annotate_matched_units(vault_root, hits, filter_plan)
-
-    if relation_paths is not None:
-        for hit in hits:
-            match = relation_provenance.get(hit.path)
-            if match is not None:
-                hit.relation_match = _relation_match_dict(match, matched="self")
-
-    if mixed:
-        return _merge_mixed_hits(
-            hits,
-            mixed_unit_hits,
+    def select_outside(exclude_paths=None, *, defer_finish=False):
+        return _find_outside_kb(
+            vault_root,
+            query=query,
+            query_norm=query_norm,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
             limit=limit,
-            config=resolved_config,
+            snapshot=snapshot,
+            admit_path=admit_path,
+            filter_plan=filter_plan if filter_plan.root is not None else None,
+            exclude_paths=exclude_paths,
+            failed_out=failed,
             retrieval_trace=retrieval_trace,
+            timings=timings,
+            defer_finish=defer_finish,
         )
 
-    # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
-    # A result produced with warm-deferred lanes is lexical-only — caching it
-    # would keep serving the degraded ranking after the warm completes. A
-    # post-warm lane FAILURE (`failed`) is skipped for the same reason: the
-    # failure may be transient, so don't pin a BM25-only result in the cache.
-    # A budget-skipped rerank is specific to this request. Do not reuse its
-    # unreranked hits for a later call that can afford the requested stage.
-    active_budget = request_budget.current()
-    budget_skipped_rerank = active_budget is not None and "rerank" in active_budget.skipped
-    # A key computed while another reader's proof ran says "unproven", but the
-    # proof may have landed before candidate collection and let the graph lane
-    # run: never pin such a result under a key that claims the lane was absent.
-    unproven_graph_key = cache_key is not None and (
-        (".graph.sqlite", ("unproven",)) in cache_key[1]
+    outside_selection = None
+    if _defer_finish and scope == "kb" and query_norm and widen_outside_kb:
+        with _span(timings, "outside_kb"):
+            outside_selection = select_outside(defer_finish=True)
+
+    annotation_reads = (
+        UnitParentReads() if catalog_view is not None and filter_plan.has_unit_predicate else None
     )
-    if (
-        cache_key is not None
-        and not degraded
-        and not failed
-        and not budget_skipped_rerank
-        and not unproven_graph_key
-    ):
-        with _FIND_CACHE_LOCK:
-            _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency())
-            if cache_checkpoints is not None:
-                _FIND_CACHE_CHECKPOINTS[cache_key] = cache_checkpoints
-            else:
-                _FIND_CACHE_CHECKPOINTS.pop(cache_key, None)
-            _FIND_CACHE.move_to_end(cache_key)
-            _trim_find_cache(cache_size)
-    return hits
+    prepared_annotations = _defer_finish and filter_plan.has_unit_predicate
+    if prepared_annotations:
+        with _span(timings, "matched_units"):
+            _annotate_matched_units(
+                vault_root, hits.hits if isinstance(hits, _SelectedHits) else hits,
+                filter_plan, catalog_view=catalog_view, parent_reads=annotation_reads,
+                pending=pending,
+            )
+
+    selected = hits
+
+    def finish() -> list[Hit]:
+        if isinstance(selected, _SelectedHits):
+            with _span(timings, "semantic.search"):
+                hits = selected.finish()
+        else:
+            hits = selected
+
+        if retrieval_trace is not None and (mode == "keyword" or not query_norm):
+            retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
+        if mode == "keyword" or not query_norm:
+            _set_rerank_timing_profile(
+                timings,
+                requested=rerank_max_candidates,
+                effective=effective_rerank_candidate_limit,
+                scorer_input_count=0,
+                unscored_tail_count=0,
+                decision="skipped",
+                reason="empty_query" if not query_norm else "requested_mode_keyword",
+            )
+
+        # Requested widening: reach into the wider vault (sibling folders like
+        # Tracking/, Reference/, plus curated trees) so content outside
+        # Knowledge Base/ isn't silently invisible. Only for scope="kb" (not
+        # "kb-only"/"vault"), non-empty queries (an empty query has no signal to
+        # widen on), and only when the caller asked for it.
+        #
+        # OPT-IN since `accelerate-governed-recall`. It used to run on every
+        # default recall and cost 7.6 s on the live cell, because it resolved
+        # eligibility a second time at vault scope and then ranked the whole
+        # non-KB corpus — building a Python BM25 corpus whenever the maintained
+        # catalogue was not fresh enough to serve it. The behaviour is reachable,
+        # not free: a caller that relies on the reserve asks for it, and the
+        # default stops paying for a lane most callers never read.
+        #
+        # We RESERVE a few result slots for out-of-KB hits rather than only
+        # back-filling when the KB underfills. The reason is empirical: on a real
+        # vault a bare query like "X3" finds 8+ KB files that literally mention the
+        # term, which fills `limit` — so a count- or even quality-gated back-fill
+        # never fires, and the actual out-of-KB target (e.g. `Tracking/X3 Full
+        # Reps.md`, whose title IS the query) stays hidden. Reserving guarantees
+        # such a match surfaces. The KB keeps the majority of slots (strong literal
+        # hits first, then weak graph/recency filler); the reserve never starves
+        # the KB (capped at limit-1) and is empty when nothing outside matches.
+        if scope == "kb" and query_norm and widen_outside_kb:
+            outside_source = (
+                outside_selection.source if isinstance(outside_selection, _OutsideSelection)
+                else find_types.SOURCE_DECLINED if outside_selection is not None
+                else find_types.SOURCE_COMPUTED
+            )
+            with _span(timings, "outside_kb", source=outside_source):
+                seen = {h.path for h in hits}
+                outside = [
+                    h
+                    for h in (
+                        outside_selection.finish(seen)
+                        if isinstance(outside_selection, _OutsideSelection)
+                        else outside_selection if outside_selection is not None
+                        else select_outside(seen)
+                    )
+                    if h.path not in seen
+                ]
+                if outside:
+                    strong: list[Hit] = []
+                    weak: list[Hit] = []
+                    for h in hits:
+                        page = _page_of(h.path)
+                        # Word/stem-level, not substring: a bare "x3" query must not
+                        # treat files that merely contain "x3" inside a longer token
+                        # (a hash, "max3...", a log copy) as strong topical matches.
+                        if page is not None and _stem_tokens_present(page, query_norm):
+                            strong.append(h)
+                        else:
+                            weak.append(h)
+                    reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
+                    kb_keep = limit - reserve
+                    hits = ((strong + weak)[:kb_keep] + outside)[:limit]
+                    if retrieval_trace is not None:
+                        retrieval_trace.record_auto_widen(
+                            hits,
+                            strong_paths=[hit.path for hit in strong[:kb_keep]],
+                            weak_paths=[hit.path for hit in weak[: max(0, kb_keep - len(strong))]],
+                            outside_paths=[hit.path for hit in outside],
+                            reserve=reserve,
+                            kb_keep=kb_keep,
+                        )
+        elif timings is not None:
+            # Silence and "ran, found nothing" are the same shape in a stage table,
+            # and the spec asks for the difference: a default recall must SAY the
+            # widening was skipped. `skipped` carries no `ms`, so the attribution
+            # partition is untouched.
+            timings.skipped("outside_kb")
+
+        # Explicit recency window (off by default) — drop out-of-window hits last,
+        # after the requested widening, so it governs every mode uniformly.
+        with _span(timings, "date_filter"):
+            hits = _filter_by_date(
+                hits,
+                updated_after=updated_after,
+                updated_before=updated_before,
+                recency_days=recency_days,
+            )
+
+        # A hit kept on a bound that could not actually be ordered is reported as
+        # such rather than presented as a clean match. Runs after every filtering
+        # lane so it sees exactly the hits the caller will receive.
+        if bound_after is not None or bound_before is not None:
+            bound_shortcuts = structured_filters.FilterShortcuts(
+                updated_after=bound_after, updated_before=bound_before
+            )
+            for hit in hits:
+                vague = structured_filters.indeterminate_bounds(
+                    {"updated": hit.updated}, shortcuts=bound_shortcuts
+                )
+                if vague:
+                    hit.order_indeterminate = list(vague)
+
+        if retrieval_trace is not None:
+            retrieval_trace.finalize_page_results(
+                hits,
+                updated_after=updated_after,
+                updated_before=updated_before,
+                recency_days=recency_days,
+            )
+            if mixed:
+                retrieval_trace.snapshot_result_plan("page")
+
+        if filter_plan.has_unit_predicate:
+            with _span(timings, "matched_units"):
+                _annotate_matched_units(
+                    vault_root,
+                    hits,
+                    filter_plan,
+                    catalog_view=catalog_view,
+                    parent_reads=annotation_reads,
+                    pending=pending,
+                )
+
+        if relation_paths is not None:
+            for hit in hits:
+                match = relation_provenance.get(hit.path)
+                if match is not None:
+                    hit.relation_match = _relation_match_dict(match, matched="self")
+
+        _note_projection_lag()
+        if mixed:
+            return _merge_mixed_hits(
+                hits,
+                mixed_unit_hits,
+                limit=limit,
+                config=resolved_config,
+                retrieval_trace=retrieval_trace,
+            )
+
+        # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
+        # A result produced with warm-deferred lanes is lexical-only — caching it
+        # would keep serving the degraded ranking after the warm completes. A
+        # post-warm lane FAILURE (`failed`) is skipped for the same reason: the
+        # failure may be transient, so don't pin a BM25-only result in the cache.
+        # A budget-skipped rerank is specific to this request. Do not reuse its
+        # unreranked hits for a later call that can afford the requested stage.
+        active_budget = request_budget.current()
+        budget_skipped_rerank = active_budget is not None and "rerank" in active_budget.skipped
+        # A key computed while another reader's proof ran says "unproven", but the
+        # proof may have landed before candidate collection and let the graph lane
+        # run: never pin such a result under a key that claims the lane was absent.
+        unproven_graph_key = cache_key is not None and (
+            (".graph.sqlite", ("unproven",)) in cache_key[1]
+        )
+        if (
+            cache_key is not None
+            and not degraded
+            and not failed
+            and not budget_skipped_rerank
+            and not unproven_graph_key
+        ):
+            with _FIND_CACHE_LOCK:
+                _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency())
+                if cache_checkpoints is not None:
+                    _FIND_CACHE_CHECKPOINTS[cache_key] = cache_checkpoints
+                else:
+                    _FIND_CACHE_CHECKPOINTS.pop(cache_key, None)
+                _FIND_CACHE.move_to_end(cache_key)
+                _trim_find_cache(cache_size)
+        return hits
+
+
+    if _defer_finish:
+        return _SelectedHits(
+            selected.hits if isinstance(selected, _SelectedHits) else selected, finish
+        )
+    return finish()
 
 
 def _collapse_frame_children(
@@ -2361,9 +2628,10 @@ def _hydrate_indexed_unit_records(
     Otherwise it reads the parent again, as it would alone, and keeps the
     newer read for later calls.
     """
-    from . import semantic_index
+    from . import lexstore, semantic_index
     from .governance import egress
 
+    catalog_view = lexstore._admitted_catalog_view(vault_root)
     parents: dict[str, tuple[ParsedPage, Any, tuple[Any, ...]] | None] = {}
     records: dict[str, tuple[ParsedPage, Any, int]] = {}
     reads = {} if parent_reads is None else parent_reads.parents
@@ -2377,9 +2645,25 @@ def _hydrate_indexed_unit_records(
                 # have landed since, so read the page now, as a call alone would.
                 read = reads[path] = _read_unit_parent(vault_root, path)
             if read is None:
+                if catalog_view is not None:
+                    catalog_view.incomplete = True
                 parents[path] = None
                 continue
+            if catalog_view is not None:
+                catalog_view.capture_page_hashes([path])
+                if (
+                    read.page is None or read.neutral is None or read.state is None
+                    or not read.page.snapshot_hash
+                    or catalog_view.page_hashes.get(path) != read.page.snapshot_hash
+                    or read.neutral.parent_source_hash != read.page.snapshot_hash
+                    or read.state.parent_source_hash != read.page.snapshot_hash
+                ):
+                    catalog_view.incomplete = True
+                    parents[path] = None
+                    continue
             if not read.current_for(hit.parent_generation):
+                if catalog_view is not None:
+                    catalog_view.incomplete = True
                 if stale_out is not None:
                     stale_out.append(hit.unit_ref)
                 parents[path] = None
@@ -2541,6 +2825,7 @@ def _vector_unit_candidates(
     failed_out: list[str] | None,
     timings: FindTimings | None,
     query_vector_provider: Callable[[], Any] | None = None,
+    prepared_queries: find_candidates.PreparedQueryInputs | None = None,
 ) -> tuple[list[Any], dict[str, Any], str]:
     """Return bounded vector candidates without opening every Markdown parent."""
     model_name = recall_space.recall_model()
@@ -2553,7 +2838,9 @@ def _vector_unit_candidates(
 
     from . import readiness
 
-    if readiness.should_defer("embeddings"):
+    if readiness.should_defer("embeddings") or (
+        prepared_queries is not None and prepared_queries.embeddings_deferred
+    ):
         if degraded_out is not None:
             degraded_out.append("embeddings")
         return [], {"status": "warming", "reason": "model_warming", "model": model_name}, "kb"
@@ -2569,14 +2856,24 @@ def _vector_unit_candidates(
     try:
         from . import embeddings
 
-        index = embeddings.get_embedding_index(vault_root)
-        with _span(timings, "vector.unit.embed"):
-            if query_vector_provider is not None:
-                encoded_for, query_vector = query_vector_provider()
-            else:
-                encoded_for = getattr(index, "identity", None)
-                with recall_space.encoding_for(index):
-                    query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        if prepared_queries is not None:
+            prepared = prepared_queries.unit
+            if prepared is None:
+                raise recall_space.ServingEncoderCold("unit query was not prepared")
+            encoded_for, query_vector = prepared.encoded()
+            prepared_queries.require_current_serving(vault_root)
+            index = prepared.index
+            if timings is not None:
+                timings.skipped("vector.unit.embed")
+        else:
+            index = embeddings.get_embedding_index(vault_root)
+            with _span(timings, "vector.unit.embed"):
+                if query_vector_provider is not None:
+                    encoded_for, query_vector = query_vector_provider()
+                else:
+                    encoded_for = getattr(index, "identity", None)
+                    with recall_space.encoding_for(index):
+                        query_vector = embeddings.embed_texts([query], is_query=True)[0]
         recall_space.require_same_space(index, encoded_for, query_vector)
         incomplete: list[str] = []
         hits = index.search_semantic_units(
@@ -2665,6 +2962,7 @@ def _find_semantic_units(
     timings: FindTimings | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
     allowed_parent_paths: set[str] | None = None,
+    prepared_queries: find_candidates.PreparedQueryInputs | None = None,
     recall_checkpoint: Any | None = None,
     repair: bool | None = None,
     max_catalog_candidates: int | None = None,
@@ -2943,6 +3241,7 @@ def _find_semantic_units(
             failed_out=failed_out,
             timings=timings,
             query_vector_provider=query_vector_provider,
+            prepared_queries=prepared_queries,
         )
         if (
             vector_allowed_refs is not None
@@ -3234,21 +3533,65 @@ def _annotate_matched_units(
     vault_root: Path,
     hits: list[Hit],
     plan: structured_filters.FilterPlan,
+    *,
+    catalog_view: Any | None = None,
+    parent_reads: UnitParentReads | None = None,
+    pending: Any | None = None,
 ) -> None:
     """Attach bounded same-unit matches without changing default page bytes."""
     from . import semantic_index
 
+    if catalog_view is not None and parent_reads is None:
+        parent_reads = UnitParentReads()
     for hit in hits:
-        page = _CACHE.get(vault_root / hit.path, vault_root)
-        if page is None:
-            hit.matched_units = []
-            continue
-        try:
-            state = semantic_index.selected_parent_index_state(vault_root, page.rel_path)
-        except (OSError, UnicodeError, ValueError) as error:
-            log.warning("matched-unit parse failed for %s: %s", hit.path, error)
-            hit.matched_units = []
-            continue
+        if parent_reads is not None:
+            if hit.path not in parent_reads.parents:
+                parent_reads.parents[hit.path] = _read_unit_parent(vault_root, hit.path)
+            read = parent_reads.parents[hit.path]
+            if pending is not None and pending.covers(hit.path):
+                held = pending.page(hit.path)
+                expected_hash = held.snapshot_hash if held is not None else None
+            else:
+                expected_hash = catalog_view.page_hashes.get(hit.path)
+            if (
+                read is None or read.page is None or read.state is None
+                or read.neutral is None
+                or read.page.snapshot_hash != hit.snapshot_hash
+                or read.neutral.parent_source_hash != read.page.snapshot_hash
+                or read.state.parent_source_hash != read.page.snapshot_hash
+                or expected_hash != hit.snapshot_hash
+            ):
+                catalog_view.incomplete = True
+                hit.matched_units = []
+                continue
+            refresh = (
+                read.state.definitions is None or not read.state.definitions.current(vault_root)
+            )
+            if refresh:
+                try:
+                    read.state = semantic_index.selected_parent_index_state(
+                        vault_root, hit.path, state=read.neutral,
+                    )
+                    read.prose = None
+                except (OSError, UnicodeError, ValueError) as error:
+                    log.warning("matched-unit parse failed for %s: %s", hit.path, error)
+                    catalog_view.incomplete = True
+                    hit.matched_units = []
+                    continue
+            elif hit.matched_units is not None:
+                continue
+            page, state = read.page, read.state
+        else:
+            page = _CACHE.get(vault_root / hit.path, vault_root)
+            if page is None:
+                hit.matched_units = []
+                continue
+            try:
+                state = semantic_index.selected_parent_index_state(vault_root, page.rel_path)
+            except (OSError, UnicodeError, ValueError) as error:
+                log.warning("matched-unit parse failed for %s: %s", hit.path, error)
+                hit.matched_units = []
+                continue
         page_value = structured_filters.page_view(page)
         matched = [
             unit
@@ -4251,6 +4594,12 @@ def _find_managed_browse(
             candidate if first[emitted] == emitted else _resolve_page(vault_root, emitted, pending)
         )
         if candidate is None or page is None:
+            from . import lexstore
+
+            view = lexstore._admitted_catalog_view(vault_root)
+            if view is not None:
+                view.incomplete = True
+                continue
             raise RetrievalIndexWarming(site="browse_snapshot_unavailable")
         for current in (candidate, page):
             expected = metadata[current.rel_path]
@@ -4515,7 +4864,9 @@ def _find_semantic(
     pending: Any | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
-) -> list[Hit]:
+    prepared_queries: find_candidates.PreparedQueryInputs | None = None,
+    defer_finish: bool = False,
+) -> list[Hit] | _SelectedHits:
     """Hybrid (BM25+vector) or vector-only mode.
 
     `failed_out` (distinct from `degraded_out`): a POST-WARM lane FAILURE — the
@@ -4611,6 +4962,7 @@ def _find_semantic(
             admitted_paths=admitted_paths,
             capture_trace=retrieval_trace is not None,
             query_vector_provider=query_vector_provider,
+            prepared_queries=prepared_queries,
             shadow=(pending.shadow if pending is not None and not pending.empty else None),
         )
     except lexstore.CatalogUnavailable as error:
@@ -4896,216 +5248,225 @@ def _find_semantic(
             if len(hits) >= target_n:
                 break
 
-    # Resolve the rerank decision. An explicit rerank=True/False always wins;
-    # otherwise (rerank is None) auto_rerank consults should_rerank on the built
-    # hits. Keeps the reranker model out of the default/test path.
-    rerank_outcome: dict[str, Any]
-    if not hits:
-        do_rerank = False
-        rerank_outcome = {"decision": "skipped", "reason": "no_hits"}
-    elif rerank is False:
-        do_rerank = False
-        rerank_outcome = {"decision": "skipped", "reason": "explicit_false"}
-    elif rerank is None:
-        if not auto_rerank:
+    def finish() -> list[Hit]:
+        nonlocal hits
+
+        # Resolve the rerank decision. An explicit rerank=True/False always wins;
+        # otherwise (rerank is None) auto_rerank consults should_rerank on the built
+        # hits. Keeps the reranker model out of the default/test path.
+        rerank_outcome: dict[str, Any]
+        if not hits:
             do_rerank = False
-            rerank_outcome = {
-                "decision": "skipped",
-                "reason": "auto_policy_not_allowed",
-            }
-        else:
-            do_rerank = should_rerank(hits, query, config)
-            rerank_outcome = {
-                "decision": "pending" if do_rerank else "skipped",
-                "reason": "auto_policy_selected" if do_rerank else "auto_policy_declined",
-            }
-    else:
-        do_rerank = True
-        rerank_outcome = {"decision": "pending", "reason": "explicit_true"}
-
-    if do_rerank and not embeddings.ranking_enabled():
-        do_rerank = False  # EXOMEM_DISABLE_RANKING — hard off, even for explicit rerank=True
-        rerank_outcome = {"decision": "skipped", "reason": "hard_disabled"}
-
-    if do_rerank:
-        # A reranker judges only what it declares it can: the script most of the
-        # query is written in, and a query against a passage in another language
-        # only if it is cross-lingual. Outside that it reorders by the wrong
-        # signal (find_policy._RERANKER_COVERAGE), so the fused order stands,
-        # explicit rerank=True included.
-        coverage = find_policy.reranker_coverage(embeddings.RERANKER_NAME)
-        if not find_policy.reranker_reads_query(coverage, query):
+            rerank_outcome = {"decision": "skipped", "reason": "no_hits"}
+        elif rerank is False:
             do_rerank = False
-            rerank_outcome = {"decision": "skipped", "reason": "query_script_not_covered"}
-        elif bundle.lexical_crossing is not None and not coverage.cross_lingual:
-            do_rerank = False
-            rerank_outcome = {
-                "decision": "skipped",
-                "reason": _RERANK_CROSSING_REASONS[bundle.lexical_crossing],
-            }
-
-    if do_rerank and readiness.should_defer("reranker"):
-        # Background warm-up owns the reranker load right now — calling
-        # rerank_pairs would block on the singleton lock. Skip; caller marks
-        # the response as warming.
-        if degraded_out is not None:
-            degraded_out.append("reranker")
-        do_rerank = False
-        rerank_outcome = {"decision": "deferred", "reason": "model_warming"}
-
-    if do_rerank and hits:
-        # Last, after every other reason the reranker might already be off: a
-        # stage that was never going to run must not be reported as a cost the
-        # budget imposed. Checked before the stage starts rather than cancelled
-        # inside it — `rerank_pairs` does not poll a flag, and a half-applied
-        # rerank would reorder the prefix unpredictably, which is the one
-        # outcome the caller cannot reason about from the hits alone.
-        active_budget = request_budget.current()
-        if active_budget is not None and not active_budget.can_afford(
-            _rerank_reserve_seconds()
-        ):
-            active_budget.note_skipped("rerank")
-            do_rerank = False
-            rerank_outcome = {"decision": "skipped", "reason": "request_budget"}
-
-    if timings is not None and not (do_rerank and hits):
-        timings.skipped("rerank")
-    scorer_input_count = 0
-    unscored_tail_count = max(0, len(hits) - rerank_candidate_limit)
-    if do_rerank and hits:
-        with _span(timings, "rerank"):
-            rerank_prefix = hits[:rerank_candidate_limit]
-            scorer_input_count = len(rerank_prefix)
-            try:
-                from . import embeddings as emb
-
-                # Best passage for each hit: the matched chunk when we have one,
-                # else the leading body slice.
-                passages: list[str] = []
-                for h in rerank_prefix:
-                    ctext = chunk_text_by_path.get(h.path)
-                    if ctext:
-                        passages.append(ctext)
-                    else:
-                        pg = _page_of(h.path)
-                        body = (pg.body if pg else "") or h.excerpt
-                        passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
-                scores = emb.rerank_pairs(query, passages)
-                if len(scores) != len(rerank_prefix):
-                    raise ValueError("reranker returned a score count that does not match its inputs")
-                score_updates: list[
-                    tuple[
-                        Hit,
-                        int,
-                        float,
-                        float,
-                        list[dict[str, float | str]] | None,
-                    ]
-                ] = []
-                for input_rank, (h, s) in enumerate(zip(rerank_prefix, scores, strict=True), start=1):
-                    raw_score = float(s)
-                    adjusted = raw_score
-                    chain: list[dict[str, float | str]] | None = (
-                        [] if retrieval_trace is not None else None
-                    )
-                    if prefer_compiled:
-                        factor = find_policy.type_multiplier(h.type, config, type_basis)
-                        before = adjusted
-                        adjusted *= factor
-                        if chain is not None:
-                            chain.append(
-                                {
-                                    "name": "type",
-                                    "factor": factor,
-                                    "before": before,
-                                    "after": adjusted,
-                                }
-                            )
-                    if prefer_active:
-                        page = _page_of(h.path)
-                        factor = _status_multiplier(
-                            status_basis.classify(
-                                page.frontmatter.get("status") if page else h.status,
-                                path=h.path,
-                                frontmatter=page.frontmatter if page else None,
-                            ).require(), config
-                        )
-                        before = adjusted
-                        adjusted *= factor
-                        if chain is not None:
-                            chain.append(
-                                {
-                                    "name": "status",
-                                    "factor": factor,
-                                    "before": before,
-                                    "after": adjusted,
-                                }
-                            )
-                    if usage_map and h.usage_boost_applied:
-                        factor = h.usage_boost_applied
-                        before = adjusted
-                        adjusted *= factor
-                        if chain is not None:
-                            chain.append(
-                                {
-                                    "name": "usage",
-                                    "factor": factor,
-                                    "before": before,
-                                    "after": adjusted,
-                                }
-                            )
-                    score_updates.append((h, input_rank, raw_score, adjusted, chain))
-                # Commit annotations only after every returned score and multiplier
-                # has been validated. A late conversion/application failure must
-                # leave the fused fallback free of partial reranker evidence.
-                for h, input_rank, raw_score, adjusted, chain in score_updates:
-                    h.rerank_input_rank = input_rank
-                    h.rerank_raw_score = raw_score
-                    h.rerank_score = adjusted
-                    if chain is not None:
-                        h.rerank_multiplier_chain = chain
-                hits = _order_reranked_prefix(
-                    hits,
-                    prefix_count=len(rerank_prefix),
-                )
-                rerank_outcome = {"decision": "ran", "reason": "ran"}
-            except ImportError as e:
-                log.warning("rerank requested but reranker unavailable: %s", e)
-                if timings is not None:
-                    timings.error("rerank", e)
+            rerank_outcome = {"decision": "skipped", "reason": "explicit_false"}
+        elif rerank is None:
+            if not auto_rerank:
+                do_rerank = False
                 rerank_outcome = {
-                    "decision": "unavailable",
-                    "reason": "dependency_unavailable",
+                    "decision": "skipped",
+                    "reason": "auto_policy_not_allowed",
                 }
-            except runtime_resources.ModelBusyError:
-                raise
-            except Exception as e:  # noqa: BLE001 - optional reranker must soft-fail.
-                log.warning("rerank failed: %s; returning fused order", e)
-                if timings is not None:
-                    timings.error("rerank", e)
-                rerank_outcome = {"decision": "failed", "reason": "runtime_failure"}
+            else:
+                do_rerank = should_rerank(hits, query, config)
+                rerank_outcome = {
+                    "decision": "pending" if do_rerank else "skipped",
+                    "reason": "auto_policy_selected" if do_rerank else "auto_policy_declined",
+                }
+        else:
+            do_rerank = True
+            rerank_outcome = {"decision": "pending", "reason": "explicit_true"}
 
-    _set_rerank_timing_profile(
-        timings,
-        requested=rerank_max_candidates,
-        effective=rerank_candidate_limit,
-        scorer_input_count=scorer_input_count,
-        unscored_tail_count=unscored_tail_count,
-        decision=rerank_outcome["decision"],
-        reason=rerank_outcome["reason"],
-    )
+        if do_rerank and not embeddings.ranking_enabled():
+            do_rerank = False  # EXOMEM_DISABLE_RANKING — hard off, even for explicit rerank=True
+            rerank_outcome = {"decision": "skipped", "reason": "hard_disabled"}
 
-    final_hits = hits[:limit]
-    if retrieval_trace is not None:
-        retrieval_trace.record_page_candidates(
-            bundle,
-            final_hits,
-            reranker_model=embeddings.RERANKER_NAME,
-            rerank_outcome=rerank_outcome,
+        if do_rerank:
+            # A reranker judges only what it declares it can: the script most of the
+            # query is written in, and a query against a passage in another language
+            # only if it is cross-lingual. Outside that it reorders by the wrong
+            # signal (find_policy._RERANKER_COVERAGE), so the fused order stands,
+            # explicit rerank=True included.
+            coverage = find_policy.reranker_coverage(embeddings.RERANKER_NAME)
+            if not find_policy.reranker_reads_query(coverage, query):
+                do_rerank = False
+                rerank_outcome = {"decision": "skipped", "reason": "query_script_not_covered"}
+            elif bundle.lexical_crossing is not None and not coverage.cross_lingual:
+                do_rerank = False
+                rerank_outcome = {
+                    "decision": "skipped",
+                    "reason": _RERANK_CROSSING_REASONS[bundle.lexical_crossing],
+                }
+
+        if do_rerank and readiness.should_defer("reranker"):
+            # Background warm-up owns the reranker load right now — calling
+            # rerank_pairs would block on the singleton lock. Skip; caller marks
+            # the response as warming.
+            if degraded_out is not None:
+                degraded_out.append("reranker")
+            do_rerank = False
+            rerank_outcome = {"decision": "deferred", "reason": "model_warming"}
+
+        if do_rerank and hits:
+            # Last, after every other reason the reranker might already be off: a
+            # stage that was never going to run must not be reported as a cost the
+            # budget imposed. Checked before the stage starts rather than cancelled
+            # inside it — `rerank_pairs` does not poll a flag, and a half-applied
+            # rerank would reorder the prefix unpredictably, which is the one
+            # outcome the caller cannot reason about from the hits alone.
+            active_budget = request_budget.current()
+            if active_budget is not None and not active_budget.can_afford(
+                _rerank_reserve_seconds()
+            ):
+                active_budget.note_skipped("rerank")
+                do_rerank = False
+                rerank_outcome = {"decision": "skipped", "reason": "request_budget"}
+
+        if timings is not None and not (do_rerank and hits):
+            timings.skipped("rerank")
+        scorer_input_count = 0
+        unscored_tail_count = max(0, len(hits) - rerank_candidate_limit)
+        if do_rerank and hits:
+            with _span(timings, "rerank"):
+                rerank_prefix = hits[:rerank_candidate_limit]
+                scorer_input_count = len(rerank_prefix)
+                try:
+                    from . import embeddings as emb
+
+                    # Best passage for each hit: the matched chunk when we have one,
+                    # else the leading body slice.
+                    passages: list[str] = []
+                    for h in rerank_prefix:
+                        ctext = chunk_text_by_path.get(h.path)
+                        if ctext:
+                            passages.append(ctext)
+                        else:
+                            pg = _page_of(h.path)
+                            body = (pg.body if pg else "") or h.excerpt
+                            passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
+                    scores = emb.rerank_pairs(query, passages)
+                    if len(scores) != len(rerank_prefix):
+                        raise ValueError(
+                            "reranker returned a score count that does not match its inputs"
+                        )
+                    score_updates: list[
+                        tuple[
+                            Hit,
+                            int,
+                            float,
+                            float,
+                            list[dict[str, float | str]] | None,
+                        ]
+                    ] = []
+                    for input_rank, (h, s) in enumerate(
+                        zip(rerank_prefix, scores, strict=True), start=1
+                    ):
+                        raw_score = float(s)
+                        adjusted = raw_score
+                        chain: list[dict[str, float | str]] | None = (
+                            [] if retrieval_trace is not None else None
+                        )
+                        if prefer_compiled:
+                            factor = find_policy.type_multiplier(h.type, config, type_basis)
+                            before = adjusted
+                            adjusted *= factor
+                            if chain is not None:
+                                chain.append(
+                                    {
+                                        "name": "type",
+                                        "factor": factor,
+                                        "before": before,
+                                        "after": adjusted,
+                                    }
+                                )
+                        if prefer_active:
+                            page = _page_of(h.path)
+                            factor = _status_multiplier(
+                                status_basis.classify(
+                                    page.frontmatter.get("status") if page else h.status,
+                                    path=h.path,
+                                    frontmatter=page.frontmatter if page else None,
+                                ).require(), config
+                            )
+                            before = adjusted
+                            adjusted *= factor
+                            if chain is not None:
+                                chain.append(
+                                    {
+                                        "name": "status",
+                                        "factor": factor,
+                                        "before": before,
+                                        "after": adjusted,
+                                    }
+                                )
+                        if usage_map and h.usage_boost_applied:
+                            factor = h.usage_boost_applied
+                            before = adjusted
+                            adjusted *= factor
+                            if chain is not None:
+                                chain.append(
+                                    {
+                                        "name": "usage",
+                                        "factor": factor,
+                                        "before": before,
+                                        "after": adjusted,
+                                    }
+                                )
+                        score_updates.append((h, input_rank, raw_score, adjusted, chain))
+                    # Commit annotations only after every returned score and multiplier
+                    # has been validated. A late conversion/application failure must
+                    # leave the fused fallback free of partial reranker evidence.
+                    for h, input_rank, raw_score, adjusted, chain in score_updates:
+                        h.rerank_input_rank = input_rank
+                        h.rerank_raw_score = raw_score
+                        h.rerank_score = adjusted
+                        if chain is not None:
+                            h.rerank_multiplier_chain = chain
+                    hits = _order_reranked_prefix(
+                        hits,
+                        prefix_count=len(rerank_prefix),
+                    )
+                    rerank_outcome = {"decision": "ran", "reason": "ran"}
+                except ImportError as e:
+                    log.warning("rerank requested but reranker unavailable: %s", e)
+                    if timings is not None:
+                        timings.error("rerank", e)
+                    rerank_outcome = {
+                        "decision": "unavailable",
+                        "reason": "dependency_unavailable",
+                    }
+                except runtime_resources.ModelBusyError:
+                    raise
+                except Exception as e:  # noqa: BLE001 - optional reranker must soft-fail.
+                    log.warning("rerank failed: %s; returning fused order", e)
+                    if timings is not None:
+                        timings.error("rerank", e)
+                    rerank_outcome = {"decision": "failed", "reason": "runtime_failure"}
+
+        _set_rerank_timing_profile(
+            timings,
+            requested=rerank_max_candidates,
+            effective=rerank_candidate_limit,
             scorer_input_count=scorer_input_count,
             unscored_tail_count=unscored_tail_count,
+            decision=rerank_outcome["decision"],
+            reason=rerank_outcome["reason"],
         )
-    return final_hits
+
+        final_hits = hits[:limit]
+        if retrieval_trace is not None:
+            retrieval_trace.record_page_candidates(
+                bundle,
+                final_hits,
+                reranker_model=embeddings.RERANKER_NAME,
+                rerank_outcome=rerank_outcome,
+                scorer_input_count=scorer_input_count,
+                unscored_tail_count=unscored_tail_count,
+            )
+        return final_hits
+
+    return _SelectedHits(hits, finish) if defer_finish else finish()
 
 
 def _widening_allowed_paths(
@@ -5183,7 +5544,8 @@ def _find_outside_kb(
     failed_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
     timings: FindTimings | None = None,
-) -> list[Hit]:
+    defer_finish: bool = False,
+) -> list[Hit] | _OutsideSelection:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers the requested `scope="kb"` widening.
 
@@ -5372,60 +5734,71 @@ def _find_outside_kb(
     if catalog_served:
         _mark_source(timings, "outside_kb", find_types.SOURCE_INDEX)
 
-    hits: list[Hit] = []
-    seen: set[str] = set()
-    for rel_path in candidates:
-        if rel_path in seen or (exclude_paths is not None and rel_path in exclude_paths):
-            continue
-        seen.add(rel_path)
-        if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
-            continue
-        page = _CACHE.get(vault_root / rel_path, vault_root)
-        if page is None:
-            continue
-        if post_eligibility is not None and rel_path not in post_eligibility:
-            continue
-        if not _passes_filters(
-            page,
-            vault_root=vault_root,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-        ):
-            continue
-        # Relaxed gate: BM25 score>0 already implies a token match, but the
-        # keyword fallback path needs this explicit check.
-        if not _any_stem_present(page, query_norm):
-            continue
-        excerpt = _stem_anchored_excerpt(page, query_norm)
-        hits.append(
-            Hit(
-                path=page.rel_path,
-                type=page.page_type,
-                scope=page.scope,
-                title=page.title,
-                updated=page.updated,
-                excerpt=excerpt or "",
-                media_type=page.media_type,
-                media_file=page.media_file,
-                status=page.status,
-                superseded_by=page.superseded_by,
-                outside_kb=True,
-                snapshot_hash=page.snapshot_hash,
+    catalog_view = lexstore._admitted_catalog_view(vault_root)
+    if catalog_view is not None:
+        catalog_view.capture_page_hashes(candidates)
+
+    def finish(exclude_paths: set[str] | None) -> list[Hit]:
+        hits: list[Hit] = []
+        seen: set[str] = set()
+        for rel_path in candidates:
+            if rel_path in seen or (exclude_paths is not None and rel_path in exclude_paths):
+                continue
+            seen.add(rel_path)
+            if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+                continue
+            page = _resolve_page(vault_root, rel_path, catalog_view=catalog_view)
+            if page is None:
+                continue
+            if post_eligibility is not None and rel_path not in post_eligibility:
+                continue
+            if not _passes_filters(
+                page,
+                vault_root=vault_root,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+            ):
+                continue
+            # Relaxed gate: BM25 score>0 already implies a token match, but the
+            # keyword fallback path needs this explicit check.
+            if not _any_stem_present(page, query_norm):
+                continue
+            excerpt = _stem_anchored_excerpt(page, query_norm)
+            hits.append(
+                Hit(
+                    path=page.rel_path,
+                    type=page.page_type,
+                    scope=page.scope,
+                    title=page.title,
+                    updated=page.updated,
+                    excerpt=excerpt or "",
+                    media_type=page.media_type,
+                    media_file=page.media_file,
+                    status=page.status,
+                    superseded_by=page.superseded_by,
+                    outside_kb=True,
+                    snapshot_hash=page.snapshot_hash,
+                )
             )
+            if len(hits) >= limit:
+                break
+        if retrieval_trace is not None:
+            retrieval_trace.record_outside_candidates(
+                hits,
+                scores=score_by_path,
+                backend=lexical_backend,
+            )
+        return hits
+
+    if defer_finish:
+        return _OutsideSelection(
+            finish, find_types.SOURCE_INDEX if catalog_served else find_types.SOURCE_COMPUTED
         )
-        if len(hits) >= limit:
-            break
-    if retrieval_trace is not None:
-        retrieval_trace.record_outside_candidates(
-            hits,
-            scores=score_by_path,
-            backend=lexical_backend,
-        )
-    return hits
+    return finish(exclude_paths)
 
 
 def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
