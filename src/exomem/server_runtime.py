@@ -679,17 +679,16 @@ def _warm_embedding_matrix(vault_root: Path) -> None:
         # while foreground recall is already serving.
         if cloud_cell.resource_policy() == "service-v1":
             return
-        import numpy as np
+        from . import embeddings
 
-        from . import embeddings, recall_space
-
-        index = embeddings.get_embedding_index(vault_root)
-        dim = int(getattr(index, "dim", recall_space.LEGACY_DIM))
-        index.search(np.full(dim, 1.0 / (dim**0.5), dtype=np.float32), k=1)
+        # The load a cold recall starts: it reads off the index lock, so a
+        # recall meanwhile reports the dense lane warming and never waits.
+        embeddings.get_embedding_index(vault_root).start_corpus_matrix_load().join()
     except Exception:  # noqa: BLE001 - a warm is never load-bearing
         log.info("embedding matrix warm skipped", exc_info=True)
         return
-    log.info("embedding matrix warm done in %.0f ms", (time.perf_counter() - started) * 1000.0)
+    # The load logs its own outcome; a failed one is not "done".
+    log.info("embedding matrix warm finished in %.0f ms", (time.perf_counter() - started) * 1000.0)
 
 
 def redrain_backoffs(

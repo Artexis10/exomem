@@ -120,9 +120,9 @@ def test_the_matrix_warm_is_skipped_without_embeddings(
     assert touched == []
 
 
-@pytest.mark.parametrize("policy,expected", [("legacy", [8]), ("service-v1", [])])
+@pytest.mark.parametrize("policy,expected", [("legacy", 1), ("service-v1", 0)])
 def test_the_matrix_warm_runs_only_for_a_resident_corpus(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str, expected: list[int]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str, expected: int
 ) -> None:
     from exomem import embeddings
 
@@ -130,18 +130,16 @@ def test_the_matrix_warm_runs_only_for_a_resident_corpus(
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", policy)
-    searches: list[int] = []
+    loads: list[str] = []
 
     class Index:
-        dim = 8
-
-        def search(self, query, k=1):
-            searches.append(len(query))
-            return []
+        def start_corpus_matrix_load(self):
+            loads.append(policy)
+            return SimpleNamespace(join=lambda: None)
 
     monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: Index())
     server_runtime._warm_embedding_matrix(tmp_path)
-    assert searches == expected
+    assert len(loads) == expected
 
 
 def test_explicitly_disabled_warmup_does_not_build_request_or_matrix_caches(

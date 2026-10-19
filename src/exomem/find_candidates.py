@@ -453,7 +453,14 @@ def collect_candidates(
                             query_vec,
                             k=candidate_k * 3,
                             allowed_paths=semantic_paths,
-                            **({"encoded_for": encoded_for} if isinstance(source, embeddings.EmbeddingIndex) else {}),
+                            # A managed service never loads a cold corpus matrix on
+                            # a request thread; a one-shot caller has no later
+                            # request to serve and keeps the inline load.
+                            **(
+                                {"encoded_for": encoded_for, "defer_cold_load": readiness.runtime_managed()}
+                                if isinstance(source, embeddings.EmbeddingIndex)
+                                else {}
+                            ),
                         )
                         if building is not None and source is idx:
                             # The build holds a changed page's old rows until its
@@ -499,7 +506,7 @@ def collect_candidates(
             if capture_trace:
                 lane_statuses["vector"] = {
                     "status": "warming",
-                    "reason": recall_space.ServingEncoderCold.reason,
+                    "reason": e.reason,
                     "model": embeddings.MODEL_NAME,
                 }
             log.info("vector search deferred (%s); ranking without the dense lane", e)
