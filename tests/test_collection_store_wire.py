@@ -126,7 +126,7 @@ def test_dispatcher_reports_committed_collection_and_held_lifecycle(store):
     assert store.inspect_collection(CID)["coverage"]["held"] == 0
 
 
-def test_dispatched_store_append_reuses_its_contract_and_fans_out_nothing(store, monkeypatch):
+def test_dispatched_store_append_parses_no_unchanged_manifest_and_fans_out_nothing(store, monkeypatch):
     """A store append must not YAML-parse an unchanged manifest again, must use a revised one,
     and must acknowledge without index fan-out, because its item views are recall-excluded."""
     from test_due_state_bulk_carriers import _command
