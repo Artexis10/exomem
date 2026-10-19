@@ -332,15 +332,19 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     workflow = _workflow()
     core_job = workflow["jobs"]["core-tests"]
     timing_job = workflow["jobs"]["timing-tests"]
-    # Job-level environment values select the timing modules; runtime defaults live on the steps.
+    # Job-level environment values select timing cases; runtime defaults live on the steps.
     assert timing_job["env"] == core_job["env"]
     assert timing_job["strategy"]["matrix"] == {
         "python-version": core_job["strategy"]["matrix"]["python-version"]
     }
     assert "needs" not in timing_job, "timing checks must overlap the worker pools"
-    serial_modules = list(core_job["env"].values())
-    for variable in core_job["env"]:
-        assert f'--ignore="${variable}"' in _run_step(core_job)["run"]
+    serial_selections = list(core_job["env"].values())
+    pooled_exclusions = []
+    for variable, selection in core_job["env"].items():
+        # Pytest separates a node ID from its module path with ::.
+        option = "--deselect" if "::" in selection else "--ignore"
+        assert f'{option}="${variable}"' in _run_step(core_job)["run"]
+        pooled_exclusions.append(f"{option}={selection}")
     serial_step = _run_step(timing_job)
     assert all(f'"${variable}"' in serial_step["run"] for variable in timing_job["env"])
     assert serial_step["if"] == "steps.scope.outputs.docs_only != 'true'"
@@ -353,8 +357,8 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
         and step.get("if") == "always()"
         for step in timing_job["steps"]
     )
-    core_items = _collect_items("pooled core tier", "core", [f"--ignore={module}" for module in serial_modules])
-    serial_items = _collect_items("serial core checks", "core", serial_modules)
+    core_items = _collect_items("pooled core tier", "core", pooled_exclusions)
+    serial_items = _collect_items("serial core checks", "core", serial_selections)
     serial = {item.nodeid for item in serial_items}
     harness_items = _collect_items("harness tier", "harness", [])
     latency_items = _collect_items("nightly latency file", None, [NIGHTLY_OWNED_MODULE])

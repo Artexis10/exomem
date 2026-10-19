@@ -292,6 +292,7 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
 def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    readiness.reset()
     monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     calls: list[str] = []
     observed_timeouts: list[float | None] = []
