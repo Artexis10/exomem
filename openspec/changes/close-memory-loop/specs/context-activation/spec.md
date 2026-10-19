@@ -517,7 +517,7 @@ It SHALL apply existing pointer, context and disclosure limits without automatic
 - **WHEN** the target is hidden, missing or ambiguous
 - **THEN** the compiler emits no substitute unit or page pointer
 - **AND** a hidden target consumes no allowance and does not preserve an otherwise redundant source fragment
-- **AND** a reader from whom nothing is withheld gets a partial correction context when the target page no longer exists
+- **AND** a reader from whom nothing is withheld gets a partial correction context when the target page no longer exists or its page name matches several pages
 - **AND** a reader denied any page gets the same packet for a withheld or a deleted target page as for a claim without that relation
 
 ### Requirement: A Planning item anchor reports its item page

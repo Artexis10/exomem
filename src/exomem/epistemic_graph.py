@@ -11090,7 +11090,7 @@ def _relation_target(
     *,
     source_path: str,
     check: Callable[[], None] | None = None,
-    landing: Callable[[str, str | None, str], tuple[str, str, dict[str, str]]] | None = None,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
 ) -> tuple[str, str, str, dict[str, Any]] | None:
     """Where one authored relation target lands: (dst, dst page, kind, metadata).
 
@@ -11111,20 +11111,27 @@ def _relation_target(
         return None
     if not canonical:
         return None
-    if warning and fragment and not any(
-        visible is None or visible(candidate) for candidate in _link_candidates(resolver, target)
-    ):
-        # No page this derivation may see carries the fragment: keep the authored
-        # address so a reader learns the dependency is gone. A reader denied the
-        # page gets the same destination and fragment outcome, as in a vault
-        # without it. Rows written before this rule stay bare until their source
-        # is re-derived; a public delete rebuilds, so no schema bump is forced.
+    if warning and fragment:
+        # The page name resolves to no page this derivation may see, or to
+        # several: keep the authored address so a reader learns the dependency
+        # is gone or unsettled. A reader denied a page gets the same destination
+        # and fragment outcome, as in a vault without it. Rows written before
+        # this rule stay bare until their source is re-derived; a public delete
+        # rebuilds, so no schema bump is forced.
         page_key = _file_key(_with_md(canonical))
-        dst_key, dst_page_key, fragment_metadata = page_key, page_key, _unlanded_fragment(fragment)
+        dst_key, dst_page_key = page_key, page_key
+        if any(
+            visible is None or visible(candidate) for candidate in _link_candidates(resolver, target)
+        ):
+            # A resolver warning with a visible candidate is a name that
+            # several visible pages share.
+            fragment_metadata = {"target_fragment": fragment, "fragment_resolution": "ambiguous"}
+        else:
+            fragment_metadata = _unlanded_fragment(fragment)
     else:
         dst_key, dst_page_key, fragment_metadata = (
-            _relation_destination(vault_root, canonical, warning, fragment)
-            if landing is None else landing(canonical, warning, fragment)
+            _relation_destination(vault_root, canonical, fragment)
+            if landing is None else landing(canonical, fragment)
         )
     return dst_key, dst_page_key, _target_kind(vault_root, canonical), {
         "target_resolution": "unresolved" if warning else "resolved",
@@ -11426,7 +11433,7 @@ def _split_target_fragment(raw: str) -> tuple[str, str]:
 
 
 def _relation_destination(
-    vault_root: Path, canonical: str, warning: str | None, fragment: str
+    vault_root: Path, canonical: str, fragment: str
 ) -> tuple[str, str, dict[str, str]]:
     """Where a relation edge lands, and what the author should be told.
 
@@ -11435,7 +11442,7 @@ def _relation_destination(
     always produced, and records why, so a typo degrades instead of deleting.
     """
     page_key = _file_key(_with_md(canonical))
-    if not fragment or warning:
+    if not fragment:
         return page_key, page_key, {}
     resolved = _current_page_unit(
         vault_root,
@@ -12702,12 +12709,12 @@ class GraphView:
             return []
 
     def _snapshot_landing(
-        self, canonical: str, warning: str | None, fragment: str,
+        self, canonical: str, fragment: str,
     ) -> tuple[str, str, dict[str, str]]:
         """Use the validated target summary instead of parsing target source text."""
         self._check()
         page_key = _file_key(_with_md(canonical))
-        if not fragment or warning:
+        if not fragment:
             return page_key, page_key, {}
         row = self._land({"dst_key": page_key, "metadata": _unlanded_fragment(fragment)})
         return str(row["dst_key"]), page_key, dict(row["metadata"])
