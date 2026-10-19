@@ -547,8 +547,8 @@ def test_material_pointer_respects_role_priority(role: str):
 def crowded_project(material_vault: Path) -> str:
     # Ten recent pages give every default lens of the project more than its
     # cap; one older note answers a specific question about the same project.
-    filler = ("Winter bales at the north depot stay stacked by colour for the visiting "
-              "assessors while the shelving keeps every crate label facing the aisle, ")
+    filler = ("Winter bales at the north depot stay stacked by color for the visiting "
+              "auditors while the shelving keeps every crate label facing the aisle, ")
     for i in range(10):
         _note(material_vault, f"depot-{i}", "\n".join(
             f"- [{category}] {filler}{filler}{filler}{category} {i}. ^{category}-{i}"

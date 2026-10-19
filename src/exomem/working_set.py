@@ -80,8 +80,8 @@ PRECEDENTS_ROLE = "precedents"
 PROMOTED_SHARE_DIVISOR = 3
 #: While the turn ranked material, a units lens selected as an anchor default
 #: may not spend material's reserve: what material's first items
-#: cost, at most this share (a third) of the budget left after continuity and
-#: state. A packet-shape bound like `MAX_ITEMS_PER_ROLE`, the same for every
+#: cost, at most this share (a third) of the budget left after continuity,
+#: state and conversation headers. A packet-shape bound like `MAX_ITEMS_PER_ROLE`, the same for every
 #: vault, so it is not configuration.
 MATERIAL_RESERVE_DIVISOR = 3
 #: Candidate units after the catalogue's parent and category predicates.
