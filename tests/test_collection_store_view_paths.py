@@ -349,3 +349,30 @@ def test_a_casefold_folder_spelling_cannot_bypass_the_aggregate_view_check(vault
     assert _as(vault, owner_principal(), lambda: egress.owner_only_aggregate(vault.root)) == {
         "available": False, "reason": "audience_restricted",
     }
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_maintenance_never_reports_or_repairs_a_restricted_vault_aggregate(vault, dry_run):
+    """A deleted hidden view must not change maintenance findings, counts or status."""
+    from exomem import commands, memory_refs, writer_lease
+
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "maintain_memory")
+
+    def report():
+        return writer_lease.invoke_command(command, vault.root, mode="reconcile", dry_run=dry_run)
+
+    _add_secret(vault)
+    memory_refs.ReferenceIndex(vault.root).rebuild_all()
+    before = _as(vault, _external(), report)
+    (vault.root / SECRET).unlink()
+    drift = memory_refs.drift(vault.root)
+    assert any(finding["path"] == SECRET for finding in drift)
+    assert _as(vault, _external(), report) == before == {
+        "available": False, "reason": "audience_restricted",
+    }
+    # A refused write-mode maintenance call cannot silently repair the hidden input.
+    assert memory_refs.drift(vault.root) == drift
+    owner = _as(vault, owner_principal(), lambda: writer_lease.invoke_command(
+        command, vault.root, mode="reconcile", dry_run=True))
+    assert SECRET in json.dumps(owner["remaining_drift"])
+    assert owner["references_refreshed"] == len(drift)

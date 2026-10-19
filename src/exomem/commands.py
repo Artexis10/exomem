@@ -4053,6 +4053,7 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
     Narrower than `audit_fix`: it does NOT canonicalize wikilinks or
     backfill frontmatter (those are content rewrites you opt into).
     Idempotent; `dry_run=true` reports without writing.
+    Whole-vault findings and totals require unrestricted owner authority.
 
     Args:
         dry_run: If true, compute what would change without writing.
@@ -4067,6 +4068,9 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
          remaining_drift: [<audit findings>],
          dry_run: bool}
     """
+    refusal = egress_module.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     from .writer_lease import (
         active_direct_mutation_guard,
         active_manager,
