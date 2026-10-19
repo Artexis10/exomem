@@ -45,11 +45,13 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 
 class PortabilityError(RuntimeError):
-    """Stable, content-free portability failure."""
+    """Stable, content-free portability failure. On RESOURCE_LIMIT_EXCEEDED,
+    `limit` names the PortabilityLimits field that was exceeded."""
 
-    def __init__(self, code: str, reason: str) -> None:
+    def __init__(self, code: str, reason: str, *, limit: str | None = None) -> None:
         self.code = code
         self.reason = reason
+        self.limit = limit
         super().__init__(f"{code}: {reason}")
 
 
@@ -419,8 +421,8 @@ class _SourceSnapshot:
     source_signature: tuple[int, int, int, int, int, int]
 
 
-def _fail(code: str, reason: str) -> None:
-    raise PortabilityError(code, reason)
+def _fail(code: str, reason: str, *, limit: str | None = None) -> None:
+    raise PortabilityError(code, reason, limit=limit)
 
 
 def _validate_identifier(value: str, field: str) -> None:
@@ -654,7 +656,11 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
                 continue
             size, digest, source_signature = _digest_regular_source(source)
             if size > limits.max_file_bytes:
-                _fail("RESOURCE_LIMIT_EXCEEDED", "a source file exceeds the export limit")
+                _fail(
+                    "RESOURCE_LIMIT_EXCEEDED",
+                    "a source file exceeds the export limit",
+                    limit="max_file_bytes",
+                )
             snapshots.append(
                 _SourceSnapshot(
                     path=normalized,
@@ -667,9 +673,17 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
             )
             total_bytes += size
             if len(snapshots) > limits.max_files:
-                _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export file limit")
+                _fail(
+                    "RESOURCE_LIMIT_EXCEEDED",
+                    "the vault exceeds the export file limit",
+                    limit="max_files",
+                )
             if total_bytes > limits.max_total_bytes:
-                _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export byte limit")
+                _fail(
+                    "RESOURCE_LIMIT_EXCEEDED",
+                    "the vault exceeds the export byte limit",
+                    limit="max_total_bytes",
+                )
 
     # Two portable-derived families now live outside the vault.  Preserve
     # their established logical archive names so old/new archives share one
@@ -713,6 +727,7 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
                     _fail(
                         "RESOURCE_LIMIT_EXCEEDED",
                         "a source file exceeds the export limit",
+                        limit="max_file_bytes",
                     )
                 snapshots.append(
                     _SourceSnapshot(
@@ -726,9 +741,17 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
                 )
                 total_bytes += size
                 if len(snapshots) > limits.max_files:
-                    _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export file limit")
+                    _fail(
+                        "RESOURCE_LIMIT_EXCEEDED",
+                        "the vault exceeds the export file limit",
+                        limit="max_files",
+                    )
                 if total_bytes > limits.max_total_bytes:
-                    _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export byte limit")
+                    _fail(
+                        "RESOURCE_LIMIT_EXCEEDED",
+                        "the vault exceeds the export byte limit",
+                        limit="max_total_bytes",
+                    )
     snapshots.sort(key=lambda snapshot: snapshot.path)
     folded: set[str] = set()
     directory_spellings: dict[str, str] = {}
@@ -1077,23 +1100,43 @@ def _preflight_entries(
         if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
             _fail("UNSAFE_ARCHIVE_ENTRY", "archive uses an unsupported compression method")
         if len(normalized.encode("utf-8")) > limits.max_path_bytes:
-            _fail("RESOURCE_LIMIT_EXCEEDED", "an archive path exceeds the configured limit")
+            _fail(
+                "RESOURCE_LIMIT_EXCEEDED",
+                "an archive path exceeds the configured limit",
+                limit="max_path_bytes",
+            )
         if info.file_size < 0 or info.file_size > limits.max_file_bytes:
-            _fail("RESOURCE_LIMIT_EXCEEDED", "an archive entry exceeds the configured limit")
+            _fail(
+                "RESOURCE_LIMIT_EXCEEDED",
+                "an archive entry exceeds the configured limit",
+                limit="max_file_bytes",
+            )
         if info.compress_size == 0:
             ratio = info.file_size if info.file_size else 1
         else:
             ratio = info.file_size / info.compress_size
         if ratio > limits.max_compression_ratio:
-            _fail("RESOURCE_LIMIT_EXCEEDED", "an archive entry exceeds the compression limit")
+            _fail(
+                "RESOURCE_LIMIT_EXCEEDED",
+                "an archive entry exceeds the compression limit",
+                limit="max_compression_ratio",
+            )
         if normalized == MANIFEST_NAME:
             if info.file_size > limits.max_manifest_bytes:
-                _fail("RESOURCE_LIMIT_EXCEEDED", "manifest exceeds the configured limit")
+                _fail(
+                    "RESOURCE_LIMIT_EXCEEDED",
+                    "manifest exceeds the configured limit",
+                    limit="max_manifest_bytes",
+                )
         else:
             payload_files += 1
             total_bytes += info.file_size
             if payload_files > limits.max_files or total_bytes > limits.max_total_bytes:
-                _fail("RESOURCE_LIMIT_EXCEEDED", "archive exceeds the configured limits")
+                _fail(
+                    "RESOURCE_LIMIT_EXCEEDED",
+                    "archive exceeds the configured limits",
+                    limit="max_files" if payload_files > limits.max_files else "max_total_bytes",
+                )
     return by_path
 
 

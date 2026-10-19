@@ -583,6 +583,8 @@ This follow-up does not gate the confirmed GA scope. Existing query CSV/JSON out
 
 **Owner ruling, 2026-10-04 — S1 only.** The first NEW owner-only Records summary collection may pass its independent S1 release gate before full public inspect p95 <15 ms and guarded append p95 <20 ms are met. Continue measuring and reporting both as optimisation targets, with scope, actual paths, data size and environment; do not mark the parent performance gate passed or claim those latencies. The general phase/GA targets below remain unchanged. All S1 correctness, permissions, integrity, crash/retry, compatibility, publication/recovery, portability and other applicable bounds remain prerequisites. This allows the necessary parent foundation to be delivered dark before its full P1a phase gate; it does not authorize existing-collection migration, arbitrary-type rollout or renewed CPU tuning instead of the product outcomes.
 
+**Owner ruling, 2026-10-19: latency does not block GA.** Measurement showed that the 15 ms inspect target is out of reach at 10,000 rows with the current inspect response. The owner then ruled that latency targets must not block shipping, because these latencies are small next to the benefit over the file-mode system. For scale, the file-mode guarded append after #1457's fixes measured 625/706 ms p50/p95 at 1,000 items (`docs/verification/records-append-latency.md`). The store service path measured 48.19/58.81 ms in one A/B arm of a different harness (below). The append, inspect, bulk, acknowledgement and per-stage targets in P1a.15, P2.8 and the structured-collections latency requirement stay optimisation targets. Query latency no worse than the file path stays a required bound, because it keeps that comparison true for queries. Each phase gate measures and reports them on Linux and native Windows/NTFS, with scope, path, data size and environment. A missed target is reported as missed, never as passed. Correctness, permissions, integrity, crash and retry, recovery, compatibility, portability, resource-budget and parity gates are unchanged, and so are the other P3.6 prerequisites.
+
 **Targets**, in the release acceptance harness, as extensions of `scripts/measure-records-append-latency.py` from #1457:
 
 | Operation | Target | Today on `main` (#1457) | Spike (storage engine only) |
@@ -657,6 +659,36 @@ The retained `measurement.json` hashes bind the observed values:
 | Before | 10,000 | `c6a859d93944c36139da2f8dcddc485b6fb30c0b2386cdfad2ad0d6e569a2777` |
 | After | 10,000 | `a5e903736438dd720c58973a3a4d2aa855570199a7d9e96b2452bc87558ad35f` |
 
+**Baseline at `f8cd6c119`, 2026-10-19.** This rerun uses the same frozen service probes, Python 3.13.14 and SQLite 3.53.1, on a Linux/WSL host with no free swap. Each size ran once.
+
+| Initial rows | Inspect p50/p95, ms | Append p50/p95, ms | Partial refusal, ms | Bulk 500, ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 46.03 / 78.49 | 95.81 / 226.53 | 101.35 | 632.65 |
+| 10,000 | 101.44 / 182.25 | 74.29 / 179.85 | 341.18 | 497.06 |
+
+The 1,000-row tail is most likely host noise: one instrumented run of the same probe minutes later measured append p50/p95 66.55/75.50 ms. Exact values, counts and unchanged refusal fingerprints pass at both sizes.
+
+The isolated diagnostic (`scripts/measure-records-append-latency.py`, 10,000 rows, store-preview, phase probes) measured guarded append p50/p95 28.81/36.53 ms and inspect 107.98/134.14 ms; the inspect is almost all thread CPU. Four exclusive stages exceed their p95 budgets: dispatcher 7.69 ms (budget 5), lease 7.36 ms (budget 2), governance 10.63 ms (budget 2) and store transaction plus view 10.38 ms (budget 4). The 10,000-row inspect response is about 330 KB; its 2,000 `source_versions` entries are 324 KB of that, and terminal egress scrubs about 4,100 strings per call.
+
+**Coordinator request attribution, 2026-10-19.** Two instrumented 1,000-row runs used the same probe with a real loopback coordinator. The first timed each coordinator request on the client and on the server; the second recorded one call stack per request. In the first run, 27 of the 30 warm appends made eight coordinator requests; the other three also carried a background renew. The probe's fixture releases only `collections-migrate-v1`, so its summary-route check also proves ownership. With the shipped release set, a dispatch makes one proof fewer.
+
+| Requests per append | Call sites | Client p50, ms | Server p50, ms |
+| ---: | --- | ---: | ---: |
+| 4 status reads | canonical ownership proof: one on the caller thread, three inside the store dispatch | 1.2–1.4 each | 0.5 |
+| 2 status reads | store runtime fencing admission: checkout, and the write-authority check before the transaction | 1.3 each | 0.5 |
+| 2 acquires | `ensure_writer` in the operation guard and in the mutation guard | 11.3 each | 10.5 |
+
+Each acquire's server time is mostly its `COMMIT` (6.6 ms, WAL with `synchronous=FULL`) and closing its per-request connection (3.4 ms). The close is consistent with a last-connection WAL checkpoint; no system-call trace was taken. The coordinator windows total 31.38/47.13 ms p50/p95 of a 66.55/75.50 ms append. Each inspect also makes four or five status reads, about 6 ms. Removing every coordinator request would still leave the append above 20 ms.
+
+**Coordinator connection reuse, 2026-10-19.** The coordinator's lease store now keeps one SQLite connection, and a store dispatch proves ownership once for its own checks. Four 1,000-row runs alternated before (`f8cd6c119`) and after. Two of them lost their per-append totals to a join defect in the probe's report, not in the product. Their per-request timings are complete:
+
+| Arm | Acquire client p50, ms | Acquire server p50, ms | Acquire `COMMIT` / close p50, ms | Status reads per run |
+| --- | ---: | ---: | ---: | ---: |
+| Before (2 runs) | 11.86, 11.60 | 11.02, 10.88 | 6.7 / 3.5 | 353 |
+| After (2 runs) | 4.95, 4.63 | 3.95, 3.88 | 3.5 / 0 | 285 |
+
+The intact before/after pair shows the append p50/p95 moving from 65.48/75.71 ms to 48.19/58.81 ms. The coordinator windows per append fall from 30.94 to 14.50 ms p50, and the requests per append fall from 8 to 6 (from 7 to 6 with the shipped release set). The paired median append difference is −17.27 ms, with a descriptive bootstrap 95% interval of −18.53 to −14.91 ms over 30 positions. The inspect difference is +0.22 ms [−1.81, 2.15]: no change. One sequential pair on one host establishes no installed gain. Append still misses 20 ms.
+
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
 **End-to-end append budget.** #1457's SQLite prototype confirms the storage layer is flat: 2.6–3.8 ms with synchronous projection at both 1,000 and 10,000 items. Its end-to-end estimate of about 93/100 ms p50/p95 is dominated by about 90 ms of shared cost outside storage, which that composite carried over unchanged from today's writer. That 90 ms is the real target of the 20 ms goal. The budget, per stage at p95:
@@ -674,11 +706,11 @@ The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and
 | Receipt projection | ≈ 1 ms | ≤ 1 ms | unchanged |
 | **Total** | ≈ 155 ms p50 (157 ms at 10 items) | **≤ 19 ms p95** | |
 
-Each stage gets its own timer in the acceptance harness, and a stage over budget fails the full phase gate (task P1a.15). For the first NEW owner-only S1 collection, these component timing budgets support the waived 20 ms append target and are likewise measured optimisation targets, not release blockers. This does not relax bulk/query/resource bounds or any integrity, authorization, recovery, compatibility or portability gate. The collection-resolution and fan-out rows are where the 90 ms goes. Both are removed by the store design itself, not by tuning.
+Each stage gets its own timer in the acceptance harness, and the phase gate (task P1a.15) reports each stage against its budget. Under the 2026-10-19 owner ruling these budgets, like the 20 ms append target, are measured optimisation targets, not release blockers. This does not relax resource budgets or any integrity, authorization, recovery, compatibility or portability gate. The collection-resolution and fan-out rows are where the 90 ms goes. Both are removed by the store design itself, not by tuning.
 
 The guard refresh a client performs between writes is also a command, so it pays the dispatcher. #1457 estimates 15–25 ms, against a storage cost of 0.04 ms. Two things make it rare and cheap:
 - every mutation receipt already returns `after_container_hash` and `item_version`, so chained writes need no refresh;
-- `record_memory(action="inspect")` retains its full public response and is measured as that command (target p95 < 15 ms). Its guard fields come from the `collections` row, but that lookup alone does not satisfy acceptance: current counts, observed-value frequencies, presentation and coverage remain part of inspection. Remaining scans must be optimized if full inspection misses the budget.
+- `record_memory(action="inspect")` retains its full public response and is measured as that command (target p95 < 15 ms). Its guard fields come from the `collections` row, but that lookup alone does not satisfy acceptance: current counts, observed-value frequencies, presentation and coverage remain part of inspection. When full inspection misses its target, the gate reports the miss; optimizing the remaining scans is optional work.
 
 **Global inventory read reuse.** One global inspection owns one canonical read and authorization operation. Nested counts and coverage join that operation. Observation coverage reads the existing immutable parsed-file cache and shares one lazy canonical routing census across its retained manifests. Its batch-local closure cannot escape the call or authorize a later operation.
 

@@ -1277,6 +1277,24 @@ def test_cellctl_may_read_the_alert_delivery_secret_it_is_told_and_no_other(monk
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_reads_the_export_ttl_and_deadline_the_chart_sets(monkeypatch: pytest.MonkeyPatch) -> None:
+    # C6: a name the chart and cellctl disagree on would keep every export
+    # for the 24-hour default whatever the operator configured.
+    from datetime import timedelta
+
+    from cellctl.main import build_reconcile_config
+
+    documents = _helm_template("--set", "cellctl.exportTtlHours=6", "--set", "cellctl.exportDeadlineMinutes=12")
+    deployment = _find(documents, "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value") for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    for name, value in env.items():
+        if value is not None and name.startswith(("CELLCTL_", "EXOMEM_")):
+            monkeypatch.setenv(name, value)
+    config = build_reconcile_config()
+    assert (config.export_ttl, config.export_deadline) == (timedelta(hours=6), timedelta(minutes=12))
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_the_platform_jobs_image_is_required_and_digest_pinned() -> None:
     result = _helm_render("--set-string", "platformJobs.image=ghcr.io/artexis10/exomem:latest")
     assert result.returncode != 0

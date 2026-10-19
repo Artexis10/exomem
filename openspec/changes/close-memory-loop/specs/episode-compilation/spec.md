@@ -64,10 +64,14 @@ For newly supported conversational semantic corrections, the owning writer SHALL
 
 Revision history SHALL use the canonical owner's storage and recovery boundary, not a disposable retrieval projection. Historical reads SHALL be bounded and subject to current disclosure and retention policy. Missing, withheld or pruned historical content SHALL be unavailable without invented reconstruction or permission leakage. Supported backup/export/restore SHALL preserve retained history. Current-state reads SHALL remain usable without loading every revision.
 
-Note and unit history reads SHALL report `status: retained` only when at least one revision is independently admitted and usable.
+Note and unit history reads SHALL report `status: retained` only when they return at least one independently admitted and usable revision.
+When they return none and `truncated` is true, because a unit-scoped read reached its examination bound, they SHALL report `status: incomplete`.
 Otherwise they SHALL report `status: unavailable`.
-Every result SHALL report `coverage: unverified`; counts describe only admitted usable revisions, never complete retention.
+Every result SHALL report `coverage: unverified`; a result describes only admitted usable revisions, never complete retention.
 Missing, withheld, corrupt and unreadable history SHALL remain indistinguishable when no revision can be admitted.
+A history read SHALL open entries newest first and stop after one page plus one further admitted entry, without opening older entries.
+A unit-scoped read SHALL also examine no more than a page-derived number of admitted entries per call, so its page MAY be short or empty while `truncated` is true and the caller continues from the continuation.
+A continuation SHALL be the version of the last admitted entry the read examined, never the version of an unavailable entry.
 
 #### Scenario: Two refinements do not create three visible pages
 
@@ -87,16 +91,24 @@ Missing, withheld, corrupt and unreadable history SHALL remain indistinguishable
 
 #### Scenario: No usable revision is available
 
-- **WHEN** no retained revision can be independently admitted and validated
+- **WHEN** no retained revision can be independently admitted and validated, and the read is not truncated
 - **THEN** note and unit history report `status: unavailable` and `coverage: unverified`
-- **AND** counts describe zero usable revisions without revealing whether other history exists
+- **AND** the result returns zero revisions without revealing whether other history exists
 - **AND** the current page remains readable under its existing authority
 
 #### Scenario: Only part of retained history is usable
 
 - **WHEN** a history read admits some revisions while other entries cannot be admitted or validated
 - **THEN** the result reports `status: retained` and `coverage: unverified`
-- **AND** counts, ordering and pagination describe only admitted usable revisions without revealing unavailable entries
+- **AND** the returned revisions, their ordering and the pagination describe only admitted usable revisions without revealing unavailable entries
+
+#### Scenario: A unit-scoped read reaches its examination bound
+
+- **WHEN** a unit-scoped history read examines its per-call limit of admitted entries before it finds a revision that touches the unit
+- **THEN** the result reports `status: incomplete`, `truncated: true`, a `continuation` and `coverage: unverified`
+- **AND** the result never reports `status: unavailable`, because older admitted entries remain unexamined
+- **AND** the caller continues from the `continuation` until a page returns a revision or is not truncated
+- **AND** the continuation names only an admitted entry, so unavailable entries stay indistinguishable from absent ones
 
 ### Requirement: Ordinary agents correct individual claims in their canonical home
 

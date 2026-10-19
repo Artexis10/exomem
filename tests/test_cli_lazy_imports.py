@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,12 +19,16 @@ HEAVY_MODULES = ("torch", "sentence_transformers", "fastmcp", "textual")
 
 
 def _run_cli_with_module_probe(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess[str], set[str]]:
+    # A private copy: the CLI probes its vault root by writing scratch files there, and
+    # parallel tests copy tests/fixtures, so the shared directory must stay untouched.
+    vault = tmp_path / "vault"
+    shutil.copytree(FIXTURE_VAULT, vault)
     modules_path = tmp_path / "modules.json"
     state_root = (tmp_path / "external-state").resolve()
     with pytest.MonkeyPatch.context() as migration_env:
         migration_env.setenv("EXOMEM_STATE_ROOT", str(state_root))
         state_migration.migrate_vault_state_offline(
-            FIXTURE_VAULT,
+            vault,
             authority=state_migration.assert_offline_migration_authority(
                 source="CLI lazy-import subprocess setup"
             ),
@@ -51,7 +56,7 @@ atexit.register(dump_modules)
             "EXOMEM_DISABLE_EMBEDDINGS": "1",
             "EXOMEM_MODULES_PATH": str(modules_path),
             "EXOMEM_STATE_ROOT": str(state_root),
-            "EXOMEM_VAULT_PATH": str(FIXTURE_VAULT),
+            "EXOMEM_VAULT_PATH": str(vault),
             "PYTHONPATH": os.pathsep.join(
                 part for part in (str(tmp_path), str(ROOT / "src"), env.get("PYTHONPATH")) if part
             ),
@@ -87,7 +92,7 @@ def test_help_discovers_product_commands_without_importing_heavy_stacks(tmp_path
 
 
 def test_status_one_shot_does_not_import_heavy_stacks(tmp_path: Path) -> None:
-    result, modules = _run_cli_with_module_probe(tmp_path, "status", "--json", "--vault", str(FIXTURE_VAULT))
+    result, modules = _run_cli_with_module_probe(tmp_path, "status", "--json", "--vault", str(tmp_path / "vault"))
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["models"]["module_loaded"] is False

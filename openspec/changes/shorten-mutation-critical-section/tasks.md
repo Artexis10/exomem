@@ -140,17 +140,20 @@
 ## 5. C5 — chore: cleanup
 
 - [x] 5.1 `tasks.md` checkbox pass (this pass).
-- [ ] 5.2 Linux CI is authoritative for the full suite, latency gate, and
+- [x] 5.2 Linux CI is authoritative for the full suite, latency gate, and
       golden gate — this Windows box cannot run them
       (`fable-delegate-claude-only-windows` harness constraint).
+      Evidence: PR #327 (merge 4246bd8a3) merged with the full suite, golden gate and package checks green on Linux CI.
 
 ## 6. Verification
 
 - [x] 6.1 C1-C4 pinned suites stay green on Windows (see 2.5, 3.6, 4.4).
-- [ ] 6.2 `uv run ruff check src tests` clean on changed files — ruff is not
+- [x] 6.2 `uv run ruff check src tests` clean on changed files — ruff is not
       installed in this environment; the orchestrator runs it out-of-band.
-- [ ] 6.3 Linux CI: full suite, latency + golden gates (authoritative; this
+      Evidence: PR #327 merged with the lint and targeted type check green; later PRs #1412, #1501, #1504 and #1901 report Ruff clean.
+- [x] 6.3 Linux CI: full suite, latency + golden gates (authoritative; this
       box cannot run them).
+      Evidence: PR #327 merged with the full suite, product end-to-end and golden gate checks green on Linux CI.
 - [ ] 6.4 Live smoke after merge + deploy: induce a `remember` under a
       slow/cold validator and confirm `exomem_boundary_hold_ms` and the
       mutation journal show a narrowed hold, not the pre-change multi-minute
@@ -158,14 +161,18 @@
 
 ## 7. Availability repair: episode fanout and graph resolver preparation
 
-- [ ] 7.1 Add red-first episode contention regressions; preserve serialized first
+- [x] 7.1 Add red-first episode contention regressions; preserve serialized first
       revision, supersession, identical retry, direct-call and fast-ack behavior.
-- [ ] 7.2 Persist episode derived demand and defer fanout, heat and nudge until
+      Evidence: PR #1412 (merge 0c29ca1c3): `test_blocked_episode_fanout_does_not_hold_the_next_writer` and `test_concurrent_initial_episode_records_keep_one_live_revision` in `tests/test_episode_memory_command.py`.
+- [x] 7.2 Persist episode derived demand and defer fanout, heat and nudge until
       after the command guard and terminal persistence.
-- [ ] 7.3 Prepare graph drain resolver outside the boundary; prove a concurrent
+      Evidence: PR #1412: `test_episode_fanout_failure_keeps_a_committed_result_and_durable_demand` and `test_direct_episode_record_runs_fanout_with_durable_exact_paths` in `tests/test_episode_memory_command.py`.
+- [x] 7.3 Prepare graph drain resolver outside the boundary; prove a concurrent
       checkpoint change leaves debt queued and does not publish stale topology.
-- [ ] 7.4 Run affected suites, independent correctness review, public-artifact
+      Evidence: PR #1412 and #1501: `test_cold_drain_resolver_does_not_hold_the_writer_boundary` and `test_drain_rejects_a_resolver_prepared_before_a_concurrent_write` in `tests/test_graph_drain.py`.
+- [x] 7.4 Run affected suites, independent correctness review, public-artifact
       gate, strict OpenSpec validation and completion CI.
+      Evidence: PR #1412 and #1501 merged with independent review, Ruff, the privacy gate, strict OpenSpec validation and green CI.
 - [ ] 7.5 Stage a verified candidate before replacement; verify concurrent writes
       through the live service, both hostnames, receipts and boundary timings.
       Preserve the old service until the candidate is ready.
@@ -194,13 +201,16 @@ This urgent availability repair ships independently of the memory-storage
 batch: it addresses interactive write refusals while preserving graph proof
 authority and can be rolled back independently.
 
-- [ ] 9.1 Prepare the source/topology proof outside the boundary and replay its
+- [x] 9.1 Prepare the source/topology proof outside the boundary and replay its
       exact byte/membership seal under authority; retain epoch, recall, policy,
       registry and live-sidecar binding and unchanged acknowledgement semantics.
-- [ ] 9.2 Verify an unrelated writer progresses during a slow proof and that
+      Evidence: PR #1501 (merge 6e00cc472): `test_a_slow_availability_proof_does_not_block_a_canonical_write` in `tests/test_graph_drain.py`.
+- [x] 9.2 Verify an unrelated writer progresses during a slow proof and that
       intervening source, policy, registry or sidecar changes refuse publication.
-- [ ] 9.3 Measure remaining final-seal hold, run affected graph suites, independent
+      Evidence: PR #1501: the same test, and `test_availability_rejects_changes_after_its_source_proof` in `tests/test_graph_drain.py`.
+- [x] 9.3 Measure remaining final-seal hold, run affected graph suites, independent
       review, privacy and strict specification checks and completion CI.
+      Evidence: PR #1501 measured the final-seal hold on a synthetic 1,000-note vault, ran the graph suites, and merged after independent review, privacy, strict OpenSpec checks and green CI.
 - [ ] 9.4 Deliver through the normal release process and verify the live personal
       service's write and graph outcomes before claiming the incident resolved.
 
@@ -217,23 +227,28 @@ authority and can be rolled back independently.
       arrival order (`_FairCaptureQueue`) around `idempotency.run`.
 - [ ] 10.3 Live: after deploy, `exomem_mutation_busy_total` stays flat under
       maximal capture and `contention_absorbed` log rows show the waits.
-- [ ] 10.4 Prepare managed episode reference owners outside the canonical guard;
+- [x] 10.4 Prepare managed episode reference owners outside the canonical guard;
       seal exact batch ownership and reload pending custody and policy under it.
       Share eligible preparation retries with existing capture allowance and waiter admission.
       Preserve direct calls, serialized revisions and both acknowledgement modes.
-- [ ] 10.5 Prove another writer can commit during a cold owner scan, admission
+      Evidence: PR #1901 (merge 078653a35): `test_cold_episode_references_leave_the_boundary_free_for_another_writer` in `tests/test_capture_boundary_hold.py`.
+- [x] 10.5 Prove another writer can commit during a cold owner scan, admission
       invalidation triggers fresh preparation, and concurrent captures survive repeated invalidation.
       Verify bounded admission and allowance exhaustion write nothing and permit same-identity recovery.
       Verify structured retryability through the command facade and run affected checks.
+      Evidence: PR #1901: `test_reference_preparation_survives_two_real_intervening_commits`, `test_three_reference_captures_survive_concurrent_preparation_invalidation` and `test_unproved_episode_references_return_a_bounded_retryable_failure_without_a_write` in `tests/test_episode_memory_command.py`.
 
 ## 11. Graph receipt identity after authority release
 
-- [ ] 11.1 Carry the dispatch checkpoint through the internal index report and
+- [x] 11.1 Carry the dispatch checkpoint through the internal index report and
       both handoff/completion checks without exposing it in public dictionaries.
-- [ ] 11.2 Reproduce a real sibling commit after completed dispatch; verify
+      Evidence: PR #1504 (merge b9870081c): `test_graph_completion_checks_its_dispatch_after_a_newer_epoch` and `test_a_missing_graph_dispatch_identity_cannot_borrow_the_global_checkpoint` in `tests/test_index_sync.py`.
+- [x] 11.2 Reproduce a real sibling commit after completed dispatch; verify
       registration and queued coverage survive a newer epoch, while missing
       identities, missing flights and stale queue generations still refuse.
-- [ ] 11.3 Run affected suites, independent review, privacy, strict OpenSpec
+      Evidence: PR #1504: `test_completed_batch_keeps_its_graph_receipt_when_a_sibling_commits` in `tests/test_graph_fanout_totality.py`.
+- [x] 11.3 Run affected suites, independent review, privacy, strict OpenSpec
       validation and completion CI; deliver after the frozen 0.102 release.
+      Evidence: PR #1504 merged after independent review, privacy, strict OpenSpec checks and green CI.
 - [ ] 11.4 Verify live committed receipts and graph convergence after managed
       upgrade before closing the graph incident or friend-readiness hold.

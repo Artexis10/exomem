@@ -121,7 +121,10 @@ did not become a unit carries `fragment_resolution` (`missing`, `ambiguous` or
 count of typos, and `detail="keys"` lists them: source path, source anchor,
 target page, fragment, outcome, admission-filtered, capped at
 `FRAGMENT_LIST_LIMIT`, with `total` and `truncated` stating what the cap left
-out. A write-response advisory is not part of this change.
+out. A write-response advisory is not part of this change. When the page name
+itself resolves to no visible page (`missing` or `not_unit`) or to several
+(`ambiguous`), the edge keeps its fragment on an unresolved target, and the
+census counts it under `unresolved_target_edges`, not the fragment counts.
 
 **Page-level readers read the owning page, from one stored column.** A unit
 destination is a `unit:`/`block:` key, but the readers that group, rank, lift and

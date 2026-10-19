@@ -40,6 +40,7 @@ from .decide import (
     StorageRoom,
     _identity_conflict,
     can_relocate,
+    claim_missing,
     decide,
     hourly_backup_due,
     nightly_backup_due,
@@ -47,6 +48,18 @@ from .decide import (
     relocation_volume,
     storage_receipt,
 )
+from .exports import (
+    EXPORT_UPLOAD_FAILED,
+    ExportRow,
+    ExportStorage,
+    accepted_report,
+    decide_export,
+    export_deadline,
+    export_size,
+    settle_step,
+)
+from .exports import HOLD as EXPORT_HOLD
+from .exports import job_name as export_job_name
 from .manifests import (
     BACKUP_JOB_NAME,
     CLONE_CLAIM_NAME,
@@ -64,6 +77,7 @@ from .manifests import (
     render_backup_job,
     render_cell_manifests,
     render_clone_claim,
+    render_export_job,
     render_import_job,
     render_restore_job,
     render_volume_snapshot,
@@ -507,6 +521,7 @@ class ClusterGateway:
     def delete_namespace(self, name: str) -> None: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
+    def observe_export_job(self, namespace: str, export_id: str): ...  # pragma: no cover
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None: ...  # pragma: no cover
     def retain_volume(self, name: str) -> None: ...  # pragma: no cover
     def delete_claim(self, namespace: str) -> None: ...  # pragma: no cover
@@ -1651,10 +1666,33 @@ async def _reconcile_row(
     if item is not None and not _identity_conflict(row, observation, cluster_config.storage):
         jobs = cluster.observe_import_jobs(namespace_name(row.cell_id), item.import_id)
         import_decision = decide_import(row, item, observation, jobs, now=now, config=config)
+    exports = await db.read_exports(connection, row.cell_id)
+    await _settle_exports(connection, row, exports, secrets_config, object_storage, cluster_config, config, now, memory)
+    # One export is packed at a time (C6's open index); after it ends, the
+    # newest one still owns the hold it has to release.
+    export_item = next((export for export in exports if export.observed_state in (None, "packing")), None)
+    if export_item is None and exports and EXPORT_HOLD in (row.hold_kind, _active_hold(row, observation)):
+        export_item = exports[-1]
+    export_job = export_decision = None
+    # An import holding or claiming the volume goes first; the export waits.
+    # A cell that has had a volume and lost its claim is decide()'s to report:
+    # any apply from the export path would create an empty claim in its place.
+    # A deleted cell's export only ends its row and upload, so it still runs.
+    if export_item is not None and import_decision is None and not _identity_conflict(
+            row, observation, cluster_config.storage) and not (
+            claim_missing(observation) and row.volume_id is not None and row.desired_state != "deleted"):
+        export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id)
+        volume_unavailable = (
+            relocation_volume(row, observation, cluster_config.storage) is not None
+            or planned_move_volume(row, observation, cluster_config.storage) is not None
+        )
+        export_decision = decide_export(row, export_item, observation, export_job, now=now, config=config,
+                                        volume_unavailable=volume_unavailable)
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
     nothing_to_start = (
         import_decision is None
+        and export_decision is None
         and _active_hold(row, observation) is None
         and not backup_due
         and not start_upgrade
@@ -1703,7 +1741,7 @@ async def _reconcile_row(
             observation, row, cluster, object_storage, volume_provider, now, memory, storage=cluster_config.storage
         )
 
-    decision = import_decision or decide(
+    decision = import_decision or export_decision or decide(
         row,
         rollout,
         observation,
@@ -1737,18 +1775,12 @@ async def _reconcile_row(
                                   "part_urls": None, "urls_expire_at": None})
         try:
             if decision.prepare_import_upload or decision.cleanup_import_transport or decision.import_action == "import":
-                import boto3
-                from botocore.config import Config
-
                 key_id, key_secret, _version = await _resolve_object_storage_key(
                     connection, row, secrets_config, object_storage, memory=memory, now=now,
                     replace_allowed=False,
                 )
-                client = boto3.client("s3", endpoint_url=cluster_config.object_storage_endpoint,
-                                      aws_access_key_id=key_id, aws_secret_access_key=key_secret,
-                                      region_name="us-east-1", config=Config(signature_version="s3v4",
-                                      connect_timeout=10, read_timeout=30, retries={"max_attempts": 2}))
-                import_storage = ImportStorage(client, cluster_config.object_storage_bucket)
+                import_storage = ImportStorage(_cell_s3_client(cluster_config, key_id, key_secret),
+                                               cluster_config.object_storage_bucket)
             if decision.cleanup_import_transport:
                 await asyncio.wait_for(asyncio.to_thread(import_storage.cleanup, item),
                                        timeout=config.import_cleanup_deadline.total_seconds())
@@ -1777,6 +1809,12 @@ async def _reconcile_row(
         if decision.hold_kind == "import" and (row.hold_kind != "import" or row.hold_started_at != decision.hold_started_at):
             await db.write_observed(connection, row.cell_id,
                                     {"hold_kind": "import", "hold_started_at": decision.hold_started_at})
+
+    export_storage = None
+    if export_decision is not None:
+        export_storage = await _export_transport(
+            connection, cluster, row, export_item, export_job, decision, secrets_config, object_storage,
+            cluster_config, memory, now)
 
     if decision.storage_growth is not None:
         _note_growth(memory, row, observation, decision)
@@ -1993,7 +2031,8 @@ async def _reconcile_row(
         park = memory.refusals.get(row.cell_id)
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []
-        steps = decision.import_action or decision.run_backup_job or decision.run_restore_job_snapshot or decision.create_snapshot or decision.create_clone
+        steps = (decision.import_action or decision.run_export_job or decision.run_backup_job
+                 or decision.run_restore_job_snapshot or decision.create_snapshot or decision.create_clone)
         local = cluster_config.storage.local
         if jobs_parked and steps:
             # A Job refused for this key waits out the backoff.
@@ -2011,6 +2050,13 @@ async def _reconcile_row(
                               render_import_job(spec, item, decision.import_action, url=url,
                                                 deadline_seconds=int((config.import_deadline if decision.import_action == "import"
                                                                       else config.import_cleanup_deadline).total_seconds())), job_refused)
+            if decision.run_export_job:
+                deadline = int(export_deadline(row, config).total_seconds())
+                size = export_size(row)
+                part_urls = await asyncio.to_thread(export_storage.part_urls, export_item, size.parts,
+                                                    expires_in=deadline)
+                _run_cell_job(cluster, row.cell_id, render_export_job(
+                    spec, export_item, size, part_urls=part_urls, deadline_seconds=deadline), job_refused)
             if decision.create_snapshot and local is not None:
                 _run_cell_job(cluster, row.cell_id, render_volume_snapshot(spec, snapshot_class=local.snapshot_class),
                               job_refused)
@@ -2074,6 +2120,116 @@ async def _reconcile_row(
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)
     return changed or decision.apply_manifests
+
+
+def _cell_s3_client(cluster_config: ClusterConfig, key_id: str, key_secret: str):
+    """The maintained S3 SDK, authenticated as one cell's prefix-restricted key."""
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client("s3", endpoint_url=cluster_config.object_storage_endpoint,
+                        aws_access_key_id=key_id, aws_secret_access_key=key_secret,
+                        region_name="us-east-1", config=Config(signature_version="s3v4",
+                        connect_timeout=10, read_timeout=30, retries={"max_attempts": 2}))
+
+
+async def _export_storage(
+    connection: asyncpg.Connection, row: CellRow, secrets_config: SecretsConfig, object_storage,
+    cluster_config: ClusterConfig, memory: LoopMemory, now: datetime, *, create_key: bool = False,
+) -> ExportStorage | None:
+    """C6 isolation: the transport for one row's exports, signed only with that
+    row's own key. None when the cell never had a key, so nothing of it can be
+    in object storage; only a new export may create the key."""
+
+    if row.b2_key_id is None and not create_key:
+        return None
+    key_id, key_secret, _version = await _resolve_object_storage_key(
+        connection, row, secrets_config, object_storage, memory=memory, now=now, replace_allowed=False)
+    return ExportStorage(_cell_s3_client(cluster_config, key_id, key_secret), cluster_config.object_storage_bucket)
+
+
+async def _remove_export(
+    connection: asyncpg.Connection, row: CellRow, item: ExportRow, storage: ExportStorage | None,
+    updates: dict[str, object],
+) -> None:
+    """Deletes every version of the export's object and aborts its uploads,
+    then records `updates` with the upload released. A failure keeps
+    upload_id, so every later pass retries the abort while the cell has a
+    key. On a deleted cell the outcome is recorded anyway; the prefix
+    deletion that runs before its key goes is the final removal."""
+
+    try:
+        if storage is not None:
+            await asyncio.to_thread(storage.remove, item)
+    except Exception as error:  # noqa: BLE001 - object storage may be down; the row keeps the retry
+        logger.error("cellctl: removing export %s of cell %s failed: %s", item.export_id, row.cell_id,
+                     _describe_error(error))
+        if row.desired_state == "deleted" and updates:
+            await db.write_export(connection, item.export_id, updates)
+        return
+    await db.write_export(connection, item.export_id, {**updates, "upload_id": None})
+
+
+async def _settle_exports(
+    connection: asyncpg.Connection, row: CellRow, exports: list[ExportRow], secrets_config: SecretsConfig,
+    object_storage, cluster_config: ClusterConfig, config: ReconcileConfig, now: datetime, memory: LoopMemory,
+) -> None:
+    """C6 work that needs no hold: expire and remove ready exports, answer link
+    requests with a version-pinned link, and retry pending removals."""
+
+    for item in exports:
+        step = settle_step(row, item, now=now, config=config)
+        if step is None:
+            continue
+        action, updates = step
+        storage = await _export_storage(connection, row, secrets_config, object_storage, cluster_config, memory, now)
+        if action == "link":
+            if storage is None:
+                continue
+            url = await asyncio.to_thread(storage.link, item, expires_in=int(config.export_link_ttl.total_seconds()))
+            await db.write_export(connection, item.export_id, {**updates, "download_url": url}, link_issued=True)
+            continue
+        if item.download_url is not None:
+            # A link is withdrawn before its object goes, so none outlives a failed removal.
+            await db.write_export(connection, item.export_id, {"download_url": None, "download_url_expires_at": None})
+        await _remove_export(connection, row, item, storage, updates)
+
+
+async def _export_transport(
+    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, job,
+    decision: Decision, secrets_config: SecretsConfig, object_storage, cluster_config: ClusterConfig,
+    memory: LoopMemory, now: datetime,
+) -> ExportStorage | None:
+    """The export decision's object-storage step and C6 write, journalled
+    before the hold is written and the StatefulSet applied."""
+
+    storage = None
+    if decision.export_transport or decision.run_export_job:
+        storage = await _export_storage(connection, row, secrets_config, object_storage, cluster_config, memory, now,
+                                        create_key=decision.export_transport == "create")
+    if decision.export_transport == "create":
+        decision.export_updates["upload_id"] = await asyncio.to_thread(storage.create, item)
+    elif decision.export_transport == "complete":
+        try:
+            version = await asyncio.to_thread(storage.complete, item, accepted_report(job.report))
+        except ValueError as error:
+            # A part that is not the one the Job uploaded never completes.
+            logger.warning("cellctl: cell %s's export %s upload was refused: %s", row.cell_id, item.export_id, error)
+            decision.export_updates = {"observed_state": "failed", "error_code": EXPORT_UPLOAD_FAILED}
+            decision.export_transport = "remove"
+            decision.stop_export_job = True
+        else:
+            decision.export_updates.update(archive_version_id=version, upload_id=None)
+    await db.write_export(connection, item.export_id, decision.export_updates)
+    if decision.export_transport == "remove":
+        await _remove_export(connection, row, item, storage, {})
+    if decision.stop_export_job:
+        cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id))
+    # The row hold survives a crash before the StatefulSet has been stopped.
+    if decision.hold_kind == EXPORT_HOLD and (row.hold_kind != EXPORT_HOLD or row.hold_started_at != decision.hold_started_at):
+        await db.write_observed(connection, row.cell_id,
+                                {"hold_kind": EXPORT_HOLD, "hold_started_at": decision.hold_started_at})
+    return storage
 
 
 def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservation, decision) -> None:

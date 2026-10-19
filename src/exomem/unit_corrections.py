@@ -131,7 +131,12 @@ def discover(
                 return
             candidate = counterpart(str(edge.get("dst_key") or ""))
             if candidate is None:
-                if metadata.get("fragment_resolution") not in {None, "unit"}:
+                # A reader denied any page cannot tell a withheld target from a
+                # missing one, so only an unrestricted reader learns it is gone;
+                # a restricted agent is not told of a deleted target, as before.
+                if metadata.get("fragment_resolution") not in {None, "unit"} and (
+                    keep is None or metadata.get("target_resolution") != "unresolved"
+                ):
                     partial = True
                 return
             reference = candidate["unit_ref"]

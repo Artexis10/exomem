@@ -231,6 +231,10 @@ spec:
               value: {{ .Values.cellctl.initDeadlineMinutes | quote }}
             - name: CELLCTL_UPGRADE_READY_DEADLINE_MINUTES
               value: {{ .Values.cellctl.upgradeReadyDeadlineMinutes | quote }}
+            - name: CELLCTL_EXPORT_DEADLINE_MINUTES
+              value: {{ .Values.cellctl.exportDeadlineMinutes | quote }}
+            - name: EXOMEM_EXPORT_TTL_HOURS
+              value: {{ .Values.cellctl.exportTtlHours | quote }}
             # D8: nightly backup window and stagger.
             - name: CELLCTL_BACKUP_WINDOW
               value: {{ .Values.cells.backupWindow | quote }}

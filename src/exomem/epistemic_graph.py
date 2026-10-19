@@ -7391,7 +7391,12 @@ class EpistemicGraphIndex:
         if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
             return False
         if not path.exists():
-            self._delete_path(conn, rel, commit=commit)
+            # Own rows only, as a rebuild leaves them: a drain or refresh re-derives
+            # the pages linking here, and removing their edges erased the
+            # unresolved edge an earlier path in the same pass had just written.
+            with conn if commit else nullcontext():
+                self._drop_own_rows(conn, rel)
+                _bump_generation(conn)
             return False
         # Admission is deliberately before title/body parsing.  Raw Records
         # may never become a graph node, edge source, or resolver entry.
@@ -10978,7 +10983,7 @@ def _structural_edges_for_page(
     resolver: vault_module.WikilinkResolver,
     visible: Callable[[str], bool] | None = None,
     check: Callable[[], None] | None = None,
-    landing: Callable[[str, str | None, str], tuple[str, str, dict[str, str]]] | None = None,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
 ) -> list[GraphEdge]:
     """Every edge some interpretation of `page` authors, as shared neutral rows.
 
@@ -11085,7 +11090,7 @@ def _relation_target(
     *,
     source_path: str,
     check: Callable[[], None] | None = None,
-    landing: Callable[[str, str | None, str], tuple[str, str, dict[str, str]]] | None = None,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
 ) -> tuple[str, str, str, dict[str, Any]] | None:
     """Where one authored relation target lands: (dst, dst page, kind, metadata).
 
@@ -11106,10 +11111,28 @@ def _relation_target(
         return None
     if not canonical:
         return None
-    dst_key, dst_page_key, fragment_metadata = (
-        _relation_destination(vault_root, canonical, warning, fragment)
-        if landing is None else landing(canonical, warning, fragment)
-    )
+    if warning and fragment:
+        # The page name resolves to no page this derivation may see, or to
+        # several: keep the authored address so a reader learns the dependency
+        # is gone or unsettled. A reader denied a page gets the same destination
+        # and fragment outcome, as in a vault without it. Rows written before
+        # this rule stay bare until their source is re-derived: a public delete
+        # rebuilds, and a source edit or a page joining or leaving the name
+        # re-derives it, so no schema bump is forced.
+        page_key = _file_key(_with_md(canonical))
+        dst_key, dst_page_key = page_key, page_key
+        candidates = _link_candidates(resolver, target)
+        if any(visible is None or visible(candidate) for candidate in candidates):
+            # A resolver warning with a visible candidate is a name that
+            # several visible pages share.
+            fragment_metadata = {"target_fragment": fragment, "fragment_resolution": "ambiguous"}
+        else:
+            fragment_metadata = _unlanded_fragment(fragment)
+    else:
+        dst_key, dst_page_key, fragment_metadata = (
+            _relation_destination(vault_root, canonical, fragment)
+            if landing is None else landing(canonical, fragment)
+        )
     return dst_key, dst_page_key, _target_kind(vault_root, canonical), {
         "target_resolution": "unresolved" if warning else "resolved",
         **fragment_metadata,
@@ -11410,7 +11433,7 @@ def _split_target_fragment(raw: str) -> tuple[str, str]:
 
 
 def _relation_destination(
-    vault_root: Path, canonical: str, warning: str | None, fragment: str
+    vault_root: Path, canonical: str, fragment: str
 ) -> tuple[str, str, dict[str, str]]:
     """Where a relation edge lands, and what the author should be told.
 
@@ -11419,7 +11442,7 @@ def _relation_destination(
     always produced, and records why, so a typo degrades instead of deleting.
     """
     page_key = _file_key(_with_md(canonical))
-    if not fragment or warning:
+    if not fragment:
         return page_key, page_key, {}
     resolved = _current_page_unit(
         vault_root,
@@ -11438,6 +11461,16 @@ def _relation_destination(
         )
     outcome = _fragment_outcome(resolved, fragment)
     return page_key, page_key, {**metadata, "fragment_resolution": outcome}
+
+
+def _unlanded_fragment(fragment: str) -> dict[str, str]:
+    """A fragment with no page to resolve against, and why it stays unlanded."""
+    return {
+        "target_fragment": fragment,
+        "fragment_resolution": (
+            "missing" if semantic_units.is_unit_anchor_shaped(fragment) else "not_unit"
+        ),
+    }
 
 
 def _fragment_outcome(resolved: _PageUnit, fragment: str) -> str:
@@ -12479,7 +12512,7 @@ class GraphView:
         )
         if definition is not None:
             row = {**row, "metadata": {**metadata, "relation_family": definition.family}}
-        if metadata.get("target_fragment"):
+        if metadata.get("target_fragment") and metadata.get("target_resolution") != "unresolved":
             row = self._land(row)
         return row
 
@@ -12676,19 +12709,14 @@ class GraphView:
             return []
 
     def _snapshot_landing(
-        self, canonical: str, warning: str | None, fragment: str,
+        self, canonical: str, fragment: str,
     ) -> tuple[str, str, dict[str, str]]:
         """Use the validated target summary instead of parsing target source text."""
         self._check()
         page_key = _file_key(_with_md(canonical))
-        if not fragment or warning:
+        if not fragment:
             return page_key, page_key, {}
-        row = self._land({"dst_key": page_key, "metadata": {
-            "target_fragment": fragment,
-            "fragment_resolution": (
-                "missing" if semantic_units.is_unit_anchor_shaped(fragment) else "not_unit"
-            ),
-        }})
+        row = self._land({"dst_key": page_key, "metadata": _unlanded_fragment(fragment)})
         return str(row["dst_key"]), page_key, dict(row["metadata"])
 
     def node_path(self, key: str) -> str | None:

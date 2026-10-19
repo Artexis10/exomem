@@ -5237,35 +5237,37 @@ def test_owner_explain_labels_purpose_branches_before_conservative_meet(
     assert result["scope_contributions"][1]["option_values"] == {}
 
 
-def test_a_page_named_in_many_fields_is_decided_once_per_payload(
+def test_each_pass_reads_the_tombstone_set_once_and_sees_a_new_deletion(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The entry filter decides each page once, however many fields name it."""
+    """A long listing paid two tombstone-tree scans per path; a pass now pays one."""
     from exomem.governance import lifecycle
 
-    page = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    # Released to the caller, but under a restricting rule, so its deletion is
+    # governed and writes the tombstone the next pass must observe.
+    page = RESTRICTED_PATH
     write_scope(vault)
-    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    write_rule(vault, ceiling=egress.RELEASE_FLOOR)
     _reset_caches()
-    seen: list[str] = []
-    real = lifecycle.is_tombstoned
+    sweeps: list[Path] = []
+    real = lifecycle.tombstoned_paths
 
-    def counted(vault_root: Path, rel_path: str) -> bool:
-        seen.append(rel_path)
-        return real(vault_root, rel_path)
+    def counted(vault_root: Path) -> frozenset[str]:
+        sweeps.append(vault_root)
+        return real(vault_root)
 
-    monkeypatch.setattr(lifecycle, "is_tombstoned", counted)
-    payload = {
-        "items": [
-            {"path": page, "to": page, "from": page, "source_path": page, "target_path": page}
-            for _ in range(20)
-        ]
-    }
+    monkeypatch.setattr(lifecycle, "tombstoned_paths", counted)
+    payload = {"items": [{"path": page}, {"path": OPEN_PATH}]}
 
     with request_scope(_external()):
-        kept = egress.filter_withheld_entries(vault, payload)
+        before = egress.filter_withheld_entries(vault, payload)
+    first_pass_sweeps = len(sweeps)
+    lifecycle.begin_deletion(vault, source_rel=page, trash_rel="Knowledge Base/_trash/deleted.md")
+    sweeps.clear()
+    with request_scope(_external()):
+        after = egress.filter_withheld_entries(vault, payload)
 
-    assert len(kept["items"]) == 20
-    # Resolving the reference, deciding it and the decision's own check: a
-    # constant per page, not one per field that names it.
-    assert seen.count(page) <= 3
+    assert before["items"] == [{"path": page}, {"path": OPEN_PATH}]
+    assert after["items"] == [{"path": OPEN_PATH}]
+    # One sweep per pass; deciding each of the two paths live took four.
+    assert (first_pass_sweeps, len(sweeps)) == (1, 1)

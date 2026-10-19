@@ -1072,6 +1072,29 @@ def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     assert len(_episodes(vault)) == 1
 
 
+def test_a_full_episode_ledger_says_so_and_a_retry_does_not_rebind_or_duplicate(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Realistic failure: a long-lived episode stopped binding at its revision cap and the
+    receipt said only `unbound`, with no cause or next step, while later recaps piled up."""
+    from exomem import episode_model
+
+    monkeypatch.setattr(episode_model, "MAX_INPUT_REVISIONS", 1)
+    with request_scope(owner_principal(surface="mcp")):
+        first = _record(vault)
+        full = _record(vault, summary="Second recap past the cap.")
+        retried = _record(vault, summary="Second recap past the cap.")
+
+    assert first["ledger"] == "bound"
+    assert (full["ledger"], full["recovery"], full["revision"]) == ("unbound", "unavailable", None)
+    assert (vault / full["source"]["path"]).exists()
+    assert any("ledger is full" in text and "without `episode`" in text for text in full["warnings"])
+    assert retried["idempotent"] is True
+    assert retried["ledger"] == "unbound"
+    assert retried["source"]["path"] == full["source"]["path"]
+    assert len(_episodes(vault)) == 2
+
+
 @pytest.mark.parametrize(
     "failure",
     [

@@ -33,6 +33,10 @@ LIVE_PATHS = {
     "infra/cellctl/src/cellctl/k8s_client.py",
     "infra/ansible/roles/k3s/files/audit-policy.yaml",
     "infra/cellctl/tests/test_k3s_integration.py",
+    # The real-S3 export transport tests run only in the live job.
+    "infra/cellctl/tests/test_export_storage.py",
+    "infra/cellctl/src/cellctl/exports.py",
+    "src/exomem/cloud_export.py",
 }
 
 
@@ -99,6 +103,7 @@ def test_parallel_live_groups_run_every_collected_case_once(tmp_path: Path) -> N
             "COLLECTED_NODES": str(output / "nodes.json"),
             "SUITE_GROUP": suite,
             "IMPORT_TEST": step["env"]["IMPORT_TEST"],
+            "EXPORT_TEST": step["env"]["EXPORT_TEST"],
         }
         subprocess.run(
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],

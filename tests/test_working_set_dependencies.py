@@ -27,8 +27,8 @@ material_vault = material_fixtures.material_vault
 owner = history_fixtures.owner
 
 
-def _create(root: Path, title: str, body: str) -> str:
-    args = dict(content=body, note_type="insight", title=title, projects=["harbor-study"])
+def _create(root: Path, title: str, body: str, note_type: str = "insight") -> str:
+    args = dict(content=body, note_type=note_type, title=title, projects=["harbor-study"])
     preview = commands.op_note(root, validate_only=True, **args)
     review = {}
     if preview.get("reviewed_none_required"):
@@ -117,6 +117,82 @@ def test_activation_keeps_an_authored_exact_dependency_actionable(
     followed = commands.op_read_memory(root, path=pointer["path"], unit_ref=pointer["ref"])
     assert followed["status"] == "found"
     assert followed["unit"]["content"].strip() == limitation
+
+
+def test_deleting_an_exact_dependency_page_leaves_its_claim_partial(material_vault: Path, owner) -> None:
+    root = material_vault
+    dependency = _create(root, "Neutral operating envelope", (
+        "## Claim\n- category: observation\n- id: limitation\n\n"
+        "Operation is conditional on the seal passing its pressure check.\n"
+    ))
+    primary = _create(root, "Violet worksheet calibration", (
+        "## Claim\n- category: observation\n- id: authorization\n"
+        f"- relations: depends_on: [[{dependency}#limitation]]\n\n"
+        "Violet worksheet calibration may proceed.\n"
+    ))
+    primary_unit = semantic_index.current_parent_index_state(root, primary).document.resolve_fragment("authorization").unit
+    removed_unit = semantic_index.current_parent_index_state(root, dependency).document.resolve_fragment("limitation").unit
+    lexstore.ensure_fresh(root)
+    assert graph_sync.drain_active_rebuilds()
+    freshness.seed(root, "vault", ((str(path), freshness.stat_signature(path))
+                                  for path in vault_module.walk_vault_md(root)))
+    find.evict_resolver_caches(root)
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+
+    commands.op_manage_memory_file(
+        root, operation="delete", path=dependency, confirm=True, force_orphan=True, allow_curated=True,
+    )
+    lexstore.ensure_fresh(root)
+    assert graph_sync.drain_active_rebuilds()
+    find.evict_resolver_caches(root)
+    find.recall_resolver_snapshot(root, expected_checkpoint=freshness.live_recall_checkpoint(root, "vault"))
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild()
+    packet = commands.op_activate_context(
+        root, turn="In harbor-study, may violet worksheet calibration proceed?", max_chars=4000,
+    )
+
+    assert primary_unit.unit_ref in {unit["ref"] for unit in packet["units"]}
+    assert removed_unit.unit_ref not in {pointer["ref"] for pointer in packet["pointers"]}
+    assert packet["generation"]["correction_context"] == "partial"
+
+
+def test_an_exact_dependency_through_a_shared_page_name_leaves_its_claim_partial(
+    material_vault: Path, owner,
+) -> None:
+    root = material_vault
+    claim = "## Claim\n- category: observation\n- id: limitation\n\n{}\n"
+    first = _create(root, "Neutral operating envelope",
+                    claim.format("Operation is conditional on the seal passing its pressure check."))
+    second = _create(root, "Neutral operating envelope",
+                     claim.format("Operation needs a signed valve log."), note_type="pattern")
+    assert first != second and Path(first).stem == Path(second).stem
+    primary = _create(root, "Violet worksheet calibration", (
+        "## Claim\n- category: observation\n- id: authorization\n"
+        f"- relations: depends_on: [[{Path(first).stem}#limitation]]\n\n"
+        "Violet worksheet calibration may proceed.\n"
+    ))
+    primary_unit = semantic_index.current_parent_index_state(root, primary).document.resolve_fragment("authorization").unit
+    candidates = {
+        semantic_index.current_parent_index_state(root, path).document.resolve_fragment("limitation").unit.unit_ref
+        for path in (first, second)
+    }
+    lexstore.ensure_fresh(root)
+    assert graph_sync.drain_active_rebuilds()
+    freshness.seed(root, "vault", ((str(path), freshness.stat_signature(path))
+                                  for path in vault_module.walk_vault_md(root)))
+    find.evict_resolver_caches(root)
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    find.recall_resolver_snapshot(root, expected_checkpoint=freshness.live_recall_checkpoint(root, "vault"))
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild()
+    packet = commands.op_activate_context(
+        root, turn="In harbor-study, may violet worksheet calibration proceed?", max_chars=4000,
+    )
+
+    assert primary_unit.unit_ref in {unit["ref"] for unit in packet["units"]}
+    assert not candidates & {pointer["ref"] for pointer in packet["pointers"]}
+    assert packet["generation"]["correction_context"] == "partial"
 
 
 def _selected(root: Path, path: str, fragment: str):
@@ -320,3 +396,37 @@ def test_withheld_outgoing_targets_do_not_exhaust_the_admitted_pointer_allowance
     assert [row["ref"].partition("#")[2] for row in packet["pointers"]] == ["visible"]
     assert "withheld-envelope" not in str(packet)
     assert packet["generation"]["correction_context"] == "available"
+
+
+@pytest.mark.parametrize("target_state", ["withheld", "deleted"])
+def test_restricted_reader_cannot_tell_a_withheld_dependency_page_from_a_deleted_one(
+    exact_relations, target_state: str,
+) -> None:
+    from dataclasses import replace
+
+    from test_governance_egress import _external
+    from test_relation_fragment_targets import SOURCE, TARGET, _write
+    from test_unit_correction_context import _publish
+    from test_working_set_currency_security import _govern
+
+    from exomem.governance.principal import request_scope
+
+    root, index, _first, _second = exact_relations
+    envelope = "Knowledge Base/Notes/Patterns/withheld-envelope.md"
+    _write(root, envelope, "---\ntype: pattern\n---\n\n"
+           "## Claim\n- category: config\n- id: limit\n\nPrivate operating limit.\n")
+    path = root / SOURCE
+    path.write_text(path.read_text().replace(f"{TARGET}#rich-1", f"{envelope.removesuffix('.md')}#limit"))
+    if target_state == "deleted":
+        (root / envelope).unlink()
+    _govern(root)
+    lexstore.ensure_fresh(root)
+    _publish(index)
+    first = _selected(root, SOURCE, "first")
+    with request_scope(_external()):
+        packet = _packet(root, (first,))
+        no_relation = _packet(root, (replace(first, relations=()),))
+    assert packet == no_relation
+    assert packet["pointers"] == []
+    assert packet["generation"]["correction_context"] == "available"
+    assert "withheld-envelope" not in str(packet)
