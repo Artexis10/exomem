@@ -26,8 +26,9 @@ caller identity would otherwise strip the public inspection response.
 commands and vault-scoped lease. It times durable SQLite acknowledgement;
 item-view publication runs later, and the final inspection reports pending views.
 It does not lift file-mode caps or measure background publication latency.
-Native Windows and mixed-authority acceptance remain outside this diagnostic;
-these numbers cannot retire the store's phase-acceptance gate.
+``.github/workflows/store-latency-windows.yml`` runs it on native Windows.
+Mixed-authority acceptance remains outside this diagnostic; these numbers cannot
+retire the store's phase-acceptance gate.
 ``--phase-probes`` adds a synthetic 10% ref-withheld audience split and one
 bulk-500 call in store mode. It reports refusal and successful append timings
 separately, without claiming the remaining platform or fsync evidence.
@@ -274,8 +275,10 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     for name in tuple(os.environ):
         if name.startswith(("EXOMEM_", "KB_MCP_")):
             del os.environ[name]
-    with tempfile.TemporaryDirectory(prefix="exomem-append-latency-") as raw, contextlib.ExitStack() as cleanup:
-        return _measure_child(args, Path(raw), cleanup)
+    # The parent deletes the work directory after this process exits. Receipt connections and
+    # the idempotency owner lock stay open until exit, and Windows cannot delete an open file.
+    with contextlib.ExitStack() as cleanup:
+        return _measure_child(args, Path(args.work_dir), cleanup)
 
 
 def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.ExitStack) -> dict[str, object]:
@@ -827,25 +830,29 @@ def _parent(args: argparse.Namespace) -> int:
     results = []
     for size in [int(part) for part in args.sizes.split(",")]:
         print(f"== size {size} ==", file=sys.stderr, flush=True)
-        completed = subprocess.run(
-            [
-                sys.executable,
-                __file__,
-                "--child",
-                "--size",
-                str(size),
-                "--appends",
-                str(args.appends),
-                "--storage",
-                args.storage,
-                *(["--lift-caps"] if args.lift_caps else []),
-                *(["--phase-probes"] if args.phase_probes else []),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        sys.stderr.write(completed.stderr[-2000:])
+        with tempfile.TemporaryDirectory(prefix="exomem-append-latency-") as work_dir:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    __file__,
+                    "--child",
+                    "--work-dir",
+                    work_dir,
+                    "--size",
+                    str(size),
+                    "--appends",
+                    str(args.appends),
+                    "--storage",
+                    args.storage,
+                    *(["--lift-caps"] if args.lift_caps else []),
+                    *(["--phase-probes"] if args.phase_probes else []),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        # A failed child prints its whole log: a CI-only failure cannot be rerun locally.
+        sys.stderr.write(completed.stderr if completed.returncode else completed.stderr[-2000:])
         if completed.returncode != 0:
             print(completed.stdout[-2000:], file=sys.stderr)
             return completed.returncode
@@ -875,6 +882,7 @@ def main() -> int:
     )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--size", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--work-dir", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.phase_probes and (args.storage != "store-preview" or any(
         size < 10 or size % 10 for size in ([args.size] if args.child else map(int, args.sizes.split(",")))
