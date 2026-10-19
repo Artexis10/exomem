@@ -10983,7 +10983,7 @@ def _structural_edges_for_page(
     resolver: vault_module.WikilinkResolver,
     visible: Callable[[str], bool] | None = None,
     check: Callable[[], None] | None = None,
-    landing: Callable[[str, str | None, str], tuple[str, str, dict[str, str]]] | None = None,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
 ) -> list[GraphEdge]:
     """Every edge some interpretation of `page` authors, as shared neutral rows.
 
@@ -11116,8 +11116,9 @@ def _relation_target(
         # several: keep the authored address so a reader learns the dependency
         # is gone or unsettled. A reader denied a page gets the same destination
         # and fragment outcome, as in a vault without it. Rows written before
-        # this rule stay bare until their source is re-derived; a public delete
-        # rebuilds, so no schema bump is forced.
+        # this rule stay bare until their source is re-derived: a public delete
+        # rebuilds, and a source edit or a page joining or leaving the name
+        # re-derives it, so no schema bump is forced.
         page_key = _file_key(_with_md(canonical))
         dst_key, dst_page_key = page_key, page_key
         if any(
