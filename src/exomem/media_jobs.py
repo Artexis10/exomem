@@ -2251,6 +2251,28 @@ def status(
         return {**empty, "store": str(path), "healthy": False, "errors": [str(exc)]}
 
 
+#: The `status` fields a tool caller sees. The worker process, the store path and
+#: the per-reason counts are operator detail: a memory reason belongs on operator
+#: surfaces such as doctor, and a job row already shows waiting work as pending.
+TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "jobs", "errors")
+
+
+def tool_status(vault_root: Path | None) -> dict[str, Any]:
+    """The `process_media status` view of `status`, without operator detail."""
+    full = status(vault_root)
+    return {field: full[field] for field in TOOL_STATUS_FIELDS}
+
+
+def tool_job_state(vault_root: Path, state: str, job_id: int | None) -> str:
+    """A job's state as a tool caller sees it: waiting work shows as pending."""
+    if state != BLOCKED or job_id is None:
+        return state
+    job = MediaJobStore(vault_root).get(job_id)
+    if job is not None and _presents_as_waiting(job.state, job.blocked_reason):
+        return PENDING
+    return state
+
+
 def _status_job(row: Any) -> dict[str, Any]:
     state = str(row["state"])
     error = str(row["last_error"]) if row["last_error"] is not None else None

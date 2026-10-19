@@ -147,7 +147,7 @@ The prior directory is kept until the restored cell has passed recall, a governe
 
 `adopt_vault` becomes available on cloud cells, without a path restriction. Its own lifting condition is met. Everything it can read belongs to the tenant, and `adoption_studio` already runs on cells without one. The tenant's assistant scans an import folder, and Adoption Studio proposes how to file it. Filing uses governed writes, with provenance to the original path and hash.
 
-`transfer_artifact`, `process_media` and `read_media` stay excluded. `transfer_artifact`'s lifting condition names an artifact-upload path to Cloud, and this change adds one, but the tool could not use it. The import path is a batch Job under a hold that ends in a staging folder, not a live bridge a running cell's tool can hand a file to. Task 2.3 rewords that exclusion's condition to say so.
+This change keeps `transfer_artifact` and `read_media` excluded. (`adopt-exomem-cloud-plain-cells` task 2.3a later lifts the `process_media` exclusion.) `transfer_artifact`'s lifting condition names an artifact-upload path to Cloud, and this change adds one, but the tool could not use it. The import path is a batch Job under a hold that ends in a staging folder, not a live bridge a running cell's tool can hand a file to. Task 2.3 rewords that exclusion's condition to say so.
 
 ### D8. Cleanup, discard and failure
 

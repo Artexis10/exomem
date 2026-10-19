@@ -8468,7 +8468,7 @@ def _process_media(
             )
         return {
             "operation": operation,
-            **media_jobs.status(vault_root),
+            **media_jobs.tool_status(vault_root),
             "index_refresh": index_sync.deferred_work_status(vault_root)["full_upserts"],
         }
 
@@ -8495,8 +8495,7 @@ def _process_media(
                 "remediation": _media_remediation(code),
             }
 
-        def terminal_job_row(relative: str, result: object) -> dict[str, object] | None:
-            state = getattr(result, "state", None)
+        def terminal_job_row(relative: str, state: str) -> dict[str, object] | None:
             if state not in {media_jobs.BLOCKED, media_jobs.FAILED}:
                 return None
             reported = next(
@@ -8561,14 +8560,15 @@ def _process_media(
             except FileNotFoundError:
                 results.append(failure_row(relative, "MEDIA_NOT_FOUND"))
                 continue
-            terminal_row = terminal_job_row(relative, result)
+            state = media_jobs.tool_job_state(vault_root, result.state, result.job_id)
+            terminal_row = terminal_job_row(relative, state)
             if terminal_row is not None:
                 results.append(terminal_row)
                 continue
             row: dict[str, object] = {
                 "path": relative,
                 "outcome": "processed" if operation == "process" else "retried",
-                "state": result.state,
+                "state": state,
                 "media_type": result.media_type,
                 "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
                 "job_id": result.job_id,
@@ -8659,7 +8659,7 @@ def _process_media(
         "operation": operation,
         "path": binary.relative_to(vault_root).as_posix(),
         "media_type": result.media_type,
-        "state": result.state,
+        "state": media_jobs.tool_job_state(vault_root, result.state, result.job_id),
         "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
         "job_id": result.job_id,
     }
@@ -13392,18 +13392,6 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
                 ),
                 lifted_when=(
                     "a live artifact-upload bridge is added for running Cloud cells"
-                ),
-            ),
-            SurfaceExclusion(
-                command="process_media",
-                reason=(
-                    "The `cloud` image installs only the `embeddings-onnx` extra "
-                    "and gates the build on torch being absent, so media "
-                    "extraction has no dependencies in the image."
-                ),
-                lifted_when=(
-                    "a media-capable cloud image ships with the required "
-                    "decoding dependencies"
                 ),
             ),
             SurfaceExclusion(
