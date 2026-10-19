@@ -2861,11 +2861,12 @@ def op_find(
         )
         hits = release.hits
     else:
-        admit_path = find_module.caller_admission(vault_root)
-        # Content admission precedes candidate selection; ordinary policy still
-        # uses its existing annotation pool and final authorization below.
-        _release_policy, _release_active = egress_module.gate_state(vault_root)
-        retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
+        with find_module._span(timings, "release_gate"):
+            admit_path = find_module.caller_admission(vault_root)
+            # Content admission precedes candidate selection; ordinary policy still
+            # uses its existing annotation pool and final authorization below.
+            _release_policy, _release_active = egress_module.gate_state(vault_root)
+            retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
         catalog_proof: dict[str, Any] = {}
         hits = find_module.find(
             vault_root,

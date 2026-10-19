@@ -100,6 +100,38 @@ def test_stale_selection_keeps_existing_recovery_after_releasing_its_view(
     assert lexstore.runtime_retrieval_catalog_proof(vault, schedule_repair=False) is not None
 
 
+def test_changed_projected_inputs_cannot_borrow_the_live_checkpoint(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lineage reuse must not bless content that the retained catalogue lacks."""
+    from exomem import find as find_module
+
+    stable = vault / "Knowledge Base/Notes/lag-stable.md"
+    stable.write_text("# Stable\n\nrealprojectionlag\n", encoding="utf-8")
+    warm_managed_cell(vault)
+    store = lexstore.get_store(vault)
+    published = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
+    later = vault / "Knowledge Base/Notes/lag-later.md"
+    later.write_text("# Later\n\nrealprojectionlag\n", encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[later])
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda _root: None)
+    lag: list[str] = []
+    proof: dict[str, object] = {}
+
+    hits = find_module.find(
+        vault,
+        query="realprojectionlag",
+        scope="kb-only",
+        mode="keyword",
+        degraded_out=lag,
+        catalog_proof_out=proof,
+    )
+
+    assert [hit.path for hit in hits] == ["Knowledge Base/Notes/lag-stable.md"]
+    assert proof == published
+    assert "recall_projection" in lag
+
+
 @library_scope()
 @pytest.mark.parametrize("result_level", ["unit", "page"])
 def test_encoder_cutover_cannot_cache_old_serving_results_under_the_new_key(

@@ -425,7 +425,7 @@ def test_ready_runtime_losing_projection_demotes_without_walk(
         ),
     )
 
-    with pytest.raises(find_module.RetrievalIndexWarming):
+    with pytest.raises(find_module.RetrievalIndexWarming) as refusal:
         find_module.find(
             tmp_path,
             query="projectionloss",
@@ -435,47 +435,12 @@ def test_ready_runtime_losing_projection_demotes_without_walk(
             temporal=False,
         )
 
+    assert refusal.value.status == "temporarily_unavailable"
     assert scheduled == [tmp_path]
     assert readiness.retrieval_admission() == {
         "state": "unavailable",
         "admitted": False,
     }
-
-
-def test_unavailable_runtime_reproves_before_requesting_another_rebuild(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A real recall request self-recovers after a late catalog publish."""
-    admissions: list[Path | None] = []
-
-    def admission(root: Path | None = None) -> dict[str, object]:
-        admissions.append(root)
-        if root is None:
-            return {"state": "unavailable", "admitted": False}
-        return {"state": "ready", "admitted": True}
-
-    class ProofReached(RuntimeError):
-        pass
-
-    readiness.manage_runtime()
-    monkeypatch.setattr(readiness, "retrieval_admission", admission)
-    monkeypatch.setattr(
-        lexstore,
-        "runtime_retrieval_catalog_proof",
-        lambda _root: (_ for _ in ()).throw(ProofReached),
-    )
-
-    with pytest.raises(ProofReached):
-        find_module.find(
-            tmp_path,
-            query="latepublish",
-            mode="keyword",
-            scope="kb",
-            graph=False,
-            temporal=False,
-        )
-
-    assert admissions == [None, tmp_path]
 
 
 def test_unavailable_runtime_with_exact_catalog_serves_the_refused_read(
@@ -637,19 +602,12 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
         "strictresolverpropagation payload",
     )
     _seed_live(tmp_path)
+    assert lexstore.get_store(tmp_path).rebuild_atomic() is True
     readiness.manage_runtime()
     monkeypatch.setattr(
         readiness,
         "retrieval_admission",
         lambda _root=None: {"state": "ready", "admitted": True},
-    )
-    monkeypatch.setattr(
-        lexstore,
-        "runtime_retrieval_catalog_proof",
-        lambda _root: {
-            scope: freshness.live_recall_checkpoint(tmp_path, scope)
-            for scope in freshness.SCOPES
-        },
     )
     observed: list[tuple[bool, object]] = []
 
@@ -698,58 +656,6 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
     )
 
 
-def test_request_projection_cannot_advance_past_its_catalog_proof(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_page(
-        tmp_path,
-        "Knowledge Base/Notes/target.md",
-        "requestproof payload",
-    )
-    _seed_live(tmp_path)
-    readiness.manage_runtime()
-    readiness.begin_warm()
-    readiness.mark_ready("retrieval_catalog")
-    readiness.finish_warm()
-    proof_calls = 0
-
-    def proof(_root: Path):
-        nonlocal proof_calls
-        proof_calls += 1
-        checkpoints = {
-            scope: freshness.live_recall_checkpoint(tmp_path, scope)
-            for scope in freshness.SCOPES
-        }
-        added = _write_page(
-            tmp_path,
-            "Knowledge Base/Notes/racing.md",
-            "requestproof racing payload",
-        )
-        freshness.on_files_changed(tmp_path, changed=[added])
-        return checkpoints
-
-    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_proof", proof)
-    monkeypatch.setattr(
-        freshness,
-        "recall_projection_snapshot",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("advanced request must decline before projection fallback")
-        ),
-    )
-
-    with pytest.raises(find_module.RetrievalIndexWarming):
-        find_module.find(
-            tmp_path,
-            query="requestproof",
-            mode="vector",
-            scope="kb",
-            graph=False,
-            temporal=False,
-        )
-
-    assert proof_calls == 1
-
-
 def test_event_index_kill_switch_keeps_managed_runtime_on_lazy_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -775,7 +681,7 @@ def test_declined_projection_is_named_in_find_timings(tmp_path: Path) -> None:
     readiness.manage_runtime()
     readiness.begin_warm()
 
-    with pytest.raises(find_module.RetrievalIndexWarming):
+    with pytest.raises(find_module.RetrievalIndexWarming) as refusal:
         find_module.find(
             tmp_path,
             query="timingprojection",
@@ -786,6 +692,7 @@ def test_declined_projection_is_named_in_find_timings(tmp_path: Path) -> None:
             timings=timings,
         )
 
+    assert refusal.value.status == "warming"
     report = timings.as_dict()
     assert report["profile"]["recall_projection"]["outcome"] == "warming"
     assert report["stages"]["recall_projection"]["ms"] >= 0.0

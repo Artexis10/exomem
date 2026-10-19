@@ -18,6 +18,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import date
 from functools import wraps
@@ -1194,14 +1195,40 @@ def _with_catalog_scope(function):
                 pending = _request_pending_coverage(
                     vault_root, managed=True, timings=values["timings"]
                 )
-                with lexstore.catalog_selection_scope(vault_root) as admitted:
-                    if admitted is None:
-                        lexstore.request_repair(vault_root)
-                        raise RetrievalIndexWarming(site="catalog_proof_incomplete")
+                selection = ExitStack()
+                try:
+                    with _span(
+                        values["timings"], "recall_projection", source=find_types.SOURCE_INDEX
+                    ):
+                        admitted = selection.enter_context(
+                            lexstore.catalog_selection_scope(vault_root)
+                        )
+                        if admitted is None:
+                            readiness.mark_unready("retrieval_catalog")
+                            state = str(readiness.retrieval_admission()["state"])
+                            _set_recall_projection_timing_outcome(
+                                values["timings"], state
+                            )
+                            _mark_source(
+                                values["timings"], "recall_projection", find_types.SOURCE_DECLINED
+                            )
+                            lexstore.request_repair(vault_root)
+                            raise RetrievalIndexWarming(
+                                site="catalog_proof_incomplete",
+                                status=(
+                                    "temporarily_unavailable"
+                                    if state == "unavailable" else "warming"
+                                ),
+                            )
                     selected_kwargs = dict(
                         call_kwargs, _catalog_admission=admitted, _pending_coverage=pending,
                     )
                     return function(vault_root, *args, **selected_kwargs)
+                finally:
+                    with _span(
+                        values["timings"], "recall_projection", source=find_types.SOURCE_INDEX
+                    ):
+                        selection.close()
 
             # Cacheable model requests first get a short lookup view. The miss
             # marker owns no catalogue, pending, filter, or page evidence.
@@ -1674,29 +1701,33 @@ def find(
     failed = failed_out if failed_out is not None else []
 
     def _note_projection_lag() -> None:
-        if catalog_view is not None:
-            from .vocabulary.registry import RegistryError
+        with _span(
+            timings, _nested_name(timings, "recall_projection"), source=find_types.SOURCE_INDEX
+        ):
+            if catalog_view is not None:
+                from .vocabulary.registry import RegistryError
 
-            try:
-                interpretation_current = (
-                    catalog_view.semantic_identity == lexstore.catalog_semantic_identity(vault_root)
-                    and all(
-                        lexstore._checkpoint_policy_current(vault_root, checkpoint)
-                        for checkpoint in catalog_view.checkpoints.values()
+                try:
+                    interpretation_current = (
+                        catalog_view.semantic_identity
+                        == lexstore.catalog_semantic_identity(vault_root)
+                        and all(
+                            lexstore._checkpoint_policy_current(vault_root, checkpoint)
+                            for checkpoint in catalog_view.checkpoints.values()
+                        )
                     )
-                )
-            except RegistryError:
-                interpretation_current = False
-            # Interpretation changes invalidate every selected row; data lag does not.
-            if not interpretation_current:
-                raise RetrievalIndexWarming(site="catalog_proof_incomplete")
-        incomplete = catalog_view is not None and catalog_view.incomplete
-        lagging = _catalog_admission is not None and any(
-            freshness.live_recall_checkpoint(vault_root, projection_scope) != checkpoint
-            for projection_scope, checkpoint in _catalog_admission.checkpoints.items()
-        )
-        if (incomplete or lagging) and _RECALL_PROJECTION_STALE_COMPONENT not in degraded:
-            degraded.append(_RECALL_PROJECTION_STALE_COMPONENT)
+                except RegistryError:
+                    interpretation_current = False
+                # Interpretation changes invalidate every selected row; data lag does not.
+                if not interpretation_current:
+                    raise RetrievalIndexWarming(site="catalog_proof_incomplete")
+            incomplete = catalog_view is not None and catalog_view.incomplete
+            lagging = _catalog_admission is not None and any(
+                freshness.live_recall_checkpoint(vault_root, projection_scope) != checkpoint
+                for projection_scope, checkpoint in _catalog_admission.checkpoints.items()
+            )
+            if (incomplete or lagging) and _RECALL_PROJECTION_STALE_COMPONENT not in degraded:
+                degraded.append(_RECALL_PROJECTION_STALE_COMPONENT)
 
     pending_active = not pending.empty or not pending.ready
     if pending_active:

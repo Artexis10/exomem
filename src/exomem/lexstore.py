@@ -3856,7 +3856,13 @@ class LexicalStore:
                     or not _checkpoint_policy_current(self.vault_root, checkpoint)
                 ):
                     return None
-                checkpoints[scope] = checkpoint
+                live = freshness_module.live_recall_checkpoint(self.vault_root, scope)
+                # Local lineage can differ while the stored inputs are identical.
+                checkpoints[scope] = (
+                    live
+                    if live is not None and _checkpoint_state(live) == _checkpoint_state(checkpoint)
+                    else checkpoint
+                )
             if (
                 catalog_semantic_identity(self.vault_root) != identity
                 or any(

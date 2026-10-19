@@ -61,6 +61,7 @@ On a miss, discard its request evidence, prepare encodings after closing, then s
 Give the discarded lookup private warnings and catalogue output; retain its actual cost in request timings.
 Recheck the serving sidecar before using prepared vectors; a cutover keeps the existing degraded outcome and prevents caching.
 Admit both scope checkpoints, schema, semantic identity, and policy identity from the same connection.
+When the existing proof shows identical stored inputs, bind the current runtime checkpoint; local lineage alone does not make the catalogue stale.
 Reuse existing query bodies for scope membership, filters, ordering, parent hints, lexical candidates, unit candidates, statistics, and selected page hashes.
 Exact and lagging scopes both read their membership from that admitted view.
 Do not apply a foreground delta through the retained connection.
