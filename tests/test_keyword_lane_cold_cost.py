@@ -326,6 +326,7 @@ def test_active_catalog_warm_refuses_every_mode_before_a_cold_freshness_walk(
             f"preseedrace payload {index}",
         )
     walked = 0
+    repair_requests: list[Path] = []
 
     def forbidden_walk(_root: Path):
         nonlocal walked
@@ -336,6 +337,7 @@ def test_active_catalog_warm_refuses_every_mode_before_a_cold_freshness_walk(
     readiness.manage_runtime()
     readiness.begin_warm()
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(lexstore, "request_repair", repair_requests.append)
     monkeypatch.setattr(
         freshness,
         "recall_projection_snapshot",
@@ -355,6 +357,27 @@ def test_active_catalog_warm_refuses_every_mode_before_a_cold_freshness_walk(
         )
 
     assert walked == 0
+    assert repair_requests == []
+
+
+def test_failed_catalog_warm_retries_before_optional_preloads_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed required warm must not wait for unrelated model preloads to retry."""
+    repairs: list[Path] = []
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.finish_required_warm()
+    monkeypatch.setattr(lexstore, "request_repair", repairs.append)
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path, query="warm recovery", mode="keyword", scope="kb",
+            graph=False, temporal=False,
+        )
+
+    assert readiness.is_warming()
+    assert repairs == [tmp_path]
 
 
 def test_catalog_proof_cannot_admit_runtime_without_live_projections(

@@ -1212,7 +1212,9 @@ def _with_catalog_scope(function):
                             _mark_source(
                                 values["timings"], "recall_projection", find_types.SOURCE_DECLINED
                             )
-                            lexstore.request_repair(vault_root)
+                            # The initial warm owns projection seeding before repair.
+                            if state == "unavailable" or readiness.required_warm_finished():
+                                lexstore.request_repair(vault_root)
                             raise RetrievalIndexWarming(
                                 site="catalog_proof_incomplete",
                                 status=(
