@@ -4293,7 +4293,12 @@ def op_get(
         NOT_FOUND (no such file); UNREADABLE (parse failure);
         SECRET_BLOCKED (opt-in raw content contains protected material).
     """
-    with call_spans_module.span("read.resolve_identifier"):
+    with (
+        call_spans_module.meter(
+            "pending_custody_unknown", "pending_identity_unknown",
+        ) as resolution_counts,
+        call_spans_module.span("read.resolve_identifier", resolution_counts),
+    ):
         path = _resolve_memory_identifier(vault_root, path)
     try:
         with call_spans_module.span("read.prepare"):
