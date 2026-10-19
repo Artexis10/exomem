@@ -6930,16 +6930,15 @@ def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
 
     Read outside the boundary at preflight and compared inside it to admit
     validity-stamp reuse without a corpus stat-walk. ``0`` when never bumped;
-    ``None`` on any read error other than the file simply not existing, and for
-    an empty file (a power loss can leave one) — fail closed: an unreadable
-    counter must disable reuse, never admit it.
+    ``None`` on any read error other than the file simply not existing —
+    fail closed: an unreadable counter must disable reuse, never admit it.
     """
     try:
         path = _commit_generation_path(active_manager().config.state_dir, vault_or_cell)
     except Exception:  # noqa: BLE001 - unresolvable identity disables reuse
         return None
     try:
-        return int(path.read_text(encoding="utf-8").strip())
+        return int(path.read_text(encoding="utf-8").strip() or "0")
     except FileNotFoundError:
         return 0
     except Exception:  # noqa: BLE001 - unreadable counter disables reuse
@@ -6955,8 +6954,9 @@ def _bump_commit_generation(state_dir: Path, vault_or_cell: os.PathLike[str] | s
             current = int(path.read_text(encoding="utf-8").strip() or "0")
         except Exception:  # noqa: BLE001 - a fresh/corrupt counter restarts
             current = 0
-        # Replaced atomically but not synced: every validity stamp lives within one invocation, so a
-        # power loss may leave the counter older or empty, and an empty counter reads as unreadable.
+        # Replaced atomically but not synced. A power loss may leave the counter older or empty
+        # (read as 0); that is safe because every validity stamp lives within one invocation, and
+        # the boundary serializes this bump with every in-boundary comparison.
         try:
             durable_write.replace_text(path, str(current + 1), sync=False)
         except OSError:

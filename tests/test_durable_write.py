@@ -79,22 +79,6 @@ def test_every_json_state_writer_goes_through_the_durable_path(
     assert len(written) == 1
 
 
-def test_an_empty_commit_counter_reads_as_unreadable_not_as_generation_zero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A power loss after the unsynced rename can leave the counter empty. Read as 0, it would match
-    # the stamp of a vault that was never bumped and admit a stale reuse.
-    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path))
-    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
-    assert writer_lease.read_commit_generation("/vault") == 0
-
-    path = writer_lease._commit_generation_path(tmp_path, "/vault")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("", encoding="utf-8")
-
-    assert writer_lease.read_commit_generation("/vault") is None
-
-
 def test_the_commit_generation_still_advances_when_the_rename_keeps_failing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

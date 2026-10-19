@@ -78,7 +78,8 @@ token:
 The commit-generation counter is replaced atomically without an fsync. Every
 validity stamp is captured and compared within one invocation, so none outlives
 the process; a power loss may leave the counter older or empty, and an empty
-counter reads as unreadable, which disables reuse.
+counter reads as 0. The mutation boundary serializes each bump with every
+in-boundary comparison, so no comparison sees a partly written counter.
 
 ## Guard narrowing (`writer_lease.py`)
 
