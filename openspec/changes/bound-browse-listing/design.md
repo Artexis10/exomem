@@ -10,6 +10,7 @@
 
 **Non-Goals:**
 - Changing `overview`.
+- Paging `manage_memory_file` with `operation="list"`. It still returns the whole listing through `op_list_directory`; the slow calls on record were all `browse_memory` lists.
 - Adding filters, a new sort order or a total count.
 - Setting the browse latency bar. It stays pending in `bound-request-latency-across-surfaces` until installed measurements support an engineering choice.
 
