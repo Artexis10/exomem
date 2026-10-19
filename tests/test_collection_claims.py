@@ -1628,7 +1628,8 @@ def test_carrier_reuses_projection_and_routing_within_each_audience_read(
     visible = due_state.served_entries(tmp_path, now=now)
     assert sum(row["category"] == "collection_candidate" for row in visible) >= 2
     assert any(row["category"] == "unreflected_observations" for row in visible)
-    assert calls == {"load": 1, "routing": 1}
+    # The reconcile above wrote the projection through the shared cache, so no read parses it.
+    assert calls == {"load": 0, "routing": 1}
 
     monkeypatch.setattr(
         egress,
