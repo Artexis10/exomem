@@ -59,8 +59,20 @@ Only semantic changes covered by the correction contract require such interpreta
 It reports `status: retained` when that count is positive and `status: unavailable` otherwise.
 Every result carries `coverage: unverified`, because a readable subset cannot prove complete retention.
 Absent, denied, corrupt and unreadable entries remain indistinguishable; current-page authority grants no exception for historical diagnostics.
-The existing admission and pagination stay in place.
-The reader still examines retained entries, so bounded total read cost remains open.
+A read skips versions not older than the continuation without opening them, then opens and admits entries newest first and stops after the page plus one further admitted entry, which sets `truncated`.
+The continuation stays the version of the last returned entry, so unavailable or withheld entries never show through position, count or continuation.
+`retained` counts the admitted entries that read examined, never total retention.
+A unit-scoped read must still open entries that do not touch the unit, so it stays proportional to retention when few entries touch that unit; a per-unit index would bound it and remains open.
+
+Isolated synthetic measurement (one 7 KB page, default page size 20, medians of five reads; the host was loaded, so absolute milliseconds are noisy):
+
+| Correction depth | Page read before / after (ms) | Unit read before / after (ms) | Current read before / after (ms) | Stored per correction |
+| --- | --- | --- | --- | --- |
+| 5 | 81 / 129 | 91 / 159 | 20 / 44 | about 7.9 KB |
+| 50 | 366 / 278 | 405 / 478 | 47 / 57 | about 7.9 KB |
+| 200 | 1585 / 290 | 1297 / 1964 | 30 / 60 | about 7.9 KB |
+
+The page read stops growing with depth. The unit rows above query a unit that only one entry touches, the worst case. A unit that every correction touches reads in 325 ms at depth 200 (after only).
 
 **File-row history (3.15, first slice).** A guarded Records or Planning file-row update that changes the row's payload keeps the payload it replaced in the same atomic batch as the correction: prior values and body with their payload hash, operation, `why`, audit transition, before/after item hashes, actor, and the caller's input binding (an episode correction names its curation run; a direct update has none). An update that leaves the payload unchanged keeps only an empty marker named for its transition, so the read accounts for it instead of reporting lost history; a refused retry keeps nothing. Each entry is one create-only JSON file named like `registry_history` versions under `Knowledge Base/_Collections/history/<collection_id>/<item_key>/`, inside the collection store's reserved tree, not `_Governance`: that tree is the governance authoring workspace, whose non-operational files are policy inputs, export treats it as disposable, and Records writers must not reach administration state. No read surface serves a reserved file, so `record_memory`/`plan_memory` `history` is the only way to a kept payload; it first releases the row exactly as a query would, so history is withheld exactly when its row is and a withheld row answers like a missing one. A read returns one page, newest first (default 20, at most 50) with a continuation, and opens only that page's entries. A kept body passes through the same origin projection and gate (`egress.projects_origin`) as the live row, under the reader's principal, and the corrector's audience is shown only to the owner or to that audience. `status` is `complete` when every correction in the row's verified audit chain has an entry, `unavailable_legacy` (with a count) when some predate retention, and `unverified` when the chain itself fails verification. Export classifies the history subtree as canonical content beside the store's mode marker and replica, so supported export and restore carry it. The module is the logical interface: store-mode collections keep row content in `item_versions`, which later backs the same read. Measured cost is about 730 B per correction for a three-field row with an empty body; it grows with the row's own payload, never with the collection. Note and semantic-unit revisions are the next slice.
 

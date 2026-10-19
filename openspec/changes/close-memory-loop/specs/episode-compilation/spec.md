@@ -68,6 +68,7 @@ Note and unit history reads SHALL report `status: retained` only when at least o
 Otherwise they SHALL report `status: unavailable`.
 Every result SHALL report `coverage: unverified`; counts describe only admitted usable revisions, never complete retention.
 Missing, withheld, corrupt and unreadable history SHALL remain indistinguishable when no revision can be admitted.
+A history read SHALL open entries newest first and stop after one page plus one further admitted entry, without opening older entries, and SHALL derive its continuation only from the last returned entry; its count describes the admitted entries it examined, never total retention.
 
 #### Scenario: Two refinements do not create three visible pages
 

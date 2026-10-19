@@ -2,10 +2,14 @@
 
 ## 5. Ordinary write follow-through
 
-- [ ] 5.1 Serve page-scoped write advice with independent emission history and delivered fingerprints; verify global carriers, disclosure, and batch behavior.
+- [x] 5.1 Serve page-scoped write advice with independent emission history and delivered fingerprints; verify global carriers, disclosure, and batch behavior.
+      Evidence: PR #1838: `test_write_advice_counts_only_affected_pages`, `test_local_delivery_does_not_reset_global_emission_history`, `test_batch_advice_counts_union_of_affected_pages` and `test_delivery_records_the_fingerprint_that_was_shown` in `tests/test_due_state_projection.py`; `test_local_write_advice_remains_independent_of_bootstrap_counts` in `tests/test_due_state_carriers.py`.
 - [ ] 5.2 Publish receipt proof under the existing outermost vault hold; verify overlapping multi-hold supersession, direct fallback, degradation, and replay.
+  Remaining: no merged test proves the direct-leaf fallback of receipt-proof publication.
 - [ ] 5.3 Prime the writer resolver from the proven structural corpus; verify freshness, recall separation, and blocked-edit behavior.
-- [ ] 5.4 Refresh manifest claims after revisions and add CPU attribution to existing spans; verify changed claims and unchanged release checks.
+  Remaining: no merged test proves blocked-edit behavior after the writer resolver is primed.
+- [x] 5.4 Refresh manifest claims after revisions and add CPU attribution to existing spans; verify changed claims and unchanged release checks.
+      Evidence: PR #1838: `test_manifest_revision_refreshes_routing_before_projection_ttl` in `tests/test_collection_claims.py` and `test_store_manifest_changes_refresh_the_shared_claims_projection` in `tests/test_collection_store_writer.py`; CPU spans in `tests/test_call_spans.py`.
 - [ ] 5.5 Reuse installed acceptance tools for matched warm writes, all outcomes, and honest coverage; independently verify latency, CPU, custody, and convergence.
 - [ ] 5.6 Package one shared read-only MCP canary and preserve the existing script interface; verify installed availability, acceptance and incomplete evidence. Add strict schema expectations beside unchanged indexed expectations. Verify source-bound membership, optional rank, private validation, local references and incomplete observer failures. Retain safe validator path fingerprints for mismatch correlation without changing outcomes or claiming unique assertion identity. Require independent source-only key checks and new series without changing frozen keys or exposing unused cases.
 - [ ] 5.7 Install the availability canary through systemd user units and expose offline status; verify credentials, actual execution and authorized notification delivery. Verify release acceptance across active read and write streams.
