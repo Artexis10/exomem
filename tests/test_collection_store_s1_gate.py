@@ -900,6 +900,8 @@ def test_a_slow_publication_copy_leaves_file_and_store_writes_acknowledging(abc,
         release.set()
     assert took < 2.5  # the mutation timeout is 5 s; a held boundary refuses MUTATION_BUSY there
     _published(abc)  # the next window carries the writes made during the copy
+    # Drain the publisher before the fixture retires its SQLite handle.
+    abc.manager.close(drain_views=False)
 
 
 def test_a_lease_lost_during_the_copy_abandons_the_swap_and_keeps_the_previous_replica(abc, monkeypatch):
