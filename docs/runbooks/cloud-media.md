@@ -136,6 +136,16 @@ Memory stops never count as attempts. A job that the brakes stop moves through t
 
 The ledger stores each reason in its `blocked_reason` column. Runtime status reports `media.memory_blocked_count`, `media.over_budget_count` and `media.engine_waiting_count`. `media.counts` counts each job as its own row shows it, so memory-blocked and waiting jobs count as pending. `exomem doctor` reports memory-blocked and over-budget work to the operator, never to the tenant.
 
+## Tenant tools
+
+Cloud cells serve `process_media`, the same tool as the personal service. A tenant's assistant can call it with these operations:
+
+- `status` reads the media job counts and each job's state.
+- `process` queues one file, or a list of files, now instead of waiting for automatic ingestion. Without a path it does bounded work over all media.
+- `retry` queues a failed file again after the cause is fixed.
+
+All three use this cell's queue, memory brakes and engine selection. A file whose engine is off waits, and no operation runs it on an engine the cell does not select. A retry never returns over-budget work (see Job states). A new OCR pack or OCR fix leaves completed text unchanged, and no operation re-extracts it. A cell serves the tool only from the first image release that includes it, so roll that image before you tell a tenant about it.
+
 ## OCR languages
 
 OCR first detects each image's script with Tesseract's OSD model. It then reads the image with the installed script models for that script and the installed language packs written in it. Each pack's script comes from the pack's own unicharset, so no code lists languages. A Japanese page reads with both a horizontal and a vertical pass, and OCR keeps the pass with the higher word confidence.
