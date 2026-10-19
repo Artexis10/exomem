@@ -691,7 +691,7 @@ _PUBLISHED_HANDOFF_PENDING: set[Path] = set()
 #: request observed during it, the request stays pending for a later caller to
 #: restart after an idle boundary instead of chaining full scans forever.
 _MAX_FULL_REBUILDS_PER_FLIGHT = 1
-#: Paths a CONTENDED foreground upsert declined, awaiting a targeted retry.
+#: Affected identities a contended publication declined, awaiting current-state replay.
 #:
 #: A governed write's incremental upsert cannot take the publication barrier
 #: while the write's own vault lock is held, so it waits 50ms and gives up
@@ -1837,7 +1837,7 @@ def _schedule_repair(
     Callers return immediately; the runtime or a later request retries failures.
 
     `deferred_paths` names the ONE case that does not need that: a foreground
-    upsert the publication barrier was merely too busy to take. The rows are
+    publication the barrier was merely too busy to take. The rows are
     fine and the store is healthy; the writer simply held the lock. The worker
     re-applies exactly those paths first and escalates to the full rebuild only
     if they do not land, so a single deferred page stops costing a whole-corpus
@@ -2072,6 +2072,13 @@ def _schedule_repair(
                         else:
                             _PUBLISHED_HANDOFF_PENDING.discard(key)
                         _FULL_REBUILDS_IN_FLIGHT.discard(key)
+                elif not promoted:
+                    # Applied rows alone cannot restore admission. Preserve the
+                    # request, but re-prove before rebuilding: another proof
+                    # may already have won the readiness admission update.
+                    with _REPAIRS_LOCK:
+                        _FULL_REBUILD_REQUESTED.add(key)
+                        _PUBLISHED_HANDOFF_PENDING.add(key)
                 rebuild = False
                 full_pass = False
                 paths = []
@@ -3694,6 +3701,12 @@ def purge_exact_persisted_rows(
 # ------------------------------------------------------------------ mechanism
 
 
+@dataclass(frozen=True)
+class _ReconcileSourceProof:
+    checkpoint: object
+    refutation_epoch: int
+
+
 class LexicalStore:
     """Mechanism for ONE vault's lexical sidecar: schema, sync, dual-write,
     and the two search primitives. Policy (backend env, probe) lives in the
@@ -3713,12 +3726,10 @@ class LexicalStore:
         # snapshot recomputes it so an ordinary-note edit is never missed.
         self._broad_seen: dict[str, tuple | None] = {}
         self._recall_seen: dict[str, object] = {}
-        # scope -> the exact RecallFreshnessCheckpoint one off-barrier source
-        # walk proved for a tainted (reconcile-derived) delta. Prepared at
-        # `apply_watcher_batch` entry with NO locks held, validated O(1) under
-        # the publication barrier by exact-checkpoint equality, and single-use:
-        # cleared when the batch finishes, whatever the outcome.
-        self._reconciled_source_proofs: dict[str, object] = {}
+        # Tickets belong to one operation. Shared counters let a refuting walk
+        # invalidate older tickets without another batch clearing their owner.
+        # Guarded by `_lock`; no source walk runs while that lock is held.
+        self._reconcile_refutations: dict[str, int] = {}
         # Live scopes a bounded mutation applied rows to but could not bless,
         # because no event history bridges the stored checkpoint to the live
         # one. No later event can bless them either, so the caller hands them
@@ -5581,33 +5592,31 @@ class LexicalStore:
             return False
         from .vault import VaultLockError
 
+        deferred_paths = None
         try:
             # Prove any tainted reconcile-derived target against one source
             # walk BEFORE taking the publication barrier: the walk is O(vault)
             # and holds no locks here, while the validation under the barrier
             # is an O(1) exact-checkpoint comparison. The proof is single-use
-            # per batch; running the prepare inside this try keeps it covered
-            # by the seam's deferred-heal handlers and the `finally` clear
-            # (the prepare's own internal catch remains primary).
-            self._prepare_reconcile_source_proof(paths, rel_paths)
+            # per operation, so failure handling cannot clear another batch's
+            # tickets. The prepare stays covered by the deferred-heal handlers.
+            source_proofs = self._prepare_reconcile_source_proof(paths, rel_paths)
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
-                applied = self._apply_paths_locked(paths, rel_paths)
+                applied = self._apply_paths_locked(paths, rel_paths, source_proofs=source_proofs)
         except VaultLockError as e:
-            log.info("lexical watcher batch deferred (%s); heals on next sync", e)
-            _schedule_runtime_catalog_repair(self.vault_root)
-            return False
+            log.info("lexical watcher batch deferred (%s); retrying these paths", e)
+            # Replay affected identities against current source state. Keeping
+            # old delete operations could erase a page recreated before retry.
+            deferred_paths = list({*paths, *(self.vault_root / rel for rel in rel_paths)})
+            applied = False
         except sqlite3.Error as e:
             self._note_query_failure(e, "lexical watcher batch deferred (%s)")
-            _schedule_runtime_catalog_repair(self.vault_root)
-            return False
+            applied = False
         except OSError as e:
             log.info("lexical watcher source changed during repair (%s)", e)
-            _schedule_runtime_catalog_repair(self.vault_root)
-            return False
-        finally:
-            self._reconciled_source_proofs.clear()
+            applied = False
         if not applied:
-            _schedule_runtime_catalog_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root, deferred_paths=deferred_paths)
         else:
             if not self._hand_off_stranded_scopes():
                 _admit_after_bounded_runtime_repair(self.vault_root, applied)
@@ -5615,7 +5624,7 @@ class LexicalStore:
         return applied
 
     def retry_deferred_upsert(self, paths: list[Path]) -> bool:
-        """Re-apply rows a CONTENDED foreground upsert declined.
+        """Reconcile identities a contended foreground publication declined.
 
         The foreground wait is 50ms because a governed write may not block on
         the lexical sidecar. A background thread has no such constraint, so it
@@ -5632,8 +5641,9 @@ class LexicalStore:
         from .vault import VaultLockError
 
         try:
+            source_proofs = self._prepare_reconcile_source_proof(paths, [])
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
-                return self._upsert_paths_locked(paths)
+                return self._apply_paths_locked(paths, [], source_proofs=source_proofs)
         except VaultLockError as e:
             log.info("lexical targeted retry still contended (%s); rebuilding", e)
             return False
@@ -5649,6 +5659,8 @@ class LexicalStore:
         self,
         paths: list[Path],
         rel_paths: list[str],
+        *,
+        source_proofs: dict[str, _ReconcileSourceProof] | None = None,
     ) -> bool:
         """Apply a changed/deleted union with the publication barrier held."""
         from . import freshness as freshness_module
@@ -5727,6 +5739,7 @@ class LexicalStore:
                 witness_targets,
                 requested_paths,
                 catalog_identity,
+                source_proofs=source_proofs,
             )
             return True
         finally:
@@ -5996,7 +6009,7 @@ class LexicalStore:
 
     def _prepare_reconcile_source_proof(
         self, paths: list[Path], rel_paths: list[str]
-    ) -> None:
+    ) -> dict[str, _ReconcileSourceProof]:
         """Prove tainted reconcile targets against one walk, with NO locks held.
 
         Runs on the dispatching thread at ``apply_watcher_batch`` entry, before
@@ -6008,20 +6021,20 @@ class LexicalStore:
         ``RecallFreshnessCheckpoint``; any event, reconcile, or policy change
         between this walk and the barrier advances the generation and fails the
         under-barrier equality check closed (``ticket_stale``). Walk or sqlite
-        errors fail closed too: no proof is stored, the batch still applies its
+        errors fail closed too: no proof is returned, the batch still applies its
         rows, and the bless waits for a later batch (``walk_failed``).
         """
         from . import freshness as freshness_module
 
         if not self.path.exists():
-            return
+            return {}
         requested_paths = self._requested_event_paths(paths, rel_paths)
         proof_targets: dict[str, object] = {}
         try:
             conn = self._connect()
             try:
                 if not self._schema_is_current(conn):
-                    return
+                    return {}
                 for scope in ("kb", "vault"):
                     if not freshness_module.recall_is_live(self.vault_root, scope):
                         continue
@@ -6042,11 +6055,17 @@ class LexicalStore:
             finally:
                 conn.close()
             if not proof_targets:
-                return
+                return {}
+            with self._lock:
+                epochs = {
+                    scope: self._reconcile_refutations.get(scope, 0)
+                    for scope in proof_targets
+                }
             members, signatures = self._walk_entries()
         except (OSError, sqlite3.Error):
             _note_source_proof("walk_failed")
-            return
+            return {}
+        prepared: dict[str, _ReconcileSourceProof] = {}
         for scope, checkpoint in proof_targets.items():
             idx = 1 if scope == "vault" else 0
             entries = [
@@ -6055,15 +6074,23 @@ class LexicalStore:
                 if flags[idx]
             ]
             if freshness_module.triple_from_entries(entries) == checkpoint.triple:
-                self._reconciled_source_proofs[scope] = checkpoint
-                _note_source_proof("prepared")
+                with self._lock:
+                    current_epoch = self._reconcile_refutations.get(scope, 0)
+                    if current_epoch == epochs[scope]:
+                        prepared[scope] = _ReconcileSourceProof(checkpoint, current_epoch)
+                _note_source_proof("prepared" if scope in prepared else "ticket_stale")
             else:
-                # The refutation is authoritative: a walk that disproves this
-                # checkpoint must also EVICT any stale stored proof for the
-                # scope, or a proof prepared before an unobserved edit could be
-                # consumed after the newest walk refuted its exact target.
-                self._reconciled_source_proofs.pop(scope, None)
+                # Invalidate outstanding tickets, including an older matching
+                # walk that has not returned its operation-local ticket yet.
+                with self._lock:
+                    # An obsolete target already fails exact-checkpoint
+                    # validation; its refutation must not revoke a newer proof.
+                    if freshness_module.recall_checkpoint(self.vault_root, scope) == checkpoint:
+                        self._reconcile_refutations[scope] = (
+                            self._reconcile_refutations.get(scope, 0) + 1
+                        )
                 _note_source_proof("proof_mismatch")
+        return prepared
 
     def _publish_live_witnesses(
         self,
@@ -6071,11 +6098,13 @@ class LexicalStore:
         targets: dict[str, tuple[object | None, object | None]],
         requested_paths: set[str],
         catalog_identity: str,
+        *,
+        source_proofs: dict[str, _ReconcileSourceProof] | None = None,
     ) -> None:
         """Persist exact watcher witnesses while the publication barrier is held.
 
         Per-scope: an untainted witness blesses as before; a tainted witness
-        blesses only when the off-barrier prepare stored a proof for EXACTLY
+        blesses only when the off-barrier prepare returned a proof for EXACTLY
         this checkpoint. A missing or superseded proof refuses that one scope
         (fail closed, O(1)) without touching the other scope's witness — no
         walk is reachable while the barrier is held from any path into this
@@ -6086,41 +6115,32 @@ class LexicalStore:
 
         witnessed = self._remember_live_witnesses(targets, requested_paths)
         for scope, (checkpoint, requires_source_proof) in witnessed.items():
-            if requires_source_proof:
-                proof = self._reconciled_source_proofs.pop(scope, None)
-                if proof is None:
-                    # No proof was prepared (non-batch path, coverage changed,
-                    # or the prepare failed closed). Refuse this scope only.
-                    _note_source_proof("proof_missing")
+            # Serialize refutation with validation and its small metadata commit,
+            # never with preparation or publication-barrier acquisition.
+            with self._lock:
+                if requires_source_proof:
+                    proof = source_proofs.pop(scope, None) if source_proofs is not None else None
+                    if proof is None:
+                        _note_source_proof("proof_missing")
+                        continue
+                    if (
+                        proof.checkpoint != checkpoint
+                        or proof.refutation_epoch != self._reconcile_refutations.get(scope, 0)
+                    ):
+                        _note_source_proof("ticket_stale")
+                        continue
+                if (
+                    freshness_module.recall_checkpoint(self.vault_root, scope) != checkpoint
+                    or catalog_semantic_identity(self.vault_root) != catalog_identity
+                ):
+                    self._witnessed.pop(scope, None)
                     continue
-                if proof != checkpoint:
-                    # An event landed between the prepare and the barrier; the
-                    # walk proved a superseded target. Refuse this scope only.
-                    # Exact-checkpoint equality is defense-in-depth here:
-                    # identity/policy divergence is closed upstream by delta
-                    # incompleteness, generation advance by this ticket
-                    # invalidation.
-                    _note_source_proof("ticket_stale")
-                    continue
-            if (
-                freshness_module.recall_checkpoint(self.vault_root, scope) != checkpoint
-                or catalog_semantic_identity(self.vault_root) != catalog_identity
-            ):
+                # The mutation already materialized the complete projected delta.
+                # Persist its exact checkpoint before releasing the barrier.
+                self._bless(conn, scope, checkpoint, identity=catalog_identity)
+                if requires_source_proof:
+                    _note_source_proof("blessed")
                 self._witnessed.pop(scope, None)
-                continue
-            # The bounded mutation already materialized every path in the
-            # complete projected delta. Persist that exact checkpoint before
-            # releasing the barrier so the post-barrier admission proof can stay
-            # read-only and cannot strand current rows behind old metadata.
-            self._bless(
-                conn,
-                scope,
-                checkpoint,
-                identity=catalog_identity,
-            )
-            if requires_source_proof:
-                _note_source_proof("blessed")
-            self._witnessed.pop(scope, None)
 
     def ensure_fresh(self) -> None:
         """Reconcile both scopes against their walks, PARANOIDLY: verified

@@ -860,9 +860,8 @@ def test_source_proof_walk_failure_applies_rows_and_converges_without_rebuild(
 def test_walk_refuted_stale_proof_cannot_bless(tmp_path, monkeypatch):
     """A prepared proof must never outlive its refutation.
 
-    Two guards carry this: a walk that refutes a checkpoint EVICTS any stale
-    stored proof for that scope (the newest walk's verdict is authoritative),
-    and a proof never outlives its own batch (cleared on every exit path).
+    A refuting walk invalidates older operation-local tickets for that scope.
+    A later batch cannot borrow a ticket from an earlier failed operation.
     Act 1 pins the cross-batch leak: a batch fails transiently after its proof
     was prepared, the source mutates unobserved (generation unchanged), and
     the next batch's walk refutes that exact checkpoint — nothing may bless.
@@ -898,7 +897,6 @@ def test_walk_refuted_stale_proof_cannot_bless(tmp_path, monkeypatch):
         monkeypatch.setattr(store, "_apply_paths_locked", _failing_apply)
         blessed_before = lexstore.source_proof_telemetry()["blessed"]
         assert store.apply_watcher_batch([page], []) is False
-        leaked_after_failure = dict(store._reconciled_source_proofs)
 
         # Unobserved edit: no event, no reconcile — the registry keeps the
         # pre-edit signature, so the NEXT walk refutes checkpoint C.
@@ -944,9 +942,6 @@ def test_walk_refuted_stale_proof_cannot_bless(tmp_path, monkeypatch):
             )
             assert readiness.complete is False
 
-        # A proof never outlives its batch — success, refusal, or failure.
-        assert leaked_after_failure == {}
-        assert store._reconciled_source_proofs == {}
     finally:
         freshness.clear()
 
