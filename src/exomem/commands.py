@@ -8468,7 +8468,7 @@ def _process_media(
             )
         return {
             "operation": operation,
-            **media_jobs.status(vault_root),
+            **media_jobs.tool_status(vault_root),
             "index_refresh": index_sync.deferred_work_status(vault_root)["full_upserts"],
         }
 

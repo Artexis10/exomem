@@ -1795,6 +1795,29 @@ def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: P
     assert retried["requeued"] == 1
 
 
+def test_process_media_status_shows_memory_blocked_work_only_as_waiting(vault: Path) -> None:
+    # A tool caller, such as a Cloud tenant, sees memory-blocked work as waiting.
+    # The memory reason and the worker's process detail stay with doctor.
+    binary = _drop_media(vault, "status-memory-blocked.m4a")
+    _media_processing().reconcile_media(vault, binary)
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None
+    assert (
+        store.record_memory_stop(claimed, kind="pressure", stop_limit=1, context="limit")
+        == media_jobs.MEMORY_BLOCKED
+    )
+
+    status = commands_module.op_process_media(vault, operation="status")
+
+    assert set(status) == {"operation", "healthy", "counts", "jobs", "errors", "index_refresh"}
+    assert status["counts"][media_jobs.PENDING] == 1
+    [job] = status["jobs"]
+    assert job["state"] == media_jobs.PENDING
+    assert job["error"] is None
+    assert media_jobs.status(vault)["memory_blocked_count"] == 1
+
+
 def test_process_media_reports_global_full_index_work_without_draining(
     vault: Path
 ) -> None:
