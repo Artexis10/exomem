@@ -178,7 +178,10 @@ def _lanes(vault: Path, client) -> int:
     print("  [3] PDF text -> extracted (PyMuPDF) & searchable   PASS")
 
     # ---- 4. /download reverse channel (scoped token) ----
-    dtok = upload_tokens.mint(TOKEN, scope="download")
+    from exomem.governance.principal import OWNER_AUDIENCE
+
+    # A download capability names who it serves; this one is the owner's own.
+    dtok = upload_tokens.mint_bound(TOKEN, audience=OWNER_AUDIENCE)
     r = client.get(
         "/download",
         params={"path": red_rel},
