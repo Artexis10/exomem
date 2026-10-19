@@ -158,7 +158,8 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
     """One pass of the export being packed, or of the newest one while its hold
     is still on. Returns None when the export leaves the cell to routine
     reconciliation this pass. `volume_unavailable` says the cell's volume is due
-    to relocate or move, or its claim is missing, so decide() owns it this pass."""
+    to relocate or move, so decide() owns it this pass. reconcile.py never asks
+    while a cell that has had a volume has no claim."""
 
     if item.cell_id != row.cell_id:
         raise ValueError("export cell mismatch")
@@ -216,9 +217,9 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
             # A cell that never served has no vault to pack.
             return Decision(export_updates={"observed_state": "failed", "error_code": EXPORT_FAILED})
         if volume_unavailable:
-            # D4: decide() starts a due relocation or move, or reports a missing
-            # claim, before anything else. The export waits for the volume the cell
-            # serves from, and a predecessor's leftover hold is released, not kept.
+            # D4: decide() starts a due relocation or move before anything else.
+            # The export waits for the volume the cell serves from, and a
+            # predecessor's leftover hold is released, not kept.
             return release() if held else None
         return hold(export_transport="create", export_updates={"observed_state": "packing"})
 

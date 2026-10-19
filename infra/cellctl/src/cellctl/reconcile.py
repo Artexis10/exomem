@@ -1675,13 +1675,15 @@ async def _reconcile_row(
         export_item = exports[-1]
     export_job = export_decision = None
     # An import holding or claiming the volume goes first; the export waits.
+    # A cell that has had a volume and lost its claim is decide()'s to report:
+    # any apply from the export path would create an empty claim in its place.
     if export_item is not None and import_decision is None and not _identity_conflict(
-            row, observation, cluster_config.storage):
+            row, observation, cluster_config.storage) and not (
+            claim_missing(observation) and row.volume_id is not None):
         export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id)
         volume_unavailable = (
             relocation_volume(row, observation, cluster_config.storage) is not None
             or planned_move_volume(row, observation, cluster_config.storage) is not None
-            or (claim_missing(observation) and row.volume_id is not None)
         )
         export_decision = decide_export(row, export_item, observation, export_job, now=now, config=config,
                                         volume_unavailable=volume_unavailable)

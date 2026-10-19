@@ -88,8 +88,8 @@ def test_a_stopped_cells_export_never_asks_for_a_replica():
 
 
 def test_an_export_waits_while_its_volume_is_unavailable_but_a_packing_one_keeps_its_hold():
-    """Defect: an export starts on a volume that is due to move or has lost its claim,
-    or a predecessor's leftover hold keeps the cell stopped while the move waits."""
+    """Defect: an export starts on a volume that is due to move, or a predecessor's
+    leftover hold keeps the cell stopped while the move waits."""
     row = _row()
     held_row = replace(row, hold_kind="export", hold_started_at=NOW)
     assert decide_export(row, _export(), SERVING, ExportJob(), now=NOW, volume_unavailable=True) is None
@@ -428,6 +428,27 @@ async def test_a_stopped_cell_is_exported_without_its_runtime_starting(cell_db, 
         statefulset_replicas = [event[2] for event in harness.cluster.events[applied_before:]
                                 if event[0] == "apply_statefulset"]
         assert statefulset_replicas and set(statefulset_replicas) == {0}
+
+
+async def test_an_export_never_recreates_a_lost_claim(cell_db, monkeypatch):
+    """Defect: a packing export's hold re-applies the cell's bundle after its claim
+    is gone, and the apply creates an empty claim in place of the tenant's volume."""
+    async with Harness(cell_db, monkeypatch) as harness:
+        await harness.serve(CELL)
+        await db.write_observed(harness.cellctl, CELL, {"volume_id": "vol-1"})
+        harness.cluster.observations[CELL] = _observed_from_applied(harness.cluster, CELL, pvc_volume_id="vol-1")
+        export_id = await harness.request(CELL)
+        await harness.run()
+        assert (await harness.export(export_id))["observed_state"] == "packing"
+        harness.cluster.observations[CELL] = _observed_from_applied(
+            harness.cluster, CELL, pvc_exists=False, pvc_bound=False, pvc_volume_id=None,
+            pod_exists=False, pod_uses_volume=False, pod_ready=False, ready_pod_image=None)
+        events_before = len(harness.cluster.events)
+
+        await harness.run(NOW + timedelta(seconds=10))
+
+        assert not [event for event in harness.cluster.events[events_before:] if event[0] == "apply_statefulset"]
+        assert (await harness.cell(CELL)).last_error_code == "VOLUME_MISSING"
 
 
 async def test_a_substituted_part_never_completes(cell_db, monkeypatch):

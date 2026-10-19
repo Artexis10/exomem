@@ -21,6 +21,11 @@ The hold SHALL have a deadline that grows with the export's cap: the configured 
 - **WHEN** the owner requests an export while a relocation or planned move of the cell's volume is due
 - **THEN** the move runs first, and the export then packs the volume the cell serves from
 
+#### Scenario: A cell whose claim is gone has an export
+
+- **WHEN** a cell that has had a volume has no claim while its export is requested, packing or holding the cell
+- **THEN** cellctl applies nothing for the export, the cell reports `VOLUME_MISSING`, and the export waits for the volume
+
 #### Scenario: An export Job hangs
 
 - **WHEN** an export hold passes its deadline
