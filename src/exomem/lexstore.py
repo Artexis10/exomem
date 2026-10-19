@@ -6538,6 +6538,7 @@ class LexicalStore:
         temp_targets = {scope: target[2] for scope, target in scope_targets.items()}
 
         def source_matches_targets() -> bool:
+            nonlocal scope_targets
             # A shift after the scan means the built units reflect a superseded
             # projection. The independent source snapshot also closes the gap
             # where another process edits the shared corpus without this process
@@ -6547,13 +6548,24 @@ class LexicalStore:
                 self._last_rebuild_result = "identity_changed"
                 return False
             final_members, final_signatures = self._walk_entries()
+            final_triples = {}
             for scope, idx in (("kb", 0), ("vault", 1)):
                 entries = [
                     (str(path), final_signatures[path])
                     for path, flags in final_members.items()
                     if flags[idx]
                 ]
-                final_triple = freshness_module.triple_from_entries(entries)
+                final_triples[scope] = freshness_module.triple_from_entries(entries)
+            if any(final_triples[scope] != target[3] for scope, target in scope_targets.items()):
+                # Replay an observed suffix before discarding the completed build;
+                # the same independent census must still prove its exact target.
+                rebased = self._rebase_detached_catalog(
+                    temp_path, scope_targets, start_identity, max_paths=None,
+                )
+                if rebased is None:
+                    return False
+                scope_targets = rebased
+            for scope, final_triple in final_triples.items():
                 if final_triple != scope_targets[scope][3]:
                     log.info(
                         "lexical atomic publish aborted: %s source changed after target capture",
