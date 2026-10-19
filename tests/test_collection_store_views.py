@@ -534,6 +534,62 @@ def test_manifest_revision_preserves_restricted_view_correction_policy(store):
                 )
 
 
+@pytest.mark.parametrize("change_projects", [False, True])
+def test_manifest_revision_reads_items_only_before_replacing_their_policy(store, monkeypatch, change_projects):
+    """Unchanged policy needs no item I/O; a changed policy must preserve an older view's authority first."""
+    from test_collection_store_writer import manifest_path, manifest_text
+
+    text = manifest_text().replace("title: Work", "title: Work\nprojects: [Alpha]").replace(
+        "    count:", "    tags: {type: array, items: {type: string}}\n    count:",
+    )
+    store.create_collection(manifest_path(), text, why="create")
+    first = store.append_record(CID, item={"title": "One", "tags": ["restricted"], "count": 1},
+                                item_key=KEY, body="Original text.\n" * 512, why="capture")
+    store.reconcile_views()
+    store.reconcile_views()
+    relative = first["affected_paths"][0]
+    path = store.root / relative
+    human = path.read_bytes().replace(b"count: 1", b"count: invalid")
+    path.write_bytes(human)
+    # Older descriptors lack contexts; recovery must use the item's original manifest.
+    with store.handle.transaction() as conn:
+        conn.execute("UPDATE projection_state SET install_json=NULL WHERE path=?", (relative,))
+    canonical = store.connection.execute("SELECT row_version,payload_hash,values_json,body,updated_txn FROM items").fetchone()
+    with held_fs.acquire(store.root).require() as filesystem:
+        implementation = type(filesystem)
+    read = implementation.read
+    read_bytes = 0
+
+    def observed_read(*args, **kwargs):
+        nonlocal read_bytes
+        result = read(*args, **kwargs)
+        if result.ok:
+            read_bytes += len(result.require())
+        return result
+
+    proposed = text.replace("title: Work", "title: Revised").removesuffix("---\n") + (
+        "item_presentation:\n  version: 1\n  title: title\n  summary: [count]\n---\n"
+    )
+    if change_projects:
+        proposed = proposed.replace("[Alpha]", "[Beta]")
+    with monkeypatch.context() as measured:
+        measured.setattr(implementation, "read", observed_read)
+        store.revise_collection(CID, manifest_text=proposed, why="revise",
+                                **store.inspect_collection(CID)["lifecycle_guards"])
+    print(f"changed_policy={change_projects} read_bytes={read_bytes} item_bytes={len(human)}")
+    assert (read_bytes >= len(human)) == change_projects
+    assert path.read_bytes() == human
+    store.reconcile_views()
+    assert store.connection.execute("SELECT row_version,payload_hash,values_json,body,updated_txn FROM items").fetchone() == canonical
+    raw, metadata, quarantined = store.connection.execute(
+        "SELECT held_bytes,governance_json,quarantined FROM held_candidates WHERE kind='view-correction'"
+    ).fetchone()
+    assert raw == human and not quarantined
+    assert json.loads(metadata) == {
+        "projects": ["beta" if change_projects else "alpha"], "tags": ["restricted"], "classes": [],
+    }
+
+
 def test_failed_rehold_cannot_downgrade_displaced_held_policy(store):
     # A less restricted retry must not expose edits to its previous secret Held envelope.
     from test_collection_store_writer import manifest_path, manifest_text
