@@ -12,7 +12,11 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
+import weakref
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -28,8 +32,12 @@ from .writer_lease import (
 )
 
 
-def _connection(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, timeout=10, isolation_level=None, factory=_ClosingConnection)
+def _connection(
+    path: Path, *, factory=_ClosingConnection, check_same_thread: bool = True
+) -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        path, timeout=10, isolation_level=None, factory=factory, check_same_thread=check_same_thread
+    )
     try:
         conn.execute("PRAGMA journal_mode=WAL")
     except BaseException:
@@ -43,6 +51,11 @@ class SQLiteLeaseStore:
         self.path = path
         self.clock = clock
         path.parent.mkdir(parents=True, exist_ok=True)
+        # One connection for the store's life. A per-request connection's close is the last
+        # close, so SQLite checkpointed the WAL into the database file after every grant.
+        self._conn = _connection(path, factory=sqlite3.Connection, check_same_thread=False)
+        self._conn_lock = threading.Lock()
+        weakref.finalize(self, self._conn.close)
         with self._connect() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS leases ("
@@ -69,8 +82,18 @@ class SQLiteLeaseStore:
                 "retired_at REAL NOT NULL, PRIMARY KEY(vault_id, generation))"
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        return _connection(self.path)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # Requests take the connection one at a time; each still opens its own BEGIN IMMEDIATE.
+        with self._conn_lock:
+            try:
+                yield self._conn
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+            if self._conn.in_transaction:
+                self._conn.commit()
 
     @staticmethod
     def _record(row, *, granted: bool = False, fence=None, store_fence=None) -> dict:  # noqa: ANN001
