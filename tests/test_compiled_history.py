@@ -584,3 +584,107 @@ def test_terminal_history_binding_cannot_outlive_its_exact_current_parent(
             current["revision_history"]["parent_ref"] = "exomem://memory/33333333-3333-4333-8333-333333333333"
         filtered = egress.postfilter("read_memory", current, vault)
     assert "revision_history" not in filtered
+
+
+def test_a_registered_dynamic_entity_keeps_both_prior_meanings_on_one_node(
+    vault: Path, owner
+) -> None:
+    from exomem import entity_types, memory_refs
+    from exomem.governance.principal import library_scope
+
+    proposal = {
+        "schema_version": 1,
+        "entity_types": {
+            "site": {
+                "folder": "Sites",
+                "label": "Site",
+                "aliases": [],
+                "capture_guidance": "A stable physical site identity.",
+            }
+        },
+    }
+    with library_scope():
+        commands.op_schema_memory(
+            vault,
+            operation="save-entity-types",
+            proposal=proposal,
+            expected_hash=entity_types.load_entity_types(vault).extension_hash,
+            why="Register a synthetic site type.",
+        )
+        created = commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="site",
+            name="Kestrel Field",
+            summary="The window is 30 minutes.",
+        )
+    path = created["path"]
+    original = commands.op_read_memory(vault, path=path)
+    for old, new, why in (
+        ("30 minutes", "45 minutes", "A source corrected the window."),
+        ("45 minutes", "60 minutes", "A later source corrected it again."),
+    ):
+        current = commands.op_read_memory(vault, path=path)
+        operation = {
+            "kind": "replace_string",
+            "old_string": f"The window is {old}.",
+            "new_string": f"The window is {new}.",
+            "expected_hash": current["content_hash"],
+        }
+        preview = commands.op_edit_memory(
+            vault, path=path, why=why, operation=operation, validate_only=True
+        )
+        commands.op_edit_memory(
+            vault,
+            path=path,
+            why=why,
+            operation={**operation, "transition_token": preview["semantic"]["transition_token"]},
+        )
+    result = commands.op_read_memory(vault, path=path, include_history=True)
+    history = result["revision_history"]
+    assert "The window is 60 minutes." in result["body"]
+    assert [r["reason"] for r in history["revisions"]] == [
+        "A later source corrected it again.",
+        "A source corrected the window.",
+    ]
+    assert "The window is 45 minutes." in history["revisions"][0]["prior"]["source"]
+    assert "The window is 30 minutes." in history["revisions"][1]["prior"]["source"]
+    assert history["revisions"][1]["before_hash"] == original["content_hash"]
+    identity = original["frontmatter"][memory_refs.ID_FIELD]
+    assert result["frontmatter"][memory_refs.ID_FIELD] == identity
+    assert history["parent_ref"] == memory_refs.memory_ref(identity)
+    assert result["path"] == path
+    assert [p.name for p in (vault / "Knowledge Base/Entities/Sites").glob("*.md")] == [
+        "Kestrel Field.md"
+    ]
+
+
+def test_prior_revision_stays_readable_when_page_definitions_become_unreadable(
+    tmp_path: Path, owner, monkeypatch
+) -> None:
+    from exomem.vocabulary import instances
+
+    _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
+    unit = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
+    _correct(tmp_path, "Second wording.", "A correction.")
+
+    def unreadable(*args, **kwargs):
+        raise ValueError("REGISTRY_UNAVAILABLE: definitions cannot be read")
+
+    monkeypatch.setattr(instances, "page_definitions", unreadable)
+    found = compiled_history.read(tmp_path, path=PAGE, unit_ref=unit.unit_ref)
+    revision, = found["revisions"]
+    assert "First wording." in revision["prior"]["source"]
+    assert revision["prior"]["unit_status"] == "found"
+    other = compiled_history.read(tmp_path, path=PAGE)["revisions"][0]
+    assert other["prior"]["source"] == revision["prior"]["source"]
+
+
+def test_history_is_unreadable_once_the_page_is_deleted(tmp_path: Path, owner) -> None:
+    _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
+    _correct(tmp_path, "Second wording.", "A correction.")
+    commands.op_delete(tmp_path, path=PAGE, confirm=True)
+    with pytest.raises(ValueError, match="NOT_FOUND|unavailable|not found"):
+        compiled_history.read(tmp_path, path=PAGE)
+    with pytest.raises(ValueError):
+        commands.op_read_memory(tmp_path, path=PAGE, include_history=True)
