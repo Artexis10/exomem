@@ -8,6 +8,7 @@ on:
       - "infra/tool-versions.env"
       - "infra/ansible/roles/k3s/files/audit-policy.yaml"
       - "src/exomem/cloud_import*.py"
+      - "src/exomem/cloud_export.py"
       - "Dockerfile"
       - "pyproject.toml"
       - "uv.lock"
@@ -21,6 +22,7 @@ on:
       - "infra/tool-versions.env"
       - "infra/ansible/roles/k3s/files/audit-policy.yaml"
       - "src/exomem/cloud_import*.py"
+      - "src/exomem/cloud_export.py"
       - "Dockerfile"
       - "pyproject.toml"
       - "uv.lock"
@@ -154,7 +156,7 @@ jobs:
           # is left out because release bumps touch it; chart tests pin the
           # invariants it carries. Git quotes a path with special or
           # non-ASCII characters, hence the optional leading quote.
-          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$|src/exomem/cloud_import[^/]*\.py$|Dockerfile$|pyproject\.toml$|uv\.lock$|\.github/workflows/cloud-cellctl\.yml$)'
+          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$|infra/cellctl/tests/test_export_storage\.py$|infra/cellctl/src/cellctl/exports\.py$|src/exomem/cloud_(import[^/]*|export)\.py$|Dockerfile$|pyproject\.toml$|uv\.lock$|\.github/workflows/cloud-cellctl\.yml$)'
         run: |
           case "$EVENT" in
             # Reusable workflows retain the full-CI caller's scheduled event.
@@ -246,6 +248,19 @@ jobs:
             EXOMEM_RELEASE_BUILD_TIME=${{ steps.import-meta.outputs.build_time }}
           cache-from: type=gha,scope=cloud-k3s
           cache-to: type=gha,mode=max,scope=cloud-k3s
+      # The export transport tests need a real S3 store with encryption at
+      # rest; this MinIO uses the live suite's pinned image and a KMS key.
+      - name: Start the MinIO for the export transport tests
+        if: matrix.suite == 'platform'
+        working-directory: infra/cellctl
+        shell: bash
+        run: |
+          image="$(uv run --frozen python -c 'from tests.test_k3s_integration import MINIO_IMAGE; print(MINIO_IMAGE)')"
+          docker run --detach --name export-storage --publish 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER=export-proof -e MINIO_ROOT_PASSWORD=export-proof-secret \
+            -e "MINIO_KMS_SECRET_KEY=export-proof:$(head -c 32 /dev/urandom | base64)" \
+            "$image" server /data --address :9000
+          timeout 60 bash -c 'until curl --silent --fail http://127.0.0.1:9000/minio/health/live; do sleep 1; done'
       # A skip (no Docker, a missing variable) must fail the job, never pass it.
       - name: Live K3s suite
         working-directory: infra/cellctl
@@ -255,12 +270,15 @@ jobs:
           CELLCTL_K3S_IMPORT_IMAGE: ${{ matrix.suite == 'protected-import' && format('cellctl-import-source:ci-{0}', github.sha) || '' }}
           PYTHONUNBUFFERED: "1"
           SUITE_GROUP: ${{ matrix.suite }}
-          # This fixed test identity partitions the existing suite, including all its parameters.
+          # These fixed test identities partition the existing suite, including all their parameters.
+          # Both run the product's own commands from the source-built image, so both belong to the
+          # protected-import group; the platform group runs every other case.
           IMPORT_TEST: test_protected_import_waits_for_real_cleanup_pod_gc
+          EXPORT_TEST: test_owner_export_packs_the_real_volume_and_serves_one_verified_archive
         run: |
-          selection="$IMPORT_TEST"
+          selection="$IMPORT_TEST or $EXPORT_TEST"
           if test "$SUITE_GROUP" = platform; then
-            selection="not $selection"
+            selection="not ($selection)"
           fi
           HELM_BIN="$(command -v helm)" \
           uv run --frozen python -m pytest -q -s -rs -p no:cacheprovider \
@@ -269,6 +287,24 @@ jobs:
             | tee "${RUNNER_TEMP}/live-k3s.txt"
           if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/live-k3s.txt"; then
             echo "::error::the live K3s suite was skipped"
+            exit 1
+          fi
+      # C6's transport tests read a real S3 store, not the cluster, so one group runs them.
+      # A skip (no store) must fail the job here too.
+      - name: Export transport suite
+        if: matrix.suite == 'platform'
+        working-directory: infra/cellctl
+        shell: bash
+        env:
+          CELLCTL_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          CELLCTL_TEST_S3_ACCESS_KEY: export-proof
+          CELLCTL_TEST_S3_SECRET_KEY: export-proof-secret
+          PYTHONUNBUFFERED: "1"
+        run: |
+          uv run --frozen python -m pytest -q -s -rs -p no:cacheprovider tests/test_export_storage.py \
+            | tee "${RUNNER_TEMP}/export-storage.txt"
+          if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/export-storage.txt"; then
+            echo "::error::the export transport suite was skipped"
             exit 1
           fi
       - name: Upload live K3s evidence

@@ -437,8 +437,10 @@ def import_storage(k3s: K3sCluster, tmp_path: Path) -> Iterator[dict[str, Any]]:
             "--user", "0:0", "--mount", f"type=volume,src={volume},dst=/data",
             "--mount", f"type=bind,src={certificates},dst=/certificates,readonly",
             "-e", f"MINIO_ROOT_USER={MINIO_ACCESS_KEY}",
-            "-e", f"MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}", MINIO_IMAGE,
-            "server", "/data", "--address", ":443", "--certs-dir", "/certificates",
+            "-e", f"MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}",
+            # C6 exports ask for encryption at rest (SSE-S3), which MinIO serves only with a KMS key.
+            "-e", "MINIO_KMS_SECRET_KEY=export-proof:" + base64.b64encode(os.urandom(32)).decode("ascii"),
+            MINIO_IMAGE, "server", "/data", "--address", ":443", "--certs-dir", "/certificates",
         ])
         address = _container_ip(name)
         # Docker assigns the address at start; restart this owned fixture after issuing its IP certificate.
@@ -840,6 +842,165 @@ print(json.dumps({{'receipt': True, 'raw_manifest': True, 'archive': manifest.ar
         _kubectl(k3s.name, ["delete", "namespace", namespace, "--ignore-not-found", "--wait=false"], check=False)
         for path in (archive, tmp_path / "envelope.tar", tmp_path / "upload.age", tmp_path / "other.age"):
             path.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not RUN_LIVE, reason="set RUN_CELLCTL_K3S_TEST=1 for the real export workflow")
+# C6 branches on whether the hold must stop a runtime or keep a stopped cell stopped.
+@pytest.mark.parametrize("desired_state", ["running", "stopped"])
+def test_owner_export_packs_the_real_volume_and_serves_one_verified_archive(
+    k3s: K3sCluster, cell_db: CellDatabase, import_storage: dict[str, Any],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, desired_state: str,
+) -> None:
+    """C6: the real export Job reads the cell's volume under the export hold and
+    uploads through the real job egress; only the verified version is served,
+    a stopped cell's runtime never starts, and expiry deletes every version."""
+    image = import_storage["image"]
+    documents = _render_platform("templates/cellctl.yaml", "templates/cloud-storage-class.yaml", settings=(
+                                     "--set", "cellctl.cellImageRepository=cellctl-import.test/exomem-cell",
+                                     "--set-json", "cells.jobEgressExcept=[]"))
+    storage_class = next(document for document in documents if document["kind"] == "StorageClass")
+    storage_class.update(provisioner="rancher.io/local-path", reclaimPolicy="Delete",
+                         volumeBindingMode="WaitForFirstConsumer")
+    storage_class.pop("parameters", None)
+    _kubectl(k3s.name, ["apply", "--filename=-"], documents=documents)
+    _wait_for(lambda: all(
+        "typeChecking" in (status := json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                          policy, "--output=json"]).stdout).get("status", {}))
+        and not status["typeChecking"].get("expressionWarnings")
+        for policy in ("exomem-cellctl-scope", "exomem-cell-connect-guard")),
+        timeout=30, description="normal controller and operator policies to type-check")
+    token = _issue_sa_token(k3s, name="cellctl", namespace="exomem-cloud")
+    configuration = k8s.Configuration()
+    k8s_config.load_kube_config(config_file=str(k3s.kubeconfig), client_configuration=configuration)
+    configuration.cert_file = configuration.key_file = None
+    configuration.api_key = {"authorization": f"Bearer {token}"}
+    sa_client = k8s.ApiClient(configuration)
+    cluster = ClusterClient(sa_client)
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(import_storage["ca"]))
+    cell_id, tenant_id = _cell_id(), uuid.uuid4()
+    namespace = namespace_name(cell_id)
+    storage = import_storage["client"]
+
+    async def sql(query: str, *args: object, role: str = "substrate_owner"):
+        connection = await asyncpg.connect(cell_db.dsn(role=role))
+        try:
+            return await connection.fetchrow(query, *args)
+        finally:
+            await connection.close()
+
+    asyncio.run(sql("INSERT INTO exomem_tenants(id) VALUES($1)", tenant_id))
+    asyncio.run(sql("INSERT INTO exomem_cloud_cells(cell_id,tenant_id,desired_state) VALUES($1,$2,'running')",
+                    cell_id, tenant_id))
+    asyncio.run(sql("INSERT INTO exomem_cloud_settings(key,value) VALUES('cell_image',$1) "
+                    "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", json.dumps(image)))
+    secrets = SecretsConfig(cell_token_key_current=b"k3s-integration-test-current-key-32b!",
+                            cell_token_key_previous=None, cell_token_key_version=1,
+                            cell_token_key_previous_version=None, backup_master_keys={1: b"0" * 32},
+                            backup_master_key_current_version=1)
+    cluster_config = ClusterConfig(object_storage_bucket=BUCKET_NAME,
+                                    object_storage_endpoint=import_storage["endpoint"],
+                                    capacity=CapacityConfig(attachments_limit_fallback=100, headroom=5))
+    fake_b2 = FakeB2(fixed_credentials=(MINIO_ACCESS_KEY, MINIO_SECRET_KEY))
+    volumes = FakeHetznerVolumeProvider()
+
+    async def step():
+        connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+        try:
+            await reconcile_once(connection, cluster, fake_b2, volumes, secrets, cluster_config, config=LIVE_CONFIG)
+        finally:
+            await connection.close()
+
+    def cell():
+        return asyncio.run(sql("SELECT * FROM exomem_cloud_cells WHERE cell_id=$1", cell_id))
+
+    def settled(state: str):
+        def check():
+            asyncio.run(step())
+            observed = cluster.observe(cell_id, namespace)
+            row = cell()
+            serving = row["ready"] and observed.pod_ready if state == "running" else not observed.pod_exists
+            return row["observed_state"] == state and row["hold_kind"] is None and serving
+        return check
+
+    try:
+        _wait_for(settled("running"), timeout=360, description="actual cell-init and Cloud runtime Ready")
+        # Suppress the unrelated scheduled backup only after the real runtime has become ready.
+        asyncio.run(sql("UPDATE exomem_cloud_cells SET last_backup_at=now() WHERE cell_id=$1", cell_id))
+        if desired_state == "stopped":
+            asyncio.run(sql("UPDATE exomem_cloud_cells SET desired_state='stopped' WHERE cell_id=$1", cell_id,
+                            role="substrate_app"))
+            _wait_for(settled("stopped"), timeout=180, description="runtime stopped before the export")
+        export_id = asyncio.run(sql("INSERT INTO exomem_cloud_exports(cell_id) VALUES($1) RETURNING export_id",
+                                    cell_id, role="substrate_app"))["export_id"]
+        seen: list[tuple[int | None, bool]] = []
+
+        def export_row():
+            return asyncio.run(sql("SELECT * FROM exomem_cloud_exports WHERE export_id=$1", export_id))
+
+        def packed():
+            asyncio.run(step())
+            observed = cluster.observe(cell_id, namespace)
+            seen.append((observed.statefulset_replicas, observed.pod_exists))
+            return export_row()["observed_state"] in ("ready", "failed")
+
+        _wait_for(packed, timeout=360, interval=2, description="actual export Job and verified completion")
+        job = cluster.observe_export_job(namespace, str(export_id))
+        print(f"[export] {desired_state}: actual termination {json.dumps(job.report, sort_keys=True)}")
+        ready = export_row()
+        assert (ready["observed_state"], ready["error_code"]) == ("ready", None)
+        assert job.succeeded and job.report["bytes"] == ready["archive_bytes"] == storage.head_object(
+            Bucket=BUCKET_NAME, Key=f"cells/{cell_id}/exports/{export_id}.zip",
+            VersionId=ready["archive_version_id"])["ContentLength"]
+        measured = cell()
+        assert 0 <= measured["used_bytes"] <= measured["filesystem_bytes"] and measured["usage_observed_at"]
+        _wait_for(settled(desired_state), timeout=360, description="export hold released, desired state again")
+        assert not cluster.observe_export_job(namespace, str(export_id)).present
+        if desired_state == "stopped":
+            assert {replicas for replicas, _pod in seen} == {0} and not any(pod for _replicas, pod in seen)
+            print(f"[export] stopped: {len(seen)} passes, StatefulSet replicas always 0, no runtime pod")
+
+        asyncio.run(sql("UPDATE exomem_cloud_exports SET link_requested_at=now() WHERE export_id=$1", export_id,
+                        role="substrate_app"))
+        asyncio.run(step())
+        linked = export_row()
+        with urlopen(linked["download_url"], context=ssl.create_default_context(cafile=str(import_storage["ca"])),
+                     timeout=60) as response:
+            archive = response.read()
+            assert response.headers["Content-Disposition"].startswith("attachment;")
+        assert hashlib.sha256(archive).hexdigest() == ready["archive_sha256"]
+        (tmp_path / "export.zip").write_bytes(archive)
+        verify = (
+            "import json; from exomem.vault_portability import verify_export_archive; "
+            f"v=verify_export_archive('/fixture/export.zip', expected_cell_id='{cell_id}'); "
+            "print(json.dumps({'files': len(v.manifest['files']), 'sha256': v.archive_sha256}))"
+        )
+        verified = json.loads(_run(["docker", "run", "--rm", "--network=none", "--user", f"{os.getuid()}:{os.getgid()}",
+                                    "--mount", f"type=bind,src={tmp_path},dst=/fixture", "--entrypoint=python3",
+                                    import_storage["tag"], "-c", verify]).stdout)
+        assert verified["sha256"] == ready["archive_sha256"] and verified["files"] > 0
+        print(f"[export] {desired_state}: downloaded archive verifies: {json.dumps(verified, sort_keys=True)}")
+
+        # Stands in for the TTL passing: cellctl reads expires_at from the row.
+        asyncio.run(sql("UPDATE exomem_cloud_exports SET expires_at=now() - interval '1 second' WHERE export_id=$1",
+                        export_id))
+        asyncio.run(step())
+        expired = export_row()
+        assert expired["observed_state"] == "expired" and expired["download_url"] is None
+        key = f"cells/{cell_id}/exports/{export_id}.zip"
+        versions = storage.list_object_versions(Bucket=BUCKET_NAME, Prefix=key)
+        assert not versions.get("Versions") and not versions.get("DeleteMarkers")
+        assert not storage.list_multipart_uploads(Bucket=BUCKET_NAME, Prefix=key).get("Uploads")
+        print(f"[export] {desired_state}: expired, every version of {key} deleted")
+    except BaseException:
+        _print_job_diagnostics(k3s.name, namespace, "export")
+        for args in (["describe", "pods"], ["logs", "statefulset/cell", "--all-containers", "--tail=100"]):
+            diagnostics = _kubectl(k3s.name, [*args, "--namespace", namespace], check=False)
+            print(f"[export] runtime diagnostics:\n{diagnostics.stdout}{diagnostics.stderr}")
+        raise
+    finally:
+        sa_client.close()
+        _kubectl(k3s.name, ["delete", "namespace", namespace, "--ignore-not-found", "--wait=false"], check=False)
+        (tmp_path / "export.zip").unlink(missing_ok=True)
 
 
 def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDatabase) -> None:

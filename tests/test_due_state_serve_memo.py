@@ -101,7 +101,7 @@ def test_rewriting_the_projection_rebuilds_once(
     assert len(calls) == 2
 
 
-def test_projection_reads_keep_persisted_state_separate_from_mutable_callers(
+def test_a_fresh_load_stays_separate_from_the_shared_snapshot_until_saved(
     tmp_path: Path,
 ) -> None:
     _persist(tmp_path, "first")
@@ -109,8 +109,9 @@ def test_projection_reads_keep_persisted_state_separate_from_mutable_callers(
     payload = due_state.load(tmp_path)
     payload["categories"]["predictions"][PAGE]["open"].append({"path": PAGE, "id": "second"})
     assert len(snapshot["categories"]["predictions"][PAGE]["open"]) == 1
+    # `save` hands its payload to the shared cache, so a caller never edits one
+    # after saving it; the write-through avoids a 20 MB re-parse per write.
     due_state.save(tmp_path, payload)
-    payload["categories"]["predictions"][PAGE]["open"].clear()
 
     assert len(due_state._load_shared(tmp_path)["categories"]["predictions"][PAGE]["open"]) == 2
     assert len(due_state.load(tmp_path)["categories"]["predictions"][PAGE]["open"]) == 2

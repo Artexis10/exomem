@@ -1129,3 +1129,38 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
                  # Completion observations must survive a controller outage until C5 is terminal.
                  "template": {"metadata": {"labels": labels}, "spec": pod}},
     }
+
+
+JOB_KIND_EXPORT = "export"
+
+
+def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str], deadline_seconds: int) -> dict:
+    """C6: the cell's own `exomem cell-export` under the export hold. It packs
+    the stopped cell's volume into a staging emptyDir as large as its parts and
+    uploads the ZIP to the presigned parts; it holds no object-storage key."""
+    from .exports import job_name
+
+    command = ["exomem", "cell-export", "--export-id", item.export_id, "--part-bytes", str(size.part_bytes),
+               "--max-bytes", str(size.max_bytes)]
+    for url in part_urls:
+        command += ["--part-url", url]
+    # Read-write like the import Jobs, not read-only like a backup: SQLite cannot
+    # read a WAL-mode store on a read-only mount once its -shm file is gone, and
+    # the export reads the collection store. The hold keeps the runtime stopped.
+    # Like the backup Job: a local volume pins this Job to a node that a move may have cordoned.
+    pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT, command=[], data_read_only=False, repo="",
+                        tolerate_cordon=spec.local_volume)
+    container = pod["containers"][0]
+    container["command"] = command
+    container["env"] = [*_init_env(spec), {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"}]
+    container["volumeMounts"].append({"name": "staging", "mountPath": "/staging"})
+    pod["volumes"].append({"name": "staging", "emptyDir": {"sizeLimit": str(size.parts * size.part_bytes)}})
+    labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}
+    return {
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": job_name(item.export_id), "namespace": spec.namespace,
+                     "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}},
+        # No TTL: cellctl deletes the Job once C6 records its outcome.
+        "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline_seconds,
+                 "template": {"metadata": {"labels": labels}, "spec": pod}},
+    }

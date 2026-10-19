@@ -59,6 +59,13 @@ class ReconcileConfig:
     import_deadline: timedelta = timedelta(hours=2)
     import_cleanup_deadline: timedelta = timedelta(minutes=2)
     import_cleanup_retry: timedelta = timedelta(hours=1)
+    # C6: an export hold not finished this long per started 10 GiB of its cap
+    # (exports.export_deadline) fails, and the cell starts again. A ready export
+    # is kept for export_ttl (EXOMEM_EXPORT_TTL_HOURS), and each download link
+    # lasts export_link_ttl.
+    export_deadline: timedelta = timedelta(minutes=30)
+    export_ttl: timedelta = timedelta(hours=24)
+    export_link_ttl: timedelta = timedelta(seconds=300)
     backup_deadline: timedelta = timedelta(minutes=15)
     # D6 step 4. Production reads it from the chart (cellctl.upgradeReadyDeadlineMinutes,
     # via main.build_reconcile_config) and never uses this value; it is the default of
@@ -229,18 +236,32 @@ def decide(
         decision = _start_relocation(row, observation, now, lost_volume, row.last_backup_snapshot)
     elif active_hold == "restore" and observation.statefulset_relocation_volume:
         decision = _continue_relocation(row, observation, now, config)
-    elif _claim_missing(observation) and row.volume_id is not None:
+    elif claim_missing(observation) and row.volume_id is not None:
         # A fresh claim would be a new, empty volume. Only a relocation, above,
         # creates one for a cell that has had a volume.
         decision = Decision(row_updates={
             "observed_state": "failed", "ready": False, "last_error_code": VOLUME_MISSING,
             "observed_generation": row.generation,
         })
-    elif active_hold == "import":
-        # C5 reconciliation owns this hold. Routine convergence never restarts its volume.
-        decision = Decision(apply_manifests=True, replicas=0, image=current_image(row, observation),
-                            hold_kind="import", hold_started_at=row.hold_started_at,
-                            row_updates={"ready": False, "observed_state": "stopping"})
+    elif active_hold in ("import", "export"):
+        # C5 and C6 reconciliation own these holds, and this branch runs only
+        # when neither decides, as when no row owns the hold. Routine
+        # convergence never restarts their volume. An unowned hold still ends:
+        # every Job of its kind starts before the kind's deadline and runs at
+        # most that long, so after twice the deadline none can use the volume.
+        from .exports import export_deadline  # exports.py imports this module
+
+        started = observation.statefulset_hold_started_at or row.hold_started_at or now
+        deadline = config.import_deadline if active_hold == "import" else export_deadline(row, config)
+        if now - started < 2 * deadline:
+            decision = Decision(apply_manifests=True, replicas=0, image=current_image(row, observation),
+                                hold_kind=active_hold, hold_started_at=row.hold_started_at,
+                                row_updates={"ready": False, "observed_state": "stopping"})
+        else:
+            decision = Decision(apply_manifests=True, replicas=0 if row.desired_state == "stopped" else 1,
+                                read_only=row.desired_state == "read_only", image=current_image(row, observation),
+                                row_updates={"hold_kind": None, "hold_started_at": None, "ready": False,
+                                             "observed_state": "stopping"})
     elif active_hold == SNAPSHOT_BACKUP:
         decision = _continue_snapshot_backup(
             row, rollout, observation, now, config, cell_image, changes_live, storage, storage_room
@@ -286,11 +307,25 @@ def decide(
                 "hold_kind": row_hold_kind(active_hold),
                 "hold_started_at": observation.statefulset_hold_started_at,
             }
+    if "last_backup_snapshot" in decision.row_updates:
+        # Every recorded backup also records the use its Job measured, as of the backup.
+        decision.row_updates = {**decision.row_updates, **usage_updates(
+            observation.backup_job_used_bytes, observation.backup_job_total_bytes,
+            decision.row_updates.get("last_backup_at"))}
     if active_hold is not None and "ready" not in decision.row_updates:
         # D4: a pass during a hold writes ready from what it observes, and a
         # pass that changes the live StatefulSet never writes ready=True.
         decision.row_updates = {**decision.row_updates, "ready": observation.pod_ready and not changes_live}
     return decision
+
+
+def usage_updates(used: int | None, total: int | None, observed_at: datetime | None) -> dict[str, object]:
+    """The C1 usage columns for one measurement, written together, or none when
+    the measurement is missing or does not add up (0 <= used <= total, total > 0)."""
+
+    if used is None or total is None or observed_at is None or not 0 <= used <= total or total == 0:
+        return {}
+    return {"used_bytes": used, "filesystem_bytes": total, "usage_observed_at": observed_at}
 
 
 def nightly_backup_due(
@@ -1122,7 +1157,7 @@ def _restore_step(
     )
 
 
-def _claim_missing(observation: ClusterObservation) -> bool:
+def claim_missing(observation: ClusterObservation) -> bool:
     return not observation.pvc_exists and not observation.pvc_bound
 
 
@@ -1142,7 +1177,7 @@ def relocation_volume(row: CellRow, observation: ClusterObservation, storage: St
         return None
     if observation.pv_node_lost and storage.is_local(observation.pv_storage_class):
         return observation.pvc_volume_id
-    if _claim_missing(observation) and row.volume_id is not None and observation.namespace_volume_lost == row.volume_id:
+    if claim_missing(observation) and row.volume_id is not None and observation.namespace_volume_lost == row.volume_id:
         return row.volume_id
     return None
 
