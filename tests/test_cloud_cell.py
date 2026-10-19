@@ -519,10 +519,9 @@ def test_cloud_mcp_request_with_previous_bearer_authenticates(
 # ---------------------------------------------------------------------------
 
 
-def test_cloud_surface_exclusions_keep_live_transfer_and_media_unavailable() -> None:
+def test_cloud_surface_exclusions_keep_live_transfer_and_video_sampling_unavailable() -> None:
     assert set(commands_module.CLOUD_SURFACE_EXCLUSIONS) == {
         "transfer_artifact",
-        "process_media",
         "read_media",
     }
     for exclusion in commands_module.CLOUD_SURFACE_EXCLUSIONS.values():
@@ -539,7 +538,7 @@ def test_cloud_tool_list_allows_staged_adoption(
         names = {tool.name for tool in tools}
         assert "transfer_artifact" not in names
         assert "adopt_vault" in names
-        assert "process_media" not in names
+        assert "process_media" in names
         assert "read_media" not in names
         assert "configure_memory" in names
         assert "activate_context" in names

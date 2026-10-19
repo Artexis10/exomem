@@ -13,6 +13,7 @@ paths and escalates only if they do not land.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -173,10 +174,15 @@ def test_a_stranded_catalogue_catches_up_without_a_whole_corpus_pass(
 
 
 def test_a_lag_over_the_foreground_cap_still_rebuilds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    live_catalogue,
 ) -> None:
     """Replaying an oversized delta under the barrier would block writers
-    longer than the detached build it replaces."""
+    longer than the detached build it replaces. The log names that refusal, so
+    an operator can tell this full pass from one a guard forced."""
+    caplog.set_level(logging.INFO, logger="exomem.lexstore")
     store, changed, _removed = live_catalogue
     bulk = []
     for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1):
@@ -197,6 +203,7 @@ def test_a_lag_over_the_foreground_cap_still_rebuilds(
     assert _wait_for_flight_end(tmp_path)
 
     assert rebuilds == [True]
+    assert any("catch-up declined (over_cap)" in message for message in caplog.messages)
 
 
 def test_a_full_request_with_nothing_lagging_still_rebuilds_drifted_rows(
