@@ -971,7 +971,8 @@ it, and the timing table keeps one row per stage:
   closes it before model loading, encoding and reranking
   (`keep-recall-available-during-pending-recovery`). An ordinary data
   publication during the request leaves the selected rows, membership and
-  statistics unchanged, and the response discloses the lag. An access-policy
+  statistics unchanged, and the response discloses the lag known at
+  admission. An access-policy
   or semantic-identity change still refuses. Strict readiness keeps its own
   current proof.
 - **[Risk] Seeded corpus vectors hide a dense-search cost.** → Dense cost is a
