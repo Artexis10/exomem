@@ -6495,8 +6495,7 @@ def op_activate_context(
     Follow live recall policy; reuse held context. For long threads or attachments,
     pass conversation as needed. origin=focus marks agent cues, not human words;
     focus cannot settle human ambiguity. Reads no attachments.
-    If the turn and held context identify no subject, ask for clarification;
-    unrelated hits cannot choose it. Preserve source identity and scope when answering.
+    If the subject is unknown, clarify first. Preserve source identity and scope.
     Due items and refresh grant no writes.
 
     Args:
