@@ -529,7 +529,13 @@ def bind_vault(
                 from .governance.egress import is_vault_root, postfilter
 
                 if injected and is_vault_root(injected[0]):
-                    result = postfilter(command.name, result, injected[0])
+                    from .collection_store import ownership
+
+                    # One ownership proof for the pass, as in the dispatcher's;
+                    # outside a scope every path decision proved its own.
+                    with ownership.read_scope(injected[0]) as ownership_scope:
+                        result = postfilter(command.name, result, injected[0])
+                        ownership_scope.finish()
                 from .governance import scrubber as governance_scrubber
 
                 if governance_scrubber._issuance_projection_context(result) is not None:

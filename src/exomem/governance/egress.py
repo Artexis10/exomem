@@ -7697,7 +7697,6 @@ def filter_withheld_entries(
         metadata_evidence = inspection_evidence
     metadata_references = dict(metadata_evidence.references) if metadata_evidence is not None else {}
     policy = operation.policy if operation is not None else policy_module.load(vault_root)
-    # File-mode decisions check live tombstones below; they never consume a captured set.
     tombstones = operation.tombstones if operation is not None else None
     who = principal if principal is not None else effective_principal()
     fail_closed = policy.blocked or (not policy.empty and not who.resolved)
@@ -7707,10 +7706,17 @@ def filter_withheld_entries(
     verdicts: dict[str, bool] = {}
     decisions_by_path: dict[str, Decision | None] = {}
 
+    def _tombstone_set() -> frozenset[str]:
+        # File mode reads the live set once per pass, on first use: a later
+        # response still sees a new deletion, and a pass no longer rescans the
+        # tombstone tree twice per path.
+        nonlocal tombstones
+        if tombstones is None:
+            tombstones = lifecycle.tombstoned_paths(vault_root)
+        return tombstones
+
     def _tombstoned(rel_path: str) -> bool:
-        if operation is not None:
-            return lifecycle.is_tombstoned_in(tombstones, rel_path)
-        return lifecycle.is_tombstoned(vault_root, rel_path)
+        return lifecycle.is_tombstoned_in(_tombstone_set(), rel_path)
 
     def _permitted(rel_path: str) -> bool:
         """True when this vault item may be named. Non-vault paths are NOT
@@ -7734,7 +7740,7 @@ def filter_withheld_entries(
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
-            tombstones=tombstones if operation is not None else None,
+            tombstones=_tombstone_set(),
         )
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
         decisions_by_path[rel_path] = decision
