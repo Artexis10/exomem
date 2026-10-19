@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 
 
-def test_store_diagnostic_uses_scoped_lease_and_full_public_inspect():
+def test_store_diagnostic_uses_scoped_lease_and_full_public_inspect(tmp_path):
     script = Path(__file__).resolve().parents[1] / "scripts/measure-records-append-latency.py"
     completed = subprocess.run(
-        [sys.executable, str(script), "--child", "--storage", "store-preview",
+        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store-preview",
          "--size", "3", "--appends", "2"],
         capture_output=True, text=True, timeout=60, check=False,
     )
@@ -39,23 +39,26 @@ def test_store_diagnostic_uses_scoped_lease_and_full_public_inspect():
             assert sample["elapsed"] > 0 and sample["thread_cpu"] > 0
             assert abs(sample["elapsed"] - sample["thread_cpu"] - sample["non_cpu_elapsed"]) < 0.003
     assert "Ordered by: internal time" in result["profile_refresh_tottime"]
+    # The pending view hash rides the main transaction: a second store commit would add an fsync.
+    trace = result["run_metadata"]["commit_fsync_count"]
+    assert trace["store_commit"] == {"invoking_thread": 1, "other_threads": 0}
     inspection = result["final_inspect"]
     assert inspection["contract"]["collection_id"] == "6a7b8c9d-1111-4222-8333-444455556666"
-    assert inspection["coverage"]["committed"] == 9
+    assert inspection["coverage"]["committed"] == 10
     assert inspection["projection"]["pending_views"] > 0
     # Counts alone can survive filtering of an unresolved caller: require the
     # public contract and every source version in this small, authorised fixture.
     versions = inspection["source_versions"]
-    assert len(versions) == 10
-    assert len({version["path"] for version in versions}) == 10
+    assert len(versions) == 11
+    assert len({version["path"] for version in versions}) == 11
     assert all(isinstance(version["hash"], str) and version["hash"] for version in versions)
     assert inspection["observed_values"]["status"]["values"] == [
-        {"value": "logged", "count": 9, "value_truncated": False},
+        {"value": "logged", "count": 10, "value_truncated": False},
     ]
 
 
 @pytest.mark.parametrize("env_prefix", ["EXOMEM_", "KB_MCP_"])
-def test_store_diagnostic_cannot_use_an_ambient_coordinator(monkeypatch, env_prefix):
+def test_store_diagnostic_cannot_use_an_ambient_coordinator(monkeypatch, env_prefix, tmp_path):
     """A developer's lease configuration must not send the invented vault to a live coordinator."""
     monkeypatch.setenv(env_prefix + "WRITER_LEASE_URL", "http://127.0.0.1:1")
     monkeypatch.setenv(env_prefix + "WRITER_LEASE_TOPOLOGY", "single-host")
@@ -64,29 +67,33 @@ def test_store_diagnostic_cannot_use_an_ambient_coordinator(monkeypatch, env_pre
     monkeypatch.setenv(env_prefix + "WRITER_LEASE_TOKEN", "invented-token")
     script = Path(__file__).resolve().parents[1] / "scripts/measure-records-append-latency.py"
     completed = subprocess.run(
-        [sys.executable, str(script), "--child", "--storage", "store-preview",
+        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store-preview",
          "--size", "1", "--appends", "1"],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert completed.returncode == 0, completed.stderr[-3000:]
     line = next(row for row in completed.stdout.splitlines() if row.startswith("RESULT-JSON:"))
     result = json.loads(line.removeprefix("RESULT-JSON:"))
-    assert result["final_inspect"]["coverage"]["committed"] == 5
+    assert result["final_inspect"]["coverage"]["committed"] == 6
     assert result["guarded_append_wall_ms"]["p95"] > 0
 
 
 def test_file_diagnostic_accounts_work_and_removes_temporary_state(tmp_path):
-    """File commands must report reached stages and finish graph writes before deleting state."""
+    """File commands must report reached stages, and the parent deletes the child's state after it exits."""
     script = Path(__file__).resolve().parents[1] / "scripts/measure-records-append-latency.py"
-    environment = {**os.environ, "TMPDIR": str(tmp_path)}
+    temporary = tmp_path / "tmp"
+    temporary.mkdir()
+    report = tmp_path / "report.json"
+    environment = {**os.environ, "TMPDIR": str(temporary)}
     completed = subprocess.run(
-        [sys.executable, str(script), "--child", "--storage", "files",
-         "--size", "1", "--appends", "1"],
+        [sys.executable, str(script), "--sizes", "1", "--storage", "files",
+         "--appends", "1", "--out", str(report)],
         env=environment, capture_output=True, text=True, timeout=60, check=False,
     )
     assert completed.returncode == 0, completed.stderr[-3000:]
-    line = next(row for row in completed.stdout.splitlines() if row.startswith("RESULT-JSON:"))
-    result = json.loads(line.removeprefix("RESULT-JSON:"))
+    results = json.loads(report.read_text(encoding="utf-8"))
+    assert len(results) == 1
+    result = results[0]
     assert result["final_inspect"]["coverage"]["committed"] == 5
     assert result["phase_acceptance"] is False
     assert result["stage_calls_last_append"]["collection.resolve"] > 0
@@ -95,14 +102,14 @@ def test_file_diagnostic_accounts_work_and_removes_temporary_state(tmp_path):
     for name in ("resolution", "governance"):
         assert result["guarded_exclusive_budgets"][name]["status"] == "reached"
         assert result["guarded_exclusive_budgets"][name]["p95_ms"] > 0
-    assert list(tmp_path.iterdir()) == []
+    assert list(temporary.iterdir()) == []
 
 
-def test_phase_probes_prove_release_refusal_and_bulk_storage():
+def test_phase_probes_prove_release_refusal_and_bulk_storage(tmp_path):
     """A filtered public read must not turn a partial audience's write into a commit."""
     script = Path(__file__).resolve().parents[1] / "scripts/measure-records-append-latency.py"
     completed = subprocess.run(
-        [sys.executable, str(script), "--child", "--storage", "store-preview",
+        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store-preview",
          "--size", "10", "--appends", "2", "--phase-probes"],
         capture_output=True, text=True, timeout=60, check=False,
     )

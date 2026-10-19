@@ -1,8 +1,9 @@
 name: Store latency (native Windows)
 
-# The store's phase gate needs guarded append, full inspect and bulk timings on
-# native NTFS. Dispatch this lane by hand against a ref; it gates nothing and
-# uploads the diagnostic's JSON report.
+# The store's phase gate needs guarded append, full inspect, bulk and query
+# timings on native NTFS, and file-mode query timings at the same sizes to
+# compare against. Dispatch this lane by hand against a ref; it gates nothing
+# and uploads the diagnostic's JSON reports.
 on:
   workflow_dispatch:
 
@@ -13,7 +14,7 @@ jobs:
   store-latency:
     name: store append and inspect latency (native NTFS)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -30,10 +31,24 @@ jobs:
           uv run --frozen --python 3.13 python scripts/measure-records-append-latency.py
           --sizes 1000,10000 --appends 30 --storage store-preview --phase-probes
           --out store-latency-windows.json
-      - name: Upload the report
+      # The file path refuses collections over 2,000 items; --lift-caps measures it past that.
+      - name: Measure file-mode latency at the same sizes
+        if: success() || failure()
+        env:
+          EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_DISABLE_EMBEDDINGS: "1"
+          EXOMEM_DISABLE_WARMUP: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python scripts/measure-records-append-latency.py
+          --sizes 1000,10000 --appends 10 --storage files --lift-caps
+          --out file-latency-windows.json
+      - name: Upload the reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: store-latency-windows
-          path: store-latency-windows.json
+          path: |
+            store-latency-windows.json
+            file-latency-windows.json
           if-no-files-found: warn

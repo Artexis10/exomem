@@ -621,7 +621,8 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         },
         "phase_evidence_missing": [
             "complete 1000 and 10000 row acceptance runs", "native Windows/NTFS run",
-            "filesystem identification", "commit/fsync trace", "query/resource phase evidence",
+            "filesystem identification", *([] if handle is not None else ["commit/fsync trace"]),
+            "resource phase evidence",
             "managed coordinated-store request path",
             "background publication latency and backup overlap",
         ],
@@ -646,6 +647,29 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
                 "calls": sum(sample["stages"][name]["calls"] for sample in samples),
             }
         return result
+
+    # Q: structured queries with the same arguments in both storage modes. Store query latency
+    # must be no worse than the file path's at each size; compare a files run with a store run.
+    query_cases = {
+        "eq_filter": {"filters": [{"column": "subject", "op": "eq", "value": _item(size // 2)["subject"]}]},
+        "contains_filter": {"filters": [{"column": "note", "op": "contains", "value": "number 7."}]},
+        "date_window_sorted": {
+            "date_from": _item(size // 2)["observed_on"], "date_to": _item(size // 2 + 29)["observed_on"],
+            "date_column": "observed_on", "sort_by": "observed_on", "descending": True, "limit": 50,
+        },
+        "count": {"aggregate": "count"},
+    }
+    query_latency = {}
+    for name, arguments in query_cases.items():
+        query_walls = []
+        for _ in range(n):
+            wall, _cpu, result, _spans = invoke(action="query", collection=COLLECTION, **arguments)
+            query_walls.append(wall)
+        query_latency[name] = {
+            "arguments": arguments, "p50_ms": round(1000 * _pct(query_walls, 0.5), 2),
+            "p95_ms": round(1000 * _pct(query_walls, 0.95), 2), "answer": _query_answer(result),
+        }
+    out["query_latency"] = {"collection_rows": size + 1, "repeats": n, "cases": query_latency}
 
     # A: guarded append; the client pays a container-version read before every append.
     guarded_rows: list[dict[str, float]] = []
@@ -698,6 +722,52 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         "p50": round(1000 * _pct(walls_b, 0.5), 2),
         "p95": round(1000 * _pct(walls_b, 0.95), 2),
     }
+
+    if handle is not None:
+        # E: one traced guarded append. It counts transactions on the store connection and Python
+        # fsync calls, split by thread. The idempotency ledger and lease state are other databases.
+        caller = threading.get_ident()
+        statements: list[tuple[bool, str]] = []
+        fsyncs = {"invoking_thread": 0, "other_threads": 0, "elapsed_ms": 0.0}
+        originals = {name: getattr(os, name) for name in ("fsync", "fdatasync") if hasattr(os, name)}
+
+        def counted(original):  # type: ignore[no-untyped-def]
+            def call(fd):  # type: ignore[no-untyped-def]
+                fsyncs["invoking_thread" if threading.get_ident() == caller else "other_threads"] += 1
+                start = time.perf_counter()
+                try:
+                    return original(fd)
+                finally:
+                    fsyncs["elapsed_ms"] += 1000 * (time.perf_counter() - start)
+
+            return call
+
+        def keyword(sql: str) -> str:
+            # SQLite's grammar fixes the transaction-control keywords, so the first token suffices.
+            return sql.split(None, 1)[0].upper() if sql.strip() else ""
+
+        _, _, expected = refresh_hash()
+        handle.connection.set_trace_callback(
+            lambda sql: statements.append((threading.get_ident() == caller, keyword(sql)))
+        )
+        for name, original in originals.items():
+            setattr(os, name, counted(original))
+        try:
+            one_append(4 * n, True, expected)
+        finally:
+            handle.connection.set_trace_callback(None)
+            for name, original in originals.items():
+                setattr(os, name, original)
+        def by_thread(*keywords: str) -> dict[str, int]:
+            return {"invoking_thread": sum(statements.count((True, word)) for word in keywords),
+                    "other_threads": sum(statements.count((False, word)) for word in keywords)}
+
+        out["run_metadata"]["commit_fsync_count"] = {
+            "scope": "one guarded append through the dispatcher; store connection only",
+            "store_begin": by_thread("BEGIN"), "store_commit": by_thread("COMMIT", "END"),
+            "store_rollback": by_thread("ROLLBACK"), "python_fsync_calls": fsyncs,
+            "sqlite_wal_sync": "one per store commit under synchronous=FULL; SQLite's own call, not counted",
+        }
 
     # C: one cProfile pass over a single guarded append.
     _, _, expected = refresh_hash()
@@ -806,6 +876,18 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
     return out
 
 
+def _query_answer(result: object) -> dict[str, object]:
+    """What one query returned, so that a files run and a store run can show the same answer."""
+    if not isinstance(result, dict):
+        return {"status": "unrecognized"}
+    rows = result.get("rows") or []
+    return {
+        "total_matched": result.get("total_matched"), "returned_rows": len(rows),
+        "subjects_sha256": hashlib.sha256(json.dumps([row.get("subject") for row in rows]).encode()).hexdigest(),
+        "aggregate": result.get("aggregate"),
+    }
+
+
 def _find_container_hash(value: object) -> str | None:
     if isinstance(value, dict):
         for key in ("expected_container_hash", "container_hash"):
@@ -830,7 +912,8 @@ def _parent(args: argparse.Namespace) -> int:
     results = []
     for size in [int(part) for part in args.sizes.split(",")]:
         print(f"== size {size} ==", file=sys.stderr, flush=True)
-        with tempfile.TemporaryDirectory(prefix="exomem-append-latency-") as work_dir:
+        # A briefly held file (a virus scanner on Windows) must not discard a finished measurement.
+        with tempfile.TemporaryDirectory(prefix="exomem-append-latency-", ignore_cleanup_errors=True) as work_dir:
             completed = subprocess.run(
                 [
                     sys.executable,
