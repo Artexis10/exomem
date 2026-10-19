@@ -11121,9 +11121,8 @@ def _relation_target(
         # re-derives it, so no schema bump is forced.
         page_key = _file_key(_with_md(canonical))
         dst_key, dst_page_key = page_key, page_key
-        if any(
-            visible is None or visible(candidate) for candidate in _link_candidates(resolver, target)
-        ):
+        candidates = _link_candidates(resolver, target)
+        if any(visible is None or visible(candidate) for candidate in candidates):
             # A resolver warning with a visible candidate is a name that
             # several visible pages share.
             fragment_metadata = {"target_fragment": fragment, "fragment_resolution": "ambiguous"}
