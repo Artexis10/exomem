@@ -591,6 +591,7 @@ class PageContext:
         # These opaque-scope protocol controls cannot be released from a current-data completeness check.
         if not readers or txn["operation"] in mutation_terminal.CONTROL_OPERATIONS:
             return None
+        historical_paths = event_paths(txn)
         paths, omitted = [], False
         for row in effects:
             if row[0] is None:
@@ -598,7 +599,7 @@ class PageContext:
                 continue
             subject = self._subject(row)
             if (not self._allows(subject, readers)
-                    or any(not self._allows(subject, readers, path) for path in event_paths(txn))):
+                    or any(not self._allows(subject, readers, path) for path in historical_paths)):
                 omitted = True
                 continue
             paths.append(subject.basis.subject.path)
@@ -616,14 +617,14 @@ class PageContext:
                     return None
                 subject = self._subject(row)
                 if (not self._allows(subject, readers)
-                        or any(not self._allows(subject, readers, path) for path in event_paths(txn))):
+                        or any(not self._allows(subject, readers, path) for path in historical_paths)):
                     return None
                 paths = [original["canonical_path"]]
             elif (not self._allows(self.manifest_subject, readers)
-                  or any(not self._allows(self.manifest_subject, readers, path) for path in event_paths(txn))):
+                  or any(not self._allows(self.manifest_subject, readers, path) for path in historical_paths)):
                 return None
         elif not effects and (not self._allows(self.manifest_subject, readers)
-                              or any(not self._allows(self.manifest_subject, readers, path) for path in event_paths(txn))):
+                              or any(not self._allows(self.manifest_subject, readers, path) for path in historical_paths)):
             return None
         return {"at": ("Imported " if txn["operation"] == "legacy_import" else "") + txn["committed_at"],
                 "operation": original["operation"] if original else txn["profile_operation"] or txn["operation"],
