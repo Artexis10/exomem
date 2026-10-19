@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import commands, embedding_index, embeddings, lexstore, readiness, warmup
+from exomem import commands, embedding_index, embeddings, lexstore, memory_refs, readiness, warmup
 
 _PAGE = "Knowledge Base/Sources/Sessions/2026-05-05-metabolism-curriculum-design.md"
 _OTHER_PAGE = "Knowledge Base/Sources/Sessions/2026-05-06-later-session.md"
@@ -79,6 +79,8 @@ def managed_vault(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
     _seed_page_vector(vault, monkeypatch)
     lexstore.ensure_fresh(vault)
+    # A managed recall never builds the reference sidecar on its own thread.
+    memory_refs.ReferenceIndex(vault).rebuild_all()
     readiness.manage_runtime()
     readiness.begin_warm()
     try:
