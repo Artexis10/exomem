@@ -446,6 +446,18 @@ def collect_candidates(
                         degraded_out.append("embeddings")
                 elif degraded_out is not None and recall_migration.coverage_unchecked(vault_root):
                     degraded_out.append("embeddings")
+                if readiness.runtime_managed():
+                    cold = [
+                        source for source in sources
+                        if isinstance(source, embeddings.EmbeddingIndex) and source.corpus_matrix_cold()
+                    ]
+                    if cold:
+                        # A whole-corpus load took 2-203 s on the request thread. The
+                        # service loads it once in the background; one-shot callers
+                        # have no later request to serve and keep the inline load.
+                        for source in cold:
+                            source.start_corpus_matrix_load()
+                        raise recall_space.CorpusMatrixCold("corpus matrix is loading")
                 with _span(timings, "vector.search"):
                     chunk_hits = []
                     for source in sources:
@@ -499,7 +511,7 @@ def collect_candidates(
             if capture_trace:
                 lane_statuses["vector"] = {
                     "status": "warming",
-                    "reason": recall_space.ServingEncoderCold.reason,
+                    "reason": e.reason,
                     "model": embeddings.MODEL_NAME,
                 }
             log.info("vector search deferred (%s); ranking without the dense lane", e)

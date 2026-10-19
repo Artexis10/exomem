@@ -294,6 +294,12 @@ class ServingEncoderCold(RuntimeError):
     reason = "model_warming"
 
 
+class CorpusMatrixCold(ServingEncoderCold):
+    """The served corpus matrix is not resident; a managed request starts its load and never waits on it."""
+
+    reason = "matrix_warming"
+
+
 #: The encoder of a sidecar recall still serves from while a new space is built
 #: (`recall_migration`): at most one, loaded by warm-up or the migration job and
 #: never by a request, and released at the cutover. It has an execution slot of

@@ -5269,3 +5269,35 @@ def test_a_page_named_in_many_fields_is_decided_once_per_payload(
     # Resolving the reference, deciding it and the decision's own check: a
     # constant per page, not one per field that names it.
     assert seen.count(page) <= 3
+
+
+def test_each_pass_reads_the_tombstone_set_once_and_sees_a_new_deletion(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long listing paid two tombstone-tree scans per path; a pass now pays one."""
+    from exomem.governance import lifecycle
+
+    page = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+    sweeps: list[Path] = []
+    real = lifecycle.tombstoned_paths
+
+    def counted(vault_root: Path) -> frozenset[str]:
+        sweeps.append(vault_root)
+        return real(vault_root)
+
+    monkeypatch.setattr(lifecycle, "tombstoned_paths", counted)
+    payload = {"items": [{"path": page}, {"path": OPEN_PATH}]}
+
+    with request_scope(_external()):
+        before = egress.filter_withheld_entries(vault, payload)
+    lifecycle.begin_deletion(vault, source_rel=page, trash_rel="Knowledge Base/_trash/deleted.md")
+    with request_scope(_external()):
+        after = egress.filter_withheld_entries(vault, payload)
+
+    assert before["items"] == [{"path": page}, {"path": OPEN_PATH}]
+    assert after["items"] == [{"path": OPEN_PATH}]
+    # One sweep per pass; deciding each of the two paths live would take four.
+    assert len(sweeps) == 2
