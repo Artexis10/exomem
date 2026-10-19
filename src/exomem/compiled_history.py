@@ -2,10 +2,11 @@
 
 One entry keeps one before image as read. History stays outside ordinary reads
 and indexing; this owner admits every retained image before serving its fields.
-It reuses the held history reader and the Records pagination envelope, without
-registry history's rotation policy. Each change costs one full before image.
-Counts require independent admission of retained entries; only a returned page
-of admitted text stays in memory.
+It reuses the held history reader and Records' page bounds and continuation, without
+registry history's rotation policy. Its envelope differs from Records': `status` is
+`retained`, `incomplete` or `unavailable`, `coverage` is always `unverified`, and
+no field claims a total. Each change costs one full before image. Only a returned
+page of independently admitted text stays in memory.
 """
 
 from __future__ import annotations
@@ -216,7 +217,8 @@ def read(
 
     One call examines a bounded number of admitted entries, so a unit-scoped page can
     be short or empty while `truncated` is true; the continuation then names the last
-    admitted entry examined, never an unavailable one.
+    admitted entry examined, never an unavailable one. Such an empty page reports
+    `incomplete`, not `unavailable`.
     """
     from . import commands
 
@@ -231,7 +233,6 @@ def read(
     directory = history_dir(parent_ref)
     names = registry_history.kept_names(root, directory, suffix=".json") or []
     cap = _scan_cap(size)
-    retained = 0
     examined = 0
     consumed = None  # The last admitted version this read finished with, touching or not.
     page = []
@@ -251,7 +252,6 @@ def read(
         if entry is None:
             continue
         if unit_ref is None or any(u.get("unit_ref") == unit_ref for u in entry["affected_units"]):
-            retained += 1
             if len(page) == size:
                 # One further admitted entry proves more exist; nothing older is opened.
                 truncated = True
@@ -291,9 +291,9 @@ def read(
         "parent_ref": parent_ref,
         "unit_ref": unit_ref,
         # These protocol outcomes describe admitted snapshots, never complete retention.
-        "status": "retained" if retained else "unavailable",
+        # An empty truncated page means the examination bound ended the read, not absence.
+        "status": "retained" if revisions else "incomplete" if truncated else "unavailable",
         "coverage": "unverified",
-        "retained": retained,
         "returned": len(revisions),
         "truncated": truncated,
         "continuation": consumed if truncated else None,

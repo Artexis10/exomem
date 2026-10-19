@@ -22,6 +22,7 @@ from exomem import (
     append_to_file,
     commands,
     compiled_history,
+    registry_history,
     semantic_index,
     semantic_writes,
     vault,
@@ -125,7 +126,7 @@ def test_admitted_history_does_not_claim_complete_coverage(tmp_path: Path, owner
 
     assert history["status"] == "retained"
     assert history["coverage"] == "unverified"
-    assert history["retained"] == history["returned"] == 1
+    assert history["returned"] == 1
     revision, = history["revisions"]
     assert "Second wording." in revision["prior"]["source"]
     assert "Unverified bytes." not in json.dumps(history)
@@ -166,7 +167,7 @@ def test_each_prior_snapshot_needs_admission_before_counts_or_reason(
 
     monkeypatch.setattr(registry_history, "_require_snapshot_admission", refuse_prior)
     hidden = compiled_history.read(tmp_path, path=PAGE)
-    assert hidden["returned"] == hidden["retained"] == 0
+    assert hidden["returned"] == 0
     assert hidden["revisions"] == []
     assert hidden["truncated"] is False
     assert "private" not in json.dumps(hidden)
@@ -214,8 +215,7 @@ def test_revisions_do_not_rotate_at_registry_history_limit_and_paginate(
     first = commands.op_read_memory(tmp_path, path=PAGE, include_history=True, history_limit=2)[
         "revision_history"
     ]
-    # `retained` counts the admitted entries this read examined, never total retention.
-    assert first["retained"] == 3 and first["returned"] == 2 and first["truncated"]
+    assert first["returned"] == 2 and first["truncated"] and first["status"] == "retained"
     second = compiled_history.read(tmp_path, path=PAGE, limit=2, continuation=first["continuation"])
     assert "Wording 21." in first["revisions"][0]["prior"]["source"]
     assert "Wording 19." in second["revisions"][0]["prior"]["source"]
@@ -243,18 +243,27 @@ def _entry_files_oldest_first(root: Path) -> list[Path]:
 
 
 def test_a_history_page_does_not_depend_on_entries_beyond_its_lookahead(
-    tmp_path: Path, owner
+    tmp_path: Path, owner, monkeypatch
 ) -> None:
     """A deep history must page without opening old entries: a damaged ancient snapshot
     must not change the newest page, or make every read pay for all retained depth."""
     _write_page(tmp_path, source=_page_source("- [rule] Wording 0. ^stable"))
-    for index in range(1, 26):
+    for index in range(1, 6):
         _correct(tmp_path, f"Wording {index}.", "A source clarified this interpretation.")
-    intact = compiled_history.read(tmp_path, path=PAGE, limit=3)
-    for path in _entry_files_oldest_first(tmp_path)[:15]:
+    intact = compiled_history.read(tmp_path, path=PAGE, limit=1)
+    for path in _entry_files_oldest_first(tmp_path)[:3]:
         path.write_text("not json", encoding="utf-8")
-    assert compiled_history.read(tmp_path, path=PAGE, limit=3) == intact
-    assert intact["returned"] == 3 and intact["truncated"] and intact["retained"] == 4
+    opened = []
+    read_kept = registry_history.read_kept
+
+    def counting(root, directory, name, **kwargs):
+        opened.append(name)
+        return read_kept(root, directory, name, **kwargs)
+
+    monkeypatch.setattr(registry_history, "read_kept", counting)
+    assert compiled_history.read(tmp_path, path=PAGE, limit=1) == intact
+    assert intact["returned"] == 1 and intact["truncated"] and intact["status"] == "retained"
+    assert len(opened) == 2  # The page and one further admitted entry; nothing older.
 
 
 def test_pagination_skips_unavailable_entries_without_revealing_them(
@@ -272,46 +281,56 @@ def test_pagination_skips_unavailable_entries_without_revealing_them(
     assert len(set(versions)) == 6
     assert not {files[p].stem for p in (1, 5, 6)} & set(versions)
     first = compiled_history.read(tmp_path, path=PAGE, limit=2)
-    assert first["retained"] == 3 and first["continuation"] == first["revisions"][-1]["version"]
+    assert first["continuation"] == first["revisions"][-1]["version"]
+
+
+def _unit_pages(root: Path, unit_ref: str, *, limit: int) -> list[dict]:
+    pages, continuation = [], None
+    while True:
+        page = compiled_history.read(
+            root, path=PAGE, unit_ref=unit_ref, limit=limit, continuation=continuation
+        )
+        pages.append(page)
+        if not page["truncated"]:
+            return pages
+        continuation = page["continuation"]
 
 
 def test_a_sparse_unit_read_is_capped_and_pages_on_to_its_old_revision(
     tmp_path: Path, owner
 ) -> None:
     """A unit corrected once, long ago, among many corrections of another unit: one read
-    must not open every retained entry to find it. It stops at a page-derived cap, says
-    `truncated`, and continuations reach the old revision exactly once without ever
-    resting on an entry this reader cannot see."""
-    _write_page(tmp_path, source=_page_source("- [rule] Busy 0. ^busy\n- [rule] Rare 0. ^rare"))
-    rare = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[1].unit_ref
-    _correct(tmp_path, "Rare 1.", "The rare unit changed once.", index=1)
-    for index in range(1, 60):
-        _correct(tmp_path, f"Busy {index}.", "The busy unit keeps changing.")
+    must not open every retained entry to find it. It stops at a page-derived cap and
+    reports `incomplete`, not `unavailable`; continuations reach the old revision exactly
+    once without ever resting on an entry this reader cannot see."""
+    _write_page(
+        tmp_path,
+        source=_page_source("- [rule] Never 0. ^never\n- [rule] Busy 0. ^busy\n- [rule] Rare 0. ^rare"),
+    )
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    never, rare = units[0].unit_ref, units[2].unit_ref
+    _correct(tmp_path, "Rare 1.", "The rare unit changed once.", index=2)
+    for index in range(1, 13):
+        _correct(tmp_path, f"Busy {index}.", "The busy unit keeps changing.", index=1)
     files = _entry_files_oldest_first(tmp_path)
-    assert len(files) == 60
-    broken = {files[position].stem for position in range(24, 32)}  # None touches the rare unit.
-    for position in range(24, 32):
+    assert len(files) == 13
+    broken = {files[position].stem for position in range(4, 8)}  # None touches the rare unit.
+    for position in range(4, 8):
         files[position].write_text("not json", encoding="utf-8")
     visible = {r["version"] for r in _walk_history(tmp_path, limit=50)}
-    assert len(visible) == 52 and not visible & broken
+    assert len(visible) == 9 and not visible & broken
 
-    reads, continuation = [], None
-    while True:
-        page = compiled_history.read(
-            tmp_path, path=PAGE, unit_ref=rare, limit=3, continuation=continuation
-        )
-        reads.append(page)
-        if not page["truncated"]:
-            break
-        assert page["continuation"] in visible  # Page-level history already shows this entry.
-        continuation = page["continuation"]
-
-    assert reads[0]["truncated"] and reads[0]["revisions"] == []
-    # Paging 52 visible entries three at a time would take 18 reads.
-    assert reads[0]["retained"] == 0 and 1 < len(reads) <= 10
-    found = [r for page in reads for r in page["revisions"]]
+    pages = _unit_pages(tmp_path, rare, limit=1)
+    assert [page["status"] for page in pages] == ["incomplete", "incomplete", "retained"]
+    assert pages[0]["truncated"] and pages[0]["returned"] == 0
+    assert all(page["continuation"] in visible for page in pages[:-1])  # Page-level history shows them.
+    found = [r for page in pages for r in page["revisions"]]
     assert len(found) == 1 and "Rare 0." in found[0]["prior"]["source"]
     assert found[0]["version"] == files[0].stem
+
+    # A unit with no revision at all stays incomplete until the walk ends, then unavailable.
+    statuses = [page["status"] for page in _unit_pages(tmp_path, never, limit=1)]
+    assert statuses == ["incomplete", "incomplete", "unavailable"]
 
 
 def test_export_and_restore_keep_prior_compiled_interpretations(tmp_path: Path, owner) -> None:
@@ -564,7 +583,7 @@ def test_denied_project_prior_matches_absent_history_in_the_complete_read(
         assert compiled_history.read(vault, path=UNTYPED_PAGE)["returned"] == 1
     with request_scope(authenticate("limited")):
         hidden = commands.op_read_memory(vault, path=UNTYPED_PAGE, include_history=True, history_limit=1)
-        assert hidden["revision_history"]["returned"] == hidden["revision_history"]["retained"] == 0
+        assert hidden["revision_history"]["returned"] == 0
         entry, = (vault / compiled_history.history_root()).rglob("*.json")
         entry.unlink()
         absent = commands.op_read_memory(vault, path=UNTYPED_PAGE, include_history=True, history_limit=1)
@@ -723,7 +742,9 @@ def test_history_is_unreadable_once_the_page_is_deleted(tmp_path: Path, owner) -
     _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
     _correct(tmp_path, "Second wording.", "A correction.")
     commands.op_delete(tmp_path, path=PAGE, confirm=True)
-    with pytest.raises(ValueError, match="NOT_FOUND|unavailable|not found"):
+    with pytest.raises(ValueError) as direct:
         compiled_history.read(tmp_path, path=PAGE)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as through_read:
         commands.op_read_memory(tmp_path, path=PAGE, include_history=True)
+    assert str(direct.value).startswith("NOT_FOUND:")
+    assert str(through_read.value).startswith("NOT_FOUND:")
