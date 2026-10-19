@@ -102,6 +102,42 @@ def test_span_distinguishes_thread_cpu_from_elapsed_wait(token, monkeypatch) -> 
     assert row["ms"] >= 10
 
 
+
+def test_recall_stages_record_cpu_and_counts_when_a_stage_refuses(token, monkeypatch) -> None:
+    """Slow or refused recall keeps CPU separate from wall time and caller counts."""
+    from exomem.find_types import FindTimings
+
+    ticks = iter((1_000_000, 3_500_000, 5_000_000, 6_500_000))
+    monkeypatch.setattr(time, "thread_time_ns", lambda: next(ticks))
+    timings = FindTimings()
+    measured = {"candidates": 3}
+    for _ in range(2):
+        with pytest.raises(ValueError), timings.span("semantic.search", measured=measured):
+            raise ValueError("refused")
+
+    row = call_spans.pop_call_spans(token)[0]
+    assert row["name"] == "recall.semantic.search"
+    assert row["count"] == 2
+    assert row["fields"] == {"candidates": 6, "thread_cpu_us": 4000}
+    assert measured == {"candidates": 3}
+    # CPU is private ledger metadata; public wall-time attribution keeps its shape.
+    assert set(timings.as_dict()["stages"]["semantic.search"]) == {"ms", "source", "calls"}
+
+
+def test_recall_stage_outside_mcp_never_samples_thread_cpu(monkeypatch) -> None:
+    """Offline recall keeps its timing budget and does not create MCP measurements."""
+    from exomem.find_types import FindTimings
+
+    def unexpected_cpu_clock():
+        raise AssertionError("offline recall sampled an MCP CPU clock")
+
+    monkeypatch.setattr(time, "thread_time_ns", unexpected_cpu_clock)
+    with FindTimings().span("semantic.search"):
+        pass
+
+    assert not call_spans._SPANS
+
+
 def test_cpu_attribution_preserves_the_carry_rebuild_sentinel(
     token, tmp_path, monkeypatch
 ) -> None:
