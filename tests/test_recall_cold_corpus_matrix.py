@@ -160,6 +160,8 @@ def test_a_failed_background_load_reports_the_lane_failed_without_retrying_at_on
 ) -> None:
     index = embeddings.get_embedding_index(managed_vault)
     index.unload_cache()
+    # A backoff no test run can outlast, so the second recall falls inside it.
+    monkeypatch.setattr(embedding_index, "MATRIX_LOAD_RETRY_SECONDS", 3600.0)
     loads: list[str] = []
 
     def failing_load():
