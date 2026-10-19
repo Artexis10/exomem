@@ -18,7 +18,7 @@ jobs:
         # runner time rather than a release -- still worth bounding. The larger
         # allowance covers the media engines actually being sizeable.
         timeout-minutes: 8
-        run: scripts/ci-apt-install.sh tesseract-ocr espeak ffmpeg
+        run: scripts/ci-apt-install.sh tesseract-ocr espeak ffmpeg gdb
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -37,4 +37,5 @@ jobs:
           EXOMEM_RECALL_MODEL: BAAI/bge-base-en-v1.5
         run: >-
           uv run --frozen --extra embeddings --extra media
-          python scripts/smoke-media-pipeline.py --require-all
+          gdb -q -batch -ex "set pagination off" -ex run -ex "thread apply all bt 30"
+          --args python scripts/smoke-media-pipeline.py --require-all
