@@ -55,8 +55,12 @@ These are programme acceptance criteria, not new gates on unrelated ordinary rel
 
 Only semantic changes covered by the correction contract require such interpretation history; formatting and derived maintenance do not create new knowledge objects. Bounded history reads must not scan every prior revision or the whole vault. Retention, deletion and current disclosure govern historical payloads as well as current content; keep an explicit unavailable state if retained content is no longer accessible. Measure storage/write amplification and bounded history-read cost at realistic correction depth, including retention/restore, before claiming the representation scales. This does not make full history a prerequisite for ordinary current-state reads.
 
-**Note and unit history reporting (3.15).** The existing reader counts independently admitted, usable revisions.
-It reports `status: retained` when that count is positive and `status: unavailable` otherwise.
+**Note and unit history reporting (3.15).** The reader admits each retained entry independently.
+It reports `status: retained` when the page returns at least one revision.
+It reports `status: incomplete` when the page returns none but `truncated` is true: a unit-scoped read reached its per-call bound, and the caller pages on from `continuation`.
+It reports `status: unavailable` only when it returns none and is not truncated.
+A page read cannot be incomplete, because it sets `truncated` only after it has filled a page.
+The envelope has no total or examined-count field.
 Every result carries `coverage: unverified`, because a readable subset cannot prove complete retention.
 Absent, denied, corrupt and unreadable entries remain indistinguishable; current-page authority grants no exception for historical diagnostics.
 A read skips versions not older than the continuation without opening them, then opens and admits entries newest first.
@@ -64,12 +68,12 @@ A page read stops after the page plus one further admitted entry, which sets `tr
 A unit-scoped read must open an entry to learn whether it touches the unit, so one call examines at most 2 x (page size + 1) admitted entries, about the cost of a page read.
 When that cap is reached first, the read returns the matches found and sets `truncated`.
 A unit-scoped page can therefore be short or empty while `truncated` is true; the caller pages on with the continuation.
-Unavailable entries never count toward the cap.
+Unavailable entries never count toward the cap, because counting them would reveal them.
+The bound counts admitted entries only, so one call's cost still grows with the number of consecutive entries the reader cannot see; that is inherent to disclosure.
 The continuation is the version of the last admitted entry the read examined: the last returned entry for a page read, and for a unit-scoped read possibly an entry that does not touch the unit.
 Every such entry is admitted and already shown to the same reader by the page-level history, so unavailable or withheld entries never show through position, count or continuation.
-`retained` counts the admitted entries that read examined (those touching the unit, when one is named), never total retention.
 
-Isolated synthetic measurement (one 7 KB page, default page size 20, medians of five reads; the host was loaded, so absolute milliseconds are noisy):
+Measured with an uncommitted isolated synthetic probe that applied corrections to one 7 KB page in a temporary vault through the supported correction route, then timed reads at the default page size of 20 (medians of five; the host was loaded, so absolute milliseconds are noisy):
 
 | Correction depth | Page read before / after (ms) | Current read before / after (ms) | Stored per correction |
 | --- | --- | --- | --- |
@@ -78,7 +82,7 @@ Isolated synthetic measurement (one 7 KB page, default page size 20, medians of 
 | 200 | 1585 / 290 | 30 / 60 | about 7.9 KB |
 
 The page read stops growing with depth.
-Unit-scoped reads at depth 200, from a separate run of the same synthetic page (its page read, 318 ms, repeats the 290 ms measurement above):
+Unit-scoped reads at depth 200, from a second uncommitted probe of the same method (its page read, 318 ms, repeats the 290 ms measurement above):
 
 | Read | Time (ms) | Returned |
 | --- | --- | --- |

@@ -3,7 +3,7 @@
 ## 5. Ordinary write follow-through
 
 - [x] 5.1 Serve page-scoped write advice with independent emission history and delivered fingerprints; verify global carriers, disclosure, and batch behavior.
-      Evidence: PR #1838: `test_write_advice_counts_only_affected_pages`, `test_local_delivery_does_not_reset_global_emission_history`, `test_batch_advice_counts_union_of_affected_pages` and `test_delivery_records_the_fingerprint_that_was_shown` in `tests/test_due_state_projection.py`; `test_local_write_advice_remains_independent_of_bootstrap_counts` in `tests/test_due_state_carriers.py`.
+      Evidence: PR #1838: `test_write_advice_counts_only_affected_pages`, `test_local_delivery_does_not_reset_global_emission_history`, `test_batch_advice_counts_union_of_affected_pages` and `test_delivery_records_the_fingerprint_that_was_shown` in `tests/test_due_state_projection.py`; `test_local_write_advice_remains_independent_of_bootstrap_counts` in `tests/test_due_state_carriers.py`. Disclosure, from PR #1700 (merge 34c1a76a4): the bounded case `test_the_served_view_is_byte_identical_to_a_vault_without_the_item[True]` and `test_bounded_due_reads_follow_the_current_principal_and_release_policy` in `tests/test_due_state_projection.py`.
 - [ ] 5.2 Publish receipt proof under the existing outermost vault hold; verify overlapping multi-hold supersession, direct fallback, degradation, and replay.
   Remaining: no merged test proves the direct-leaf fallback of receipt-proof publication.
 - [ ] 5.3 Prime the writer resolver from the proven structural corpus; verify freshness, recall separation, and blocked-edit behavior.

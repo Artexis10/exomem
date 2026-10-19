@@ -14,6 +14,6 @@
 ## 3. Delivery acceptance
 
 - [x] 3.1 Complete independent review, integrated CI, and ordinary release; record exact accepted and released commits.
-      Evidence: released in PR #1683 (0.116.0, merge 886a0a9bf), with a later due-memo repair in PR #1883 (merge 92f752d39); both merged on green CI after independent review.
+      Evidence: accepted PR #1700 (merge 34c1a76a4, independent reviews recorded in its body); released in 0.116.0 (release PR #1683, merge 886a0a9bf); later due memo repair PR #1883 (merge 92f752d39).
 - [ ] 3.2 Check native relevance and mention behavior through continuation, compaction, and credential renewal after release; record unverified behavior explicitly.
 - [ ] 3.3 Synchronize and archive the change after shipped non-optional tasks complete; verify strict OpenSpec validation.
