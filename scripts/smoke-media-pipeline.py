@@ -34,9 +34,11 @@ TOKEN = "smoke-token"
 
 
 def _wait(predicate, *, timeout=120.0, what="condition", explain=None):
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     while time.monotonic() < deadline:
         if predicate():
+            print(f"  waited {time.monotonic() - started:.1f}s for {what}")
             return True
         time.sleep(0.5)
     detail = f"\n{explain()}" if explain is not None else ""
@@ -58,6 +60,7 @@ def main() -> int:
         help="fail instead of explicitly skipping when a heavy dependency is unavailable",
     )
     args = parser.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)  # keep lane lines in order with the server's logs
     missing = _missing_dependencies()
     if missing:
         print(f"SMOKE: optional media lanes unavailable: {', '.join(sorted(missing))}")
@@ -147,7 +150,7 @@ def _lanes(vault: Path, client) -> int:
     Image.new("RGB", (320, 320), "red").save(red, "PNG")
     post("red.png", red.getvalue(), "image/png", "Smoke", "02")
     red_rel = "Knowledge Base/Evidence/Smoke/02/red.png"
-    _wait(lambda: embeddings.ClipIndex(vault).has(red_rel), what="CLIP index of red.png")
+    _wait(lambda: embeddings.ClipIndex(vault).has(red_rel), what="CLIP index of red.png", explain=queue)
     _wait(lambda: found("a solid red square", "hybrid", "red.png.md"),
           what="CLIP to surface the textless red image")
     red_hit = found("a solid red square", "hybrid", "red.png.md")
