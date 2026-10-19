@@ -87,6 +87,15 @@ def test_a_stopped_cells_export_never_asks_for_a_replica():
     assert passes[4].hold_kind is None and passes[4].row_updates["hold_kind"] is None
 
 
+def test_an_export_waits_for_a_due_volume_move_but_a_packing_one_keeps_its_hold():
+    """Defect: an export starts on a volume that is about to be relocated or moved."""
+    row = _row()
+    held_row = replace(row, hold_kind="export", hold_started_at=NOW)
+    assert decide_export(row, _export(), SERVING, ExportJob(), now=NOW, volume_moving=True) is None
+    packing = decide_export(held_row, PACKING, DRAINED, ExportJob(), now=NOW, volume_moving=True)
+    assert packing is not None and packing.run_export_job
+
+
 def test_a_running_cells_export_waits_for_the_volume_and_restarts_the_runtime_after():
     """Defect: the export Job mounts the volume beside the runtime, or the cell stays stopped after."""
     row = _row()

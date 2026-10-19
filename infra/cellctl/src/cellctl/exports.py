@@ -153,10 +153,12 @@ def export_deadline(row: CellRow, config: ReconcileConfig = DEFAULT_RECONCILE_CO
 
 
 def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation, job: ExportJob, *,
-                  now: datetime, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> Decision | None:
+                  now: datetime, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG,
+                  volume_moving: bool = False) -> Decision | None:
     """One pass of the export being packed, or of the newest one while its hold
     is still on. Returns None when the export leaves the cell to routine
-    reconciliation this pass."""
+    reconciliation this pass. `volume_moving` says a relocation or planned
+    move of the cell's volume is due."""
 
     if item.cell_id != row.cell_id:
         raise ValueError("export cell mismatch")
@@ -210,6 +212,10 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
         if image is None:
             # A cell that never served has no vault to pack.
             return Decision(export_updates={"observed_state": "failed", "error_code": EXPORT_FAILED})
+        if volume_moving:
+            # D4: a due relocation or move starts before anything else, so the
+            # export waits and then packs the volume the cell will serve from.
+            return None
         return hold(export_transport="create", export_updates={"observed_state": "packing"})
 
     if job.succeeded:
