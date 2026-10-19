@@ -122,6 +122,17 @@ already injected this turn's working set. For a known information gap, use
 `ask_memory`, then `read_memory` on selected refs. Activation is read-only and
 abstains rather than guessing.
 
+An unresolved packet can mean an unidentified subject or missing facts about a
+known subject. Use the turn and relevant held context to distinguish them. For an
+unidentified subject, ask for clarification instead of surveying unrelated records.
+A retrieved candidate alone does not establish what the user meant. For a known
+subject, continue targeted recall; abstention does not prove that its facts are absent.
+
+Preserve each source's subject and scope when answering. If a record might concern
+an entity but does not establish that link, state the uncertainty. A past event
+alone does not establish a current condition, approval, or required procedure. Attribute
+such requirements only when the source supports them.
+
 An agent can refresh context within the same human turn when new evidence or
 a task change makes held context incomplete. Use the exposed
 `trigger="task_refresh"`, set `initiator="agent"`, keep the original human
