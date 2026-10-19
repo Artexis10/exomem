@@ -13,9 +13,10 @@ paths and escalates only if they do not land.
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -158,7 +159,8 @@ def test_a_stranded_catalogue_catches_up_without_a_whole_corpus_pass(
 
     monkeypatch.setattr(store, "rebuild_atomic", rebuild)
 
-    lexstore._schedule_repair(tmp_path)
+    # Every recall runs this strict proof; a lagging checkpoint queues repair.
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
     assert _wait_for_flight_end(tmp_path)
 
     assert rebuilds == [], "a lagging catalogue was rebuilt from the whole corpus"
@@ -170,25 +172,46 @@ def test_a_stranded_catalogue_catches_up_without_a_whole_corpus_pass(
     assert lexstore.search_bm25(tmp_path, "beforeremoval", k=3, scope="kb") == []
 
 
-@pytest.mark.parametrize("decline", ["retired store", "delta over the foreground cap"])
-def test_a_full_request_the_delta_cannot_answer_still_rebuilds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue, decline: str
+def test_a_lag_over_the_foreground_cap_still_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
 ) -> None:
-    """Re-applying rows cannot heal a store retired as corrupt, and replaying
-    an oversized delta under the barrier would block writers longer than the
-    detached build it replaces."""
+    """Replaying an oversized delta under the barrier would block writers
+    longer than the detached build it replaces."""
     store, changed, _removed = live_catalogue
-    if decline == "retired store":
-        changed.write_text("# After\n\nafterchange\n", encoding="utf-8")
-        freshness.on_files_changed(tmp_path, changed=[changed])
-        store._failed = True
-    else:
-        bulk = []
-        for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1):
-            page = changed.parent / f"bulk-{index}.md"
-            page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
-            bulk.append(page)
-        freshness.on_files_changed(tmp_path, changed=bulk)
+    bulk = []
+    for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1):
+        page = changed.parent / f"bulk-{index}.md"
+        page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+        bulk.append(page)
+    freshness.on_files_changed(tmp_path, changed=bulk)
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == [True]
+
+
+def test_a_full_request_with_nothing_lagging_still_rebuilds_drifted_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """Checkpoint metadata cannot attest rows.
+
+    Callers such as an exact purge that lost the barrier request a full pass
+    because rows drifted while every checkpoint stayed current. That request
+    must still rebuild, not be acknowledged by an exact-current proof.
+    """
+    store, changed, _removed = live_catalogue
+    row = changed.relative_to(tmp_path).as_posix()
+    with closing(sqlite3.connect(store.path)) as conn, conn:
+        conn.execute("DELETE FROM pages WHERE path = ?", (row,))
     rebuilds = []
     real_rebuild = store.rebuild_atomic
 
@@ -202,6 +225,8 @@ def test_a_full_request_the_delta_cannot_answer_still_rebuilds(
     assert _wait_for_flight_end(tmp_path)
 
     assert rebuilds == [True]
+    with closing(sqlite3.connect(store.path)) as conn:
+        assert conn.execute("SELECT 1 FROM pages WHERE path = ?", (row,)).fetchone()
 
 
 @pytest.fixture(autouse=True)
@@ -221,6 +246,7 @@ def _quiesce(timeout: float = 20.0) -> bool:
                 leaked_reobservation = bool(lexstore._FULL_REBUILD_REOBSERVED)
                 lexstore._DEFERRED_UPSERTS.clear()
                 lexstore._FULL_REBUILD_REQUESTED.clear()
+                lexstore._LAG_ONLY_REBUILDS.clear()
                 lexstore._FULL_REBUILDS_IN_FLIGHT.clear()
                 lexstore._FULL_REBUILD_REOBSERVED.clear()
                 lexstore._PUBLISHED_HANDOFF_PENDING.clear()
