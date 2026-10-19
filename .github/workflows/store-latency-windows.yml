@@ -34,6 +34,7 @@ jobs:
       # The file path refuses collections over 2,000 items; --lift-caps measures it past that.
       - name: Measure file-mode latency at the same sizes
         if: success() || failure()
+        timeout-minutes: 40
         env:
           EXOMEM_DISABLE_CLIP: "1"
           EXOMEM_DISABLE_EMBEDDINGS: "1"

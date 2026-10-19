@@ -621,7 +621,9 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         },
         "phase_evidence_missing": [
             "complete 1000 and 10000 row acceptance runs", "native Windows/NTFS run",
-            "filesystem identification", *([] if handle is not None else ["commit/fsync trace"]),
+            "filesystem identification",
+            "SQLite WAL sync count (inferred from commits, not traced)" if handle is not None
+            else "commit/fsync trace",
             "resource phase evidence",
             "managed coordinated-store request path",
             "background publication latency and backup overlap",
@@ -663,23 +665,31 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
 
     query_latency = {}
     for name, arguments in query_cases.items():
-        query_walls = []
-        answer: dict[str, object] = {}
+        outcomes: dict[tuple[str, str | None], list[float]] = defaultdict(list)
+        answers: dict[tuple[str, str | None], dict[str, object]] = {}
         for _ in range(n):
             start = time.perf_counter()
             try:
-                _wall, _cpu, result, _spans = invoke(action="query", collection=COLLECTION, **arguments)
+                wall, _cpu, result, _spans = invoke(action="query", collection=COLLECTION, **arguments)
             except (OpError, collections.CollectionError) as error:
-                # A refusal is an answer too: both modes must give the same one, and it has a cost.
-                answer = {"status": "refused", "code": error.code}
+                # A refusal is an outcome both modes must share, but its cost is not a query's.
+                outcome, wall = ("refused", error.code), time.perf_counter() - start
+                answers[outcome] = {"code": error.code}
             else:
-                answer = {"status": "answered", **_query_answer(result)}
-            query_walls.append(time.perf_counter() - start)
+                outcome = ("answered", None)
+                answers[outcome] = _query_answer(result)
+            outcomes[outcome].append(wall)
+        if len(outcomes) != 1:
+            raise RuntimeError(f"query case {name} mixed outcomes {sorted(outcomes)}; timing refused")
+        [(outcome, walls_q)] = outcomes.items()
         query_latency[name] = {
-            "arguments": arguments, "p50_ms": round(1000 * _pct(query_walls, 0.5), 2),
-            "p95_ms": round(1000 * _pct(query_walls, 0.95), 2), "answer": answer,
+            "arguments": arguments, "outcome": outcome[0], "answer": answers[outcome],
+            f"{outcome[0]}_ms": {"p50": round(1000 * _pct(walls_q, 0.5), 2),
+                                 "p95": round(1000 * _pct(walls_q, 0.95), 2)},
         }
     out["query_latency"] = {"collection_rows": size + 1, "repeats": n, "cases": query_latency}
+    if any(case["outcome"] != "answered" for case in query_latency.values()):
+        out["phase_evidence_missing"].append("answered query latency at this size")
 
     # A: guarded append; the client pays a container-version read before every append.
     guarded_rows: list[dict[str, float]] = []
@@ -754,7 +764,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
 
         def keyword(sql: str) -> str:
             # SQLite's grammar fixes the transaction-control keywords, so the first token suffices.
-            return sql.split(None, 1)[0].upper() if sql.strip() else ""
+            return sql.split(None, 1)[0].rstrip(";").upper() if sql.strip() else ""
 
         _, _, expected = refresh_hash()
         handle.connection.set_trace_callback(
@@ -768,6 +778,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             handle.connection.set_trace_callback(None)
             for name, original in originals.items():
                 setattr(os, name, original)
+
         def by_thread(*keywords: str) -> dict[str, int]:
             return {"invoking_thread": sum(statements.count((True, word)) for word in keywords),
                     "other_threads": sum(statements.count((False, word)) for word in keywords)}
