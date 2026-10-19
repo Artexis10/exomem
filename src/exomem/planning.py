@@ -518,7 +518,6 @@ def query(
                     continuation=continuation,
                     output_format=output_format,
                     view=view,
-                    source_versions_for_rows=True,
                 )
             else:
                 result = record_formats.query_collection(
@@ -537,7 +536,6 @@ def query(
                     output_format=output_format,
                     view=view,
                     authorize_path=authorize_path,
-                    source_versions_for_rows=True,
                 )
             hierarchy = _hierarchy(
                 vault_root,

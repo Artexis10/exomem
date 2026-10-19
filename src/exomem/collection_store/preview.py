@@ -363,8 +363,7 @@ def dispatch(
             include_history = args.pop("include_agent_history", False)
             from .history import agent_history
 
-            result = record_governance.query_collection(
-                vault_root, manifest, **args, source_versions_for_rows=True)
+            result = record_governance.query_collection(vault_root, manifest, **args)
             return True, record_governance.project_query_result(
                 result, manifest, output_format=args.get("output_format", "json"),
                 agent_history=agent_history(writer, manifest) if include_history else None,

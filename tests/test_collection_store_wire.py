@@ -280,13 +280,16 @@ def test_file_and_store_queries_share_operator_and_aggregate_results(paired, pro
 def test_records_query_lists_only_the_sources_it_returns(paired, monkeypatch):
     """A one-row query must not carry every item's source version: above a few hundred
     items that list alone exceeded the response cap, and both modes refused the query."""
-    from exomem import query_data
+    from exomem import query_data, vault
 
-    invoke, _, _ = paired
+    invoke, roots, _ = paired
     paired_create(paired, "records", scaffold=False)
     for mode in (0, 1):
         for index in range(40):
             invoke(mode, "records", "append", collection=CID, item={"title": f"Item {index:02d}"}, why="seed")
+    items = (roots[0] / manifest_path()).parent / "Items"
+    [source] = [path.relative_to(roots[0]).as_posix() for path in items.glob("*.md")
+                if vault.parse_frontmatter(path.read_text())[0].get("title") == "Item 07"]
     # Forty source versions overflow this cap, as five hundred overflow the shipped one.
     monkeypatch.setattr(query_data, "MAX_RESPONSE_BYTES", 4096)
     one = [invoke(mode, "records", "query", collection=CID,
@@ -294,8 +297,7 @@ def test_records_query_lists_only_the_sources_it_returns(paired, monkeypatch):
     count = [invoke(mode, "records", "query", collection=CID, aggregate="count") for mode in (0, 1)]
     for result in one:
         assert [row["title"] for row in result["rows"]] == ["Item 07"]
-        paths = [version["path"] for version in result["source_versions"]]
-        assert paths[0] == manifest_path() and len(paths) == 2
+        assert [version["path"] for version in result["source_versions"]] == [manifest_path(), source]
     for result in count:
         assert result["aggregate"] == {"count": 40}
         assert [version["path"] for version in result["source_versions"]] == [manifest_path()]
@@ -451,7 +453,7 @@ def test_rendered_query_formats_match_file_mode(paired, output_format):
     for mode in (0, 1):
         invoke(mode, "records", "append", collection=CID, item={"title": "One"},
                item_key=KEY, why="capture")
-    rendered = [invoke(mode, "records", "query", collection=manifest_path(),
+    rendered = [invoke(mode, "records", "query", collection=CID,
                        output_format=output_format)["rendered"] for mode in (0, 1)]
     normalized = [re.sub(r"[0-9a-f]{64}|(?<=generated_at: )[^\n]+", "<mode-local>",
                          value) for value in rendered]

@@ -2456,8 +2456,6 @@ def query_collection(
     authorize_path: Callable[[str], bool] | None = None,
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
     project_child_value: Callable[[Any, collections.RecordPresentationColumn], Any] | None = None,
-    source_versions_limit: int | None = None,
-    source_versions_for_rows: bool = False,
     late_link_projection: bool = False,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor.
@@ -2650,19 +2648,13 @@ def query_collection(
         rendered="",
         aggregate=result.aggregate,
         query=query,
-        source_versions=(
-            _source_versions_for_returned_rows(
-                parsed,
-                manifest,
-                result.rows,
-                item_id_property=profile.item_id_property,
-            )
-            if source_versions_for_rows
-            else (
-                parsed.source_versions
-                if source_versions_limit is None
-                else parsed.source_versions[:source_versions_limit]
-            )
+        # Only the returned rows' sources: a list of every source grows with the
+        # collection and passes the response cap; the snapshot names the whole read.
+        source_versions=_source_versions_for_returned_rows(
+            parsed,
+            manifest,
+            result.rows,
+            item_id_property=profile.item_id_property,
         ),
         columns=tuple(result.columns),
         view=view_provenance,

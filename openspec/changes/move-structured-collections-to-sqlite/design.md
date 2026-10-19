@@ -700,7 +700,18 @@ The intact before/after pair shows the append p50/p95 moving from 65.48/75.71 ms
 
 Store append and inspect miss their 20 ms and 15 ms p95 targets at both sizes. Bulk 500 meets 1 s.
 
-**Query bound.** The harness runs four Records queries with the same arguments in both modes: an `eq` filter, a `contains` filter, a 30-day date window sorted with limit 50, and `count`. At `36e95b57f`, before the fix below, every case refused in both modes at both sizes with `RECORD_RESPONSE_TOO_LARGE`. Each Records query response listed the source version of every item. Above about 500 items that list alone passed the 64 KiB response cap: a one-row query answered at 400 rows and refused at 600. A Records query now lists the manifest and the sources of its returned rows, as a Planning query already did. After the fix, every case answers in both modes with the same total, row count and ordered subjects:
+The phase probes withhold 10% of the rows by ref from a partial audience. The complete audience appends to that collection. The partial audience's append is refused with `COLLECTION_NOT_FOUND`, and every run checks that the refusals leave the canonical rows and rendered views unchanged:
+
+| Platform | Rows | Complete-audience append p50/p95, ms | Partial-audience refusal p50/p95, ms |
+| --- | ---: | ---: | ---: |
+| Linux | 1,000 | 19.52 / 22.45 | 11.23 / 11.93 |
+| Linux | 10,000 | 20.49 / 24.69 | 11.33 / 12.28 |
+| NTFS | 1,000 | 115.12 / 124.68 | 85.45 / 143.78 |
+| NTFS | 10,000 | 117.09 / 286.78 | 83.99 / 90.48 |
+
+The NTFS complete-audience p95 at 10,000 rows, 286.78 ms, is the worst append in this gate; its p50 stays at 117.09 ms.
+
+**Query bound.** The harness runs four Records queries with the same arguments in both modes: an `eq` filter, a `contains` filter, a 30-day date window sorted with limit 50, and `count`. At `36e95b57f`, before the fix below, every case refused in both modes at both sizes with `RECORD_RESPONSE_TOO_LARGE`. Each Records query response listed the source version of every item. Above about 500 items that list alone passed the 64 KiB response cap: a one-row query answered at 400 rows and refused at 600. Every Records query now lists the manifest and the sources of its returned rows, as a Planning query already did. That covers the internal callers too. The independent review reproduced both failing above the same size: current-state recall returned nothing, and plan progress reported `query_unavailable`. After the fix, every case answers in both modes with the same total, row count and ordered subjects:
 
 | Rows | Case | Store p50, ms | Files p50, ms | Files ÷ store |
 | ---: | --- | ---: | ---: | ---: |
@@ -725,7 +736,7 @@ The required bound holds on Linux: store query latency is below the file path's 
 | Store | 10,000 | 114.97 / 120.66 | 329.99 / 342.28 | 2,032.8 |
 | Files | 1,000 | 16,816.57 / 25,914.40 | 7,161.13 / 7,554.82 | not measured |
 
-Every NTFS target is missed, and bulk 500 misses 1 s as well. The extra append time is CPU on the invoking thread: its median is 109.38 ms on NTFS against 12.82–14.71 ms on Linux, while the remaining elapsed time stays at 7–11 ms. Every stage grows, governance most (60.55 ms against 6.30 ms at 1,000 rows). Windows thread time includes kernel time, so file-system calls may account for part of it; that is not attributed. The one store commit and the lease's commit-generation fsync (3.70 and 4.34 ms) are the same as on Linux.
+Every NTFS target is missed, and bulk 500 misses 1 s as well. Most of the extra append time is CPU on the invoking thread. Windows thread time advances in 15.625 ms ticks, and every NTFS append sample read 93.75 or 109.375 ms of it, against a 12.82–14.71 ms median on Linux. So at least 93.75 ms of an append of about 113 ms is on that thread; the tick is too coarse to resolve the remainder. Every stage grows, governance most (60.55 ms against 6.30 ms at 1,000 rows). Windows thread time includes kernel time, so file-system calls may account for part of it; that is not attributed. The one store commit and the lease's commit-generation fsync (3.70 and 4.34 ms) are the same as on Linux.
 
 | Rows | Case | Store p50, ms | Files p50, ms | Files ÷ store |
 | ---: | --- | ---: | ---: | ---: |
@@ -1394,16 +1405,16 @@ Earlier, §12 assumed uniformly released collections. Two changes fix that:
 - The existing restic timer runs `exomem collections backup --to <staging>` first and backs up that consistent snapshot, alongside the vault replica.
 - The P1b.8 gate measures **replica sync churn**. A full replica is about 15.8 MB at 10,000 rows (spike), so publication is coalesced to at most one publish per 60 s under steady writes (and always at the §1 boundaries). The gate reports bytes per hour at 1, 10 and 60 writes per minute.
 
-**Measured churn, 2026-10-18 and 2026-10-19.** Four 300-second windows ran on one retained invented fixture of 10,000 Work rows, with a real in-process coordinator and released item, manifest and aggregate views. Three ran at source `1bf69cb51`; the 60-writes-per-minute rerun ran at `99f136bd8`, which includes #1892. Installed bytes count replica files replaced inside the window, not physical I/O or network. Each window had at most one busy replica call. That call returned `retry_pending` (`COLLECTION_STORE_BUSY`) in about 1 ms, with no pending publication and an unchanged replica signature, so these rates count it as installing nothing. The probe itself marks those windows partial.
+**Measured churn, 2026-10-18 and 2026-10-19.** Four 300-second windows ran on one retained invented fixture of 10,000 Work rows, with a real in-process coordinator and released item, manifest and aggregate views. Three ran at source `1bf69cb51`; the 60-writes-per-minute rerun ran at `99f136bd8`, which includes #1892. Installed bytes count replica files replaced inside the window, not physical I/O or network. Publication attempts land about 60–65 s apart. Three windows had one busy attempt: it returned `retry_pending` (`COLLECTION_STORE_BUSY`) in about 1 ms, with no pending publication and an unchanged replica signature, so these rates count it as installing nothing, and its replacement waits for the next attempt. The probe marks those windows partial.
 
-| Writes per minute | Source | Writes acknowledged | Replacements | Installed bytes | Bytes per hour | Acknowledgement median / max, s | View appearance after acknowledgement, s |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | `1bf69cb51` | 5 / 5 | 4 | 106,729,472 | 1,280,752,776 | 0.087 / 0.417 | 0.86–1.06 |
-| 10 | `1bf69cb51` | 50 / 50 | 5 | 133,619,712 | 1,603,436,080 | 0.086 / 0.420 | 0.86–0.99 |
-| 60 | `1bf69cb51` | 298 / 300 | 3 | 81,375,232 | 975,360,422 | 0.982 / 1.508 | 0.55 to an upper bound of 27.55 |
-| 60 | `99f136bd8` | 295 / 300 | 3 | 83,099,648 | 995,418,590 | 1.005 / 1.627 | 0.21–5.08 |
+| Writes per minute | Source | Probe status | Writes acknowledged | Replacements | Installed bytes | Bytes per hour | Acknowledgement median / max, s | View appearance after acknowledgement, s |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `1bf69cb51` | partial (one busy attempt) | 5 / 5 | 4 | 106,729,472 | 1,280,752,776 | 0.087 / 0.417 | 0.86–1.06 |
+| 10 | `1bf69cb51` | complete | 50 / 50 | 5 | 133,619,712 | 1,603,436,080 | 0.086 / 0.420 | 0.86–0.99 |
+| 60 | `1bf69cb51` | partial (one busy attempt, two missed slots) | 298 / 300 | 3 | 81,375,232 | 975,360,424 | 0.982 / 1.508 | 0.55 to an upper bound of 27.55 |
+| 60 | `99f136bd8` | partial (one busy attempt, five missed slots) | 295 / 300 | 3 | 83,099,648 | 995,418,590 | 1.005 / 1.626 | 0.21–5.08 |
 
-Replacements land about 62 s apart, so the coalescing budget holds. A replacement installs the whole replica, about 27.5 MB at this size, so steady writes cost about 1.0 to 1.6 GB of replica bytes per hour. At 60 writes per minute the acknowledgement median reaches about 1 s, and the probe misses two and five scheduled slots; that saturation is not attributed. #1892 shortened the title-only manifest revision on this fixture from 24.12 s to 1.63 s, and its manifest view appeared 1.87 s after acknowledgement. The rerun's report SHA-256 prefix is `4b3b75ee457b9215` and its probe prefix is `a88cdf1086fa3ec5`.
+Inside each window, replacements land at least 60 s apart, so the coalescing budget holds; a busy attempt stretches one gap to about 120 s. Closer publications occur only at service start and stop, which are §1 boundaries. A replacement installs the whole replica, about 27.5 MB at this size. Steady writes therefore cost one replica per publish interval, about 1.6 GB per hour at every measured rate. The lower rows hold one fewer replacement because a busy attempt fell inside the 300-second window; they do not mean that a higher write rate costs less. At 60 writes per minute the acknowledgement median reaches about 1 s, and the probe misses two and five scheduled slots; that saturation is not attributed. The title-only manifest revision on this fixture took 24.12 s at `1bf69cb51` and 1.63 s at `99f136bd8`, one sample each; #1892 is the change between them on that path. Its manifest view appeared 1.87 s after acknowledgement. The rerun's report SHA-256 prefix is `4b3b75ee457b9215` and its probe prefix is `a88cdf1086fa3ec5`.
 
 #### A10. Moves and renames: `VIEW_MOVED`
 
