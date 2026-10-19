@@ -18,6 +18,12 @@ The existing semantic-block metadata syntax (`- relations: kind: [[Target]]`) SH
 - **AND** the edge records the fragment with its outcome, and the relation census counts it
 - **AND** a unit address that names nothing, one that names several, and a heading reference are distinct outcomes
 
+#### Scenario: A fragment whose target page exists nowhere
+- **WHEN** a relation target carries a `#fragment` and no page the derivation may see resolves its page name, because the page was deleted or is withheld from that reader
+- **THEN** the relation keeps its unresolved page-level edge with the fragment and its outcome
+- **AND** a reader denied the page gets the same destination and fragment outcome as in a vault without that page
+- **AND** a queued repair of a deleted page leaves the surviving authors' edges a full rebuild leaves
+
 #### Scenario: A target with no fragment is unaffected
 - **WHEN** a relation target carries no `#fragment`
 - **THEN** the resulting edge is identical to the one produced before unit-level destinations existed
