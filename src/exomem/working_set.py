@@ -333,6 +333,8 @@ class LaneItem:
     promoted: bool = False
     relevance_order: int = 0
     request_anchors: frozenset[str] = frozenset()
+    #: Parsed authored relations stay private until their exact targets pass admission.
+    relations: tuple[Mapping[str, Any], ...] = ()
 
 
 class LaneResult(NamedTuple):
@@ -418,7 +420,9 @@ def _folded_prose(text: str) -> str:
     return " ".join(str(text or "").casefold().split())
 
 
-def _without_lede_repeats(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
+def _without_lede_repeats(
+    ordered: Sequence[LaneItem], *, qualified_sources: frozenset[tuple[str, str]] = frozenset(),
+) -> tuple[LaneItem, ...]:
     """Drop a unit the anchor page's own lede already says (close-memory-loop,
     activation quality).
 
@@ -446,6 +450,7 @@ def _without_lede_repeats(ordered: Sequence[LaneItem]) -> tuple[LaneItem, ...]:
             and not item.provenance.get("corrects")
             and not item.provenance.get("supersedes_targets")
             and not item.provenance.get("superseded_by")
+            and (item.ref, str(item.provenance.get("source_hash") or "")) not in qualified_sources
         ):
             text = _folded_prose(item.text)
             if text and any(text in lede and item.lifecycle == lifecycle
@@ -488,6 +493,7 @@ def build_packet(
     """Order, cap and budget the lane output into the packet the caller sees."""
     status_basis = status_basis or lifecycle_statuses.Basis(None)
     correction_status = None
+    outgoing_pointers: dict[tuple[str, str, str, str], LaneItem] = {}
     if status_basis.root is not None and any(item.level == "unit" for item in items):
         from . import find, unit_corrections
 
@@ -495,6 +501,30 @@ def build_packet(
         parent_reads = find.UnitParentReads()
         visible = visible if visible is not None else unit_corrections.reader_view(status_basis.root)
         tentative: dict[str, LaneItem] = {}
+        tentative_outgoing: dict[tuple[str, str, str, str], LaneItem] = {}
+
+        def outgoing_key(candidate: Mapping[str, Any]) -> tuple[str, str, str, str]:
+            return tuple(candidate[key] for key in ("source_ref", "source_hash", "relation", "unit_ref"))
+
+        def admit_outgoing(candidate: dict[str, Any]) -> bool:
+            hit = parent_reads.exact(
+                status_basis.root, candidate["path"], candidate["unit_ref"],
+                candidate["fingerprint"], visible=visible,
+            )
+            if hit is None:
+                return False
+            target = _unit_items(None, [hit], parent_reads=parent_reads)[0]
+            if not _reader_admitted((target,), visible):
+                return False
+            seed = seeds[candidate["source_ref"]]
+            ordering = status_basis.ordering(seed.lifecycle, path=seed.path or None)
+            history = " (historical source)" if ordering is not None and ordering.historical else ""
+            tentative_outgoing[outgoing_key(candidate)] = replace(
+                target, role=seed.role, anchor=seed.path, promoted=seed.promoted,
+                request_anchors=seed.request_anchors,
+                why=f"{seed.ref} {candidate['relation']}{history}; read the exact related unit.",
+            )
+            return True
 
         def admit_counterpart(candidate: dict[str, Any]) -> bool:
             hit = parent_reads.exact(
@@ -518,10 +548,15 @@ def build_packet(
 
         discovered = unit_corrections.discover(
             status_basis.root, tuple(seeds), accept=admit_counterpart, keep=visible,
+            outgoing_sources={ref: (str(item.provenance.get("source_hash") or ""), item.relations)
+                              for ref, item in seeds.items() if item.relations},
+            accept_outgoing=admit_outgoing,
         )
         correction_status = discovered["status"]
         # Only a stable, completed discovery may contribute candidates or lifecycle inputs.
         incoming = {row["unit_ref"]: tentative[row["unit_ref"]] for row in discovered["units"]}
+        outgoing_pointers = {outgoing_key(row): tentative_outgoing[outgoing_key(row)]
+                             for row in discovered["outgoing"]}
         items = tuple(
             replace(item, provenance={**item.provenance, **{
                 key: incoming[item.ref].provenance[key] for key in ("corrects", "relation", "family")
@@ -588,7 +623,10 @@ def build_packet(
             anchors=anchors, ambiguity=ambiguity, missing=missing, recent_context=recent_context,
             conversation_inferred=conversation_inferred, status_basis=status_basis,
         )
-    ordered = _without_lede_repeats(_deduplicated(sorted(current_items, key=_sort_key)))
+    ordered = _without_lede_repeats(
+        _deduplicated(sorted(current_items, key=_sort_key)),
+        qualified_sources=frozenset((key[0], key[1]) for key in outgoing_pointers),
+    )
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
@@ -628,6 +666,7 @@ def build_packet(
     starved: dict[str, None] = {}
     capped_material: dict[str, None] = {}
     represented: set[str] = set()
+    served_sources: dict[tuple[str, str], LaneItem] = {}
 
     def _material_capped(item: LaneItem) -> bool:
         return item.role in material_roles and (
@@ -635,7 +674,7 @@ def build_packet(
             and not item.request_anchors - represented
         )
 
-    def _budget_pointer(item: LaneItem, reason: str) -> None:
+    def _budget_pointer(item: LaneItem, reason: str, *, exact_path: bool = False) -> None:
         nonlocal used, promoted_used
         if _material_capped(item):
             capped_material.setdefault(item.role, None)
@@ -644,6 +683,8 @@ def build_packet(
             starved.setdefault(item.role, None)
             return
         pointer = _pointer(item, reason)
+        if exact_path:
+            pointer["path"] = item.path
         cost = (
             working_set_conversation.prose_chars(
                 pointer, role_ids=role_ids, status_basis=status_basis
@@ -751,6 +792,7 @@ def build_packet(
             if promoted:
                 promoted_used += cost
             units.append(unit)
+            served_sources[item.ref, str(item.provenance.get("source_hash") or "")] = item
             used += cost
             per_role[item.role] = role_count + 1
             if item.role in material_roles:
@@ -759,6 +801,12 @@ def build_packet(
         for item, reason in deferred:
             _budget_pointer(item, reason)
         deferred.clear()
+        for (source_ref, source_hash, _relation, _target), pointer_item in outgoing_pointers.items():
+            source = served_sources.get((source_ref, source_hash))
+            if source is not None and source.promoted == promoted:
+                _budget_pointer(replace(pointer_item, role=source.role, promoted=source.promoted,
+                                        request_anchors=source.request_anchors),
+                                "requires_read", exact_path=True)
 
     packet: dict[str, Any] = {
         "recent_context": recent_entries,
@@ -1543,6 +1591,7 @@ def _unit_items(
                     "supersedes_targets": list(supersedes),
                 },
                 why=(role.description or f"{role.id} lane") if role is not None else "",
+                relations=tuple(getattr(hit, "relations", ()) or ()),
             )
         )
     return tuple(out)
