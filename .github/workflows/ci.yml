@@ -22,10 +22,12 @@ jobs:
   timing-tests:
     name: serial timing checks (py${{ matrix.python-version }})
     # Keep timing checks on an idle runner while every core worker pool starts.
-    env: &serial-core-modules
+    env: &serial-core-selections
       EXOMEM_SERIAL_CORE_MODULE: tests/test_governance_overhead.py
       EXOMEM_SERIAL_ANALYTICS_MODULE: tests/test_query_engine_analytics.py
       EXOMEM_SERIAL_GRAPH_MODULE: tests/test_graph_lane_perf.py
+      # Real-clock attribution needs an idle process, outside the worker pool.
+      EXOMEM_SERIAL_RECALL_NODE: tests/test_recall_integration.py::test_every_request_shape_attributes_its_time
     if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -70,6 +72,7 @@ jobs:
           "$EXOMEM_SERIAL_CORE_MODULE"
           "$EXOMEM_SERIAL_ANALYTICS_MODULE"
           "$EXOMEM_SERIAL_GRAPH_MODULE"
+          "$EXOMEM_SERIAL_RECALL_NODE"
           -o timeout=180
           --durations-path="$EXOMEM_DURATIONS_PATH"
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-serial.xml
@@ -102,7 +105,7 @@ jobs:
   # replacement because scheduler recovery previously stalled after a crash.
   core-tests:
     name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/12)
-    env: *serial-core-modules
+    env: *serial-core-selections
     # The release PR runs no test job: `release-evidence` requires a green
     # full run at its base revision and refuses a release PR that changes
     # anything release-please does not manage. Lint, build (packages, Cloud
@@ -192,6 +195,7 @@ jobs:
           --ignore="$EXOMEM_SERIAL_CORE_MODULE"
           --ignore="$EXOMEM_SERIAL_ANALYTICS_MODULE"
           --ignore="$EXOMEM_SERIAL_GRAPH_MODULE"
+          --deselect="$EXOMEM_SERIAL_RECALL_NODE"
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path="$EXOMEM_DURATIONS_PATH"
