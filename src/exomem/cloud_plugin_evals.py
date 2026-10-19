@@ -14,7 +14,6 @@ SURFACES = ("claude-chat", "claude-cowork", "claude-code", "chatgpt", "codex")
 IDENTITY_KEYS = ("version", "skill_contract", "corpus_digest", "profile", "resource")
 
 
-
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
@@ -56,7 +55,9 @@ def _is_write(call: dict) -> bool:
         return False
     arguments = call.get("arguments")
     try:
-        return not invocation_is_read_only(command, arguments if isinstance(arguments, dict) else {})
+        return not invocation_is_read_only(
+            command, arguments if isinstance(arguments, dict) else {}
+        )
     except SelectorCoverageError:
         # The registry cannot classify this selector, so the call counts as a write.
         return True
@@ -632,9 +633,7 @@ def readiness(root: Path, evidence: Path, *, now: datetime | None = None) -> dic
         value = cross.get("readback", {})
         inspect(value, "cross_readback", reader)
         writes = [
-            c
-            for c in _calls(written["observations"])
-            if _is_write(c) and _ok(c.get("result"))
+            c for c in _calls(written["observations"]) if _is_write(c) and _ok(c.get("result"))
         ]
         found = _readback_issues(value, writes, written["marker"], written["conversation_id"])
         issues.extend("cross_readback:" + i for i in found)
