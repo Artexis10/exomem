@@ -142,6 +142,22 @@ def test_the_matrix_warm_runs_only_for_a_resident_corpus(
     assert len(loads) == expected
 
 
+def test_the_matrix_warm_creates_no_sidecar_on_a_vault_without_one(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty sidecar would switch reconcile to unit vectors before any exist."""
+    from exomem import embeddings
+
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    sidecar = embeddings.get_embedding_index(vault).path
+    assert not sidecar.exists()
+
+    server_runtime._warm_embedding_matrix(vault)
+
+    assert not sidecar.exists()
+
+
 def test_explicitly_disabled_warmup_does_not_build_request_or_matrix_caches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

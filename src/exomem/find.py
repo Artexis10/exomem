@@ -93,7 +93,8 @@ _collapse = find_results.collapse
 # countable: doctor (and any future health endpoint) can read them, and each
 # find carries a per-request `degraded` envelope marker built from `failed_out`
 # below (distinct from the `warming` marker, which means "lane deferred while a
-# model preload is still in flight", not "lane failed"). Thread-safe — find runs
+# model preload or a corpus-matrix load is still in flight", not "lane failed").
+# Thread-safe — find runs
 # on FastMCP/REST worker + file-watcher threads concurrently.
 _DEGRADATION_LOCK = threading.Lock()
 _DEGRADATION_COUNTS: dict[str, int] = {}

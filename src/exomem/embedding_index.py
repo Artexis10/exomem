@@ -106,8 +106,11 @@ CHUNK_PATH_LOG = sidecar_store.PathChangeLog(
 CATCHUP_MAX_PATHS = 32
 CATCHUP_MAX_GENERATIONS = 64
 # After a background corpus-matrix load fails, a managed recall reports the
-# dense lane failed, not warming, for this long before it starts another load.
-MATRIX_LOAD_RETRY_SECONDS = 60.0
+# dense lane failed, not warming, and starts no load for this long. A load that
+# fails late has read the whole corpus, so retrying on every recall would repeat
+# that read; the wait starts short, so a transient failure (a busy lock) costs
+# seconds of dense recall, and doubles with each consecutive failure up to 64x.
+MATRIX_LOAD_RETRY_SECONDS = 5.0
 
 # --------------------------------------------------------------- generation meta
 #
@@ -747,6 +750,7 @@ class EmbeddingIndex:
         self._matrix_load_lock = threading.Lock()
         self._matrix_load: threading.Thread | None = None
         self._matrix_load_failed_at: float | None = None
+        self._matrix_load_failures = 0
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -1587,27 +1591,30 @@ class EmbeddingIndex:
             return served
         return None
 
-    def require_resident_matrix(self) -> None:
-        """Serve the matrix now, or load it in the background and raise.
+    def require_resident_matrix(self) -> _EmbCache | None:
+        """The matrix that serves now, or a background load and a raise.
 
-        A matrix that serves, or catches up within the bound, returns at once.
+        A matrix that serves, or catches up within the bound, is returned.
         Otherwise this starts the one background load and raises
         `recall_space.CorpusMatrixCold`, or a plain error while a failed load
-        backs off. A long-running service's recall calls this before `search`:
-        a whole-corpus load took minutes on a request thread.
+        backs off. None means no resident matrix applies (no sidecar, or the
+        disk-scoring profile). A long-running service's recall serves through
+        this: a whole-corpus load took minutes on a request thread.
         """
         if not self.path.exists() or cloud_cell.resource_policy() == "service-v1":
-            return
+            return None
         from . import recall_policy
 
         policy_identity = recall_policy.recall_policy_identity(self.vault_root)
-        if self._serve_resident(policy_identity) is not None:
-            return
+        served = self._serve_resident(policy_identity)
+        if served is not None:
+            return served
         if self._matrix_loading() is not None:
             raise recall_space.CorpusMatrixCold("corpus matrix is loading")
         with self._lock:
-            if self._serve_or_catch_up_locked(policy_identity) is not None:
-                return
+            served = self._serve_or_catch_up_locked(policy_identity)
+            if served is not None:
+                return served
             self._defer_matrix_load()
 
     def _serve_or_catch_up_locked(self, policy_identity: tuple[str, str]) -> _EmbCache | None:
@@ -1659,6 +1666,8 @@ class EmbeddingIndex:
         )
         self._cache = loaded
         self._hits += 1
+        self._matrix_load_failed_at = None
+        self._matrix_load_failures = 0
         return loaded
 
     def start_corpus_matrix_load(self) -> threading.Thread:
@@ -1681,7 +1690,8 @@ class EmbeddingIndex:
     def _defer_matrix_load(self) -> NoReturn:
         """Start the background load, or report that the last one failed recently."""
         failed_at = self._matrix_load_failed_at
-        if failed_at is not None and time.monotonic() - failed_at < MATRIX_LOAD_RETRY_SECONDS:
+        backoff = MATRIX_LOAD_RETRY_SECONDS * 2 ** min(self._matrix_load_failures - 1, 6)
+        if failed_at is not None and time.monotonic() - failed_at < backoff:
             raise RuntimeError("the background corpus matrix load failed; retrying after a backoff")
         self.start_corpus_matrix_load()
         raise recall_space.CorpusMatrixCold("corpus matrix is loading")
@@ -1690,6 +1700,9 @@ class EmbeddingIndex:
         """Read every row off `self._lock`, so writers and recall never wait on the read."""
         from . import recall_policy
 
+        # Like every reader here, never create the sidecar it would read.
+        if not self.path.exists() or cloud_cell.resource_policy() == "service-v1":
+            return
         started = time.perf_counter()
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
@@ -1705,10 +1718,12 @@ class EmbeddingIndex:
                     # more under the lock, which holds the writers' cache patches.
                     served = self._full_load_locked()
         except Exception:  # noqa: BLE001 — recall reports the failure until the backoff ends
+            self._matrix_load_failures += 1
             self._matrix_load_failed_at = time.monotonic()
             log.warning("background embedding matrix load failed", exc_info=True)
             return
         self._matrix_load_failed_at = None
+        self._matrix_load_failures = 0
         log.info(
             "embedding matrix background load: reason=%s rows=%d gen=%d in %.0f ms",
             reason,
@@ -1930,9 +1945,10 @@ class EmbeddingIndex:
             vec_hits = self._vec_search(query_vec, k)
             if vec_hits is not None:
                 return vec_hits
-        if defer_cold_load:
-            self.require_resident_matrix()
-        metadata, matrix = self.all_vectors()
+        resident = self.require_resident_matrix() if defer_cold_load else None
+        metadata, matrix = (
+            (resident.metadata, resident.matrix) if resident is not None else self.all_vectors()
+        )
         if not metadata:
             return []
         mask: np.ndarray | None = None

@@ -178,6 +178,35 @@ def test_a_failed_background_load_reports_the_lane_failed_without_retrying_at_on
     assert len(loads) == loads_before_second
 
 
+def test_an_inline_reader_waits_for_the_background_load_instead_of_reading_again(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second full read would hold two corpus matrices at once (about 950 MB here)."""
+    _seed_page_vector(vault, monkeypatch)
+    index = embeddings.get_embedding_index(vault)
+    index.unload_cache()
+    release = threading.Event()
+    loads: list[str] = []
+    real_load = index._load_all_rows
+
+    def held_load():
+        loads.append(threading.current_thread().name)
+        release.wait(timeout=30)
+        return real_load()
+
+    monkeypatch.setattr(index, "_load_all_rows", held_load)
+    loading = index.start_corpus_matrix_load()
+    # An audit or a write advisory reads the matrix inline while the load runs.
+    reader = threading.Thread(target=index.all_vectors, name="inline-reader")
+    reader.start()
+    reader.join(timeout=1)
+    release.set()
+    reader.join(timeout=30)
+    loading.join(timeout=30)
+
+    assert loads == ["exomem-matrix-load"]
+
+
 def test_a_one_shot_caller_keeps_the_dense_lane_by_loading_inline(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
