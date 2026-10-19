@@ -659,15 +659,25 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         },
         "count": {"aggregate": "count"},
     }
+    from exomem.cli_ops import OpError
+
     query_latency = {}
     for name, arguments in query_cases.items():
         query_walls = []
+        answer: dict[str, object] = {}
         for _ in range(n):
-            wall, _cpu, result, _spans = invoke(action="query", collection=COLLECTION, **arguments)
-            query_walls.append(wall)
+            start = time.perf_counter()
+            try:
+                _wall, _cpu, result, _spans = invoke(action="query", collection=COLLECTION, **arguments)
+            except (OpError, collections.CollectionError) as error:
+                # A refusal is an answer too: both modes must give the same one, and it has a cost.
+                answer = {"status": "refused", "code": error.code}
+            else:
+                answer = {"status": "answered", **_query_answer(result)}
+            query_walls.append(time.perf_counter() - start)
         query_latency[name] = {
             "arguments": arguments, "p50_ms": round(1000 * _pct(query_walls, 0.5), 2),
-            "p95_ms": round(1000 * _pct(query_walls, 0.95), 2), "answer": _query_answer(result),
+            "p95_ms": round(1000 * _pct(query_walls, 0.95), 2), "answer": answer,
         }
     out["query_latency"] = {"collection_rows": size + 1, "repeats": n, "cases": query_latency}
 
@@ -819,8 +829,6 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         _, _, refusal_expected = refresh_hash()
         before = canonical_state()
         refusal_samples = []
-        from exomem.cli_ops import OpError
-
         for index in range(n):
             try:
                 invoke(audience=partial_principal, action="append", collection=COLLECTION,
