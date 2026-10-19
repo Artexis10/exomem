@@ -36,9 +36,9 @@ def owner():
         yield
 
 
-def _correct(root: Path, value: str, reason: str) -> dict:
+def _correct(root: Path, value: str, reason: str, *, index: int = 0) -> dict:
     current = semantic_index.current_parent_index_state(root, PAGE)
-    unit = current.document.units[0]
+    unit = current.document.units[index]
     return commands.op_observe_memory(
         root,
         path=PAGE,
@@ -273,6 +273,45 @@ def test_pagination_skips_unavailable_entries_without_revealing_them(
     assert not {files[p].stem for p in (1, 5, 6)} & set(versions)
     first = compiled_history.read(tmp_path, path=PAGE, limit=2)
     assert first["retained"] == 3 and first["continuation"] == first["revisions"][-1]["version"]
+
+
+def test_a_sparse_unit_read_is_capped_and_pages_on_to_its_old_revision(
+    tmp_path: Path, owner
+) -> None:
+    """A unit corrected once, long ago, among many corrections of another unit: one read
+    must not open every retained entry to find it. It stops at a page-derived cap, says
+    `truncated`, and continuations reach the old revision exactly once without ever
+    resting on an entry this reader cannot see."""
+    _write_page(tmp_path, source=_page_source("- [rule] Busy 0. ^busy\n- [rule] Rare 0. ^rare"))
+    rare = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[1].unit_ref
+    _correct(tmp_path, "Rare 1.", "The rare unit changed once.", index=1)
+    for index in range(1, 60):
+        _correct(tmp_path, f"Busy {index}.", "The busy unit keeps changing.")
+    files = _entry_files_oldest_first(tmp_path)
+    assert len(files) == 60
+    broken = {files[position].stem for position in range(24, 32)}  # None touches the rare unit.
+    for position in range(24, 32):
+        files[position].write_text("not json", encoding="utf-8")
+    visible = {r["version"] for r in _walk_history(tmp_path, limit=50)}
+    assert len(visible) == 52 and not visible & broken
+
+    reads, continuation = [], None
+    while True:
+        page = compiled_history.read(
+            tmp_path, path=PAGE, unit_ref=rare, limit=3, continuation=continuation
+        )
+        reads.append(page)
+        if not page["truncated"]:
+            break
+        assert page["continuation"] in visible  # Page-level history already shows this entry.
+        continuation = page["continuation"]
+
+    assert reads[0]["truncated"] and reads[0]["revisions"] == []
+    # Paging 52 visible entries three at a time would take 18 reads.
+    assert reads[0]["retained"] == 0 and 1 < len(reads) <= 10
+    found = [r for page in reads for r in page["revisions"]]
+    assert len(found) == 1 and "Rare 0." in found[0]["prior"]["source"]
+    assert found[0]["version"] == files[0].stem
 
 
 def test_export_and_restore_keep_prior_compiled_interpretations(tmp_path: Path, owner) -> None:
