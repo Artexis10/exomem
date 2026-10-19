@@ -2366,6 +2366,7 @@ def visible_memory_ref_paths(
     vault_root: Path, values: Iterable[str], *,
     principal: RequestPrincipal | None = None, purpose: str | None = None,
     _optional: Literal[False] = False,
+    _prepared_owners: memory_refs._ReferenceOwners | None = None,
 ) -> dict[str, str]: ...
 
 
@@ -2374,6 +2375,7 @@ def visible_memory_ref_paths(
     vault_root: Path, values: Iterable[str], *,
     principal: RequestPrincipal | None = None, purpose: str | None = None,
     _optional: bool,
+    _prepared_owners: memory_refs._ReferenceOwners | None = None,
 ) -> dict[str, str] | None: ...
 
 
@@ -2384,27 +2386,44 @@ def visible_memory_ref_paths(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     _optional: bool = False,
+    _prepared_owners: memory_refs._ReferenceOwners | None = None,
 ) -> dict[str, str] | None:
     """`visible_memory_refs` with the one visible page each ref names, from the
     same single scan: `{ref: vault-relative path}`.
 
     Optional packet origins may receive None for incomplete caller-visible
     identity coverage. Every exact caller retains strict resolution by default.
+
+    A caller supplying private prepared owners must hold its commit guard and
+    validate its preparation seal before and after this fresh admission.
+    This helper checks root and identifier coverage, not preparation freshness.
     """
     wanted = {
         value: memory_id
         for value in dict.fromkeys(str(item or "").strip() for item in values)
         if (memory_id := memory_refs.parse_memory_ref(value)) is not None
     }
-    if not wanted and not _optional:
+    if not wanted and not _optional and _prepared_owners is None:
         return {}
-    found = memory_refs.paths_for_ids_read_only(
-        Path(vault_root), wanted.values(),
-        admit_pending_paths=functools.partial(
-            pending_identity_candidates, Path(vault_root), principal=principal, purpose=purpose,
-        ),
-        _optional=_optional,
+    admit_pending_paths = functools.partial(
+        pending_identity_candidates, Path(vault_root), principal=principal, purpose=purpose,
     )
+    if _prepared_owners is None:
+        found = memory_refs.paths_for_ids_read_only(
+            Path(vault_root), wanted.values(),
+            admit_pending_paths=admit_pending_paths, _optional=_optional,
+        )
+    else:
+        # Only raw owners cross preparation; custody and policy stay current here.
+        view = memory_refs._reference_owner_view_read_only(
+            Path(vault_root), wanted.values(),
+            admit_pending_paths=admit_pending_paths, _optional=_optional,
+            _prepared_owners=_prepared_owners,
+        )
+        found = (
+            view.optional_current_paths(Path(vault_root)) if _optional
+            else view.current_paths(Path(vault_root))
+        )
     if found is None:
         return None
     out: dict[str, str] = {}

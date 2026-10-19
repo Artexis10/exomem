@@ -21,6 +21,7 @@ from .kbdir import kb_dirname
 
 if TYPE_CHECKING:
     from .pending_recall import ReferenceProjection
+    from .semantic_contract import ReferenceIdentitySnapshot
 
 log = logging.getLogger(__name__)
 
@@ -959,26 +960,40 @@ class _ReferenceOwnerView:
         }
 
 
-def _reference_owner_view_read_only(
+@dataclass(frozen=True)
+class _ReferenceOwners:
+    root: Path
+    owners: Mapping[str, tuple[str, ...]]
+    snapshot: ReferenceIdentitySnapshot | None
+
+    def snapshot_is_current(self) -> bool:
+        from . import semantic_contract
+
+        return self.snapshot is None or (
+            not semantic_contract.identity_census_omits_scanned_pages(self.root)
+            and semantic_contract.reference_identity_snapshot_is_current(self.root, self.snapshot)
+        )
+
+
+def _normalized_reference_ids(ids: Iterable[Any]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        identifier for value in ids if (identifier := normalize_id(value)) is not None
+    ))
+
+
+def _reference_owners_read_only(
     vault_root: Path, ids: Iterable[Any], *,
-    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None,
     _optional: bool = False,
-) -> _ReferenceOwnerView:
-    """Acquire the existing identity source once, before pending withdrawal."""
-    wanted: list[str] = []
-    seen: set[str] = set()
-    for value in ids:
-        normalized = normalize_id(value)
-        if normalized is not None and normalized not in seen:
-            seen.add(normalized)
-            wanted.append(normalized)
+) -> _ReferenceOwners:
+    """Acquire raw owners for the entire batch without pending or policy decisions."""
+    wanted = _normalized_reference_ids(ids)
+    root = Path(vault_root)
     if not wanted and not _optional:
-        return _ReferenceOwnerView({}, None, frozenset())
+        return _ReferenceOwners(root.resolve(), {}, None)
 
     # Lazy: `semantic_contract` imports this module.
     from . import semantic_contract
 
-    root = Path(vault_root)
     # The source is chosen before any lookup, from vault-wide state alone.
     #
     # A sidecar fast path was tried and removed. Consulting it and scanning
@@ -1021,8 +1036,10 @@ def _reference_owner_view_read_only(
             answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
             if semantic_contract.reference_identity_snapshot_is_current(root, snapshot):
                 resolved = answered
-            elif measured is not None:
-                measured["declined_snapshot_changed"] = 1
+            else:
+                snapshot = None
+                if measured is not None:
+                    measured["declined_snapshot_changed"] = 1
         if measured is not None:
             measured["snapshot"] = int(bool(wanted) and resolved is not None)
         if resolved is None:
@@ -1039,6 +1056,24 @@ def _reference_owner_view_read_only(
                 measured["pages"] = len(pages)
         if measured is not None:
             measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
+    return _ReferenceOwners(root.resolve(), resolved, snapshot)
+
+
+def _reference_owner_view_read_only(
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None,
+    _optional: bool = False,
+    _prepared_owners: _ReferenceOwners | None = None,
+) -> _ReferenceOwnerView:
+    """Apply fresh pending custody to exactly this root and normalized batch."""
+    root = Path(vault_root)
+    wanted = _normalized_reference_ids(ids)
+    if _prepared_owners is None:
+        _prepared_owners = _reference_owners_read_only(root, wanted, _optional=_optional)
+    elif _prepared_owners.root != root.resolve() or set(_prepared_owners.owners) != set(wanted):
+        raise ValueError("prepared reference owners do not cover this root and batch")
+    if not wanted and not _optional:
+        return _ReferenceOwnerView({}, None, frozenset())
     projection = _pending_reference_projection(root)
     unprovable = frozenset() if projection is None else projection.blocked_paths
     if projection is not None and admit_pending_paths is not None and projection.blocked_paths:
@@ -1048,7 +1083,7 @@ def _reference_owner_view_read_only(
             projection,
             blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
         )
-    return _ReferenceOwnerView(resolved, projection, unprovable)
+    return _ReferenceOwnerView(_prepared_owners.owners, projection, unprovable)
 
 
 def resolve_identifier(vault_root: Path, value: str) -> str:

@@ -376,6 +376,17 @@ items they covered (`paths` on the `index.*` components, `texts`/`chars` on
 `advisory.overlap_groups`). The key is absent on a span that measured only time,
 so nothing about an existing row changes.
 
+Recall stage spans also carry `thread_cpu_us` during MCP calls, including stages
+that raise. This measures CPU on the executing thread, excluding other threads.
+Nested stage measurements overlap; do not add them. These fields do not change
+public wall-time diagnostics. Outside MCP, recall does not sample this CPU clock.
+Missing CPU fields leave consumption unknown.
+
+The existing retrieval-refusal log names its validated site and the bound MCP
+`request_id`. Direct calls and invalid request IDs report `unbound`; they do not
+mint an ID. Match a valid ID to the call ledger before attributing a refusal site.
+A nearby log timestamp alone does not bind the site to a call.
+
 Matrix-load child spans break down the outer load. They do not include the caller's
 lock wait or vector scoring. Snapshot and release each aggregate two intervals.
 The ledger retains the 32 slowest spans. A row that dropped any carries

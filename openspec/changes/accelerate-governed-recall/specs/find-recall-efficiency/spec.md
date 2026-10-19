@@ -66,7 +66,9 @@ assembly, and serialization. A skipped or unavailable optional lane MUST be repr
 or unavailable rather than causing the call to fail. Timing diagnostics MUST NOT include note bodies,
 excerpts, vectors, or other bulk content. Inside an MCP tool call the per-stage timings SHALL be
 collected whether or not diagnostics were requested and SHALL be mirrored into the call ledger as
-`recall.<stage>` spans carrying names and milliseconds only; response inclusion remains opt-in.
+`recall.<stage>` spans carrying stage names, elapsed milliseconds, and invocation counts.
+These spans MAY carry bounded, content-free integer work measurements, including CPU
+microseconds on the executing thread. Response inclusion of timing diagnostics remains opt-in.
 
 Every reported stage SHALL be a registered interval so the unattributed remainder
 is computed from real intervals: `total_ms` less the union of the root-level

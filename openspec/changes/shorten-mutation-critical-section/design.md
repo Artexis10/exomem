@@ -249,9 +249,43 @@ for the full checklist:
 
 ## Episode and graph contention follow-up
 
-Keep `episode_memory` outside `_NARROW_BOUNDARY_COMMANDS`. Visibility checks,
-revision selection, shared Source index/log planning, supersession writes and
-input-ledger binding remain inside its existing command guard. The episode
+Keep `episode_memory` outside `_NARROW_BOUNDARY_COMMANDS`. Narrow only its
+`record` action, unless `EXOMEM_WIDE_MUTATION_BOUNDARY` restores the outer guard.
+Prepare the recap and raw reference owners before acquiring the canonical mutation boundary.
+Choose the owner source from vault-wide state, using one current snapshot or
+one scan for the whole normalized batch. Retain exact root and identifier
+coverage; never carry pending projection or visibility decisions across this seam.
+
+Seal preparation with a readable active-manager commit generation, the full
+vault freshness checkpoint, live state and external-pending epoch. Recheck the
+seal after acquisition, inside the guard, and after fresh pending custody,
+caller-filtered uncertainty, policy and uniqueness checks, immediately before
+revision selection. Borrowed snapshots also require current snapshot identity
+and namespace compatibility. A fresh scan can use a non-live checkpoint; that
+checkpoint does not prove an empty or current cached corpus.
+
+Leave the guard before requesting admission or preparing again when the seal
+changes. Keyed captures with contention absorption enabled use the invocation's
+existing absolute capture deadline, FIFO ticket and worker waiter slot.
+The first invalidation acquires admission; the invocation retains it until completion,
+including physical contention retries. A nested ineligible invocation cannot borrow it.
+Other managed calls allow two preparation attempts and preserve the request's delivery reserve.
+
+Check the allowance before and after queue admission, before another census,
+and before another guarded attempt. This bounds additional retries; it cannot
+interrupt an individual census or establish a hard wall-clock limit.
+An unreadable entry generation skips the scan. Exhaustion or declined admission returns
+`REFERENCE_PREPARATION_UNAVAILABLE`, with `status: retryable`, `committed: false`
+and cause `generation_unavailable` or `preparation_changed`, before any episode
+write or ledger bind. Ownership invalidation does not count as physical contention
+or restart the leaf through its public error handler. Its cost is a census per
+admitted invalidation, one waiter until completion, or a same-identity caller retry.
+It prevents unproved ownership from affecting canonical data. Observations after the final
+seal retain the existing watcher residual, without arbitrary-editor linearizability.
+
+Fresh visibility admission, revision selection, shared Source index/log planning,
+supersession writes and input-ledger binding remain inside the record guard.
+Direct calls without a managed request retain their current guard behavior. The episode
 caller opts into `add.add`'s deferred fanout path: commit canonical files without
 inline fanout, persist full-refresh demand for the exact caller paths, and queue
 `post_commit_batch_fanout` through `defer_until_terminal_persisted`. Receipt-owned
