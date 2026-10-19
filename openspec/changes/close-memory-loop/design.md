@@ -55,12 +55,45 @@ These are programme acceptance criteria, not new gates on unrelated ordinary rel
 
 Only semantic changes covered by the correction contract require such interpretation history; formatting and derived maintenance do not create new knowledge objects. Bounded history reads must not scan every prior revision or the whole vault. Retention, deletion and current disclosure govern historical payloads as well as current content; keep an explicit unavailable state if retained content is no longer accessible. Measure storage/write amplification and bounded history-read cost at realistic correction depth, including retention/restore, before claiming the representation scales. This does not make full history a prerequisite for ordinary current-state reads.
 
-**Note and unit history reporting (3.15).** The existing reader counts independently admitted, usable revisions.
-It reports `status: retained` when that count is positive and `status: unavailable` otherwise.
+**Note and unit history reporting (3.15).** The reader admits each retained entry independently.
+It reports `status: retained` when the page returns at least one revision.
+It reports `status: incomplete` when the page returns none but `truncated` is true: a unit-scoped read reached its per-call bound, and the caller pages on from `continuation`.
+It reports `status: unavailable` only when it returns none and is not truncated.
+A page read cannot be incomplete, because it sets `truncated` only after it has filled a page.
+The envelope has no total or examined-count field.
 Every result carries `coverage: unverified`, because a readable subset cannot prove complete retention.
 Absent, denied, corrupt and unreadable entries remain indistinguishable; current-page authority grants no exception for historical diagnostics.
-The existing admission and pagination stay in place.
-The reader still examines retained entries, so bounded total read cost remains open.
+A read skips versions not older than the continuation without opening them, then opens and admits entries newest first.
+A page read stops after the page plus one further admitted entry, which sets `truncated`.
+A unit-scoped read must open an entry to learn whether it touches the unit, so one call examines at most 2 x (page size + 1) admitted entries, about the cost of a page read.
+When that cap is reached first, the read returns the matches found and sets `truncated`.
+A unit-scoped page can therefore be short or empty while `truncated` is true; the caller pages on with the continuation.
+Unavailable entries never count toward the cap, because counting them would reveal them.
+The bound counts admitted entries only, so one call's cost still grows with the number of consecutive entries the reader cannot see; that is inherent to disclosure.
+The continuation is the version of the last admitted entry the read examined: the last returned entry for a page read, and for a unit-scoped read possibly an entry that does not touch the unit.
+Every such entry is admitted and already shown to the same reader by the page-level history, so unavailable or withheld entries never show through position, count or continuation.
+
+Measured with an uncommitted isolated synthetic probe that applied corrections to one 7 KB page in a temporary vault through the supported correction route, then timed reads at the default page size of 20 (medians of five; the host was loaded, so absolute milliseconds are noisy):
+
+| Correction depth | Page read before / after (ms) | Current read before / after (ms) | Stored per correction |
+| --- | --- | --- | --- |
+| 5 | 81 / 129 | 20 / 44 | about 7.9 KB |
+| 50 | 366 / 278 | 47 / 57 | about 7.9 KB |
+| 200 | 1585 / 290 | 30 / 60 | about 7.9 KB |
+
+The page read stops growing with depth.
+Unit-scoped reads at depth 200, from a second uncommitted probe of the same method (its page read, 318 ms, repeats the 290 ms measurement above):
+
+| Read | Time (ms) | Returned |
+| --- | --- | --- |
+| Page read, no unit | 318 | 20 |
+| Unit touched by 199 of 200 corrections | 293 | 20 |
+| Unit touched once, by the oldest correction: first read, capped | 311 | 0, `truncated` |
+| The same unit, walked to its revision | 1844 in 5 reads | 1 |
+| The same unit, one read without the cap | 1203 | 1 |
+
+The cap bounds each call at about a page read.
+Reaching a sparse unit's old revision still takes a walk proportional to retention, spread over several calls and dearer in total than one uncapped scan (1844 against 1203 ms above); a per-unit index would remove that and remains open.
 
 **File-row history (3.15, first slice).** A guarded Records or Planning file-row update that changes the row's payload keeps the payload it replaced in the same atomic batch as the correction: prior values and body with their payload hash, operation, `why`, audit transition, before/after item hashes, actor, and the caller's input binding (an episode correction names its curation run; a direct update has none). An update that leaves the payload unchanged keeps only an empty marker named for its transition, so the read accounts for it instead of reporting lost history; a refused retry keeps nothing. Each entry is one create-only JSON file named like `registry_history` versions under `Knowledge Base/_Collections/history/<collection_id>/<item_key>/`, inside the collection store's reserved tree, not `_Governance`: that tree is the governance authoring workspace, whose non-operational files are policy inputs, export treats it as disposable, and Records writers must not reach administration state. No read surface serves a reserved file, so `record_memory`/`plan_memory` `history` is the only way to a kept payload; it first releases the row exactly as a query would, so history is withheld exactly when its row is and a withheld row answers like a missing one. A read returns one page, newest first (default 20, at most 50) with a continuation, and opens only that page's entries. A kept body passes through the same origin projection and gate (`egress.projects_origin`) as the live row, under the reader's principal, and the corrector's audience is shown only to the owner or to that audience. `status` is `complete` when every correction in the row's verified audit chain has an entry, `unavailable_legacy` (with a count) when some predate retention, and `unverified` when the chain itself fails verification. Export classifies the history subtree as canonical content beside the store's mode marker and replica, so supported export and restore carry it. The module is the logical interface: store-mode collections keep row content in `item_versions`, which later backs the same read. Measured cost is about 730 B per correction for a three-field row with an empty body; it grows with the row's own payload, never with the collection. Note and semantic-unit revisions are the next slice.
 
