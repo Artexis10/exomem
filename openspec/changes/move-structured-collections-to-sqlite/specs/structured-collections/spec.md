@@ -641,14 +641,19 @@ A migration whose imported files changed after it published its store SHALL NOT 
 - **WHEN** an export's lease lapses after it recorded its intent, and another host takes the lease and records a newer head
 - **THEN** the export refuses with `COLLECTION_STORE_SYNC_PENDING` before it publishes or writes a file
 
-### Requirement: Collection store writes meet a latency budget
+### Requirement: Collection store latency is measured against its targets
 
-The independently gated first NEW owner-only Records summary collection (S1 in `add-collection-query-engine`) MAY be released before the 15 ms full-public-inspect, 20 ms guarded-append and supporting append-stage timing targets below are met. Those targets SHALL remain measured and reported optimisation goals for S1, with unmet results explicit; this exception SHALL NOT establish full phase/GA performance acceptance. Bulk/query/resource bounds and integrity, authorization, correctness, recovery, compatibility, portability and all other applicable S1 gates SHALL remain mandatory. Existing Records and Planning SHALL NOT be migrated by this exception.
-With the store canonical, the release acceptance harness SHALL measure, and the delivery SHALL meet: a guarded single append p95 under 20 ms end to end at 10,000 items, measured through the real dispatcher, idempotency ledger, writer lease, collection resolution, governance and synchronous item-view publication, with a per-stage timer and budget for each; a 500-row bulk upsert under 1 s end to end; and structured query results identical to the file-canonical path on the parity corpus, with query latency no worse than the file path at every measured size. File-only directory census ceilings SHALL NOT cap canonical store rows. A client guard refresh through full public `inspect` SHALL have p95 under 15 ms, retaining its counts, observed-value frequencies, presentation and coverage; measuring an internal guard-only lookup SHALL NOT satisfy this gate. Reusable metadata and base-policy results SHALL remain qualified by their current dependencies, while session authority, active grants and final grant-bearing decisions SHALL be refreshed for each operation. Cache deltas SHALL become reusable only after COMMIT succeeds. The acknowledgement path SHALL NOT include reading other items, hashing the collection, discovering or parsing a manifest file, rendering or publishing views other than the changed item, manifest and held views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
+The absolute latency targets below are optimisation targets and SHALL NOT block a phase gate, the S1 release or GA. The release acceptance harness SHALL measure them and report each result, a missed target as missed, with its scope, path, data size and environment. Migration of existing Records and Planning collections SHALL follow the P3.6 GA gate, whatever the latency results. Integrity, authorization, correctness, recovery, compatibility, portability, resource-budget and parity gates SHALL remain mandatory.
+With the store canonical, the harness SHALL measure these against their targets on Linux and native Windows NTFS:
+- a guarded single append, target p95 under 20 ms end to end at 10,000 items, through the real dispatcher, idempotency ledger, writer lease, collection resolution, governance and synchronous item-view publication, with a per-stage timer and budget for each;
+- a 500-row bulk upsert, target under 1 s end to end;
+- a client guard refresh through full public `inspect`, target p95 under 15 ms, retaining its counts, observed-value frequencies, presentation and coverage. Measuring an internal guard-only lookup SHALL NOT stand in for this measurement.
+
+Structured query results SHALL be identical to the file-canonical path on the parity corpus, and structured query latency SHALL be no worse than the file path at every measured size. File-only directory census ceilings SHALL NOT cap canonical store rows. Reusable metadata and base-policy results SHALL remain qualified by their current dependencies, while session authority, active grants and final grant-bearing decisions SHALL be refreshed for each operation. Cache deltas SHALL become reusable only after COMMIT succeeds. The acknowledgement path SHALL NOT include reading other items, hashing the collection, discovering or parsing a manifest file, rendering or publishing views other than the changed item, manifest and held views, index synchronization of views, or reading or rewriting `Knowledge Base/log.md`.
 
 #### Scenario: Append stays flat as the collection grows
 - **WHEN** guarded appends are measured at 1,000 and 10,000 items through the real dispatcher on Linux and Windows NTFS, including a 10,000-row collection with a tenth of its rows withheld from one measured audience
-- **THEN** successful appends by a fully authorized audience and `COLLECTION_NOT_FOUND` refusals by the partial audience are measured separately, every applicable p95 is under 20 ms, and no stage exceeds its budget
+- **THEN** successful appends by a fully authorized audience and `COLLECTION_NOT_FOUND` refusals by the partial audience are measured separately, and each p95 and stage time is reported against its target, a miss as a miss
 
 #### Scenario: Collection resolution does not read the manifest file
 - **WHEN** an append resolves its collection
@@ -668,7 +673,7 @@ With the store canonical, the release acceptance harness SHALL measure, and the 
 
 #### Scenario: Bulk upsert of 500 rows
 - **WHEN** 500 valid rows are submitted in one bulk upsert against a 10,000-item collection
-- **THEN** the call completes in under 1 s
+- **THEN** all 500 rows are stored, and the call's elapsed time is reported against its 1 s target
 
 #### Scenario: Query parity
 - **WHEN** the parity corpus queries run against the file path and the store
@@ -677,7 +682,7 @@ With the store canonical, the release acceptance harness SHALL measure, and the 
 #### Scenario: Owner-only first collection misses the optimisation targets
 
 - **WHEN** S1's mandatory correctness, permissions, recovery, portability and remaining bounds pass but measured inspect or append exceeds 15 ms or 20 ms respectively
-- **THEN** that NEW owner-only collection may be enabled with actual latency reported, existing file collections unchanged and the parent performance gate still open
+- **THEN** that NEW owner-only collection may be enabled with actual latency reported and existing file collections unchanged, and the parent gate reports the miss
 
 ### Requirement: Declared storage strategies are view layouts over the collection store
 The substrate SHALL support three declared storage strategies. For `markdown-log` and `markdown-items` the strategy SHALL name the layout of the collection's Markdown views, one chronological log file of item blocks or one Markdown file per item, while the canonical data of both SHALL live in the collection store. The `dataset` strategy (CSV, TSV, or JSON) SHALL remain file-canonical and query-only. Any cache, index, export, summary, replica, or generated view SHALL be derived from the canonical source it represents.

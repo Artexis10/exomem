@@ -560,6 +560,14 @@
           "default": false,
           "description": "Recurse in list mode.",
           "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Page size: 200, max 1000."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "A next_cursor, to continue."
         }
       },
       "type": "object"

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.129.0](https://github.com/Artexis10/exomem/compare/v0.128.2...v0.129.0) (2026-10-19)
+
+
+### Features
+
+* **cloud:** serve process_media on Cloud cells ([#1909](https://github.com/Artexis10/exomem/issues/1909)) ([606fb1c](https://github.com/Artexis10/exomem/commit/606fb1c4f8f0c0b517947733b1b32bfc17cac5c9))
+
+
+### Bug Fixes
+
+* **observability:** log why a lexical catch-up keeps the full pass ([#1908](https://github.com/Artexis10/exomem/issues/1908)) ([320efde](https://github.com/Artexis10/exomem/commit/320efdedbb1cd84ed3536548bd90e5f8e2fd0cd4))
+
+
+### Performance
+
+* scope the second egress pass and read tombstones once per pass ([#1907](https://github.com/Artexis10/exomem/issues/1907)) ([61c88b3](https://github.com/Artexis10/exomem/commit/61c88b342727d3b71b48362ef8a38036c6f8456b))
+* time the recall parent-hint lookup as its own stage ([#1906](https://github.com/Artexis10/exomem/issues/1906)) ([c6cb767](https://github.com/Artexis10/exomem/commit/c6cb767f64b11a7575b95df11750ee0600be7704))
+
 ## [0.128.2](https://github.com/Artexis10/exomem/compare/v0.128.1...v0.128.2) (2026-10-19)
 
 

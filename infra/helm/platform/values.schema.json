@@ -69,7 +69,7 @@
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
+      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2AccountId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "b2KeyManagementSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
         "sharedWorker": {
           "type": "object",
@@ -205,6 +205,8 @@
           "maximum": 120,
           "description": "Minutes cellctl waits for an upgraded cell to become ready before it restores the pre-upgrade snapshot and pauses the rollout. Below 5, a normal first start (image pull, migration, catalogue rebuild) misses it and rolls back a healthy image. Above 120, a broken image keeps the canary cell down for hours before the automatic restore."
         },
+        "exportDeadlineMinutes": {"type": "integer", "minimum": 1},
+        "exportTtlHours": {"type": "integer", "minimum": 1},
         "databaseDsnSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "databaseDsnSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
         "cellTokenKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},

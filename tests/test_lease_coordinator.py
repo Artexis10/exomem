@@ -506,9 +506,7 @@ async def test_store_head_survives_handoff_expiry_and_restart(tmp_path: Path) ->
         assert status["collection_store_fence_generation"] == 1
 
 
-def test_renew_waiting_past_expiry_preserves_the_committed_store_head(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_renew_waiting_past_expiry_preserves_the_committed_store_head(tmp_path: Path) -> None:
     """A queued renewal cannot replace the head after its holder's lease expires."""
     now = [100.0]
     database = tmp_path / "coordinator.sqlite"
@@ -526,16 +524,9 @@ def test_renew_waiting_past_expiry_preserves_the_committed_store_head(
     }
     assert store.renew(**lease, collection_store_head=STORE_HEAD)["granted"] is True
     attempted = threading.Event()
-    connect = store._connect
-
-    def traced_connect() -> sqlite3.Connection:
-        conn = connect()
-        conn.set_trace_callback(
-            lambda sql: attempted.set() if sql == "BEGIN IMMEDIATE" else None
-        )
-        return conn
-
-    monkeypatch.setattr(store, "_connect", traced_connect)
+    store._conn.set_trace_callback(
+        lambda sql: attempted.set() if sql == "BEGIN IMMEDIATE" else None
+    )
     with ThreadPoolExecutor(max_workers=1) as executor:
         blocker = sqlite3.connect(database, isolation_level=None)
         try:

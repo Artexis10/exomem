@@ -25,8 +25,9 @@ from test_mcp_schema_fidelity import _build_server
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Raised from 90,000 for the evaluated correction guidance in the semantic-authoring
-# contract (five authoring tools) and the retained-history read and observe fields.
-TOTAL_BUDGET = 91_650
+# contract (five authoring tools) and the retained-history read and observe fields,
+# then by 80 for browse_memory's page fields (`limit`, `cursor`).
+TOTAL_BUDGET = 91_730
 
 #: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
 # The bounded viewer and original recovery use spare per-tool headroom; correction guidance raises the total.
@@ -59,7 +60,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "query_dataset": 1265,
     "process_media": 1025,
     "transfer_artifact": 1330,
-    "browse_memory": 850,
+    "browse_memory": 930,
     "compile_source": 715,
     "read_media": 625,
     "coordination_status": 500,

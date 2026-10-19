@@ -1,0 +1,39 @@
+name: Store latency (native Windows)
+
+# The store's phase gate needs guarded append, full inspect and bulk timings on
+# native NTFS. Dispatch this lane by hand against a ref; it gates nothing and
+# uploads the diagnostic's JSON report.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  store-latency:
+    name: store append and inspect latency (native NTFS)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Measure store-mode latency at 1,000 and 10,000 rows
+        env:
+          EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_DISABLE_EMBEDDINGS: "1"
+          EXOMEM_DISABLE_WARMUP: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python scripts/measure-records-append-latency.py
+          --sizes 1000,10000 --appends 30 --storage store-preview --phase-probes
+          --out store-latency-windows.json
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-latency-windows
+          path: store-latency-windows.json
+          if-no-files-found: warn

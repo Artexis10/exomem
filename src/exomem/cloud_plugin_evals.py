@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -11,26 +12,6 @@ from urllib.parse import urlsplit
 
 SURFACES = ("claude-chat", "claude-cowork", "claude-code", "chatgpt", "codex")
 IDENTITY_KEYS = ("version", "skill_contract", "corpus_digest", "profile", "resource")
-WRITE_TOOLS = frozenset(
-    {
-        "remember",
-        "observe_memory",
-        "edit_memory",
-        "replace_memory",
-        "capture_source",
-        "preserve_evidence",
-        "preserve_artifacts",
-        "episode_memory",
-        "record_memory",
-        "plan_memory",
-        "manage_memory_file",
-        "compile_source",
-        "configure_memory",
-        "connect_memory",
-        "govern_memory",
-        "supersede_memory",
-    }
-)
 
 
 def _json(value: object) -> str:
@@ -53,6 +34,33 @@ def _ok(result: object) -> bool:
 
 def _calls(observations: list) -> list[dict]:
     return [o for o in observations if isinstance(o, dict) and o.get("kind") == "tool"]
+
+
+@functools.cache
+def _product_commands() -> dict:
+    # Imported here, not at module load: the registry is heavy and only the
+    # write check needs it.
+    from .commands import PRODUCT_COMMANDS
+
+    return {command.name: command for command in PRODUCT_COMMANDS}
+
+
+def _is_write(call: dict) -> bool:
+    """Whether an observed call can change memory, as the command registry classifies it."""
+    from .commands import invocation_is_read_only
+    from .governance.egress import SelectorCoverageError
+
+    command = _product_commands().get(call.get("name"))
+    if command is None:
+        return False
+    arguments = call.get("arguments")
+    try:
+        return not invocation_is_read_only(
+            command, arguments if isinstance(arguments, dict) else {}
+        )
+    except SelectorCoverageError:
+        # The registry cannot classify this selector, so the call counts as a write.
+        return True
 
 
 def _refs(value: object) -> set[str]:
@@ -229,7 +237,7 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
         issues.append("required_alternative_missing")
     for name in set(names).intersection(case.get("forbidden", [])):
         issues.append("forbidden_call:" + str(name))
-    if case.get("no_mutations") and set(names).intersection(WRITE_TOOLS):
+    if case.get("no_mutations") and any(_is_write(c) for c in calls):
         issues.append("unexpected_mutation")
     if not case.get("denied_write") and any(not _ok(c["result"]) for c in calls):
         issues.append("tool_failed")
@@ -377,8 +385,8 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             trace.get("readback"), writes, marker, trace.get("conversation_id", "")
         )
     if case.get("denied_write"):
-        denied = [c for c in calls if c.get("name") in WRITE_TOOLS and not _ok(c["result"])]
-        if not denied or any(c.get("name") in WRITE_TOOLS for c in successful):
+        denied = [c for c in calls if _is_write(c) and not _ok(c["result"])]
+        if not denied or any(_is_write(c) for c in successful):
             issues.append("denial_not_observed")
         unnegated = re.sub(
             r"\b(not|never|could not|couldn't|wasn't|isn't|haven't|hasn't|didn't|nothing was)"
@@ -625,9 +633,7 @@ def readiness(root: Path, evidence: Path, *, now: datetime | None = None) -> dic
         value = cross.get("readback", {})
         inspect(value, "cross_readback", reader)
         writes = [
-            c
-            for c in _calls(written["observations"])
-            if c.get("name") in WRITE_TOOLS and _ok(c.get("result"))
+            c for c in _calls(written["observations"]) if _is_write(c) and _ok(c.get("result"))
         ]
         found = _readback_issues(value, writes, written["marker"], written["conversation_id"])
         issues.extend("cross_readback:" + i for i in found)

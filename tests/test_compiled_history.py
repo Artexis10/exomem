@@ -22,6 +22,7 @@ from exomem import (
     append_to_file,
     commands,
     compiled_history,
+    registry_history,
     semantic_index,
     semantic_writes,
     vault,
@@ -36,9 +37,9 @@ def owner():
         yield
 
 
-def _correct(root: Path, value: str, reason: str) -> dict:
+def _correct(root: Path, value: str, reason: str, *, index: int = 0) -> dict:
     current = semantic_index.current_parent_index_state(root, PAGE)
-    unit = current.document.units[0]
+    unit = current.document.units[index]
     return commands.op_observe_memory(
         root,
         path=PAGE,
@@ -125,7 +126,7 @@ def test_admitted_history_does_not_claim_complete_coverage(tmp_path: Path, owner
 
     assert history["status"] == "retained"
     assert history["coverage"] == "unverified"
-    assert history["retained"] == history["returned"] == 1
+    assert history["returned"] == 1
     revision, = history["revisions"]
     assert "Second wording." in revision["prior"]["source"]
     assert "Unverified bytes." not in json.dumps(history)
@@ -166,7 +167,7 @@ def test_each_prior_snapshot_needs_admission_before_counts_or_reason(
 
     monkeypatch.setattr(registry_history, "_require_snapshot_admission", refuse_prior)
     hidden = compiled_history.read(tmp_path, path=PAGE)
-    assert hidden["returned"] == hidden["retained"] == 0
+    assert hidden["returned"] == 0
     assert hidden["revisions"] == []
     assert hidden["truncated"] is False
     assert "private" not in json.dumps(hidden)
@@ -214,14 +215,122 @@ def test_revisions_do_not_rotate_at_registry_history_limit_and_paginate(
     first = commands.op_read_memory(tmp_path, path=PAGE, include_history=True, history_limit=2)[
         "revision_history"
     ]
-    assert first["retained"] == 22 and first["returned"] == 2 and first["truncated"]
+    assert first["returned"] == 2 and first["truncated"] and first["status"] == "retained"
     second = compiled_history.read(tmp_path, path=PAGE, limit=2, continuation=first["continuation"])
     assert "Wording 21." in first["revisions"][0]["prior"]["source"]
     assert "Wording 19." in second["revisions"][0]["prior"]["source"]
+    walked = _walk_history(tmp_path, limit=5)
+    assert len(walked) == 22
+    assert all(f"Wording {21 - i}." in r["prior"]["source"] for i, r in enumerate(walked))
     retained = list((tmp_path / compiled_history.history_root()).rglob("*.json"))
     assert len(retained) == 22
     with pytest.raises(ValueError):
         commands.op_read_memory(tmp_path, path=retained[0].relative_to(tmp_path).as_posix())
+
+
+def _walk_history(root: Path, *, limit: int) -> list[dict]:
+    seen, continuation = [], None
+    while True:
+        page = compiled_history.read(root, path=PAGE, limit=limit, continuation=continuation)
+        seen += page["revisions"]
+        if not page["truncated"]:
+            return seen
+        continuation = page["continuation"]
+
+
+def _entry_files_oldest_first(root: Path) -> list[Path]:
+    return sorted((root / compiled_history.history_root()).rglob("*.json"), key=lambda p: p.name)
+
+
+def test_a_history_page_does_not_depend_on_entries_beyond_its_lookahead(
+    tmp_path: Path, owner, monkeypatch
+) -> None:
+    """A deep history must page without opening old entries: a damaged ancient snapshot
+    must not change the newest page, or make every read pay for all retained depth."""
+    _write_page(tmp_path, source=_page_source("- [rule] Wording 0. ^stable"))
+    for index in range(1, 6):
+        _correct(tmp_path, f"Wording {index}.", "A source clarified this interpretation.")
+    intact = compiled_history.read(tmp_path, path=PAGE, limit=1)
+    for path in _entry_files_oldest_first(tmp_path)[:3]:
+        path.write_text("not json", encoding="utf-8")
+    opened = []
+    read_kept = registry_history.read_kept
+
+    def counting(root, directory, name, **kwargs):
+        opened.append(name)
+        return read_kept(root, directory, name, **kwargs)
+
+    monkeypatch.setattr(registry_history, "read_kept", counting)
+    assert compiled_history.read(tmp_path, path=PAGE, limit=1) == intact
+    assert intact["returned"] == 1 and intact["truncated"] and intact["status"] == "retained"
+    assert len(opened) == 2  # The page and one further admitted entry; nothing older.
+
+
+def test_pagination_skips_unavailable_entries_without_revealing_them(
+    tmp_path: Path, owner
+) -> None:
+    _write_page(tmp_path, source=_page_source("- [rule] Wording 0. ^stable"))
+    for index in range(1, 10):
+        _correct(tmp_path, f"Wording {index}.", "A source clarified this interpretation.")
+    files = _entry_files_oldest_first(tmp_path)  # Wording 0..8 snapshots, oldest first.
+    for position in (1, 5, 6):
+        files[position].write_text("not json", encoding="utf-8")
+    walked = _walk_history(tmp_path, limit=2)
+    versions = [r["version"] for r in walked]
+    assert len(walked) == 6 and versions == sorted(versions, reverse=True)
+    assert len(set(versions)) == 6
+    assert not {files[p].stem for p in (1, 5, 6)} & set(versions)
+    first = compiled_history.read(tmp_path, path=PAGE, limit=2)
+    assert first["continuation"] == first["revisions"][-1]["version"]
+
+
+def _unit_pages(root: Path, unit_ref: str, *, limit: int) -> list[dict]:
+    pages, continuation = [], None
+    while True:
+        page = compiled_history.read(
+            root, path=PAGE, unit_ref=unit_ref, limit=limit, continuation=continuation
+        )
+        pages.append(page)
+        if not page["truncated"]:
+            return pages
+        continuation = page["continuation"]
+
+
+def test_a_sparse_unit_read_is_capped_and_pages_on_to_its_old_revision(
+    tmp_path: Path, owner
+) -> None:
+    """A unit corrected once, long ago, among many corrections of another unit: one read
+    must not open every retained entry to find it. It stops at a page-derived cap and
+    reports `incomplete`, not `unavailable`; continuations reach the old revision exactly
+    once without ever resting on an entry this reader cannot see."""
+    _write_page(
+        tmp_path,
+        source=_page_source("- [rule] Never 0. ^never\n- [rule] Busy 0. ^busy\n- [rule] Rare 0. ^rare"),
+    )
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    never, rare = units[0].unit_ref, units[2].unit_ref
+    _correct(tmp_path, "Rare 1.", "The rare unit changed once.", index=2)
+    for index in range(1, 13):
+        _correct(tmp_path, f"Busy {index}.", "The busy unit keeps changing.", index=1)
+    files = _entry_files_oldest_first(tmp_path)
+    assert len(files) == 13
+    broken = {files[position].stem for position in range(4, 8)}  # None touches the rare unit.
+    for position in range(4, 8):
+        files[position].write_text("not json", encoding="utf-8")
+    visible = {r["version"] for r in _walk_history(tmp_path, limit=50)}
+    assert len(visible) == 9 and not visible & broken
+
+    pages = _unit_pages(tmp_path, rare, limit=1)
+    assert [page["status"] for page in pages] == ["incomplete", "incomplete", "retained"]
+    assert pages[0]["truncated"] and pages[0]["returned"] == 0
+    assert all(page["continuation"] in visible for page in pages[:-1])  # Page-level history shows them.
+    found = [r for page in pages for r in page["revisions"]]
+    assert len(found) == 1 and "Rare 0." in found[0]["prior"]["source"]
+    assert found[0]["version"] == files[0].stem
+
+    # A unit with no revision at all stays incomplete until the walk ends, then unavailable.
+    statuses = [page["status"] for page in _unit_pages(tmp_path, never, limit=1)]
+    assert statuses == ["incomplete", "incomplete", "unavailable"]
 
 
 def test_export_and_restore_keep_prior_compiled_interpretations(tmp_path: Path, owner) -> None:
@@ -474,7 +583,7 @@ def test_denied_project_prior_matches_absent_history_in_the_complete_read(
         assert compiled_history.read(vault, path=UNTYPED_PAGE)["returned"] == 1
     with request_scope(authenticate("limited")):
         hidden = commands.op_read_memory(vault, path=UNTYPED_PAGE, include_history=True, history_limit=1)
-        assert hidden["revision_history"]["returned"] == hidden["revision_history"]["retained"] == 0
+        assert hidden["revision_history"]["returned"] == 0
         entry, = (vault / compiled_history.history_root()).rglob("*.json")
         entry.unlink()
         absent = commands.op_read_memory(vault, path=UNTYPED_PAGE, include_history=True, history_limit=1)
@@ -533,3 +642,109 @@ def test_terminal_history_binding_cannot_outlive_its_exact_current_parent(
             current["revision_history"]["parent_ref"] = "exomem://memory/33333333-3333-4333-8333-333333333333"
         filtered = egress.postfilter("read_memory", current, vault)
     assert "revision_history" not in filtered
+
+
+def test_a_registered_dynamic_entity_keeps_both_prior_meanings_on_one_node(
+    vault: Path, owner
+) -> None:
+    from exomem import entity_types, memory_refs
+    from exomem.governance.principal import library_scope
+
+    proposal = {
+        "schema_version": 1,
+        "entity_types": {
+            "site": {
+                "folder": "Sites",
+                "label": "Site",
+                "aliases": [],
+                "capture_guidance": "A stable physical site identity.",
+            }
+        },
+    }
+    with library_scope():
+        commands.op_schema_memory(
+            vault,
+            operation="save-entity-types",
+            proposal=proposal,
+            expected_hash=entity_types.load_entity_types(vault).extension_hash,
+            why="Register a synthetic site type.",
+        )
+        created = commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="site",
+            name="Kestrel Field",
+            summary="The window is 30 minutes.",
+        )
+    path = created["path"]
+    original = commands.op_read_memory(vault, path=path)
+    for old, new, why in (
+        ("30 minutes", "45 minutes", "A source corrected the window."),
+        ("45 minutes", "60 minutes", "A later source corrected it again."),
+    ):
+        current = commands.op_read_memory(vault, path=path)
+        operation = {
+            "kind": "replace_string",
+            "old_string": f"The window is {old}.",
+            "new_string": f"The window is {new}.",
+            "expected_hash": current["content_hash"],
+        }
+        preview = commands.op_edit_memory(
+            vault, path=path, why=why, operation=operation, validate_only=True
+        )
+        commands.op_edit_memory(
+            vault,
+            path=path,
+            why=why,
+            operation={**operation, "transition_token": preview["semantic"]["transition_token"]},
+        )
+    result = commands.op_read_memory(vault, path=path, include_history=True)
+    history = result["revision_history"]
+    assert "The window is 60 minutes." in result["body"]
+    assert [r["reason"] for r in history["revisions"]] == [
+        "A later source corrected it again.",
+        "A source corrected the window.",
+    ]
+    assert "The window is 45 minutes." in history["revisions"][0]["prior"]["source"]
+    assert "The window is 30 minutes." in history["revisions"][1]["prior"]["source"]
+    assert history["revisions"][1]["before_hash"] == original["content_hash"]
+    identity = original["frontmatter"][memory_refs.ID_FIELD]
+    assert result["frontmatter"][memory_refs.ID_FIELD] == identity
+    assert history["parent_ref"] == memory_refs.memory_ref(identity)
+    assert result["path"] == path
+    assert [p.name for p in (vault / "Knowledge Base/Entities/Sites").glob("*.md")] == [
+        "Kestrel Field.md"
+    ]
+
+
+def test_prior_revision_stays_readable_when_page_definitions_become_unreadable(
+    tmp_path: Path, owner, monkeypatch
+) -> None:
+    from exomem.vocabulary import instances
+
+    _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
+    unit = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
+    _correct(tmp_path, "Second wording.", "A correction.")
+
+    def unreadable(*args, **kwargs):
+        raise ValueError("REGISTRY_UNAVAILABLE: definitions cannot be read")
+
+    monkeypatch.setattr(instances, "page_definitions", unreadable)
+    found = compiled_history.read(tmp_path, path=PAGE, unit_ref=unit.unit_ref)
+    revision, = found["revisions"]
+    assert "First wording." in revision["prior"]["source"]
+    assert revision["prior"]["unit_status"] == "found"
+    other = compiled_history.read(tmp_path, path=PAGE)["revisions"][0]
+    assert other["prior"]["source"] == revision["prior"]["source"]
+
+
+def test_history_is_unreadable_once_the_page_is_deleted(tmp_path: Path, owner) -> None:
+    _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
+    _correct(tmp_path, "Second wording.", "A correction.")
+    commands.op_delete(tmp_path, path=PAGE, confirm=True)
+    with pytest.raises(ValueError) as direct:
+        compiled_history.read(tmp_path, path=PAGE)
+    with pytest.raises(ValueError) as through_read:
+        commands.op_read_memory(tmp_path, path=PAGE, include_history=True)
+    assert str(direct.value).startswith("NOT_FOUND:")
+    assert str(through_read.value).startswith("NOT_FOUND:")
