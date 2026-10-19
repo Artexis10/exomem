@@ -1886,11 +1886,8 @@ class MediaWorker:
                 continue
             binary = self._vault_root / ef.group(1).strip()
             # Reconciliation renders a preserved stub and queues it itself. A job
-            # claimed against the stub went stale as soon as it did. Scene frames
-            # are this worker's own sidecars, so restart recovery keeps them.
-            if _PARENT_MEDIA_MARKER not in head and not media_processing.is_reconciled_pending(
-                self._vault_root, binary, text
-            ):
+            # claimed against the stub went stale as soon as it did.
+            if media_processing.awaits_reconciliation(self._vault_root, binary, text):
                 continue
             # Enqueue only the sidecar this binary actually owns. A stray copy —
             # a Syncthing `.sync-conflict-*.md`, a manual duplicate — still carries

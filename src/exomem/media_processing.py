@@ -676,18 +676,17 @@ def _iter_governed_media(vault: Path, kb_root: Path):
         stack.extend(reversed(directories))
 
 
-def is_reconciled_pending(vault: Path, binary: Path, text: str) -> bool:
-    """Whether reconciliation has rendered this pending sidecar of `binary`.
+def awaits_reconciliation(vault: Path, binary: Path, text: str) -> bool:
+    """Whether this pending sidecar of `binary` is a stub reconciliation has yet to render.
 
-    A stub that preserve wrote is not yet: reconciliation renders and queues it.
+    Reconciliation renders and queues such a stub itself. A scene frame names its
+    parent video: the media worker wrote it, so it is never such a stub.
     """
     media_type = classify_media(binary)
-    if media_type is None:
-        return False
     frontmatter, _body, raw_frontmatter = parse_frontmatter(text)
-    return raw_frontmatter is not None and _is_pending_sidecar_shape(
-        vault, binary, frontmatter, media_type
-    )
+    if media_type is None or raw_frontmatter is None or frontmatter.get("parent_media"):
+        return False
+    return not _is_pending_sidecar_shape(vault, binary, frontmatter, media_type)
 
 
 def _needs_reconciliation(
