@@ -1195,7 +1195,11 @@ def _with_catalog_scope(function):
                 readiness.retrieval_admission()["state"] == "warming"
                 and not readiness.required_warm_finished()
             ):
-                return function(vault_root, *args, **kwargs)
+                with _span(
+                    values["timings"], "recall_projection", source=find_types.SOURCE_DECLINED
+                ):
+                    _set_recall_projection_timing_outcome(values["timings"], "warming")
+                    raise RetrievalIndexWarming(site="catalog_proof_incomplete", status="warming")
 
             def select(call_kwargs):
                 pending = _request_pending_coverage(

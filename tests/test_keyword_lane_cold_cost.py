@@ -412,6 +412,37 @@ def test_initial_warm_keeps_retained_catalogue_repair_with_the_warm_owner(
     assert repairs == []
 
 
+def test_initial_warm_refusal_stays_bound_when_warm_finishes_after_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completing startup must not let a request bypass retained selection."""
+    _write_page(tmp_path, "Knowledge Base/Notes/warm-transition.md", "warmtransitionmarker")
+    _materialize_live_catalog(tmp_path, "warmtransitionmarker")
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    required_finished = readiness.required_warm_finished
+
+    def finish_after_observation():
+        finished = required_finished()
+        readiness.finish_required_warm()
+        readiness.mark_ready("retrieval_catalog")
+        return finished
+
+    monkeypatch.setattr(readiness, "required_warm_finished", finish_after_observation)
+    timings = find_module.FindTimings()
+
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        find_module.find(
+            tmp_path, query="warmtransitionmarker", mode="keyword", scope="kb",
+            graph=False, temporal=False, timings=timings,
+        )
+
+    assert raised.value.status == "warming"
+    report = timings.as_dict()
+    assert report["profile"]["recall_projection"]["outcome"] == "warming"
+    assert report["stages"]["recall_projection"]["source"] == "declined"
+
+
 def test_catalog_proof_cannot_admit_runtime_without_live_projections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
