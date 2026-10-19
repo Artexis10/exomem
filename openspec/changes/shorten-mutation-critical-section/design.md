@@ -264,14 +264,23 @@ revision selection. Borrowed snapshots also require current snapshot identity
 and namespace compatibility. A fresh scan can use a non-live checkpoint; that
 checkpoint does not prove an empty or current cached corpus.
 
-Leave the guard and prepare again when the seal changes. Allow two preparation
-attempts, and preserve the request's delivery reserve before the second attempt.
-An unreadable entry generation skips the scan. Exhaustion returns
+Leave the guard before requesting admission or preparing again when the seal
+changes. Keyed captures with contention absorption enabled use the invocation's
+existing absolute capture deadline, FIFO ticket and worker waiter slot.
+The first invalidation acquires admission; the invocation retains it until completion,
+including physical contention retries. A nested ineligible invocation cannot borrow it.
+Other managed calls allow two preparation attempts and preserve the request's delivery reserve.
+
+Check the allowance before and after queue admission, before another census,
+and before another guarded attempt. This bounds additional retries; it cannot
+interrupt an individual census or establish a hard wall-clock limit.
+An unreadable entry generation skips the scan. Exhaustion or declined admission returns
 `REFERENCE_PREPARATION_UNAVAILABLE`, with `status: retryable`, `committed: false`
 and cause `generation_unavailable` or `preparation_changed`, before any episode
-write or ledger bind. This outcome does not enter physical-contention absorption.
-Its cost is an extra preparation or a same-identity caller retry; it prevents
-unproved ownership from affecting canonical data. Observations after the final
+write or ledger bind. Ownership invalidation does not count as physical contention
+or restart the leaf through its public error handler. Its cost is a census per
+admitted invalidation, one waiter until completion, or a same-identity caller retry.
+It prevents unproved ownership from affecting canonical data. Observations after the final
 seal retain the existing watcher residual, without arbitrary-editor linearizability.
 
 Fresh visibility admission, revision selection, shared Source index/log planning,

@@ -223,12 +223,26 @@ def record(
         episode=episode, about=about, when=when, audience=audience, **fields
     )
     request_id = writer_lease.active_mutation_request_id()
+    retry = writer_lease._active_capture_preparation_retry() if request_id is not None else None
+
+    def retry_available() -> bool:
+        return request_budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS) and (
+            retry is None or retry.available()
+        )
+
     source = None
     # These causes name the two closed preparation failures, never user meaning.
     cause = "preparation_changed"
-    for attempt in range(2):
-        if attempt and not request_budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
-            break
+    attempt = 0
+    while True:
+        if attempt:
+            if not retry_available() or (retry is None and attempt >= 2):
+                break
+            # Every invalidation reaches this seam after releasing its guard.
+            # The invocation retains one existing FIFO ticket and waiter slot.
+            if retry is not None and not retry.admit():
+                break
+        attempt += 1
         recap = original_recap
         preparation = None
         if request_id is not None and recap.about:
@@ -241,6 +255,8 @@ def record(
             checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
             live = freshness.is_live(vault_root, "vault")
             external_pending_epoch = freshness.external_pending_epoch(vault_root)
+            if attempt > 1 and not retry_available():
+                break
             owners = memory_refs._reference_owners_read_only(
                 vault_root, (memory_refs.parse_memory_ref(ref) for ref in recap.about)
             )
@@ -249,6 +265,10 @@ def record(
             )
             if not preparation.current(vault_root):
                 continue
+        # A census cannot be interrupted; its completion may spend the
+        # allowance before this additional guarded attempt can start.
+        if attempt > 1 and not retry_available():
+            break
         # Direct add callers run fanout inline. Preserve their existing path
         # instead of pulling that derived work into a new outer guard.
         guard = (

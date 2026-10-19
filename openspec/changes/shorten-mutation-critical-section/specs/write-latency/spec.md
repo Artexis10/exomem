@@ -117,12 +117,23 @@ live state and external-pending epoch. Borrowed snapshots SHALL also retain
 current snapshot identity and compatible scan membership. Fresh non-live scans
 remain valid preparation; they do not establish a current cached corpus.
 
-An invalidated preparation SHALL leave the guard before preparing again, with
-at most two attempts and the delivery reserve preserved before another attempt.
-An unreadable entry generation SHALL skip the census. Exhaustion SHALL return
+An invalidated preparation SHALL leave the guard before requesting admission or
+preparing again. Eligible keyed captures SHALL share their existing absolute
+capture allowance, FIFO ticket and waiter slot across preparation and physical
+contention retries. The first invalidation SHALL acquire admission and retain it
+until completion. Ineligible managed calls SHALL retain at most two attempts.
+A nested ineligible invocation SHALL NOT inherit eligible preparation admission.
+
+Additional retries SHALL preserve the delivery reserve and check the allowance
+before and after queue admission, before another census and before another guard.
+The allowance SHALL NOT promise to interrupt an individual census or impose
+a hard wall-clock limit. An unreadable entry generation SHALL skip the census.
+Exhaustion or declined admission SHALL return
 `REFERENCE_PREPARATION_UNAVAILABLE` with `status: retryable`, `committed: false`
 and cause `generation_unavailable` or `preparation_changed`, before any episode
-write or ledger bind. Other episode actions and the explicit wide-boundary
+write or ledger bind. Ownership invalidation SHALL NOT increment physical busy
+metrics or restart the leaf through its public error handler.
+Other episode actions and the explicit wide-boundary
 override SHALL retain their command guards. Direct calls without a managed
 request SHALL retain their current guard behavior.
 
@@ -140,9 +151,17 @@ request SHALL retain their current guard behavior.
 
 #### Scenario: Reference preparation cannot be validated
 
-- **WHEN** repeated invalidation, the delivery reserve or an unreadable generation prevents a sealed preparation
+- **WHEN** the capture allowance, waiter admission, delivery reserve or an unreadable generation prevents a sealed preparation
 - **THEN** the caller receives the structured retryable outcome
 - **AND** no episode Source or input-ledger revision is written
+- **AND** a later unchanged request with the same idempotency key can commit once
+
+#### Scenario: Concurrent reference captures invalidate preparation repeatedly
+
+- **WHEN** canonical commits invalidate an eligible capture's preparation more than once
+- **AND** its shared capture allowance and waiter admission permit another attempt
+- **THEN** the capture prepares fresh ownership and commits once
+- **AND** completion releases its existing FIFO ticket and waiter slot
 
 #### Scenario: Slow recap indexing does not exclude an unrelated writer
 
