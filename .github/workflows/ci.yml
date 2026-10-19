@@ -180,8 +180,10 @@ jobs:
         # Full runs replace the scratch snapshot with measured cases and upload it.
         # Refreshing the baseline stays a reviewed change through scripts/refresh_test_durations.py.
         # Preserve thread stacks before a worker timeout can discard them.
+        # Each disposable runner owns this shallow root, which keeps xdist within the calibrated filesystem-call budget.
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
+          --basetemp=/tmp/exomem-pytest
           --splits=12
           -n 4
           --dist loadfile

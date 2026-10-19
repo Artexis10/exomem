@@ -269,7 +269,9 @@ def read(
     return {
         "parent_ref": parent_ref,
         "unit_ref": unit_ref,
-        "status": "retained",
+        # These protocol outcomes describe admitted snapshots, never complete retention.
+        "status": "retained" if retained else "unavailable",
+        "coverage": "unverified",
         "retained": retained,
         "returned": len(revisions),
         "truncated": truncated,
