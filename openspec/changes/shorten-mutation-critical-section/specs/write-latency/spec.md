@@ -106,6 +106,44 @@ exits. Durable repair demand MUST exist before releasing custody, including
 when fanout fails or the process exits after its canonical commit. Existing
 receipt-owned fast acknowledgement MUST NOT receive duplicate fanout.
 
+Managed `record` calls SHALL acquire raw reference owners before the canonical
+boundary, using vault-wide source selection and the whole normalized batch.
+The guarded record SHALL require exact root and identifier coverage, fresh
+pending custody, caller-filtered uncertainty, policy and uniqueness admission.
+It SHALL verify its preparation seal after acquisition, inside the guard and
+after admission, immediately before revision selection. The seal SHALL bind
+the active manager's readable commit generation, full freshness checkpoint,
+live state and external-pending epoch. Borrowed snapshots SHALL also retain
+current snapshot identity and compatible scan membership. Fresh non-live scans
+remain valid preparation; they do not establish a current cached corpus.
+
+An invalidated preparation SHALL leave the guard before preparing again, with
+at most two attempts and the delivery reserve preserved before another attempt.
+An unreadable entry generation SHALL skip the census. Exhaustion SHALL return
+`REFERENCE_PREPARATION_UNAVAILABLE` with `status: retryable`, `committed: false`
+and cause `generation_unavailable` or `preparation_changed`, before any episode
+write or ledger bind. Other episode actions and the explicit wide-boundary
+override SHALL retain their command guards. Direct calls without a managed
+request SHALL retain their current guard behavior.
+
+#### Scenario: Cold reference owners permit another writer
+
+- **WHEN** a managed record waits for a cold reference-owner scan
+- **THEN** an unrelated canonical writer can commit
+- **AND** that commit invalidates the earlier preparation before revision selection
+
+#### Scenario: Admission observes a new duplicate
+
+- **WHEN** a duplicate identity arrives during pending or policy admission
+- **THEN** the final seal rejects the preparation before revision selection
+- **AND** a fresh preparation omits an ambiguous about-reference
+
+#### Scenario: Reference preparation cannot be validated
+
+- **WHEN** repeated invalidation, the delivery reserve or an unreadable generation prevents a sealed preparation
+- **THEN** the caller receives the structured retryable outcome
+- **AND** no episode Source or input-ledger revision is written
+
 #### Scenario: Slow recap indexing does not exclude an unrelated writer
 
 - **WHEN** an episode has committed and its post-terminal fanout is blocked

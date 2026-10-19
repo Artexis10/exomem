@@ -5743,12 +5743,21 @@ class LeaseManager:
             and kwargs.get("mode") == "tag-variants"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # Only record owns a short guard around fresh admission, revision
+        # selection and ledger binding; the other episode actions still rely
+        # on this command boundary. The action is a closed protocol enum.
+        narrow_episode_record = (
+            command.name == "episode_memory"
+            and kwargs.get("action") == "record"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
             or narrow_tag_variant_commit
+            or narrow_episode_record
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")

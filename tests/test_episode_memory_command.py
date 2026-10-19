@@ -390,12 +390,132 @@ def test_a_revision_that_changed_after_it_was_read_loses_and_is_re_read(
     assert ours["revision"] == 3
 
 
-def test_episode_memory_holds_the_wide_mutation_boundary() -> None:
-    """Its read of the live revisions and its write must not interleave with
-    another writer's commit; the narrowed boundary would allow exactly that."""
-    from exomem import writer_lease
+def test_offline_episode_references_scan_before_the_commit_boundary(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import freshness, mutation_lock, writer_lease
 
-    assert "episode_memory" not in writer_lease._NARROW_BOUNDARY_COMMANDS
+    reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
+    assert not freshness.is_live(vault, "vault")
+    assert freshness.consumer_checkpoint(vault, "vault").triple is None
+    states = []
+    real_scan = memory_refs._scan_pages
+
+    def scan(root):
+        states.append(mutation_lock.active_mutation_snapshot()["state"])
+        return real_scan(root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", scan)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    with request_scope(owner_principal(surface="mcp")):
+        result = manager.invoke(command, (vault, schema_module.load_source_schema(vault)), {
+            "action": "record", "episode": KEY, "subject": "Reference recap",
+            "summary": "Recorded a reference target.", "worked_on": ["Used the target."],
+            "about": [reference],
+        })
+        stored = episode_recovery.EpisodeInputOwner(vault)._store().read(episode_model.episode_id(KEY))
+
+    assert states and set(states) == {"free"}
+    assert result["revision"] == 1 and result["about_skipped"] == 0
+    assert stored["state"]["input_revisions"][0]["evidence"]["about"] == [reference]
+
+
+def test_a_duplicate_arriving_during_policy_admission_is_reprepared_before_revision_selection(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import freshness, mutation_lock, writer_lease
+
+    identity = "11111111-1111-4111-8111-111111111111"
+    reference = _write_note(vault, "reference-target", identity)
+    states = []
+    real_scan = memory_refs._scan_pages
+    real_visible = egress._visible_candidates
+    changed = False
+
+    def scan(root):
+        states.append(mutation_lock.active_mutation_snapshot()["state"])
+        return real_scan(root)
+
+    def visible(*args, **kwargs):
+        nonlocal changed
+        result = real_visible(*args, **kwargs)
+        if not changed:
+            changed = True
+            _write_note(vault, "reference-duplicate", identity)
+            freshness.mark_external_pending(vault)
+        return result
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", scan)
+    monkeypatch.setattr(egress, "_visible_candidates", visible)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    with request_scope(owner_principal(surface="mcp")):
+        result = manager.invoke(command, (vault, schema_module.load_source_schema(vault)), {
+            "action": "record", "episode": KEY, "subject": "Reference recap",
+            "summary": "Recorded a reference target.", "worked_on": ["Used the target."],
+            "about": [reference],
+        })
+        stored = episode_recovery.EpisodeInputOwner(vault)._store().read(episode_model.episode_id(KEY))
+
+    assert states and set(states) == {"free"}
+    assert result["revision"] == 1 and result["about_skipped"] == 1
+    assert "about" not in stored["state"]["input_revisions"][0]["evidence"]
+
+
+@pytest.mark.parametrize("failure", ["generation_unavailable", "preparation_changed", "delivery_reserve"])
+def test_unproved_episode_references_return_a_bounded_retryable_failure_without_a_write(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from exomem import command_surface, freshness, request_budget, writer_lease
+
+    reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    bound = command_surface.bind_vault(
+        command.leaf, vault, schema_module.load_source_schema(vault), command=command
+    )
+    scans = []
+    real_scan = memory_refs._scan_pages
+
+    def scan(root):
+        scans.append(root)
+        result = real_scan(root)
+        freshness.mark_external_pending(root)
+        if failure == "delivery_reserve":
+            request_budget.current().deadline = 0
+        return result
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", scan)
+    if failure == "generation_unavailable":
+        monkeypatch.setattr(writer_lease, "read_commit_generation", lambda root: None)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=60))
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            result = bound(
+                action="record", episode=KEY, subject="Reference recap",
+                summary="Recorded a reference target.", worked_on=["Used the target."],
+                about=[reference], idempotency_key="reference-retry",
+            )
+            assert _episodes(vault) == []
+            with pytest.raises(EpisodeError, match="EPISODE_NOT_FOUND"):
+                episode_recovery.EpisodeInputOwner(vault).input_history(KEY)
+    finally:
+        request_budget.reset_current(token)
+
+    if failure == "generation_unavailable":
+        assert not scans
+    elif failure == "delivery_reserve":
+        assert len(scans) == 1
+    else:
+        assert 1 <= len(scans) <= 2
+    assert result["success"] is False
+    error = result["error"]
+    assert error["code"] == "REFERENCE_PREPARATION_UNAVAILABLE"
+    assert error["status"] == "retryable" and error["committed"] is False
+    assert error["cause"] == ("generation_unavailable" if failure == "generation_unavailable" else "preparation_changed")
+    assert "same idempotency key" in error["remediation"]
 
 
 def test_blocked_episode_fanout_does_not_hold_the_next_writer(
