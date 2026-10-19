@@ -212,7 +212,7 @@ def test_parent_update_replaces_all_unit_rows_in_one_transaction(
         conn.close()
     page = _write_page(tmp_path, "- [rule] broken generation ^broken\n")
     find_module.clear_cache()
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
     assert lexstore.get_store(tmp_path).upsert_paths([page]) is False
     assert [row["content"] for row in _rows(tmp_path)] == ["newtoken"]
 

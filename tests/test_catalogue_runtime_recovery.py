@@ -40,6 +40,9 @@ def test_readiness_only_traffic_recovers_a_failed_catalogue_publication(
         freshness.seed(vault, scope, [(str(page), freshness.stat_signature(page))])
     lexstore.ensure_fresh(vault)
     store = lexstore.get_store(vault)
+    # This exercises a failed whole-corpus publication. An exact delta replay
+    # would answer the one-page lag below without publishing at all.
+    monkeypatch.setattr(store, "catch_up_lagging_delta", lambda: False)
     publication_attempts: list[Path] = []
     allow_publication = threading.Event()
     compute_finished = threading.Event()

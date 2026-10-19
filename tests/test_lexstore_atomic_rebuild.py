@@ -1017,6 +1017,78 @@ def test_foreground_delta_after_temp_target_rebases_replacement(
     assert not any("deletedcontent" in c for c in contents)
 
 
+def test_live_blessed_inside_the_replayed_span_does_not_veto_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Steady traffic must not decline every completed detached rebuild.
+
+    The watcher blesses live during the build and the next event is still
+    unblessed at the barrier, so live sits between the build's start and its
+    rebased target. The replacement already holds that state.
+    """
+    a = _kb_file(tmp_path, "a.md", "- [config] startcontent ^u1")
+    b = _kb_file(tmp_path, "b.md", "- [config] stablecontent ^u2")
+    _seed(tmp_path, [a, b])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+
+    real_fold = lexstore.LexicalStore._fold_to_single_file
+    injected = False
+
+    def fold_then_bless_then_lag(conn: Any) -> bool:
+        nonlocal injected
+        if not injected:
+            injected = True
+            a.write_text(_page_text("a", "- [config] blessedcontent ^u1"), encoding="utf-8")
+            _touch_future(a)
+            freshness.on_files_changed(tmp_path, changed=[a])
+            blessed = freshness.recall_triple(tmp_path, "kb")
+            assert store.catalog_readiness("kb", blessed).complete
+            b.write_text(_page_text("b", "- [config] laggingcontent ^u2"), encoding="utf-8")
+            _touch_future(b)
+            freshness.on_files_changed(tmp_path, changed=[b])
+        return real_fold(conn)
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_bless_then_lag)
+    published = store.rebuild_atomic()
+    monkeypatch.undo()
+
+    assert published is True, store._last_rebuild_result
+    assert store.catalog_checkpoint("kb") == freshness.recall_checkpoint(tmp_path, "kb")
+    contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
+    assert any("blessedcontent" in c for c in contents)
+    assert any("laggingcontent" in c for c in contents)
+
+
+@pytest.mark.parametrize(
+    ("instance", "generation", "policy"),
+    [
+        pytest.param("other-registry", 5, "policy", id="foreign registry"),
+        pytest.param("registry", 2, "policy", id="behind the build's start"),
+        pytest.param("registry", 5, "other-policy", id="changed recall policy"),
+    ],
+)
+def test_publication_guard_refuses_live_state_the_replacement_may_lack(
+    instance: str, generation: int, policy: str
+) -> None:
+    def checkpoint(instance: str, generation: int, policy: str = "policy"):
+        return freshness.RecallFreshnessCheckpoint(
+            instance, generation, (generation, 0, "digest"), policy, "access"
+        )
+
+    start = {
+        "exists": True,
+        "schema_current": True,
+        "identity": "identity",
+        "checkpoints": {"kb": checkpoint("registry", 3)},
+    }
+    now = {**start, "checkpoints": {"kb": checkpoint(instance, generation, policy)}}
+
+    assert lexstore.LexicalStore._publication_guard_changed(
+        start, now, {"kb": checkpoint("registry", 8)}
+    )
+
+
 def test_large_off_barrier_rebase_converges_without_another_full_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

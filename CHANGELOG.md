@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.128.2](https://github.com/Artexis10/exomem/compare/v0.128.1...v0.128.2) (2026-10-19)
+
+
+### Bug Fixes
+
+* catch up a lagging lexical catalogue without a whole-corpus rebuild ([#1905](https://github.com/Artexis10/exomem/issues/1905)) ([c13679d](https://github.com/Artexis10/exomem/commit/c13679dca79ec0fd517df45f253927c88a8e377f))
+* **compiler:** preserve unresolved subjects and source scope ([#1900](https://github.com/Artexis10/exomem/issues/1900)) ([2b90e13](https://github.com/Artexis10/exomem/commit/2b90e13e57d8ee5dcdbc4c195bee1246a635e2a4))
+* **observability:** bind recall refusal and CPU diagnostics ([#1898](https://github.com/Artexis10/exomem/issues/1898)) ([eb81ed2](https://github.com/Artexis10/exomem/commit/eb81ed23f1ef221d3cfda0baa5b3ae1513cc8151))
+* prepare episode references before acquiring the write guard ([078653a](https://github.com/Artexis10/exomem/commit/078653a352d5bdfa13cc1708095e8ec8f792c93f))
+* replay observed edits during final catalog proof ([#1904](https://github.com/Artexis10/exomem/issues/1904)) ([f8cd6c1](https://github.com/Artexis10/exomem/commit/f8cd6c11965254a5ceb12aea356f89b60b9220e5))
+
+
+### Performance
+
+* bound recall metadata lookup to candidate paths ([#1903](https://github.com/Artexis10/exomem/issues/1903)) ([8565ea4](https://github.com/Artexis10/exomem/commit/8565ea46385e3d8f69513b1ac04054061a2f9b4b))
+* **collections:** reuse connector inputs in inspection notices ([#1899](https://github.com/Artexis10/exomem/issues/1899)) ([a90121b](https://github.com/Artexis10/exomem/commit/a90121b007f0c772cc3dcaebd644d6d066d8c302))
+
 ## [0.128.1](https://github.com/Artexis10/exomem/compare/v0.128.0...v0.128.1) (2026-10-19)
 
 
