@@ -303,7 +303,12 @@ def test_a_forged_token_reaches_the_rest_door_as_a_served_packet(
     for leaky in ("EXOMEM_UPLOAD_TOKEN", "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD"):
         monkeypatch.delenv(leaky, raising=False)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
-    assert graph_sync.drain_active_rebuilds(timeout=5)
+    drained = graph_sync.drain_active_rebuilds(timeout=5)
+    if not drained:
+        import faulthandler
+
+        faulthandler.dump_traceback()
+    assert drained
     client = TestClient(server.build_server(require_auth=False).http_app())
 
     response = client.post(
