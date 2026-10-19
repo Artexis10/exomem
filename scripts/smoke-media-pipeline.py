@@ -150,15 +150,7 @@ def _lanes(vault: Path, client) -> int:
     Image.new("RGB", (320, 320), "red").save(red, "PNG")
     post("red.png", red.getvalue(), "image/png", "Smoke", "02")
     red_rel = "Knowledge Base/Evidence/Smoke/02/red.png"
-    def red_state():
-        from exomem import recall_policy
-
-        sidecar = vault / f"{red_rel}.md"
-        head = sidecar.read_text("utf-8")[:300] if sidecar.exists() else "(no sidecar)"
-        candidate = recall_policy.is_recall_candidate(vault, sidecar) if sidecar.exists() else None
-        return f"sidecar recall candidate: {candidate}\n{head}\n{queue()}"
-
-    _wait(lambda: embeddings.ClipIndex(vault).has(red_rel), what="CLIP index of red.png", explain=red_state)
+    _wait(lambda: embeddings.ClipIndex(vault).has(red_rel), what="CLIP index of red.png", explain=queue)
     _wait(lambda: found("a solid red square", "hybrid", "red.png.md"),
           what="CLIP to surface the textless red image")
     red_hit = found("a solid red square", "hybrid", "red.png.md")
