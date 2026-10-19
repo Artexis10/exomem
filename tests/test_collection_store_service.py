@@ -769,15 +769,15 @@ def test_lost_store_custody_keeps_file_writes_and_renewal_available(service, mon
         assert {path: path.read_bytes() for path in protected} == protected
         assert marker.read_bytes() == before_marker
         with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
-            prove = restarted.manager._collection_file_marker
+            refuse_paths = authority.refuse_view_paths
 
-            def removed_after_proof(*args, **kwargs):
-                current = prove(*args, **kwargs)
+            def removed_before_validation(*args, **kwargs):
+                # Withdraw after the file proof without changing the renewal thread's marker reader.
                 marker.unlink()
-                return current
+                return refuse_paths(*args, **kwargs)
 
             with monkeypatch.context() as gap:
-                gap.setattr(restarted.manager, "_collection_file_marker", removed_after_proof)
+                gap.setattr(authority, "refuse_view_paths", removed_before_validation)
                 refused(lambda: vault.batch_atomic_write([
                     vault.PlannedWrite(root / "Knowledge Base/unowned.md", "Unpublished.\n"),
                 ], vault_root=root, post_commit_fanout=False), "COLLECTION_STORE_MARKER_CONFLICT")
@@ -1158,9 +1158,7 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
 
     monkeypatch.setattr(runtime.StoreServer, "_serve", pending_before_maintenance)
     boundary = service.manager._mutation_coordinator_for(root)
-    # Keep the deliberate refusal inside the normal maintenance backoff window.
     ordinary_timeout = service.manager._mutation_timeout_seconds
-    monkeypatch.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
     guard = service.manager.consistency_guard
     rejected_operations = []
 
@@ -1187,13 +1185,17 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
         assert call(root, "record_memory", action="append", collection=CID, item_key=LATER,
                     item={"title": "Pending summary"}, why="pending summary")["outcome"] == "committed"
         assert appended.wait(2)
-        with boundary.hold(timeout_seconds=0, operation="test-summary-holder", holder_kind="foreground"):
-            resume.set()
-            _until(lambda: bool(refusals()))
-            with pytest.raises(OpError) as busy:
-                imported(root, mode="status", continuation=job["continuation"])
-            assert busy.value.code == "MUTATION_BUSY"
-            assert len(refusals()) == 1
+        # The independent replica publisher can still own the boundary during setup.
+        with boundary.hold(timeout_seconds=ordinary_timeout, operation="test-summary-holder", holder_kind="foreground"):
+            with monkeypatch.context() as held_timeout:
+                # Keep only the deliberate refusal inside the normal maintenance backoff window.
+                held_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+                resume.set()
+                _until(lambda: bool(refusals()))
+                with pytest.raises(OpError) as busy:
+                    imported(root, mode="status", continuation=job["continuation"])
+                assert busy.value.code == "MUTATION_BUSY"
+                assert len(refusals()) == 1
         for _ in range(3):
             status = imported(root, mode="status", continuation=job["continuation"])
             assert status["state"] == "complete" and status["rows"] == initial["rows"]
@@ -1201,7 +1203,6 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
         assert len(refusals()) == 1
     finally:
         resume.set()
-        monkeypatch.setattr(service.manager, "_mutation_timeout_seconds", ordinary_timeout)
     page = root / manifest_path().replace("_collection.md", "Items/_summary.md")
     # An ordinary mutation still wakes publication after the held boundary clears.
     call(root, "record_memory", action="append", collection=CID,

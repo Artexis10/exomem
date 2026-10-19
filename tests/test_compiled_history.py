@@ -94,6 +94,43 @@ def test_timestamp_only_write_and_replay_add_no_revision(tmp_path: Path, owner) 
     assert compiled_history.read(tmp_path, path=PAGE)["returned"] == 1
 
 
+def test_unusable_history_matches_absence_without_claiming_retention(tmp_path: Path, owner) -> None:
+    _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
+    absent = commands.op_read_memory(tmp_path, path=PAGE, include_history=True)["revision_history"]
+    _correct(tmp_path, "Second wording.", "A correction.")
+    entry, = (tmp_path / compiled_history.history_root()).rglob("*.json")
+    damaged = json.loads(entry.read_text(encoding="utf-8"))
+    damaged["prior"]["source"] += "Unverified bytes."
+    entry.write_text(json.dumps(damaged), encoding="utf-8")
+
+    result = commands.op_read_memory(tmp_path, path=PAGE, include_history=True)
+
+    assert result["revision_history"]["status"] == "unavailable"
+    assert result["revision_history"]["coverage"] == "unverified"
+    assert result["revision_history"] == absent
+    assert "Second wording." in result["body"]
+
+
+def test_admitted_history_does_not_claim_complete_coverage(tmp_path: Path, owner) -> None:
+    _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
+    _correct(tmp_path, "Second wording.", "The first correction.")
+    _correct(tmp_path, "Third wording.", "The second correction.")
+    for path in (tmp_path / compiled_history.history_root()).rglob("*.json"):
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        if "First wording." in entry["prior"]["source"]:
+            entry["prior"]["source"] += "Unverified bytes."
+            path.write_text(json.dumps(entry), encoding="utf-8")
+
+    history = commands.op_read_memory(tmp_path, path=PAGE, include_history=True)["revision_history"]
+
+    assert history["status"] == "retained"
+    assert history["coverage"] == "unverified"
+    assert history["retained"] == history["returned"] == 1
+    revision, = history["revisions"]
+    assert "Second wording." in revision["prior"]["source"]
+    assert "Unverified bytes." not in json.dumps(history)
+
+
 def test_history_write_fails_atomically_with_primary(tmp_path: Path, owner, monkeypatch) -> None:
     _write_page(tmp_path, source=_page_source("- [rule] First wording. ^stable"))
     before = (tmp_path / PAGE).read_bytes()
