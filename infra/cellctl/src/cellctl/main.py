@@ -94,7 +94,7 @@ def build_reconcile_config() -> ReconcileConfig:
         ("import_cleanup_deadline", "CELLCTL_IMPORT_CLEANUP_DEADLINE_MINUTES", "minutes"),
         ("import_cleanup_retry", "CELLCTL_IMPORT_CLEANUP_RETRY_MINUTES", "minutes"),
         ("export_deadline", "CELLCTL_EXPORT_DEADLINE_MINUTES", "minutes"),
-        # C6 names this setting; only cellctl reads it, and expires_at carries it to Substrate.
+        # C6 names this setting. Substrate reads the same variable to state the time limit, so set both alike.
         ("export_ttl", "EXOMEM_EXPORT_TTL_HOURS", "hours"),
     ):
         if variable in os.environ:

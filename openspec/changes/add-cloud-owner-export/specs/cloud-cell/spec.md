@@ -2,7 +2,7 @@
 
 ### Requirement: An owner export runs under an export hold
 
-cellctl SHALL pack an owner export only while the cell carries an `export` hold and no runtime pod uses the cell's volume. The hold SHALL stop a running or read-only cell and SHALL keep a stopped cell at zero replicas. cellctl SHALL record the hold on the row with its start time and SHALL resume it after a restart. An export SHALL wait while another hold owns the volume.
+cellctl SHALL pack an owner export only while the cell carries an `export` hold and no runtime pod uses the cell's volume. The hold SHALL stop a running or read-only cell and SHALL keep a stopped cell at zero replicas. cellctl SHALL record the hold on the row with its start time and SHALL resume it after a restart. An export SHALL wait while another hold owns the volume. An export SHALL NOT start while a relocation or planned move of the cell's volume is due, or while a cell that has had a volume has no claim; cellctl SHALL release a leftover export hold during that wait.
 
 The hold SHALL have a deadline that grows with the export's cap: the configured deadline for each started 10 GiB. The export Job and its part URLs SHALL NOT outlast it. Past it, the export SHALL fail with `EXPORT_HOLD_EXPIRED`. When the export ends, cellctl SHALL release the hold only after the export Job and its pods are gone, and the cell SHALL return to its desired replicas. When the cell is deleted, the export SHALL fail with `EXPORT_INTERRUPTED` and SHALL NOT delay the deletion. cellctl SHALL retry a failed abort of its upload on every pass while the cell has a key.
 
@@ -15,6 +15,11 @@ The hold SHALL have a deadline that grows with the export's cap: the configured 
 
 - **WHEN** the owner of a running cell requests an export
 - **THEN** the runtime stops, the export Job starts only after the runtime's pod has released the volume, and the runtime starts again after the Job is gone
+
+#### Scenario: A cell due to move exports
+
+- **WHEN** the owner requests an export while a relocation or planned move of the cell's volume is due
+- **THEN** the move runs first, and the export then packs the volume the cell serves from
 
 #### Scenario: An export Job hangs
 

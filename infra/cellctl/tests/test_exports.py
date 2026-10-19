@@ -87,12 +87,15 @@ def test_a_stopped_cells_export_never_asks_for_a_replica():
     assert passes[4].hold_kind is None and passes[4].row_updates["hold_kind"] is None
 
 
-def test_an_export_waits_for_a_due_volume_move_but_a_packing_one_keeps_its_hold():
-    """Defect: an export starts on a volume that is about to be relocated or moved."""
+def test_an_export_waits_while_its_volume_is_unavailable_but_a_packing_one_keeps_its_hold():
+    """Defect: an export starts on a volume that is due to move or has lost its claim,
+    or a predecessor's leftover hold keeps the cell stopped while the move waits."""
     row = _row()
     held_row = replace(row, hold_kind="export", hold_started_at=NOW)
-    assert decide_export(row, _export(), SERVING, ExportJob(), now=NOW, volume_moving=True) is None
-    packing = decide_export(held_row, PACKING, DRAINED, ExportJob(), now=NOW, volume_moving=True)
+    assert decide_export(row, _export(), SERVING, ExportJob(), now=NOW, volume_unavailable=True) is None
+    leftover = decide_export(held_row, _export(), DRAINED, ExportJob(), now=NOW, volume_unavailable=True)
+    assert leftover.hold_kind is None and leftover.replicas == 1
+    packing = decide_export(held_row, PACKING, DRAINED, ExportJob(), now=NOW, volume_unavailable=True)
     assert packing is not None and packing.run_export_job
 
 
@@ -194,6 +197,16 @@ def test_the_export_job_carries_part_urls_but_no_storage_credential():
     assert "envFrom" not in container
     assert {"name": "staging", "emptyDir": {"sizeLimit": str(327 * 64 * MIB)}} in pod["volumes"]
     assert job["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] == "export"
+
+
+def test_a_local_export_job_tolerates_its_cordoned_node():
+    """Defect: the removal playbook cordons a local cell's node, so its export Job never schedules."""
+    spec = CellManifestSpec(cell_id=CELL, image=IMAGE, replicas=0, read_only=False, storage_gib=20,
+                            local_volume=True, hold_kind="export", hold_started_at=NOW.isoformat())
+    size = ExportSize(max_bytes=20 * GIB, part_bytes=64 * MIB, parts=327)
+    job = render_export_job(spec, _export(), size, part_urls=["https://storage.test/one"], deadline_seconds=1800)
+    assert job["spec"]["template"]["spec"]["tolerations"] == [
+        {"key": "node.kubernetes.io/unschedulable", "operator": "Exists", "effect": "NoSchedule"}]
 
 
 # --- C6 against real Postgres roles, with object storage at its SDK boundary ---------

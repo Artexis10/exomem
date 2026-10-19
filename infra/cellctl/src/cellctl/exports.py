@@ -154,11 +154,11 @@ def export_deadline(row: CellRow, config: ReconcileConfig = DEFAULT_RECONCILE_CO
 
 def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation, job: ExportJob, *,
                   now: datetime, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG,
-                  volume_moving: bool = False) -> Decision | None:
+                  volume_unavailable: bool = False) -> Decision | None:
     """One pass of the export being packed, or of the newest one while its hold
     is still on. Returns None when the export leaves the cell to routine
-    reconciliation this pass. `volume_moving` says a relocation or planned
-    move of the cell's volume is due."""
+    reconciliation this pass. `volume_unavailable` says the cell's volume is due
+    to relocate or move, or its claim is missing, so decide() owns it this pass."""
 
     if item.cell_id != row.cell_id:
         raise ValueError("export cell mismatch")
@@ -181,6 +181,13 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
                         row_updates={"hold_kind": HOLD, "hold_started_at": start,
                                      "ready": False, "observed_state": "stopping"}, **fields)
 
+    def release() -> Decision:
+        desired = 0 if row.desired_state == "stopped" else 1
+        return Decision(apply_manifests=bool(image), replicas=desired, image=image,
+                        read_only=row.desired_state == "read_only", hold_kind=None, hold_started_at=None,
+                        row_updates={"hold_kind": None, "hold_started_at": None, "ready": False,
+                                     "observed_state": "stopping"})
+
     def end(terminal: str, code: str | None) -> Decision:
         # The outcome is recorded before the upload is removed; a removal that
         # fails is retried from the row's upload_id and never holds the cell.
@@ -201,21 +208,18 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
         if job.present:
             # The Job and its pod drain before the runtime may take the volume back.
             return hold(stop_export_job=True)
-        desired = 0 if row.desired_state == "stopped" else 1
-        return Decision(apply_manifests=bool(image), replicas=desired, image=image,
-                        read_only=row.desired_state == "read_only", hold_kind=None, hold_started_at=None,
-                        row_updates={"hold_kind": None, "hold_started_at": None, "ready": False,
-                                     "observed_state": "stopping"})
+        return release()
     if item.requested_state == "superseded":
         return end("expired", None)
     if item.observed_state is None:
         if image is None:
             # A cell that never served has no vault to pack.
             return Decision(export_updates={"observed_state": "failed", "error_code": EXPORT_FAILED})
-        if volume_moving:
-            # D4: a due relocation or move starts before anything else, so the
-            # export waits and then packs the volume the cell will serve from.
-            return None
+        if volume_unavailable:
+            # D4: decide() starts a due relocation or move, or reports a missing
+            # claim, before anything else. The export waits for the volume the cell
+            # serves from, and a predecessor's leftover hold is released, not kept.
+            return release() if held else None
         return hold(export_transport="create", export_updates={"observed_state": "packing"})
 
     if job.succeeded:

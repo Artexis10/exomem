@@ -1147,7 +1147,9 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
     # Read-write like the import Jobs, not read-only like a backup: SQLite cannot
     # read a WAL-mode store on a read-only mount once its -shm file is gone, and
     # the export reads the collection store. The hold keeps the runtime stopped.
-    pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT, command=[], data_read_only=False, repo="")
+    # Like the backup Job: a local volume pins this Job to a node that a move may have cordoned.
+    pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT, command=[], data_read_only=False, repo="",
+                        tolerate_cordon=spec.local_volume)
     container = pod["containers"][0]
     container["command"] = command
     container["env"] = [*_init_env(spec), {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"}]

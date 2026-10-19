@@ -236,7 +236,7 @@ def decide(
         decision = _start_relocation(row, observation, now, lost_volume, row.last_backup_snapshot)
     elif active_hold == "restore" and observation.statefulset_relocation_volume:
         decision = _continue_relocation(row, observation, now, config)
-    elif _claim_missing(observation) and row.volume_id is not None:
+    elif claim_missing(observation) and row.volume_id is not None:
         # A fresh claim would be a new, empty volume. Only a relocation, above,
         # creates one for a cell that has had a volume.
         decision = Decision(row_updates={
@@ -1157,7 +1157,7 @@ def _restore_step(
     )
 
 
-def _claim_missing(observation: ClusterObservation) -> bool:
+def claim_missing(observation: ClusterObservation) -> bool:
     return not observation.pvc_exists and not observation.pvc_bound
 
 
@@ -1177,7 +1177,7 @@ def relocation_volume(row: CellRow, observation: ClusterObservation, storage: St
         return None
     if observation.pv_node_lost and storage.is_local(observation.pv_storage_class):
         return observation.pvc_volume_id
-    if _claim_missing(observation) and row.volume_id is not None and observation.namespace_volume_lost == row.volume_id:
+    if claim_missing(observation) and row.volume_id is not None and observation.namespace_volume_lost == row.volume_id:
         return row.volume_id
     return None
 

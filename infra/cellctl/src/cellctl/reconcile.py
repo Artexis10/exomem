@@ -40,6 +40,7 @@ from .decide import (
     StorageRoom,
     _identity_conflict,
     can_relocate,
+    claim_missing,
     decide,
     hourly_backup_due,
     nightly_backup_due,
@@ -1677,12 +1678,13 @@ async def _reconcile_row(
     if export_item is not None and import_decision is None and not _identity_conflict(
             row, observation, cluster_config.storage):
         export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id)
-        volume_moving = (
+        volume_unavailable = (
             relocation_volume(row, observation, cluster_config.storage) is not None
             or planned_move_volume(row, observation, cluster_config.storage) is not None
+            or (claim_missing(observation) and row.volume_id is not None)
         )
         export_decision = decide_export(row, export_item, observation, export_job, now=now, config=config,
-                                        volume_moving=volume_moving)
+                                        volume_unavailable=volume_unavailable)
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
     nothing_to_start = (
