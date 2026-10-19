@@ -1080,7 +1080,11 @@ replaced coordinator, or one restored from a backup older than that migration,
 does not hold the fence. The hosts then refuse the store with
 `COLLECTION_STORE_MARKER_CONFLICT`, because only a marker at generation 1 may
 make the first fence cut on a new coordinator. Keep the coordinator database in
-the backups, and restore a copy taken after the latest migration.
+the backups, and restore a copy taken after the latest migration. A running
+coordinator keeps recent grants and fences in its `-wal` file, so the database
+file alone is not current. Back it up with SQLite's online backup API, for
+example `sqlite3 writer-leases.sqlite ".backup copy.sqlite"`, or copy it while
+the coordinator is stopped.
 
 #### When an export cannot finish
 

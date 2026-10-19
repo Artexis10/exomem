@@ -664,11 +664,11 @@ The retained `measurement.json` hashes bind the observed values:
 | 1,000 | 46.03 / 78.49 | 95.81 / 226.53 | 101.35 | 632.65 |
 | 10,000 | 101.44 / 182.25 | 74.29 / 179.85 | 341.18 | 497.06 |
 
-The 1,000-row tail is host noise, not a regression: an instrumented run of the same probe minutes later measured append p50/p95 66.55/75.50 ms. Exact values, counts and unchanged refusal fingerprints pass at both sizes.
+The 1,000-row tail is most likely host noise: one instrumented run of the same probe minutes later measured append p50/p95 66.55/75.50 ms. Exact values, counts and unchanged refusal fingerprints pass at both sizes.
 
 The isolated diagnostic (`scripts/measure-records-append-latency.py`, 10,000 rows, store-preview, phase probes) measured guarded append p50/p95 28.81/36.53 ms and inspect 107.98/134.14 ms; the inspect is almost all thread CPU. Four exclusive stages exceed their p95 budgets: dispatcher 7.69 ms (budget 5), lease 7.36 ms (budget 2), governance 10.63 ms (budget 2) and store transaction plus view 10.38 ms (budget 4). The 10,000-row inspect response is about 330 KB; its 2,000 `source_versions` entries are 324 KB of that, and terminal egress scrubs about 4,100 strings per call.
 
-**Coordinator request attribution, 2026-10-19.** One instrumented 1,000-row run used the same probe with a real loopback coordinator. It timed each coordinator request on the client and on the server, and recorded one call stack per request. Each of the 30 warm appends made eight coordinator requests:
+**Coordinator request attribution, 2026-10-19.** Two instrumented 1,000-row runs used the same probe with a real loopback coordinator. The first timed each coordinator request on the client and on the server; the second recorded one call stack per request. In the first run, 27 of the 30 warm appends made eight coordinator requests; the other three also carried a background renew. The probe's fixture releases only `collections-migrate-v1`, so its summary-route check also proves ownership. With the shipped release set, a dispatch makes one proof fewer.
 
 | Requests per append | Call sites | Client p50, ms | Server p50, ms |
 | ---: | --- | ---: | ---: |
@@ -685,7 +685,7 @@ Each acquire's server time is mostly its `COMMIT` (6.6 ms, WAL with `synchronous
 | Before (2 runs) | 11.86, 11.60 | 11.02, 10.88 | 6.7 / 3.5 | 353 |
 | After (2 runs) | 4.95, 4.63 | 3.95, 3.88 | 3.5 / 0 | 285 |
 
-The intact before/after pair shows the append p50/p95 moving from 65.48/75.71 ms to 48.19/58.81 ms. The coordinator windows per append fall from 30.94 to 14.50 ms p50, and the requests per append fall from 8 to 6. The paired median append difference is −17.27 ms, with a descriptive bootstrap 95% interval of −18.53 to −14.91 ms over 30 positions. The inspect difference is +0.22 ms [−1.81, 2.15]: no change. One sequential pair on one host establishes no installed gain. Append still misses 20 ms.
+The intact before/after pair shows the append p50/p95 moving from 65.48/75.71 ms to 48.19/58.81 ms. The coordinator windows per append fall from 30.94 to 14.50 ms p50, and the requests per append fall from 8 to 6 (from 7 to 6 with the shipped release set). The paired median append difference is −17.27 ms, with a descriptive bootstrap 95% interval of −18.53 to −14.91 ms over 30 positions. The inspect difference is +0.22 ms [−1.81, 2.15]: no change. One sequential pair on one host establishes no installed gain. Append still misses 20 ms.
 
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
