@@ -101,7 +101,7 @@ def test_rewriting_the_projection_rebuilds_once(
     assert len(calls) == 2
 
 
-def test_projection_reads_keep_persisted_state_separate_from_mutable_callers(
+def test_a_fresh_load_stays_separate_from_the_shared_snapshot_until_saved(
     tmp_path: Path,
 ) -> None:
     _persist(tmp_path, "first")

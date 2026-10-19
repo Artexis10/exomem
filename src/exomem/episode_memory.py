@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 
 LEDGER_FULL_WARNING = (
     "This episode's ledger is full, so this recap committed as a Source but is not bound to it, "
-    "and a retry will not bind it. Later recaps keep committing as Sources. "
+    "and a retry may not bind it. Later recaps keep committing as Sources. "
     "Record the next recap without `episode` to start a new key."
 )
 

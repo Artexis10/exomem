@@ -337,20 +337,24 @@ def test_a_write_that_changes_no_due_category_leaves_the_projection_file_alone(
     assert _served(vault) == advice_before
 
 
-def test_a_delta_write_does_not_hide_a_projection_replaced_from_outside(vault: Path) -> None:
-    """Realistic failure: the write-through entry bound to the wrong file token serves stale claims."""
-    rel = _prediction(vault, "owed", check_by="2026-08-01")
+def test_a_quiet_write_still_persists_a_state_key_added_later(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Realistic failure: the skip compares a fixed key list, so a new carried key never reaches disk."""
+    carried = due_state_module._carried_backfill_cursors
+
+    def with_future_key(current):
+        generation = (current.get("future_index") or {}).get("generation", 0) + 1
+        return {**carried(current), "future_index": {"generation": generation}}
+
+    monkeypatch.setattr(due_state_module, "_carried_backfill_cursors", with_future_key)
+    _prediction(vault, "owed", check_by="2026-08-01")
     due_state_module.reconcile(vault, today=TODAY)
-    due_state_module.apply_write_delta(vault, rel, today=TODAY)
+    quiet = _write(vault, f"{INSIGHTS}/quiet.md", "---\ntitle: quiet\ntype: insight\n---\n\nNothing due.\n")
+    returned = due_state_module.apply_write_delta(vault, quiet, today=TODAY)
 
-    foreign = due_state_module.load(vault)
-    foreign["claims"] = {"foreign": {"marker": True}}
-    path = due_state_module.state_path(vault)
-    replacement = path.with_name("foreign.json")
-    replacement.write_text(json.dumps(foreign), encoding="utf-8")
-    replacement.replace(path)
-
-    assert due_state_module._load_shared(vault)["claims"] == {"foreign": {"marker": True}}
+    due_state_module.reset_serve_cache()
+    assert due_state_module.load(vault)["future_index"] == returned["future_index"]
 
 
 def test_a_delta_write_that_changes_a_category_is_persisted(vault: Path) -> None:

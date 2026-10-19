@@ -314,7 +314,12 @@ def _remember_written(
 
 
 def save(vault_root: Path, payload: dict[str, Any]) -> None:
-    """Atomically replace the projection state. Best effort; never raises."""
+    """Atomically replace the projection state. Best effort; never raises.
+
+    The saved payload becomes the shared parse-cache entry every reader gets,
+    so a caller never edits it, or anything `reconcile` or a delta returns,
+    after this call.
+    """
     path = state_path(vault_root)
     try:
         from . import state_paths, vault
@@ -326,7 +331,8 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
         try:
             with os.fdopen(handle_fd, "w", encoding="utf-8", newline="\n") as handle:
                 # Compact separators, sorted keys: this file is rewritten and
-                # fsynced on every governed write, so its size is a per-write cost.
+                # fsynced on every governed write that changes it, so its size is
+                # a per-write cost.
                 # Indentation cost ~2.5x for a machine-read file nobody diffs;
                 # `sort_keys` stays for determinism.
                 # Stream the payload to avoid allocating another full-size string.
@@ -369,6 +375,9 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
 #: projection (20 MB, ~600 ms on the personal vault) and, worse, made every
 #: read look like a state change to anything keyed on the projection file.
 EMISSION_FILENAME = ".due-state-emission.json"
+
+#: The projection's only bookkeeping key: a copy of the sidecar ledger above.
+_BOOKKEEPING_KEY = "emission"
 
 
 def emission_path(vault_root: Path) -> Path:
@@ -1434,7 +1443,11 @@ def reconcile(
     today: dt.date | None = None,
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
-    """Full recompute plus persist — the healer after out-of-band edits."""
+    """Full recompute plus persist — the healer after out-of-band edits.
+
+    The returned payload is the shared cache entry `save` stored; callers read it
+    and never edit it.
+    """
     existing = load(vault_root) or _UNPERSISTED.get(str(vault_root))
     payload = recompute(vault_root, today=today, now=now)
     # The projection is derived and rebuilt from authored state; the emission
@@ -2060,10 +2073,14 @@ def _save_unless_unchanged(
     with `current`, so the comparison costs one identity check per page and a
     deep compare only of the entries the delta replaced.
     """
-    keys = ("version", "computed_on", "categories", "bindings", "claims", "role_state", "backfill_cursors")
-    if all(updated.get(key) == current.get(key) for key in keys):
+    if _without_bookkeeping(updated) == _without_bookkeeping(current):
         return
     save(vault_root, updated)
+
+
+def _without_bookkeeping(payload: Mapping[str, Any]) -> dict[str, Any]:
+    # Every key but the ledger copy is state, so a key added later persists by default.
+    return {key: value for key, value in payload.items() if key != _BOOKKEEPING_KEY}
 
 
 def _persist_delta(
@@ -2924,13 +2941,14 @@ def served_entries(
 def _served_content_token(vault_root: Path) -> str | None:
     """Identity of the projection without its emission ledger, or None when absent.
 
-    Every governed write rewrites the file to tick the emission ledger, which no
-    served build reads, so keying the served cache on the file would rebuild the
-    served list -- a release decision per due item -- on every write. Everything
-    else is hashed, so a key a build starts reading invalidates by default.
+    A governed write that saves the projection also refreshes its copy of the
+    emission ledger, which no served build reads, so keying the served cache on
+    the file would rebuild the served list -- a release decision per due item --
+    on every such write. Everything else is hashed, so a key a build starts
+    reading invalidates by default.
     """
     return _content_token(
-        state_path(vault_root), lambda: _load_shared(vault_root), "emission"
+        state_path(vault_root), lambda: _load_shared(vault_root), _BOOKKEEPING_KEY
     )
 
 

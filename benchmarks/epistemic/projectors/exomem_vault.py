@@ -1316,9 +1316,9 @@ class VaultProjector(Projector):
     def _read_due_state_ledger(self) -> dict[str, Any] | None:
         """The ledger of record: the sidecar beside the projection, else the copy inside it.
 
-        Delivering a block writes only the sidecar; governed writes refresh the
-        projection's copy. Reading the projection alone under-reports emissions
-        between writes.
+        Delivering a block writes only the sidecar; a governed write refreshes the
+        projection's copy only when it saves the projection. Reading the
+        projection alone under-reports emissions.
         """
         sidecar = self._state_file(DUE_STATE_EMISSION_FILE)
         ledger = _read_json(sidecar) if sidecar is not None else None
