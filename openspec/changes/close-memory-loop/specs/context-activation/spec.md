@@ -293,7 +293,13 @@ SHALL use existing material preference and rank. Packet assembly SHALL preserve
 the combined selected order of units and pointers within existing role priority,
 character budgets and the conditional shared material allowance. Earlier categorical roles, including their pages
 and downgraded pointers, SHALL spend before a material group at its declared
-registry position; later roles SHALL follow. Categorical portions SHALL retain
+registry position; later roles SHALL follow. While material has admitted candidates
+in the packet's own tier, a role that a units lane serves and that an anchor default
+alone selected SHALL NOT spend material's reserve, as units or pointers: the lesser
+of what material's first three items cost as served and a third of the budget left
+after working continuity and current state. Identity, Records, Planning and
+turn-cued roles SHALL keep their priority, and material SHALL spend the reserve at
+its declared position. Categorical portions SHALL retain
 unit-first ordering, and packets without material SHALL retain the old ordering.
 Own/promoted tiers and current-state/Planning precedence SHALL remain unchanged.
 Beyond the default three items, each additional served material item SHALL represent
@@ -341,10 +347,20 @@ prose budget SHALL NOT be presented as unchanged context overhead.
   or truncated evidence is not represented as a complete answer
 
 #### Scenario: Earlier categorical context survives a tight budget
-- **WHEN** a tight packet can afford either earlier identity or constraint
-  context, including a downgraded pointer, or lower-priority material
+- **WHEN** a tight packet can afford either earlier identity or turn-cued
+  constraint context, including a downgraded pointer, or lower-priority material
 - **THEN** the earlier role retains capacity, while later categorical units do
   not jump ahead of the combined material group solely because they are units
+
+#### Scenario: A broad project's default lenses leave room for the turn's material
+- **WHEN** a turn resolves a project whose pages give each anchor-default units
+  lens more than its cap, and material ranked one older note for the turn
+- **THEN** the packet serves that note, and each default lens still serves units
+  within the total prose budget
+
+#### Scenario: A name-only turn keeps every default lens
+- **WHEN** a turn names only the same broad project, so material ranks nothing
+- **THEN** no reserve applies and each default lens serves its full item cap
 
 ### Requirement: Project configuration participates in activation freshness
 A project-registry-only edit SHALL be visible to ordinary writer validation and

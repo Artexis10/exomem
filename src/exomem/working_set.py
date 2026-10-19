@@ -78,6 +78,12 @@ PRECEDENTS_ROLE = "precedents"
 #: Material promoted only by the earlier conversation gets at most this share
 #: (a third) of the packet budget when the turn resolved something itself.
 PROMOTED_SHARE_DIVISOR = 3
+#: While the turn ranked material, a units lens that only an anchor default
+#: selected may not spend material's reserve: what material's first items
+#: cost, at most this share (a third) of the budget left after continuity and
+#: state. A packet-shape bound like `MAX_ITEMS_PER_ROLE`, the same for every
+#: vault, so it is not configuration.
+MATERIAL_RESERVE_DIVISOR = 3
 #: Candidate units after the catalogue's parent and category predicates.
 UNIT_LANE_LIMIT = 200
 GRAPH_MAX_NODES = 24
@@ -647,6 +653,23 @@ def build_packet(
     listed_anchors = _listed_anchors(anchors)
     listed_ambiguity = [dict(entry) for entry in ambiguity[:working_set_resolve.MAX_AMBIGUITY_CHOICES]]
     role_ids = frozenset(str(role["id"]) for role in roles) if conversation_inferred else frozenset()
+    # A units lens that only an anchor default selected does not read the
+    # turn, so over a broad anchor it fills any budget with whatever is
+    # newest. `lane` is a registry-declared attribute and `source` a closed
+    # selection token; neither names a role.
+    yielding_roles = frozenset(
+        str(role["id"]) for role in roles
+        if role.get("lane") == "units" and role.get("source") == "anchor_default"
+    )
+
+    def _charge(kind: str, served: Mapping[str, Any]) -> int:
+        return (
+            working_set_conversation.prose_chars(
+                served, role_ids=role_ids, status_basis=status_basis
+            )
+            if conversation_inferred else served_chars(kind, served)
+        )
+
     if conversation_inferred:
         used += working_set_conversation.budget_headers(
             (*listed_anchors, *listed_ambiguity),
@@ -686,13 +709,9 @@ def build_packet(
         pointer = _pointer(item, reason)
         if exact_path:
             pointer["path"] = item.path
-        cost = (
-            working_set_conversation.prose_chars(
-                pointer, role_ids=role_ids, status_basis=status_basis
-            )
-            if conversation_inferred else served_chars("pointers", pointer)
-        )
-        if used + cost > material_limit or item.promoted and promoted_used + cost > promoted_share:
+        cost = _charge("pointers", pointer)
+        ceiling = material_limit - (reserve if item.role in yielding_roles else 0)
+        if used + cost > ceiling or item.promoted and promoted_used + cost > promoted_share:
             starved.setdefault(item.role, None)
             return
         pointers.append(pointer)
@@ -702,6 +721,14 @@ def build_packet(
         used += cost
         if item.promoted:
             promoted_used += cost
+
+    def _material_cost(item: LaneItem) -> int:
+        text = bounded_text(item.text)
+        if item.level == "page" or not text:
+            return _charge("pointers", _pointer(item, "requires_read"))
+        if len(text) > (MAX_UNIT_CHARS if item.provenance.get("standing") else MAX_UNIT_HARD_CHARS):
+            return _charge("pointers", _pointer(item, "unit_too_long"))
+        return _charge("units", _served_unit(item))
 
     def _defer(item: LaneItem, reason: str) -> None:
         if item.role in material_roles:
@@ -733,12 +760,7 @@ def build_packet(
                 entry["statement"] = statement
             for key in working_set_currency.INTERNAL_PROVENANCE:
                 entry.pop(key, None)
-            cost = (
-                working_set_conversation.prose_chars(
-                    entry, role_ids=role_ids, status_basis=status_basis
-                )
-                if conversation_inferred else served_chars("current_state", entry)
-            )
+            cost = _charge("current_state", entry)
             if used + cost > material_limit or promoted and promoted_used + cost > promoted_share:
                 continue
             state_entries.append(entry)
@@ -746,6 +768,21 @@ def build_packet(
             if promoted:
                 promoted_used += cost
 
+        # Material keeps room for what its first items cost while the
+        # anchor-default lenses ahead of it spend, their overflow pointers
+        # included; its first item releases the room at its declared position.
+        reserve = 0
+        if not promoted and yielding_roles:
+            first_material = [
+                item for item in ordered
+                if item.role in material_roles and not item.promoted
+                and not _redundant_superseded(item, present_paths)
+            ][:MAX_ITEMS_PER_ROLE]
+            if first_material:
+                reserve = min(
+                    sum(_material_cost(item) for item in first_material),
+                    (material_limit - used) // MATERIAL_RESERVE_DIVISOR,
+                )
         previous_group = None
         for item in ordered:
             if item.promoted != promoted or _redundant_superseded(item, present_paths):
@@ -756,6 +793,8 @@ def build_packet(
                     _budget_pointer(deferred_item, reason)
                 deferred.clear()
                 previous_group = group
+            if item.role in material_roles:
+                reserve = 0
             if item.role in material_roles and item.level == "page":
                 _defer(item, "requires_read")
                 continue
@@ -768,12 +807,7 @@ def build_packet(
                 _defer(item, "unit_too_long")
                 continue
             unit = _served_unit(item)
-            cost = (
-                working_set_conversation.prose_chars(
-                    unit, role_ids=role_ids, status_basis=status_basis
-                )
-                if conversation_inferred else served_chars("units", unit)
-            )
+            cost = _charge("units", unit)
             role_count = per_role.get(item.role, 0)
             # No class is exempt: a standing unit takes one of its role's slots.
             if _material_capped(item) or (
@@ -781,7 +815,8 @@ def build_packet(
             ):
                 _defer(item, "role_cap")
                 continue
-            if used + cost > material_limit or not text:
+            ceiling = material_limit - (reserve if item.role in yielding_roles else 0)
+            if used + cost > ceiling or not text:
                 _defer(item, "budget")
                 continue
             ordering = status_basis.ordering(item.lifecycle, path=item.path or None)
