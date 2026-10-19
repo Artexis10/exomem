@@ -176,7 +176,7 @@ def test_incomplete_catalog_raises_non_cacheable_warming_outcome(
     # completeness cannot be established for the safe category plan.
     monkeypatch.setattr(find_module, "_FOREGROUND_LEXICAL_REPAIR_PAGE_CAP", 0)
     scheduled: list[Path] = []
-    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda root, **_kwargs: scheduled.append(root))
     target = _write_note(
         tmp_path,
         "Knowledge Base/Notes/warming.md",
@@ -244,7 +244,7 @@ def test_projection_identity_mismatch_is_warming_not_stale_recall(
     # though the Markdown freshness checkpoint did not move.
     monkeypatch.setattr(semantic_index, "PARSER_VERSION", semantic_index.PARSER_VERSION + 1)
     scheduled: list[Path] = []
-    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda root, **_kwargs: scheduled.append(root))
     monkeypatch.setattr(
         find_module,
         "_walk_md",
@@ -348,7 +348,7 @@ def test_delta_over_cap_returns_warming_and_schedules_one_repair(
     freshness.on_files_changed(tmp_path, changed=pages)
 
     scheduled: list[Path] = []
-    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda root, **_kwargs: scheduled.append(root))
     monkeypatch.setattr(
         find_module,
         "_walk_md",

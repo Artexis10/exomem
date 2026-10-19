@@ -185,7 +185,7 @@ def catalog_selection_scope(vault_root: Path):
             _ADMITTED_CATALOG.reset(token)
         if lagging:
             # Preserve convergence without handing repair an active SQL reader.
-            _schedule_runtime_catalog_repair(root)
+            _schedule_runtime_catalog_repair(root, lag_only=True)
 
 
 def _checkpoint_policy_current(vault_root: Path, checkpoint: object) -> bool:
@@ -780,6 +780,12 @@ _DEFERRED_UPSERTS: dict[Path, set[Path]] = {}
 #: sqlite error, a noncurrent schema, a source that moved. These are NOT
 #: contention, and none of them is fixed by re-applying rows.
 _FULL_REBUILD_REQUESTED: set[Path] = set()
+#: The pending full requests whose every cause was a stored checkpoint that
+#: differs from the registry's. Only these may be answered by an exact delta
+#: replay, and only when the worker then proves the catalogue exactly current.
+#: That proof reads checkpoint metadata, which cannot attest rows, so any other
+#: cause clears its key here and keeps the rebuild.
+_LAG_ONLY_REBUILDS: set[Path] = set()
 _REPAIR_PROGRESS: dict[Path, dict[str, object]] = {}
 _REPAIRS_LOCK = threading.Lock()
 #: Reconcile source-proof outcomes — stable, content-free counters ONLY (no
@@ -1591,7 +1597,7 @@ def runtime_retrieval_catalog_admission(
         lagging.append(scope)
     if schedule_repair:
         # Serving stale is a bridge, not a resting state: keep converging.
-        _schedule_runtime_catalog_repair(root)
+        _schedule_runtime_catalog_repair(root, lag_only=True)
     return RecallProjectionAdmission(checkpoints, tuple(lagging))
 
 
@@ -1801,13 +1807,16 @@ def _schedule_runtime_catalog_repair(
     vault_root: Path,
     *,
     deferred_paths: list[Path] | None = None,
+    lag_only: bool = False,
 ) -> None:
     """Order admission revocation before the repair that may restore it."""
     _mark_runtime_retrieval_unavailable_if_current(vault_root)
-    if deferred_paths is None:
-        _schedule_repair(vault_root)
-    else:
+    if deferred_paths is not None:
         _schedule_repair(vault_root, deferred_paths=deferred_paths)
+    elif lag_only:
+        _schedule_repair(vault_root, lag_only=True)
+    else:
+        _schedule_repair(vault_root)
 
 
 def request_repair(vault_root: Path) -> None:
@@ -1895,11 +1904,60 @@ def clear_stores() -> None:
         )
 
 
+def _request_full_rebuild(key: Path, *, lag_only: bool = False) -> None:
+    """Record a pending full request; the caller holds `_REPAIRS_LOCK`.
+
+    A pending request stays lag-only only while every request folded into it
+    was lag-only, so one request with any other cause restores the rebuild.
+    """
+    if not lag_only:
+        _LAG_ONLY_REBUILDS.discard(key)
+    elif key not in _FULL_REBUILD_REQUESTED:
+        _LAG_ONLY_REBUILDS.add(key)
+    _FULL_REBUILD_REQUESTED.add(key)
+
+
+def _admit_if_current(vault_root: Path) -> bool:
+    """Admit a configured runtime, or prove an offline catalogue, when exactly current."""
+    from . import freshness as freshness_module
+
+    if _is_configured_runtime_vault(vault_root):
+        return _mark_runtime_retrieval_ready_if_current(vault_root)
+    existing = runtime_retrieval_catalog_proof(
+        vault_root,
+        require_live_projection=freshness_module.event_indexes_enabled(),
+        schedule_repair=False,
+    )
+    return existing is not None
+
+
+def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
+    """Whether an exact delta replay answered a lag-only full request.
+
+    Answering every lagging request with a whole-corpus pass held the
+    publication barrier long enough to make concurrent watcher batches miss
+    it, which stranded the next delta and requested another pass. The proof
+    runs here on the repair worker, never on a request path. A replay that
+    cannot prove both scopes exactly current keeps the full pass.
+    """
+    # The worker's store protocol requires only `rebuild_atomic` and
+    # `retry_deferred_upsert`; a store without a catch-up keeps the full pass.
+    catch_up = getattr(store, "catch_up_lagging_delta", None)
+    if catch_up is None:
+        return False
+    try:
+        return catch_up() and _admit_if_current(vault_root)
+    except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
+        log.info("lexical catch-up declined (%s); rebuilding", error)
+        return False
+
+
 def _schedule_repair(
     vault_root: Path,
     *,
     deferred_paths: list[Path] | None = None,
     pending_only: bool = False,
+    lag_only: bool = False,
 ) -> bool:
     """Start at most one best-effort lexical repair per vault.
 
@@ -1916,6 +1974,11 @@ def _schedule_repair(
     re-applies exactly those paths first and escalates to the full rebuild only
     if they do not land, so a single deferred page stops costing a whole-corpus
     pass (#526).
+
+    `lag_only` marks a caller whose only observation was checkpoint metadata
+    differing from the registry's. While every pending full request is
+    lag-only, the worker first replays the exact registry delta and skips the
+    whole-corpus pass only when the catalogue then proves exactly current.
 
     Every other caller passes nothing and still gets the rebuild, so this can
     only ever do LESS work than before, never less repair: a targeted retry that
@@ -1944,7 +2007,7 @@ def _schedule_repair(
         elif key in _FULL_REBUILDS_IN_FLIGHT:
             _FULL_REBUILD_REOBSERVED.setdefault(key, set()).add(observation)
         else:
-            _FULL_REBUILD_REQUESTED.add(key)
+            _request_full_rebuild(key, lag_only=lag_only)
         if key in _REPAIRS_IN_FLIGHT:
             # The running worker re-reads both queues before it exits, so this
             # request is picked up rather than dropped.
@@ -1963,6 +2026,7 @@ def _schedule_repair(
             while True:
                 with _REPAIRS_LOCK:
                     published_handoff = False
+                    lag_only = False
                     full_requested = key in _FULL_REBUILD_REQUESTED
                     paths = sorted(_DEFERRED_UPSERTS.pop(key, set()))
                     if full_requested and full_passes >= _MAX_FULL_REBUILDS_PER_FLIGHT:
@@ -1984,6 +2048,8 @@ def _schedule_repair(
                         rebuild = full_requested
                         if rebuild:
                             _FULL_REBUILD_REQUESTED.discard(key)
+                            lag_only = key in _LAG_ONLY_REBUILDS
+                            _LAG_ONLY_REBUILDS.discard(key)
                             published_handoff = key in _PUBLISHED_HANDOFF_PENDING
                             _PUBLISHED_HANDOFF_PENDING.discard(key)
                     if not rebuild and not paths:
@@ -2006,26 +2072,22 @@ def _schedule_repair(
                     # its flight. Re-prove the persisted catalogue before paying
                     # for another whole-vault scan; a request arriving during the
                     # proof sets the level-triggered bit again and is not cleared.
-                    from . import freshness as freshness_module
-
-                    if _is_configured_runtime_vault(vault_root):
-                        already_current = _mark_runtime_retrieval_ready_if_current(
-                            vault_root,
-                        )
-                    else:
-                        existing = runtime_retrieval_catalog_proof(
-                            vault_root,
-                            require_live_projection=(
-                                freshness_module.event_indexes_enabled()
-                            ),
-                            schedule_repair=False,
-                        )
-                        already_current = existing is not None
+                    already_current = _admit_if_current(vault_root)
                     with _REPAIRS_LOCK:
                         requested_during_proof = key in _FULL_REBUILD_REQUESTED
                     if already_current and not requested_during_proof:
                         rebuild = False
                         outcome = "published"
+                        if not paths:
+                            continue
+                if rebuild and lag_only:
+                    with _REPAIRS_LOCK:
+                        _set_repair_progress(key, "targeted")
+                    if _caught_up_without_rebuild(vault_root, store):
+                        # A request arriving meanwhile is level-triggered: the
+                        # next iteration consumes it with its own cause.
+                        rebuild = False
+                        outcome = "targeted"
                         if not paths:
                             continue
                 targeted_started = time.monotonic()
@@ -2049,7 +2111,7 @@ def _schedule_repair(
                             # A targeted retry after this worker's full pass just
                             # proved that another full repair is necessary. Keep
                             # both claims for the next bounded flight.
-                            _FULL_REBUILD_REQUESTED.add(key)
+                            _request_full_rebuild(key)
                             if paths:
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                             _FULL_REBUILD_REOBSERVED.pop(key, None)
@@ -2065,6 +2127,7 @@ def _schedule_repair(
                         # a queued request asked for. Consume that level here so
                         # it cannot become a redundant pass immediately after.
                         _FULL_REBUILD_REQUESTED.discard(key)
+                        _LAG_ONLY_REBUILDS.discard(key)
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _FULL_REBUILDS_IN_FLIGHT.add(key)
                         _set_repair_progress(key, "building")
@@ -2134,11 +2197,11 @@ def _schedule_repair(
                             # proof succeed. Preserve a declined pass across the
                             # bounded idle boundary even when nobody happened to
                             # re-observe staleness while it was running.
-                            _FULL_REBUILD_REQUESTED.add(key)
+                            _request_full_rebuild(key)
                             if paths:
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                         if uncovered:
-                            _FULL_REBUILD_REQUESTED.add(key)
+                            _request_full_rebuild(key)
                         if repaired and key in _FULL_REBUILD_REQUESTED:
                             # Another proof can win admission during promotion.
                             # Re-prove this publication before rebuilding it.
@@ -2151,7 +2214,7 @@ def _schedule_repair(
                     # request, but re-prove before rebuilding: another proof
                     # may already have won the readiness admission update.
                     with _REPAIRS_LOCK:
-                        _FULL_REBUILD_REQUESTED.add(key)
+                        _request_full_rebuild(key, lag_only=True)
                         _PUBLISHED_HANDOFF_PENDING.add(key)
                 rebuild = False
                 full_pass = False
@@ -2163,11 +2226,11 @@ def _schedule_repair(
                 # stays best-effort; the runtime recovery owner or a later
                 # caller can retry the preserved claim in a fresh flight.
                 if rebuild:
-                    _FULL_REBUILD_REQUESTED.add(key)
+                    _request_full_rebuild(key)
                 if paths:
                     _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                 if _FULL_REBUILD_REOBSERVED.get(key):
-                    _FULL_REBUILD_REQUESTED.add(key)
+                    _request_full_rebuild(key)
                 _FULL_REBUILD_REOBSERVED.pop(key, None)
                 _PUBLISHED_HANDOFF_PENDING.discard(key)
                 _FULL_REBUILDS_IN_FLIGHT.discard(key)
@@ -4307,9 +4370,10 @@ class LexicalStore:
         observation as canonical made every healthy live write veto publication.
 
         Schema/identity/existence changes still conflict. A checkpoint advance is
-        accepted only when it is the exact same-process target already replayed
-        into the temp catalogue; foreign or uncovered checkpoint changes remain
-        incomparable and fail closed.
+        accepted only when the temp catalogue already holds it: the exact target,
+        or a generation of the same registry and recall policy between the
+        build's start and that target. Foreign, policy-changed or backwards
+        checkpoint changes remain incomparable and fail closed.
         """
         changed = [
             key
@@ -4326,11 +4390,40 @@ class LexicalStore:
                 if before == after:
                     continue
                 target = targets.get(scope)
-                if after is None or target is None or after != target:
+                if after is None or target is None:
+                    changed.append(f"checkpoint:{scope}")
+                elif after != target and not LexicalStore._replayed_between(
+                    before, after, target
+                ):
                     changed.append(f"checkpoint:{scope}")
         if changed:
-            log.debug("lexical publication guard changed fields: %s", tuple(changed))
+            # INFO, not DEBUG: field names only, and without them a declined
+            # publication cannot be attributed from production logs.
+            log.info("lexical publication guard changed fields: %s", tuple(changed))
         return bool(changed)
+
+    @staticmethod
+    def _replayed_between(before, after, target) -> bool:
+        """Whether a live checkpoint lies inside the replacement's replayed span.
+
+        Under steady traffic the watcher blesses the live catalogue between the
+        build's start capture and the barrier, while the next event is still
+        unblessed, so live rarely equals the rebased target exactly. The temp
+        holds this registry's exact state at `target` (its start capture plus
+        every retained generation replayed up to it, proved by the final
+        census), so it contains any state the same registry and policy attested
+        at or below `target`. Publishing therefore advances live.
+        """
+        if before is None:
+            return False
+        lineage = (after.instance_id, after.policy_version, after.access_policy_fingerprint)
+        return (
+            (before.instance_id, before.policy_version, before.access_policy_fingerprint)
+            == lineage
+            and (target.instance_id, target.policy_version, target.access_policy_fingerprint)
+            == lineage
+            and before.generation <= after.generation <= target.generation
+        )
 
     @staticmethod
     def _live_regressed(now_guard: dict, temp_targets: dict, current_identity: str) -> bool:
@@ -5725,7 +5818,9 @@ class LexicalStore:
             return False
         except OSError as e:
             log.info("lexical sidecar upsert source changed during repair (%s)", e)
-            _schedule_runtime_catalog_repair(self.vault_root)
+            # A source read moved under the apply; the worker's catch-up must
+            # prove the catalogue exactly current, or the full pass runs.
+            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
             return False
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
@@ -5757,6 +5852,7 @@ class LexicalStore:
         from .vault import VaultLockError
 
         deferred_paths = None
+        source_moved = False
         try:
             # Prove any tainted reconcile-derived target against one source
             # walk BEFORE taking the publication barrier: the walk is O(vault)
@@ -5778,8 +5874,13 @@ class LexicalStore:
             applied = False
         except OSError as e:
             log.info("lexical watcher source changed during repair (%s)", e)
+            # A source read moved under the apply; the worker's catch-up must
+            # prove the catalogue exactly current, or the full pass runs.
+            source_moved = True
             applied = False
-        if not applied:
+        if not applied and source_moved:
+            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+        elif not applied:
             _schedule_runtime_catalog_repair(self.vault_root, deferred_paths=deferred_paths)
         else:
             if not self._hand_off_stranded_scopes():
@@ -5814,6 +5915,58 @@ class LexicalStore:
         except (sqlite3.Error, OSError) as e:
             log.info("lexical targeted retry failed (%s); rebuilding", e)
             return False
+
+    def catch_up_lagging_delta(self) -> bool:
+        """Replay the registry delta a lagging catalogue misses, without a scan.
+
+        A watcher batch that misses the barrier leaves an uncovered delta that no
+        later batch can bless. When this process's registry still bridges each
+        scope's stored checkpoint with a complete, untainted delta, and the
+        union fits the foreground cap, replaying those identities is the
+        watcher's own bounded apply, deletions included. Returns whether that
+        replay committed (trivially, when nothing lags). A retired or stale
+        store, a foreign or adopted origin, lost history, a reconcile-tainted
+        delta or an oversized one returns False and keeps the full pass.
+        """
+        from . import freshness as freshness_module
+
+        if self._failed or not self.path.exists():
+            return False
+        lagging: set[str] = set()
+        try:
+            conn = self._connect()
+            try:
+                if not self._schema_is_current(conn):
+                    return False
+                identity = catalog_semantic_identity(self.vault_root)
+                if self._meta_catalog_identity(conn) != identity:
+                    return False
+                for scope in freshness_module.SCOPES:
+                    if not freshness_module.recall_is_live(self.vault_root, scope):
+                        return False
+                    stored = self._meta_checkpoint(conn, scope)
+                    current = freshness_module.recall_checkpoint(self.vault_root, scope)
+                    if (
+                        stored is None
+                        or current is None
+                        or stored.instance_id != current.instance_id
+                    ):
+                        return False
+                    delta = freshness_module.recall_delta_since(
+                        self.vault_root, scope, stored
+                    )
+                    if not delta.complete or delta.requires_source_proof:
+                        return False
+                    lagging |= delta.changed | delta.deleted
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False
+        if len(lagging) > CATALOG_FOREGROUND_DELTA_CAP:
+            return False
+        if not lagging:
+            return True
+        return self.retry_deferred_upsert([Path(path) for path in sorted(lagging)])
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
@@ -8384,7 +8537,9 @@ class LexicalStore:
                             # not be applied. Defer to the repair worker rather than
                             # letting the mismatch escape this seam.
                             if schedule_repair:
-                                _schedule_runtime_catalog_repair(self.vault_root)
+                                _schedule_runtime_catalog_repair(
+                                    self.vault_root, lag_only=True
+                                )
                             return CatalogReadiness("stale", False, backend_name)
                         return self.catalog_readiness(
                             scope,
@@ -8394,7 +8549,9 @@ class LexicalStore:
                             recall_checkpoint=target_checkpoint,
                         )
             if schedule_repair:
-                _schedule_runtime_catalog_repair(self.vault_root)
+                # The stored checkpoint differs from the target; the worker's catch-up
+                # must prove it exactly current, or the full pass runs.
+                _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(
@@ -8791,7 +8948,10 @@ class LexicalStore:
             try:
                 readiness = self._view_readiness(view, scope, recall_checkpoint)
                 if not readiness.complete:
-                    _schedule_runtime_catalog_repair(self.vault_root)
+                    # Only metadata disagrees (view, checkpoint, policy, schema or
+                    # identity); the worker's catch-up must prove the catalogue
+                    # exactly current, or the full pass runs.
+                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(None, readiness)
                 return CatalogQueryResult(query_fn(view.connection), readiness)
             except RegistryError:
@@ -8833,8 +8993,10 @@ class LexicalStore:
                     # The pinned snapshot no longer matches the readiness proof — a
                     # publication landed between the verdict and this transaction.
                     # Defer rather than serve an unvalidated (possibly regressed)
-                    # generation; the repair worker reconciles it.
-                    _schedule_runtime_catalog_repair(self.vault_root)
+                    # generation; the repair worker reconciles it. Only metadata
+                    # disagrees, so its catch-up must prove the catalogue exactly
+                    # current, or the full pass runs.
+                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )

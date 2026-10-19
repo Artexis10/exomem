@@ -76,7 +76,7 @@ def test_stale_selection_keeps_existing_recovery_after_releasing_its_view(
     freshness.clear()
     rebuilt: list[bool] = []
 
-    def recover(root):
+    def recover(root, **_kwargs):
         from exomem import file_watcher
 
         assert root == vault.resolve()
@@ -114,7 +114,7 @@ def test_changed_projected_inputs_cannot_borrow_the_live_checkpoint(
     later = vault / "Knowledge Base/Notes/lag-later.md"
     later.write_text("# Later\n\nrealprojectionlag\n", encoding="utf-8")
     freshness.on_files_changed(vault, changed=[later])
-    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda _root, **_kwargs: None)
     lag: list[str] = []
     proof: dict[str, object] = {}
 
