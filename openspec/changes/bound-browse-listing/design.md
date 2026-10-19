@@ -10,7 +10,7 @@
 
 **Non-Goals:**
 - Changing `overview`.
-- Paging `manage_memory_file` with `operation="list"`. It still returns the whole listing through `op_list_directory`; the slow calls on record were all `browse_memory` lists.
+- Paging `manage_memory_file` with `operation="list"` or the legacy `list_directory` REST and CLI route. Both still return the whole listing through `op_list_directory`, reading every file; the slow calls on record were all `browse_memory` lists. A long call there can still hold a release drain, so it stays a tracked follow-up.
 - Adding filters, a new sort order or a total count.
 - Setting the browse latency bar. It stays pending in `bound-request-latency-across-surfaces` until installed measurements support an engineering choice.
 
@@ -19,7 +19,7 @@
 1. **Page size.** `limit` defaults to 200 and is capped at 1,000. Smaller and larger values are clamped, never rejected. 200 entries keep a page readable by an agent client. The cap bounds the cost of one call.
 2. **Cursor.** The cursor is an opaque URL-safe string that encodes three things: the listed path, the `recursive` flag, and the sort key of the last returned entry. The leaf resumes after that key. A cursor that does not decode, or that names another path or flag, fails with `INVALID_CURSOR`. The cursor carries only a path the caller already received, so it discloses nothing new. It is not signed, because a forged cursor can only start a listing at a different point of the same folder, which the caller may list anyway.
 3. **No total count.** The leaf would need a withholding decision for every entry to count only the visible ones. A raw count would tell a non-owner caller how many entries are withheld. The response says only whether more entries follow.
-4. **Names first.** `reserved_paths.list_generic_tree` gains an option that skips file bytes. The leaf sorts the names, walks them in order from the cursor, applies `keep` and the reserved-path and exclusion rules, and stops at `limit` visible entries. Then it reads bytes and frontmatter for those entries only, through the same descriptor-bound reads.
+4. **Names first.** The folder's children are still each opened and stat'ed once to enumerate them; what the page bounds is byte reads, frontmatter parsing and egress decisions. `reserved_paths.list_generic_tree` gains an option that skips file bytes. The leaf sorts the names, walks them in order from the cursor, applies `keep` and the reserved-path and exclusion rules, and stops at `limit` visible entries. Then it reads bytes and frontmatter for those entries only, through the same descriptor-bound reads.
 5. **One more probe.** The leaf collects up to `limit + 1` visible entries. `truncated` is true only when one more visible entry exists, so a final page that ends exactly at `limit` reports no further page.
 
 ## Risks / Trade-offs

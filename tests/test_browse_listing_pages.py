@@ -103,6 +103,37 @@ def test_withheld_entries_neither_shorten_a_page_nor_appear_in_a_cursor(vault: P
     assert "secret" not in resumed_after[2]
 
 
+def test_the_owners_page_and_cursor_skip_a_page_whose_deletion_is_pending(vault: Path) -> None:
+    """The owner's leaf filters nothing, but egress drops a page being deleted.
+
+    A cursor built from that page would name it to a client that never received it.
+    """
+    from exomem.governance import lifecycle
+
+    _write_notes(vault, ["a-open", "b-secret", "c-open", "d-open"])
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "secret.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Secret\npaths: ["Notes/Bulk/*-secret.md"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "secret-external.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        "audience: external\nceiling: 0\n",
+        encoding="utf-8",
+    )
+    # Governed, so the deletion writes the tombstone that egress honours.
+    lifecycle.begin_deletion(
+        vault, source_rel=f"{_BULK}/b-secret.md", trash_rel="Knowledge Base/_trash/b-secret.md"
+    )
+
+    first = commands.op_browse_memory(vault, path=_BULK, mode="list", limit=2)
+
+    assert [Path(path).stem for path in _paths(first)] == ["a-open", "c-open"]
+    assert list_directory.decode_cursor(first["next_cursor"], _BULK, False)[2] == f"{_BULK}/c-open.md"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="counts reads on the POSIX held filesystem")
 def test_a_page_reads_only_the_files_it_returns(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from exomem import _held_fs_posix

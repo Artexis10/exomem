@@ -8,7 +8,7 @@
 - A response that stops early carries `truncated: true` and an opaque `next_cursor`. The caller passes it back as `cursor` to continue the listing.
 - The leaf reads frontmatter and bytes only for the entries it returns. It enumerates names for the rest.
 - A page holds only entries the caller may see. The response carries no total count.
-- `overview` mode is unchanged.
+- `overview` mode returns what it did, and refuses `limit` and `cursor` with `INVALID_MODE`.
 
 ## Capabilities
 

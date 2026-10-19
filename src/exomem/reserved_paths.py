@@ -2078,7 +2078,7 @@ def list_generic_names(
     *,
     recursive: bool = True,
 ) -> tuple[tuple[str, str], ...]:
-    """The releasable `(relative_path, kind)` pairs of a tree, opening no entry."""
+    """The releasable `(relative_path, kind)` pairs of a tree, reading no file's bytes."""
     names: list[tuple[str, str]] = []
 
     def record(candidates: list[tuple[str, str]]) -> tuple[str, ...]:

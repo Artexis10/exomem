@@ -86,7 +86,8 @@ def encode_cursor(listing: str, recursive: bool, last: DirectoryEntry) -> str:
     """
     payload = {"v": 1, "path": listing, "recursive": recursive,
                "after": list(entry_sort_key(last.type, last.path))}
-    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # ASCII escapes keep a name that is not valid UTF-8 encodable; it round-trips.
+    raw = json.dumps(payload, separators=(",", ":")).encode("ascii")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
@@ -121,8 +122,10 @@ def list_directory(
 ) -> ListDirectoryResult:
     """List a folder; with `limit`, one page after the `after` sort key.
 
-    A page reads bytes and frontmatter only for the entries it returns, and
-    `exclude` drops vault paths before they can take a place on the page.
+    A page reads bytes and frontmatter, and runs egress decisions, only for
+    the entries it returns; the folder's children are still each opened and
+    stat'ed once to enumerate it. `exclude` drops vault paths before they can
+    take a place on the page.
     """
     from .governance import egress
 
@@ -186,11 +189,25 @@ def list_directory(
 
     truncated = False
 
+    def released(batch: list[str]) -> list[str]:
+        # The owner's leaf keeps everything (`keep` is None), yet the terminal
+        # egress pass still drops tombstoned pages, and every entry while
+        # governance fails closed. A cursor names the page's last entry, so the
+        # page holds only what that pass releases, decided by the pass itself.
+        if keep is not None or not batch:
+            return batch
+        payload = egress.filter_withheld_entries(
+            vault_root, {"entries": [{"path": child_path(relative)} for relative in batch]}
+        )
+        kept = {entry["path"] for entry in payload.get("entries") or ()}
+        return [relative for relative in batch if child_path(relative) in kept]
+
     def page(candidates: list[tuple[str, str]]) -> list[str]:
         # One visible entry past the page decides `truncated`, so a page that
         # ends exactly at the last entry reports no further page.
         nonlocal truncated
         chosen: list[str] = []
+        batch: list[str] = []
         for relative_path, kind in sorted(
             candidates, key=lambda candidate: entry_sort_key(candidate[1], child_path(candidate[0]))
         ):
@@ -198,11 +215,15 @@ def list_directory(
                 continue
             if not listed(relative_path, kind == "directory"):
                 continue
-            if len(chosen) == limit:
-                truncated = True
-                break
-            chosen.append(relative_path)
-        return chosen
+            batch.append(relative_path)
+            if len(chosen) + len(batch) > limit:
+                chosen.extend(released(batch))
+                batch = []
+                if len(chosen) > limit:
+                    break
+        chosen.extend(released(batch))
+        truncated = len(chosen) > limit
+        return chosen[:limit]
 
     try:
         held_entries = reserved_paths.list_generic_tree(
@@ -217,7 +238,9 @@ def list_directory(
     entries = [
         _entry_for_held(held_entry, child_path(held_entry.relative_path))
         for held_entry in held_entries
-        if listed(held_entry.relative_path, held_entry.identity.kind == "directory")
+        # A page's entries were decided while it was chosen.
+        if limit is not None
+        or listed(held_entry.relative_path, held_entry.identity.kind == "directory")
     ]
     entries.sort(key=lambda e: entry_sort_key(e.type, e.path))
 
