@@ -309,6 +309,65 @@ def test_a_delta_removes_the_written_pages_resolved_item(vault: Path) -> None:
     assert _served(vault) is None
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, bytes]:
+    info = path.stat()
+    return (info.st_ino, info.st_mtime_ns, info.st_size, path.read_bytes())
+
+
+def test_a_write_that_changes_no_due_category_leaves_the_projection_file_alone(
+    vault: Path,
+) -> None:
+    """Realistic failure: every governed write rewrote and fsynced a ~20 MB projection.
+
+    Only the emission copy inside the projection differed; the sidecar ledger is
+    the record, so the file must stay put while the write tick still counts.
+    """
+    _prediction(vault, "owed", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    advice_before = _served(vault)
+    path = due_state_module.state_path(vault)
+    before = _file_identity(path)
+    writes_before = due_state_module.emission_ledger(vault)["writes"]
+
+    quiet = _write(vault, f"{INSIGHTS}/quiet.md", "---\ntitle: quiet\ntype: insight\n---\n\nNothing due.\n")
+    due_state_module.apply_write_delta(vault, quiet, today=TODAY)
+
+    assert _file_identity(path) == before
+    assert due_state_module.emission_ledger(vault)["writes"] == writes_before + 1
+    assert _served(vault) == advice_before
+
+
+def test_a_quiet_write_still_persists_a_state_key_added_later(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Realistic failure: the skip compares a fixed key list, so a new carried key never reaches disk."""
+    carried = due_state_module._carried_backfill_cursors
+
+    def with_future_key(current):
+        generation = (current.get("future_index") or {}).get("generation", 0) + 1
+        return {**carried(current), "future_index": {"generation": generation}}
+
+    monkeypatch.setattr(due_state_module, "_carried_backfill_cursors", with_future_key)
+    _prediction(vault, "owed", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    quiet = _write(vault, f"{INSIGHTS}/quiet.md", "---\ntitle: quiet\ntype: insight\n---\n\nNothing due.\n")
+    returned = due_state_module.apply_write_delta(vault, quiet, today=TODAY)
+
+    due_state_module.reset_serve_cache()
+    assert due_state_module.load(vault)["future_index"] == returned["future_index"]
+
+
+def test_a_delta_write_that_changes_a_category_is_persisted(vault: Path) -> None:
+    _prediction(vault, "first", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    rel = _prediction(vault, "second", check_by="2026-07-01")
+    due_state_module.apply_write_delta(vault, rel, today=TODAY)
+
+    due_state_module.reset_serve_cache()
+    stored = due_state_module.load(vault)
+    assert rel in stored["categories"]["prediction_window"]
+
+
 def _dangling(vault: Path, slug: str, *, target: str, status: str = "superseded") -> str:
     """A page whose `superseded_by` points nowhere — the page-local defect."""
     return _write(

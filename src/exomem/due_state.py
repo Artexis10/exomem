@@ -297,8 +297,29 @@ def _load_shared(vault_root: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _remember_written(
+    vault_root: Path,
+    written: tuple[int, int, int],
+    on_disk: tuple[int, int, int] | None,
+    payload: dict[str, Any],
+) -> None:
+    key = str(vault_root)
+    with _SHARED_LOCK:
+        _SHARED.pop(key, None)
+        if on_disk != written:
+            return
+        if len(_SHARED) >= _SHARED_CAP:
+            _SHARED.pop(next(iter(_SHARED)), None)
+        _SHARED[key] = (written, payload)
+
+
 def save(vault_root: Path, payload: dict[str, Any]) -> None:
-    """Atomically replace the projection state. Best effort; never raises."""
+    """Atomically replace the projection state. Best effort; never raises.
+
+    The saved payload becomes the shared parse-cache entry every reader gets,
+    so a caller never edits it, or anything `reconcile` or a delta returns,
+    after this call.
+    """
     path = state_path(vault_root)
     try:
         from . import state_paths, vault
@@ -310,7 +331,8 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
         try:
             with os.fdopen(handle_fd, "w", encoding="utf-8", newline="\n") as handle:
                 # Compact separators, sorted keys: this file is rewritten and
-                # fsynced on every governed write, so its size is a per-write cost.
+                # fsynced on every governed write that changes it, so its size is
+                # a per-write cost.
                 # Indentation cost ~2.5x for a machine-read file nobody diffs;
                 # `sort_keys` stays for determinism.
                 # Stream the payload to avoid allocating another full-size string.
@@ -324,9 +346,17 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+                info = os.fstat(handle.fileno())
+            written = (info.st_ino, info.st_mtime_ns, info.st_size)
             vault.replace_tolerating_transient_sharing(
                 lambda: os.replace(temp_name, path)
             )
+            # Write-through: the next read would otherwise re-parse the whole
+            # file this call just serialised. Bind the entry to the temp file's
+            # identity and keep it only if the destination still shows that
+            # identity; a concurrent replace between the two leaves a different
+            # token, so the entry is dropped and the next read parses the disk.
+            _remember_written(vault_root, written, _file_token(path), payload)
         except BaseException:
             try:
                 os.unlink(temp_name)
@@ -341,10 +371,13 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
 
 #: The emission ledger lives beside the projection, not inside it. It changes
 #: on every delivered advisory; the projection changes on every governed
-#: write. Keeping them in one file made each delivery rewrite the whole
+#: write that changes state. Keeping them in one file made each delivery rewrite the whole
 #: projection (20 MB, ~600 ms on the personal vault) and, worse, made every
 #: read look like a state change to anything keyed on the projection file.
 EMISSION_FILENAME = ".due-state-emission.json"
+
+#: The projection's only bookkeeping key: a copy of the sidecar ledger above.
+_BOOKKEEPING_KEY = "emission"
 
 
 def emission_path(vault_root: Path) -> Path:
@@ -1410,7 +1443,11 @@ def reconcile(
     today: dt.date | None = None,
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
-    """Full recompute plus persist — the healer after out-of-band edits."""
+    """Full recompute plus persist — the healer after out-of-band edits.
+
+    The returned payload is the shared cache entry `save` stored; callers read it
+    and never edit it.
+    """
     existing = load(vault_root) or _UNPERSISTED.get(str(vault_root))
     payload = recompute(vault_root, today=today, now=now)
     # The projection is derived and rebuilt from authored state; the emission
@@ -1620,7 +1657,7 @@ def apply_write_delta(
             "role_state": role_index,
             **_carried_backfill_cursors(current),
         }
-        save(vault_root, updated)
+        _save_unless_unchanged(vault_root, current, updated)
     return updated
 
 
@@ -2024,6 +2061,28 @@ def _load_projection_manifest(vault_root: Path, path: str) -> Any | None:
         return None
 
 
+def _save_unless_unchanged(
+    vault_root: Path, current: Mapping[str, Any], updated: dict[str, Any]
+) -> None:
+    """Save `updated` unless only its emission copy differs from `current`.
+
+    A governed write that leaves every page-local category as it was still
+    ticks the emission ledger, and the projection carries a copy of that tick.
+    Rewriting and fsyncing ~20 MB to refresh a copy the sidecar already holds
+    is the cost this skips. `updated` shares its untouched per-page entries
+    with `current`, so the comparison costs one identity check per page and a
+    deep compare only of the entries the delta replaced.
+    """
+    if _without_bookkeeping(updated) == _without_bookkeeping(current):
+        return
+    save(vault_root, updated)
+
+
+def _without_bookkeeping(payload: Mapping[str, Any]) -> dict[str, Any]:
+    # Every key but the ledger copy is state, so a key added later persists by default.
+    return {key: value for key, value in payload.items() if key != _BOOKKEEPING_KEY}
+
+
 def _persist_delta(
     vault_root: Path,
     current: dict[str, Any],
@@ -2055,7 +2114,7 @@ def _persist_delta(
         "role_state": current.get("role_state"),
         **_carried_backfill_cursors(current),
     }
-    save(vault_root, updated)
+    _save_unless_unchanged(vault_root, current, updated)
     return updated
 
 
@@ -2882,13 +2941,14 @@ def served_entries(
 def _served_content_token(vault_root: Path) -> str | None:
     """Identity of the projection without its emission ledger, or None when absent.
 
-    Every governed write rewrites the file to tick the emission ledger, which no
-    served build reads, so keying the served cache on the file would rebuild the
-    served list -- a release decision per due item -- on every write. Everything
-    else is hashed, so a key a build starts reading invalidates by default.
+    A governed write that saves the projection also refreshes its copy of the
+    emission ledger, which no served build reads, so keying the served cache on
+    the file would rebuild the served list -- a release decision per due item --
+    on every such write. Everything else is hashed, so a key a build starts
+    reading invalidates by default.
     """
     return _content_token(
-        state_path(vault_root), lambda: _load_shared(vault_root), "emission"
+        state_path(vault_root), lambda: _load_shared(vault_root), _BOOKKEEPING_KEY
     )
 
 

@@ -5198,21 +5198,23 @@ def op_preserve(
     # The facets the sidecar's own frontmatter carries, so `claims.match`
     # decides an Evidence write exactly as the recompute will.
     routing_facets = {"type": ["source"], "tags": routing_tags}
-    routing = semantic_writes._records_routing_from_terms(
-        vault_root, routing_terms, routing_facets
-    )
+    with call_spans_module.span("post_commit.records_routing"):
+        routing = semantic_writes._records_routing_from_terms(
+            vault_root, routing_terms, routing_facets
+        )
     try:
         from . import due_state
 
-        due_state.apply_observation_write_delta(
-            vault_root,
-            path=str(result.sidecar_path or ""),
-            observation_ref=str(result.ref or ""),
-            terms=routing_terms,
-            routing=routing,
-            observation_aliases=(str(result.path or ""),),
-            facets=routing_facets,
-        )
+        with call_spans_module.span("post_commit.observation_delta"):
+            due_state.apply_observation_write_delta(
+                vault_root,
+                path=str(result.sidecar_path or ""),
+                observation_ref=str(result.ref or ""),
+                terms=routing_terms,
+                routing=routing,
+                observation_aliases=(str(result.path or ""),),
+                facets=routing_facets,
+            )
     except Exception:  # noqa: BLE001 -- due-state advice never breaks Evidence custody
         log.debug("Evidence observation due-state delta failed (non-fatal)", exc_info=True)
     delivered_routing = semantic_writes._records_routing_for_delivery(
