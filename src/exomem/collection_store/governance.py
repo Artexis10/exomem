@@ -972,10 +972,11 @@ class OperationAuthorization:
         return authority.SessionMembership(subject.basis.identity, subject.basis.fingerprint,
                                            self.cache.scopes(subject, self.policy))
 
-    def _decision_key(self, subject: CanonicalSubject):
+    def _decision_key(self, subject: CanonicalSubject, *, connector_identity: tuple | None = None):
         return (_bound(subject, "unbound").basis, self.policy.fingerprint,
                 self.who.audience_id, self.purpose,
-                connector_boundary.cache_identity(self.root, self.who, self.policy))
+                connector_boundary.cache_identity(self.root, self.who, self.policy)
+                if connector_identity is None else connector_identity)
 
     def decision(self, subject: CanonicalSubject, *, session=True) -> Decision:
         """Decide one subject; a hold is released no further than the existing item it would change (A8).
@@ -1350,6 +1351,7 @@ class OperationAuthorization:
             notice_decisions = None
             if notices:
                 decisions = []
+                connector_identity = None
                 for subject in catalog:
                     identity = subject.basis.identity
                     if subject.row_id is None:
@@ -1362,7 +1364,11 @@ class OperationAuthorization:
                         # Pure policy results do not include L0 access/tombstone gates.
                         decision = self.decision(subject, session=False)
                     else:
-                        decision = self.cache.decisions.get(self._decision_key(subject))
+                        # Only this notice assembly shares the input; terminal admission still obtains fresh authority.
+                        if connector_identity is None:
+                            connector_identity = connector_boundary.cache_identity(self.root, self.who, self.policy)
+                        decision = self.cache.decisions.get(self._decision_key(
+                            subject, connector_identity=connector_identity))
                         if decision is None:
                             decision = self.decision(subject, session=False)
                     decisions.append(decision)

@@ -209,6 +209,56 @@ def test_terminal_inspection_refuses_a_changed_basis_or_payload(store, change):
             egress.postfilter("record_memory", result, store.root)
 
 
+@pytest.mark.parametrize("change", ["restrict", "invalid"])
+def test_inspection_cannot_release_a_connector_change_during_notice_assembly(store, tmp_path, monkeypatch, change):
+    """A loop-local connector input cannot carry old counts through fresh terminal admission."""
+    import json
+
+    from exomem.cli_ops import OpError
+    from exomem.collection_store import governance
+    from exomem.governance import policy
+    from exomem.governance.principal import ClientBinding, OriginSessionBinding, RequestPrincipal
+
+    store.create_collection(manifest_path(), manifest_text(), why="create")
+    store.append_record(CID, item={"title": "Allowed"}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "Protected canary"}, item_key=OTHER, why="capture")
+    write_scope(store.root, paths=f"Records/**/{OTHER}.md")
+    scope_id = next(iter(policy.load(store.root).scopes))
+    config = tmp_path / "connector.json"
+    document = {"version": 1, "default_denied_scope_ids": [scope_id], "clients": [{
+        "issuer": "urn:fixture:issuer", "client_id": "configured-client", "denied_scope_ids": [],
+    }]}
+    config.write_text(json.dumps(document))
+    monkeypatch.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
+    who = RequestPrincipal("owner", surface="mcp", issuer_family="mcp-oauth:fixture", remote_owner=True,
+        client_binding=ClientBinding("urn:fixture:issuer", "configured-client"),
+        origin_session=OriginSessionBinding("fixture-session", "fixture-generation", "fixture-audience"))
+    with preview_store(store.root, store.handle), request_scope(who):
+        assert _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)["coverage"]["committed"] == 2
+        original_key = governance.OperationAuthorization._decision_key
+        changed = False
+
+        def change_connector(operation, subject, **options):
+            nonlocal changed
+            key = original_key(operation, subject, **options)
+            if not changed and options.get("connector_identity") is not None:
+                changed = True
+                document["clients"][0]["denied_scope_ids"] = [scope_id]
+                config.write_text(json.dumps(document) if change == "restrict" else "{")
+            return key
+
+        with monkeypatch.context() as racing:
+            racing.setattr(governance.OperationAuthorization, "_decision_key", change_connector)
+            with pytest.raises((collections.CollectionError, OpError)) as refused:
+                _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
+            assert refused.value.code == "COLLECTION_NOT_FOUND"
+        assert changed
+        config.write_text(json.dumps(document))
+        current = _through_dispatcher(store.root, "record_memory", action="inspect", collection=CID)
+        assert current["coverage"]["committed"] == 1
+        assert "Protected canary" not in str(current)
+
+
 def test_partial_log_inspection_preserves_visible_metadata_across_hidden_edit(store):
     """A shared log name is not a grant to read its withheld sibling's bytes."""
     store.create_collection(manifest_path(), _log_manifest(), why="create")
