@@ -80,7 +80,14 @@ def main() -> int:
     os.environ.setdefault("EXOMEM_CLIP_DEVICE", "cpu")
     os.environ.setdefault("EXOMEM_ASR_DEVICE", "cpu")
     with scratch_root.scratch_root("exomem-media-smoke-") as root:
-        return _smoke(root / "vault")
+        code = _smoke(root / "vault")
+    # The server's shutdown does not join its background embedding work. A thread
+    # still inside torch when the interpreter finalizes is aborted through
+    # std::terminate (exit 134), which would turn every result here red. That
+    # shutdown defect is tracked on its own; this smoke's verdict is the lanes.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
 
 
 def _smoke(vault: Path) -> int:
