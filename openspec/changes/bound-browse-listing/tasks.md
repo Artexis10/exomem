@@ -1,6 +1,6 @@
 ## 1. Bounded listing
 
-- [x] 1.1 Let `reserved_paths.list_generic_tree` take a `select` callback that names the entries to open, stat and read, after the unchanged reserved-path and identity rules; add `list_generic_names`, which opens no entry. Prove that unselected files are not read.
+- [x] 1.1 Let `reserved_paths.list_generic_tree` take a `select` callback that names the entries to open, stat and read, after the unchanged reserved-path and identity rules; add `list_generic_names`, which reads no file's bytes. Prove that unselected files are not read.
 - [x] 1.2 Page `list_directory.list_directory`: sort the names, resume after the cursor key, apply the exclusion rule, the reserved-path rule and `keep` while filling, stop after `limit + 1` visible entries, and read bytes and frontmatter only for the returned entries.
 - [x] 1.3 Add `limit` and `cursor` to `op_browse_memory`. Clamp `limit` to 1 to 1,000 (default 200), encode and verify the cursor, and return `truncated` and `next_cursor`. `op_list_directory` keeps the whole listing for its callers.
 - [x] 1.4 Tests, one per behaviour that differs:

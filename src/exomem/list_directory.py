@@ -208,6 +208,7 @@ def list_directory(
         nonlocal truncated
         chosen: list[str] = []
         batch: list[str] = []
+        want = limit + 1
         for relative_path, kind in sorted(
             candidates, key=lambda candidate: entry_sort_key(candidate[1], child_path(candidate[0]))
         ):
@@ -216,11 +217,14 @@ def list_directory(
             if not listed(relative_path, kind == "directory"):
                 continue
             batch.append(relative_path)
-            if len(chosen) + len(batch) > limit:
+            if len(batch) >= want:
                 chosen.extend(released(batch))
                 batch = []
                 if len(chosen) > limit:
                     break
+                # Released entries fell short: a doubled batch keeps a long run
+                # of dropped entries to a logarithmic count of egress calls.
+                want = max(limit + 1 - len(chosen), 2 * want)
         chosen.extend(released(batch))
         truncated = len(chosen) > limit
         return chosen[:limit]
