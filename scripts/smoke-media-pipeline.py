@@ -104,6 +104,11 @@ def _lanes(vault: Path, client) -> int:
     def queue():
         return json.dumps(media_jobs.status(vault), indent=1, default=str)
 
+    # Search indexes a new sidecar asynchronously, so each lane waits for it.
+    def found(query, mode, name):
+        find_module.clear_cache()
+        return [h for h in find_module.find(vault, query=query, mode=mode) if name in h.path]
+
     def up_token():
         return upload_tokens.mint(TOKEN, scope="upload")
 
@@ -133,9 +138,8 @@ def _lanes(vault: Path, client) -> int:
     assert "whitechapel" in body.lower() or "eviction" in body.lower(), (
         f"OCR text missing:\n{body[:400]}"
     )
-    find_module.clear_cache()
-    hits = find_module.find(vault, query="eviction whitechapel", mode="keyword")
-    assert any("notice.png.md" in h.path for h in hits), "find did not surface the OCR'd image"
+    _wait(lambda: found("eviction whitechapel", "keyword", "notice.png.md"),
+          what="find to surface the OCR'd image")
     print("  [1] image OCR -> searchable by its text          PASS")
 
     # ---- 2. CLIP textless image ----
@@ -144,10 +148,9 @@ def _lanes(vault: Path, client) -> int:
     post("red.png", red.getvalue(), "image/png", "Smoke", "02")
     red_rel = "Knowledge Base/Evidence/Smoke/02/red.png"
     _wait(lambda: embeddings.ClipIndex(vault).has(red_rel), what="CLIP index of red.png")
-    find_module.clear_cache()
-    hits = find_module.find(vault, query="a solid red square", mode="hybrid")
-    red_hit = [h for h in hits if "red.png.md" in h.path]
-    assert red_hit, "CLIP did not surface the textless red image"
+    _wait(lambda: found("a solid red square", "hybrid", "red.png.md"),
+          what="CLIP to surface the textless red image")
+    red_hit = found("a solid red square", "hybrid", "red.png.md")
     assert red_hit[0].as_dict().get("media_type") == "image"
     print("  [2] textless image -> found by CLIP visual match  PASS")
 
@@ -167,9 +170,8 @@ def _lanes(vault: Path, client) -> int:
         explain=queue,
     )
     assert "cardiology" in pdf_sidecar.read_text("utf-8").lower(), "PDF text not extracted"
-    find_module.clear_cache()
-    hits = find_module.find(vault, query="cardiology consult", mode="keyword")
-    assert any("report.pdf.md" in h.path for h in hits), "find did not surface the PDF"
+    _wait(lambda: found("cardiology consult", "keyword", "report.pdf.md"),
+          what="find to surface the PDF")
     print("  [3] PDF text -> extracted (PyMuPDF) & searchable   PASS")
 
     # ---- 4. /download reverse channel (scoped token) ----
