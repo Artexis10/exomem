@@ -75,11 +75,14 @@ def _assert_no_heavy_modules(modules: set[str]) -> None:
     assert "exomem.server" not in modules
 
 
-def test_help_does_not_import_heavy_stacks(tmp_path: Path) -> None:
+def test_help_discovers_product_commands_without_importing_heavy_stacks(tmp_path: Path) -> None:
     result, modules = _run_cli_with_module_probe(tmp_path, "--help")
 
     assert result.returncode == 0, result.stderr
     assert "MCP transport to serve" in result.stdout
+    assert "exomem bootstrap --help" in result.stdout
+    assert "exomem bootstrap --profile compact --json" in result.stdout
+    assert "exomem <command> --help" in result.stdout
     _assert_no_heavy_modules(modules)
 
 
