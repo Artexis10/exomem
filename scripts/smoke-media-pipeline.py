@@ -179,7 +179,8 @@ def _lanes(vault: Path, client) -> int:
         params={"path": red_rel},
         headers={"Authorization": f"Bearer {dtok}"},
     )
-    assert r.status_code == 200 and r.content == red.getvalue(), "download byte mismatch"
+    assert r.status_code == 200, f"/download refused: {r.status_code} {r.text[:400]}"
+    assert r.content == red.getvalue(), "download byte mismatch"
     # scope isolation: an upload-scoped token must NOT download
     r2 = client.get(
         "/download",
