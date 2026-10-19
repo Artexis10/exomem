@@ -373,6 +373,8 @@ def record_memory(
                 expand_children=False if expand_children is None else expand_children,
                 expand_child=expand_child,
                 continuation=continuation,
+                # A full source list grows with the collection and overflows the response cap.
+                source_versions_for_rows=True,
             )
             history = None
             if include_agent_history is True:
