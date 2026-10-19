@@ -445,6 +445,20 @@ def test_trivial_turn_rejects_mutations():
     assert not checks.evaluate_trace(value, case("trivial-no-write"), IDENTITY)["ok"]
 
 
+def test_no_mutation_case_classifies_a_call_by_its_operation():
+    # A recall-only turn may read media status, but queuing media work is a write.
+    value = trace()
+    value["observations"].insert(
+        3, tool("process_media", {"operation": "status"}, {"operation": "status", "counts": {}})
+    )
+    assert checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
+    value["observations"][3] = tool(
+        "process_media", {"operation": "process"}, {"operation": "process", "requeued": 0}
+    )
+    report = checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)
+    assert "unexpected_mutation" in report["issues"]
+
+
 def test_readiness_without_evidence_is_not_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(checks, "_identity", lambda root: IDENTITY)
     report = checks.readiness(ROOT, tmp_path)
