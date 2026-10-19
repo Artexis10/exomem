@@ -257,6 +257,28 @@ class ClusterClient:
             result[phase] = ImportJob(job is not None, active, succeeded, failed, report, bool(pods))
         return result
 
+    def observe_export_job(self, namespace: str, export_id: str):
+        """C6: the export's one Job, its pods and its termination report."""
+        from .exports import ExportJob, job_name
+
+        name = job_name(export_id)
+        job = self._get_job(namespace, name)
+        pods = self._core.list_namespaced_pod(namespace, label_selector=f"batch.kubernetes.io/job-name={name}").items
+        # Terminating pods still hold the volume until Kubernetes removes them.
+        active = any(p.metadata.deletion_timestamp is not None or
+                     p.status.phase not in ("Succeeded", "Failed") for p in pods)
+        succeeded = job is not None and bool(job.status.succeeded)
+        failed = job is not None and bool(job.status.failed)
+        report = {}
+        if succeeded or failed:
+            try:
+                parsed = json.loads(self._job_pod_termination_message(namespace, name, succeeded=succeeded) or "{}")
+            except ValueError:
+                parsed = {}
+            report = parsed if isinstance(parsed, dict) else {}
+        finished_at = _parse_timestamp(job.status.completion_time) if succeeded else None
+        return ExportJob(job is not None, active, succeeded, failed, report, bool(pods), finished_at)
+
     def delete_job(self, namespace: str, name: str) -> None:
         # Background propagation removes the Job's pods too; a batch/v1 Job
         # deleted without a policy orphans them.

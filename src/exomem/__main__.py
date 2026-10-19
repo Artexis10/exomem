@@ -20,6 +20,8 @@ Subcommands:
 - `cell-init` — idempotent Exomem Cloud cell init-container entrypoint: vault
   init when absent, then offline state migration; no governance schema
   migration, no custody environment
+- `cell-export` — Exomem Cloud owner export Job: the canonical ZIP of a held
+  cell, uploaded to controller-presigned parts; reports sizes and digests only
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -295,6 +297,9 @@ def _dispatch_main(raw: list[str]) -> int:
     if raw and raw[0] == "cell-import":
         from .cloud_import_job import main as import_main
         return import_main(raw[1:])
+    if raw and raw[0] == "cell-export":
+        from .cloud_export import main as export_main
+        return export_main(raw[1:])
     if raw and raw[0] == "cell-init":
         return _cell_init_main(raw[1:])
     # `exomem activate "<turn>"` — the spelled-out contract for the context

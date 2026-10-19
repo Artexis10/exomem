@@ -51,6 +51,10 @@ OBSERVED_COLUMNS = (
     "observed_storage_capacity_bytes",
     "observed_storage_generation",
     "observed_storage_at",
+    # Migration 0066: the disk use the last backup or export Job measured.
+    "used_bytes",
+    "filesystem_bytes",
+    "usage_observed_at",
 )
 
 ROLLOUT_COLUMNS = ("paused", "error_code", "held_cell_id", "last_good_image")
@@ -387,3 +391,49 @@ async def finalize_import(connection: asyncpg.Connection, cell_id: str, import_i
         await write_observed(connection, cell_id, {"hold_kind": None, "hold_started_at": None,
                                                   "last_error_code": None})
         return _row_from_record(record)
+
+
+async def read_exports(connection: asyncpg.Connection, cell_id: str):
+    """C6 rows that still need cellctl, oldest first: the one being packed,
+    every ready one (links, expiry, supersede), every ended one whose upload
+    removal is still pending, and the newest one, whose ending releases an
+    export hold."""
+    from .exports import ExportRow
+
+    records = await connection.fetch(
+        "SELECT * FROM exomem_cloud_exports WHERE cell_id=$1 AND ("
+        "observed_state IS NULL OR observed_state IN ('packing','ready') OR upload_id IS NOT NULL OR export_id = ("
+        "SELECT export_id FROM exomem_cloud_exports WHERE cell_id=$1 ORDER BY created_at DESC, export_id DESC LIMIT 1)) "
+        "ORDER BY created_at, export_id", cell_id,
+    )
+    rows = []
+    for record in records:
+        fields = {name: record[name] for name in ExportRow.__dataclass_fields__}
+        fields["export_id"] = str(fields["export_id"])
+        rows.append(ExportRow(**fields))
+    return rows
+
+
+# C6 column grants fix this controller-owned subset.
+EXPORT_COLUMNS = frozenset({
+    "observed_state", "error_code", "archive_bytes", "archive_sha256", "archive_version_id", "upload_id",
+    "ready_at", "expires_at", "download_url", "download_url_expires_at",
+})
+
+
+async def write_export(connection: asyncpg.Connection, export_id: str, updates: dict, *, link_issued: bool = False) -> None:
+    """Writes cellctl's C6 observation. `link_issued` records the link this
+    write carries as answering every request up to now: never earlier than
+    the request it answers, so a request is never answered twice."""
+    import uuid
+
+    if set(updates) - EXPORT_COLUMNS:
+        raise ValueError("not an export observation column")
+    if not updates and not link_issued:
+        return
+    assignments, parameters = _assignments(updates, start=2)
+    if link_issued:
+        assignments = ", ".join(filter(None, [
+            assignments, "link_issued_at = GREATEST(clock_timestamp(), COALESCE(link_requested_at, '-infinity'))"]))
+    await connection.execute(f"UPDATE exomem_cloud_exports SET {assignments} WHERE export_id=$1",
+                             uuid.UUID(export_id), *parameters)
