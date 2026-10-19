@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.128.1](https://github.com/Artexis10/exomem/compare/v0.128.0...v0.128.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **context:** preserve exact outgoing unit relation pointers ([#1893](https://github.com/Artexis10/exomem/issues/1893)) ([021ed9a](https://github.com/Artexis10/exomem/commit/021ed9a534f414088711dee4ef14e3e44d8b65c8))
+* **governance:** require full authority for maintenance aggregates ([#1894](https://github.com/Artexis10/exomem/issues/1894)) ([955ce3c](https://github.com/Artexis10/exomem/commit/955ce3c3f3a3223a91bd3ec6fc4289ce6edc32fb))
+* **recall:** retain one catalogue during selection ([#1885](https://github.com/Artexis10/exomem/issues/1885)) ([73370fc](https://github.com/Artexis10/exomem/commit/73370fcc0efb04582e28fcd0c6cc27175eca6d10))
+* **recall:** retry contended watcher batches ([#1897](https://github.com/Artexis10/exomem/issues/1897)) ([3aa564e](https://github.com/Artexis10/exomem/commit/3aa564e376606e03f02804c8ca609b3d3e20a15a))
+
+
+### Performance
+
+* **collections:** avoid unrelated view reads during manifest revision ([#1892](https://github.com/Artexis10/exomem/issues/1892)) ([43d65c3](https://github.com/Artexis10/exomem/commit/43d65c3ffcfbecd08c13ed5049bf8f689ecb1db4))
+
 ## [0.128.0](https://github.com/Artexis10/exomem/compare/v0.127.5...v0.128.0) (2026-10-19)
 
 
