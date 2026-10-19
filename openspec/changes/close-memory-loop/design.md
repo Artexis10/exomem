@@ -1813,6 +1813,16 @@ Exact resolution must remain deterministic across full and selected documents an
 Compiler acceptance must exercise the actual public workflow with the minimum sufficient connected units.
 The served context must retain verdicts, source and version provenance, and temporal state without unconditional parent-page expansion.
 An exact unit read may expand bounded parent context when the agent needs it.
+For an exact selected unit, preserve admitted explicit outgoing relations as actionable exact read pointers.
+Bind each relation to the selected unit's source hash and the current graph interpretation.
+Resolve and admit the exact target before applying the existing pointer and context limits.
+Emit a relation pointer only when its source version survives packet assembly; retain distinct source-to-target bindings.
+Hidden targets contribute no pointer, source qualification or allowance use.
+Unavailable, ambiguous or moving publication omits optional enrichment without cold proof, waiting or page substitution.
+Reuse the incoming correction scan, its deadline and its row bound without reducing the correction allowance.
+Target bodies remain explicit reads; relation pointers do not infer dependencies or change claim currency.
+Prove same-page and cross-page targets, stale source versions, withheld targets and omitted-source negatives.
+An ordinary agent must follow a useful pointer and give the source-grounded qualified answer.
 Legacy in-place correction remains with the existing authorized edit owner, with retained history and no default dated child.
 
 SQLite remains the core disk-backed graph owner.
