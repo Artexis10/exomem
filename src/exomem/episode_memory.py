@@ -51,6 +51,12 @@ from .vault import (
 
 log = logging.getLogger(__name__)
 
+LEDGER_FULL_WARNING = (
+    "This episode's ledger is full, so this recap committed as a Source but is not bound to it, "
+    "and a retry will not bind it. Later recaps keep committing as Sources. "
+    "Record the next recap without `episode` to start a new key."
+)
+
 
 @dataclass(frozen=True)
 class _ReferencePreparation:
@@ -300,6 +306,7 @@ def record(
                 continue
             source, idempotent = _write(vault_root, source_schema, recap, when, audience)
             revision: int | None
+            ledger_warnings: list[str] = []
             try:
                 bound = owner.bind_committed_input(
                     recap.key, path=source["path"], reference=source["ref"], about=recap.about
@@ -309,13 +316,16 @@ def record(
                     raise
                 # The recap is committed and stays readable; only this caller's ledger
                 # missed it -- a refused or corrupt journal, or an unwritable one. An
-                # error here would invite a retry of a write that already happened; a
-                # retry is idempotent anyway and binds it.
+                # error here would invite a retry of a write that already happened. A
+                # transient failure binds on retry; a full ledger (EPISODE_TOO_LARGE)
+                # never does, so that one carries its cause and the way out.
                 log.warning(
                     "episode ledger bind failed after a committed recap: %s",
                     getattr(error, "code", type(error).__name__),
                 )
                 ledger, recovery, revision = "unbound", "unavailable", None
+                if getattr(error, "code", None) == "EPISODE_TOO_LARGE":
+                    ledger_warnings = [LEDGER_FULL_WARNING]
             else:
                 ledger, recovery, revision = bound["ledger"], bound["recovery"], bound["input_revision"]
         break
@@ -359,6 +369,7 @@ def record(
         "recovery": recovery,
         "ledger": ledger,
         "about_skipped": about_skipped,
+        **({"warnings": ledger_warnings} if ledger_warnings else {}),
     }
 
 

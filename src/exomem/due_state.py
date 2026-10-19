@@ -297,6 +297,22 @@ def _load_shared(vault_root: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _remember_written(
+    vault_root: Path,
+    written: tuple[int, int, int],
+    on_disk: tuple[int, int, int] | None,
+    payload: dict[str, Any],
+) -> None:
+    key = str(vault_root)
+    with _SHARED_LOCK:
+        _SHARED.pop(key, None)
+        if on_disk != written:
+            return
+        if len(_SHARED) >= _SHARED_CAP:
+            _SHARED.pop(next(iter(_SHARED)), None)
+        _SHARED[key] = (written, payload)
+
+
 def save(vault_root: Path, payload: dict[str, Any]) -> None:
     """Atomically replace the projection state. Best effort; never raises."""
     path = state_path(vault_root)
@@ -324,9 +340,17 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+                info = os.fstat(handle.fileno())
+            written = (info.st_ino, info.st_mtime_ns, info.st_size)
             vault.replace_tolerating_transient_sharing(
                 lambda: os.replace(temp_name, path)
             )
+            # Write-through: the next read would otherwise re-parse the whole
+            # file this call just serialised. Bind the entry to the temp file's
+            # identity and keep it only if the destination still shows that
+            # identity; a concurrent replace between the two leaves a different
+            # token, so the entry is dropped and the next read parses the disk.
+            _remember_written(vault_root, written, _file_token(path), payload)
         except BaseException:
             try:
                 os.unlink(temp_name)
@@ -1620,7 +1644,7 @@ def apply_write_delta(
             "role_state": role_index,
             **_carried_backfill_cursors(current),
         }
-        save(vault_root, updated)
+        _save_unless_unchanged(vault_root, current, updated)
     return updated
 
 
@@ -2024,6 +2048,24 @@ def _load_projection_manifest(vault_root: Path, path: str) -> Any | None:
         return None
 
 
+def _save_unless_unchanged(
+    vault_root: Path, current: Mapping[str, Any], updated: dict[str, Any]
+) -> None:
+    """Save `updated` unless only its emission copy differs from `current`.
+
+    A governed write that leaves every page-local category as it was still
+    ticks the emission ledger, and the projection carries a copy of that tick.
+    Rewriting and fsyncing ~20 MB to refresh a copy the sidecar already holds
+    is the cost this skips. `updated` shares its untouched per-page entries
+    with `current`, so the comparison costs one identity check per page and a
+    deep compare only of the entries the delta replaced.
+    """
+    keys = ("version", "computed_on", "categories", "bindings", "claims", "role_state", "backfill_cursors")
+    if all(updated.get(key) == current.get(key) for key in keys):
+        return
+    save(vault_root, updated)
+
+
 def _persist_delta(
     vault_root: Path,
     current: dict[str, Any],
@@ -2055,7 +2097,7 @@ def _persist_delta(
         "role_state": current.get("role_state"),
         **_carried_backfill_cursors(current),
     }
-    save(vault_root, updated)
+    _save_unless_unchanged(vault_root, current, updated)
     return updated
 
 

@@ -309,6 +309,61 @@ def test_a_delta_removes_the_written_pages_resolved_item(vault: Path) -> None:
     assert _served(vault) is None
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, bytes]:
+    info = path.stat()
+    return (info.st_ino, info.st_mtime_ns, info.st_size, path.read_bytes())
+
+
+def test_a_write_that_changes_no_due_category_leaves_the_projection_file_alone(
+    vault: Path,
+) -> None:
+    """Realistic failure: every governed write rewrote and fsynced a ~20 MB projection.
+
+    Only the emission copy inside the projection differed; the sidecar ledger is
+    the record, so the file must stay put while the write tick still counts.
+    """
+    _prediction(vault, "owed", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    advice_before = _served(vault)
+    path = due_state_module.state_path(vault)
+    before = _file_identity(path)
+    writes_before = due_state_module.emission_ledger(vault)["writes"]
+
+    quiet = _write(vault, f"{INSIGHTS}/quiet.md", "---\ntitle: quiet\ntype: insight\n---\n\nNothing due.\n")
+    due_state_module.apply_write_delta(vault, quiet, today=TODAY)
+
+    assert _file_identity(path) == before
+    assert due_state_module.emission_ledger(vault)["writes"] == writes_before + 1
+    assert _served(vault) == advice_before
+
+
+def test_a_delta_write_does_not_hide_a_projection_replaced_from_outside(vault: Path) -> None:
+    """Realistic failure: the write-through entry bound to the wrong file token serves stale claims."""
+    rel = _prediction(vault, "owed", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    due_state_module.apply_write_delta(vault, rel, today=TODAY)
+
+    foreign = due_state_module.load(vault)
+    foreign["claims"] = {"foreign": {"marker": True}}
+    path = due_state_module.state_path(vault)
+    replacement = path.with_name("foreign.json")
+    replacement.write_text(json.dumps(foreign), encoding="utf-8")
+    replacement.replace(path)
+
+    assert due_state_module._load_shared(vault)["claims"] == {"foreign": {"marker": True}}
+
+
+def test_a_delta_write_that_changes_a_category_is_persisted(vault: Path) -> None:
+    _prediction(vault, "first", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    rel = _prediction(vault, "second", check_by="2026-07-01")
+    due_state_module.apply_write_delta(vault, rel, today=TODAY)
+
+    due_state_module.reset_serve_cache()
+    stored = due_state_module.load(vault)
+    assert rel in stored["categories"]["prediction_window"]
+
+
 def _dangling(vault: Path, slug: str, *, target: str, status: str = "superseded") -> str:
     """A page whose `superseded_by` points nowhere — the page-local defect."""
     return _write(
