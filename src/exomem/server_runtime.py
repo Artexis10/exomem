@@ -231,6 +231,14 @@ class LocalRuntimeActivation:
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
+        # Once admission holds and off this thread: requests never wait on a
+        # matrix load, and the reaper still frees it when idle.
+        threading.Thread(
+            target=_warm_embedding_matrix,
+            args=(self.vault_root,),
+            name="exomem-matrix-warm",
+            daemon=True,
+        ).start()
         self._start_component("semantic drain", self._start_semantic_drain)
         if self._shutdown.is_set():
             self._stop_background_workers()
@@ -250,14 +258,6 @@ class LocalRuntimeActivation:
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
-        # Lazily, once the drain is done and off this thread: nothing below
-        # waits on a matrix load, and the reaper still frees it when idle.
-        threading.Thread(
-            target=_warm_embedding_matrix,
-            args=(self.vault_root,),
-            name="exomem-matrix-warm",
-            daemon=True,
-        ).start()
         starters = (
             ("graph drain", self._start_graph_drain),
             ("media", self._start_media_worker),
