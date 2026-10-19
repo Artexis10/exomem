@@ -26,8 +26,9 @@ caller identity would otherwise strip the public inspection response.
 commands and vault-scoped lease. It times durable SQLite acknowledgement;
 item-view publication runs later, and the final inspection reports pending views.
 It does not lift file-mode caps or measure background publication latency.
-Native Windows and mixed-authority acceptance remain outside this diagnostic;
-these numbers cannot retire the store's phase-acceptance gate.
+``.github/workflows/store-latency-windows.yml`` runs it on native Windows.
+Mixed-authority acceptance remains outside this diagnostic; these numbers cannot
+retire the store's phase-acceptance gate.
 ``--phase-probes`` adds a synthetic 10% ref-withheld audience split and one
 bulk-500 call in store mode. It reports refusal and successful append timings
 separately, without claiming the remaining platform or fsync evidence.
@@ -274,8 +275,10 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     for name in tuple(os.environ):
         if name.startswith(("EXOMEM_", "KB_MCP_")):
             del os.environ[name]
-    with tempfile.TemporaryDirectory(prefix="exomem-append-latency-") as raw, contextlib.ExitStack() as cleanup:
-        return _measure_child(args, Path(raw), cleanup)
+    # The parent deletes the work directory after this process exits. Receipt connections and
+    # the idempotency owner lock stay open until exit, and Windows cannot delete an open file.
+    with contextlib.ExitStack() as cleanup:
+        return _measure_child(args, Path(args.work_dir), cleanup)
 
 
 def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.ExitStack) -> dict[str, object]:
@@ -618,7 +621,10 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         },
         "phase_evidence_missing": [
             "complete 1000 and 10000 row acceptance runs", "native Windows/NTFS run",
-            "filesystem identification", "commit/fsync trace", "query/resource phase evidence",
+            "filesystem identification",
+            "SQLite WAL sync count (inferred from commits, not traced)" if handle is not None
+            else "commit/fsync trace",
+            "resource phase evidence",
             "managed coordinated-store request path",
             "background publication latency and backup overlap",
         ],
@@ -643,6 +649,47 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
                 "calls": sum(sample["stages"][name]["calls"] for sample in samples),
             }
         return result
+
+    # Q: structured queries with the same arguments in both storage modes. Store query latency
+    # must be no worse than the file path's at each size; compare a files run with a store run.
+    query_cases = {
+        "eq_filter": {"filters": [{"column": "subject", "op": "eq", "value": _item(size // 2)["subject"]}]},
+        "contains_filter": {"filters": [{"column": "note", "op": "contains", "value": "number 7."}]},
+        "date_window_sorted": {
+            "date_from": _item(size // 2)["observed_on"], "date_to": _item(size // 2 + 29)["observed_on"],
+            "date_column": "observed_on", "sort_by": "observed_on", "descending": True, "limit": 50,
+        },
+        "count": {"aggregate": "count"},
+    }
+    from exomem.cli_ops import OpError
+
+    query_latency = {}
+    for name, arguments in query_cases.items():
+        outcomes: dict[tuple[str, str | None], list[float]] = defaultdict(list)
+        answers: dict[tuple[str, str | None], dict[str, object]] = {}
+        for _ in range(n):
+            start = time.perf_counter()
+            try:
+                wall, _cpu, result, _spans = invoke(action="query", collection=COLLECTION, **arguments)
+            except (OpError, collections.CollectionError) as error:
+                # A refusal is an outcome both modes must share, but its cost is not a query's.
+                outcome, wall = ("refused", error.code), time.perf_counter() - start
+                answers[outcome] = {"code": error.code}
+            else:
+                outcome = ("answered", None)
+                answers[outcome] = _query_answer(result)
+            outcomes[outcome].append(wall)
+        if len(outcomes) != 1:
+            raise RuntimeError(f"query case {name} mixed outcomes {sorted(outcomes)}; timing refused")
+        [(outcome, walls_q)] = outcomes.items()
+        query_latency[name] = {
+            "arguments": arguments, "outcome": outcome[0], "answer": answers[outcome],
+            f"{outcome[0]}_ms": {"p50": round(1000 * _pct(walls_q, 0.5), 2),
+                                 "p95": round(1000 * _pct(walls_q, 0.95), 2)},
+        }
+    out["query_latency"] = {"collection_rows": size + 1, "repeats": n, "cases": query_latency}
+    if any(case["outcome"] != "answered" for case in query_latency.values()):
+        out["phase_evidence_missing"].append("answered query latency at this size")
 
     # A: guarded append; the client pays a container-version read before every append.
     guarded_rows: list[dict[str, float]] = []
@@ -696,6 +743,53 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         "p95": round(1000 * _pct(walls_b, 0.95), 2),
     }
 
+    if handle is not None:
+        # E: one traced guarded append. It counts transactions on the store connection and Python
+        # fsync calls, split by thread. The idempotency ledger and lease state are other databases.
+        caller = threading.get_ident()
+        statements: list[tuple[bool, str]] = []
+        fsyncs = {"invoking_thread": 0, "other_threads": 0, "elapsed_ms": 0.0}
+        originals = {name: getattr(os, name) for name in ("fsync", "fdatasync") if hasattr(os, name)}
+
+        def counted(original):  # type: ignore[no-untyped-def]
+            def call(fd):  # type: ignore[no-untyped-def]
+                fsyncs["invoking_thread" if threading.get_ident() == caller else "other_threads"] += 1
+                start = time.perf_counter()
+                try:
+                    return original(fd)
+                finally:
+                    fsyncs["elapsed_ms"] += 1000 * (time.perf_counter() - start)
+
+            return call
+
+        def keyword(sql: str) -> str:
+            # SQLite's grammar fixes the transaction-control keywords, so the first token suffices.
+            return sql.split(None, 1)[0].rstrip(";").upper() if sql.strip() else ""
+
+        _, _, expected = refresh_hash()
+        handle.connection.set_trace_callback(
+            lambda sql: statements.append((threading.get_ident() == caller, keyword(sql)))
+        )
+        for name, original in originals.items():
+            setattr(os, name, counted(original))
+        try:
+            one_append(4 * n, True, expected)
+        finally:
+            handle.connection.set_trace_callback(None)
+            for name, original in originals.items():
+                setattr(os, name, original)
+
+        def by_thread(*keywords: str) -> dict[str, int]:
+            return {"invoking_thread": sum(statements.count((True, word)) for word in keywords),
+                    "other_threads": sum(statements.count((False, word)) for word in keywords)}
+
+        out["run_metadata"]["commit_fsync_count"] = {
+            "scope": "one guarded append through the dispatcher; store connection only",
+            "store_begin": by_thread("BEGIN"), "store_commit": by_thread("COMMIT", "END"),
+            "store_rollback": by_thread("ROLLBACK"), "python_fsync_calls": fsyncs,
+            "sqlite_wal_sync": "one per store commit under synchronous=FULL; SQLite's own call, not counted",
+        }
+
     # C: one cProfile pass over a single guarded append.
     _, _, expected = refresh_hash()
     profile = cProfile.Profile(timer=time.thread_time)
@@ -746,8 +840,6 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         _, _, refusal_expected = refresh_hash()
         before = canonical_state()
         refusal_samples = []
-        from exomem.cli_ops import OpError
-
         for index in range(n):
             try:
                 invoke(audience=partial_principal, action="append", collection=COLLECTION,
@@ -803,6 +895,18 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
     return out
 
 
+def _query_answer(result: object) -> dict[str, object]:
+    """What one query returned, so that a files run and a store run can show the same answer."""
+    if not isinstance(result, dict):
+        return {"status": "unrecognized"}
+    rows = result.get("rows") or []
+    return {
+        "total_matched": result.get("total_matched"), "returned_rows": len(rows),
+        "subjects_sha256": hashlib.sha256(json.dumps([row.get("subject") for row in rows]).encode()).hexdigest(),
+        "aggregate": result.get("aggregate"),
+    }
+
+
 def _find_container_hash(value: object) -> str | None:
     if isinstance(value, dict):
         for key in ("expected_container_hash", "container_hash"):
@@ -827,25 +931,30 @@ def _parent(args: argparse.Namespace) -> int:
     results = []
     for size in [int(part) for part in args.sizes.split(",")]:
         print(f"== size {size} ==", file=sys.stderr, flush=True)
-        completed = subprocess.run(
-            [
-                sys.executable,
-                __file__,
-                "--child",
-                "--size",
-                str(size),
-                "--appends",
-                str(args.appends),
-                "--storage",
-                args.storage,
-                *(["--lift-caps"] if args.lift_caps else []),
-                *(["--phase-probes"] if args.phase_probes else []),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        sys.stderr.write(completed.stderr[-2000:])
+        # A briefly held file (a virus scanner on Windows) must not discard a finished measurement.
+        with tempfile.TemporaryDirectory(prefix="exomem-append-latency-", ignore_cleanup_errors=True) as work_dir:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    __file__,
+                    "--child",
+                    "--work-dir",
+                    work_dir,
+                    "--size",
+                    str(size),
+                    "--appends",
+                    str(args.appends),
+                    "--storage",
+                    args.storage,
+                    *(["--lift-caps"] if args.lift_caps else []),
+                    *(["--phase-probes"] if args.phase_probes else []),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        # A failed child prints its whole log: a CI-only failure cannot be rerun locally.
+        sys.stderr.write(completed.stderr if completed.returncode else completed.stderr[-2000:])
         if completed.returncode != 0:
             print(completed.stdout[-2000:], file=sys.stderr)
             return completed.returncode
@@ -875,6 +984,7 @@ def main() -> int:
     )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--size", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--work-dir", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.phase_probes and (args.storage != "store-preview" or any(
         size < 10 or size % 10 for size in ([args.size] if args.child else map(int, args.sizes.split(",")))

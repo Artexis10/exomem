@@ -120,7 +120,6 @@ def test_query_collection_selects_returned_source_versions_without_repeating_row
         tmp_path,
         manifest,
         limit=50,
-        source_versions_for_rows=True,
     )
 
     assert [row["record_id"] for row in result.rows] == [f"record-{number}" for number in range(50)]

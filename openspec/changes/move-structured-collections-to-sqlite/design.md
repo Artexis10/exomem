@@ -689,6 +689,67 @@ Each acquire's server time is mostly its `COMMIT` (6.6 ms, WAL with `synchronous
 
 The intact before/after pair shows the append p50/p95 moving from 65.48/75.71 ms to 48.19/58.81 ms. The coordinator windows per append fall from 30.94 to 14.50 ms p50, and the requests per append fall from 8 to 6 (from 7 to 6 with the shipped release set). The paired median append difference is −17.27 ms, with a descriptive bootstrap 95% interval of −18.53 to −14.91 ms over 30 positions. The inspect difference is +0.22 ms [−1.81, 2.15]: no change. One sequential pair on one host establishes no installed gain. Append still misses 20 ms.
 
+**Isolated diagnostic, Linux, 2026-10-19.** `scripts/measure-records-append-latency.py` at `99f136bd8` (script SHA-256 prefix `cb92b7af2bbd`) ran on Linux/WSL ext4 with Python 3.13.14 and SQLite 3.53.1. Its writer boundary is local and its coordinator is off, so these rows do not compare with the service-path rows above. Store runs take 30 samples per operation. File runs take 10 and lift the 2,000-item file caps; the shipped file path refuses 10,000 items. Each size ran once. Peak RSS comes from `/usr/bin/time -v`.
+
+| Mode | Rows | Guarded append p50/p95, ms | Inspect p50/p95, ms | Bulk 500, ms | Peak RSS, MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Store | 1,000 | 19.39 / 24.25 | 30.89 / 35.46 | 486.6 | 183 |
+| Store | 10,000 | 21.88 / 24.15 | 86.94 / 102.88 | 500.9 | 373 |
+| Files | 1,000 | 493.08 / 550.38 | 413.28 / 439.07 | not measured | 173 |
+| Files | 10,000 | 3,615.70 / 3,726.18 | 5,423.31 / 5,553.12 | not measured | 358 |
+
+Store append and inspect miss their 20 ms and 15 ms p95 targets at both sizes. Bulk 500 meets 1 s.
+
+The phase probes withhold 10% of the rows by ref from a partial audience. The complete audience appends to that collection. The partial audience's append is refused with `COLLECTION_NOT_FOUND`, and every run checks that the refusals leave the canonical rows and rendered views unchanged:
+
+| Platform | Rows | Complete-audience append p50/p95, ms | Partial-audience refusal p50/p95, ms |
+| --- | ---: | ---: | ---: |
+| Linux | 1,000 | 19.52 / 22.45 | 11.23 / 11.93 |
+| Linux | 10,000 | 20.49 / 24.69 | 11.33 / 12.28 |
+| NTFS | 1,000 | 115.12 / 124.68 | 85.45 / 143.78 |
+| NTFS | 10,000 | 117.09 / 286.78 | 83.99 / 90.48 |
+
+The NTFS complete-audience p95 at 10,000 rows, 286.78 ms, is the worst append in this gate; its p50 stays at 117.09 ms.
+
+**Query bound.** The harness runs four Records queries with the same arguments in both modes: an `eq` filter, a `contains` filter, a 30-day date window sorted with limit 50, and `count`. At `36e95b57f`, before the fix below, every case refused in both modes at both sizes with `RECORD_RESPONSE_TOO_LARGE`. Each Records query response listed the source version of every item. Above about 500 items that list alone passed the 64 KiB response cap: a one-row query answered at 400 rows and refused at 600. Every Records query now lists the manifest and the sources of its returned rows, as a Planning query already did. That covers the internal callers too. The independent review reproduced the failures in scaled runs with a lowered cap: plan progress reported `query_unavailable`, and the current-state query refused, which its caller turns into no answer. At the shipped cap with 600 store items, the current-state query also refused before the fix. After the fix, every case answers in both modes with the same total, row count and ordered subjects:
+
+| Rows | Case | Store p50, ms | Files p50, ms | Files ÷ store |
+| ---: | --- | ---: | ---: | ---: |
+| 1,000 | `eq` filter | 38.04 | 272.13 | 7.2 |
+| 1,000 | `contains` filter | 36.67 | 273.73 | 7.5 |
+| 1,000 | date window, sorted, limit 50 | 40.16 | 284.54 | 7.1 |
+| 1,000 | `count` | 37.98 | 267.15 | 7.0 |
+| 10,000 | `eq` filter | 414.48 | 2,857.61 | 6.9 |
+| 10,000 | `contains` filter | 413.18 | 2,790.05 | 6.8 |
+| 10,000 | date window, sorted, limit 50 | 427.57 | 2,931.10 | 6.9 |
+| 10,000 | `count` | 429.54 | 2,858.66 | 6.7 |
+
+The required bound holds on Linux: store query latency is below the file path's at both sizes. Medians are compared because the arms take different sample counts. The 50 ms per-row governed query target at 10,000 rows is missed. That cost does not come from the source list: the same cases took 439–465 ms to refuse before the fix.
+
+**Acknowledgement commits.** Each store run traces one guarded append. The invoking thread runs one `BEGIN IMMEDIATE`…`COMMIT` and one read `BEGIN`…`ROLLBACK` on the store connection, and no other thread uses it. The pending view hash is written in that one commit. The invoking thread also makes one Python fsync, which took 3.06–3.12 ms: as the mutation boundary exits, `writer_lease._bump_commit_generation` replaces the vault's commit-generation file through `durable_write.replace_text`. That write predates the store and runs in file mode too. SQLite's own WAL sync is not a Python call and is not counted.
+
+**Isolated diagnostic, native Windows/NTFS, 2026-10-19.** The manual `store-latency-windows.yml` lane ran the same script at `99f136bd8` on a GitHub `windows-latest` runner, with Python 3.13.16 and SQLite 3.50.4 (run 39327763962). The sample counts match the Linux runs. File mode at 10,000 rows did not finish within the step's 40-minute limit, so it is not measured.
+
+| Mode | Rows | Guarded append p50/p95, ms | Inspect p50/p95, ms | Bulk 500, ms |
+| --- | ---: | ---: | ---: | ---: |
+| Store | 1,000 | 113.10 / 132.03 | 200.91 / 212.64 | 1,425.8 |
+| Store | 10,000 | 114.97 / 120.66 | 329.99 / 342.28 | 2,032.8 |
+| Files | 1,000 | 16,816.57 / 25,914.40 | 7,161.13 / 7,554.82 | not measured |
+
+Every NTFS target is missed, and bulk 500 misses 1 s as well. Most of the extra append time is CPU on the invoking thread. Windows thread time advances in 15.625 ms ticks, and every NTFS append sample read 93.75 or 109.375 ms of it, against a 12.82–14.71 ms median on Linux. Each reading is accurate to one tick; the mean reading is 103.1 ms at 1,000 rows and 105.7 ms at 10,000, so most of an append of about 113 ms is on that thread. The tick is too coarse to resolve the remainder. Every stage grows, governance most (60.55 ms against 6.30 ms at 1,000 rows). Windows thread time includes kernel time, so file-system calls may account for part of it; that is not attributed. The one store commit and the lease's commit-generation fsync (3.70 and 4.34 ms) are the same as on Linux.
+
+| Rows | Case | Store p50, ms | Files p50, ms | Files ÷ store |
+| ---: | --- | ---: | ---: | ---: |
+| 1,000 | `eq` filter | 170.86 | 5,582.47 | 32.7 |
+| 1,000 | `contains` filter | 169.14 | 5,396.85 | 31.9 |
+| 1,000 | date window, sorted, limit 50 | 181.53 | 5,396.66 | 29.7 |
+| 1,000 | `count` | 167.75 | 5,332.07 | 31.8 |
+| 10,000 | each of the four cases | 1,108.79–1,160.34 | not measured | — |
+
+The answers match the Linux answers case by case. The query bound holds on NTFS at 1,000 rows. At 10,000 rows it is unmeasured: the shipped file path refuses that size, and the cap-lifted file run did not finish. The report SHA-256 prefixes are `ec6adb461b6ee558` (store) and `fd4773d8a918b536` (files).
+
+The retained `measurement.json` SHA-256 prefixes are, before the fix (`36e95b57f`): store `35b7de2bf5d29a9a` and `6c9c78dd4aabbff5`, files `25c23f01d050612e` and `481b1d9661686995`; after it (`99f136bd8`): store `1a9bc9284bf9efbf` and `fad2ebe31a645a8f`, files `f92c0d6d985e06ed` and `99368d4e7a03c891`, each at 1,000 then 10,000 rows.
+
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
 **End-to-end append budget.** #1457's SQLite prototype confirms the storage layer is flat: 2.6–3.8 ms with synchronous projection at both 1,000 and 10,000 items. Its end-to-end estimate of about 93/100 ms p50/p95 is dominated by about 90 ms of shared cost outside storage, which that composite carried over unchanged from today's writer. That 90 ms is the real target of the 20 ms goal. The budget, per stage at p95:
@@ -1343,6 +1404,17 @@ Earlier, §12 assumed uniformly released collections. Two changes fix that:
 - The live store is **excluded entirely** from file-level backups.
 - The existing restic timer runs `exomem collections backup --to <staging>` first and backs up that consistent snapshot, alongside the vault replica.
 - The P1b.8 gate measures **replica sync churn**. A full replica is about 15.8 MB at 10,000 rows (spike), so publication is coalesced to at most one publish per 60 s under steady writes (and always at the §1 boundaries). The gate reports bytes per hour at 1, 10 and 60 writes per minute.
+
+**Measured churn, 2026-10-18 and 2026-10-19.** Four 300-second windows ran on one retained invented fixture of 10,000 Work rows, with a real in-process coordinator and released item, manifest and aggregate views. Three ran at source `1bf69cb51`; the 60-writes-per-minute rerun ran at `99f136bd8`, which includes #1892. Installed bytes count replica files replaced inside the window, not physical I/O or network. Publication attempts land about 60–65 s apart. Three windows had one busy attempt: it returned `retry_pending` (`COLLECTION_STORE_BUSY`) in about 1 ms, with no pending publication and an unchanged replica signature, so these rates count it as installing nothing, and its replacement waits for the next attempt. The probe marks those windows partial.
+
+| Writes per minute | Source | Probe status | Writes acknowledged | Replacements | Installed bytes | Bytes per hour | Acknowledgement median / max, s | View appearance after acknowledgement, s |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `1bf69cb51` | partial (one busy attempt) | 5 / 5 | 4 | 106,729,472 | 1,280,752,776 | 0.087 / 0.417 | 0.86–1.06 |
+| 10 | `1bf69cb51` | complete | 50 / 50 | 5 | 133,619,712 | 1,603,436,080 | 0.086 / 0.420 | 0.86–0.99 |
+| 60 | `1bf69cb51` | partial (one busy attempt, two missed slots) | 298 / 300 | 3 | 81,375,232 | 975,360,424 | 0.982 / 1.508 | 0.55 to an upper bound of 27.55 |
+| 60 | `99f136bd8` | partial (one busy attempt, five missed slots) | 295 / 300 | 3 | 83,099,648 | 995,418,590 | 1.005 / 1.626 | 0.21–5.08 |
+
+Inside each window, replacements land at least 60 s apart, so the coalescing budget holds; a busy attempt stretches one gap to about 120 s. Closer publications occur only at service start and stop, which are §1 boundaries. A replacement installs the whole replica, about 27.5 MB at this size. Steady writes therefore cost one replica per publish interval, about 1.6 GB per hour at every measured rate. The lower rows hold fewer replacements for two reasons. At 1 write per minute a busy attempt fell inside the 300-second window. At 60 writes per minute a busy attempt also fell inside it, and the first replica attempt came at about +62 s instead of +2.7 s, so only four attempts fell inside it. The lower rows do not mean that a higher write rate costs less. At 60 writes per minute the acknowledgement median reaches about 1 s, and the probe misses two and five scheduled slots; that saturation is not attributed. The title-only manifest revision on this fixture took 24.12 s at `1bf69cb51` and 1.63 s at `99f136bd8`, one sample each; #1892 is the change between them on that path. Its manifest view appeared 1.87 s after acknowledgement. The rerun's report SHA-256 prefix is `4b3b75ee457b9215` and its probe prefix is `a88cdf1086fa3ec5`.
 
 #### A10. Moves and renames: `VIEW_MOVED`
 
