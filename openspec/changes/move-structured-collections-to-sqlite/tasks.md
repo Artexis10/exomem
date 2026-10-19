@@ -91,7 +91,7 @@ October 4 private runtime/create foundation: independent review approves current
   - Prove mixed file/store inventory and targeted coverage through the serving service. Check withheld supports, reflecting rows, canonical changes, session changes and atomic projection replacement.
   - Compare the same public workflow at increasing collection counts: baseline, parser reuse only, and batch reuse. Report cold/warm latency and memory; retain the existing phase thresholds.
 - [ ] P1a.15 **Phase gate.**
-  - This remains the full phase gate. The narrow S1 exception above permits its first owner-only collection without the two 15/20 ms targets or their supporting append-stage timing targets; all remain measured optimisation goals for S1. It does not permit checking this phase complete or waiving bulk/query/resource bounds or any integrity, authorization, recovery, compatibility or portability gate.
+  - Owner ruling, 2026-10-19 (`design.md` §12): latency does not block GA. The p95, bulk and per-stage timings below are optimisation targets. This gate requires them measured and reported on Linux and native Windows/NTFS, a miss reported as a miss, but not met. It still requires the parity test, resource budgets and every integrity, authorization, recovery, compatibility and portability check. The narrow S1 exception above is now part of this ruling.
   - Extend `scripts/measure-records-append-latency.py` (#1457) to store mode with per-stage timers for the §12 budget table. The diagnostic now reports exclusive budgets, partial-audience refusal proof and bulk-500 stages; the §12 baseline misses the phase targets.
   - Guarded append p95 < 20 ms at 1,000 and 10,000 items through the real dispatcher, with no stage over its budget, including a 10,000-row collection with 10% of rows ref-withheld, on Linux and on a Windows/NTFS runner (A7). Measure the partial audience's `COLLECTION_NOT_FOUND` refusal separately from successful fully authorized appends; both retain the applicable stage and p95 budgets.
   - No second commit or fsync on the acknowledgement path (the pending hash is written in the main transaction).
@@ -257,7 +257,7 @@ October 4 private runtime/create foundation: independent review approves current
   Evidence: `tests/test_collection_store_edit_back.py::test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held` (the Records summary, diagnostics and the `collection_view_corrections` attention category, then discard), `::test_a_planning_hierarchy_violation_is_held_not_applied` (the Planning diagnostics code with the key set unchanged) and `::test_attention_for_a_withheld_view_correction_equals_attention_without_it`, shown red when the category ignores the caller's release.
 - [ ] P2.8 **Phase gate.**
   - The edit-back matrix is green; the gate adds `collection-views-v1` to the release (`collection_store.capability.RELEASED`).
-  - The SQLite acknowledgement stays within the P1a.15 budget: store, item render and pending state ≤ 4 ms p95, end to end < 20 ms. Report physical publication separately.
+  - Report the SQLite acknowledgement against the P1a.15 targets: store, item render and pending state ≤ 4 ms p95, end to end < 20 ms. Under the 2026-10-19 owner ruling these are measured targets, not release blockers. Report physical publication separately.
   - Healthy-writer publication lag for item, manifest and aggregate views is reported and bounded under the harness. Blocked publication remains visibly pending; no numeric lag maximum is assumed.
 
 ## P3. Audit, history, and the GA gate
