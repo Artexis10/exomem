@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,6 +100,16 @@ def _write_note(vault: Path, name: str, memory_id: str) -> str:
         encoding="utf-8",
     )
     return memory_refs.memory_ref(memory_id)
+
+
+def _reference_record(manager, vault: Path, reference: str, *, episode: str = KEY) -> dict:
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    with request_scope(owner_principal(surface="mcp")):
+        return manager.invoke(command, (vault, schema_module.load_source_schema(vault)), {
+            "action": "record", "episode": episode, "subject": "Reference recap",
+            "summary": "Recorded a reference target.", "worked_on": ["Used the target."],
+            "about": [reference],
+        }, idempotency_key=episode)
 
 
 def _withhold_notes_from(vault: Path, audience: str) -> None:
@@ -390,12 +401,288 @@ def test_a_revision_that_changed_after_it_was_read_loses_and_is_re_read(
     assert ours["revision"] == 3
 
 
-def test_episode_memory_holds_the_wide_mutation_boundary() -> None:
-    """Its read of the live revisions and its write must not interleave with
-    another writer's commit; the narrowed boundary would allow exactly that."""
+def test_offline_episode_references_scan_before_the_commit_boundary(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import freshness, mutation_lock, writer_lease
+
+    reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
+    assert not freshness.is_live(vault, "vault")
+    assert freshness.consumer_checkpoint(vault, "vault").triple is None
+    states = []
+    real_scan = memory_refs._scan_pages
+
+    def scan(root):
+        states.append(mutation_lock.active_mutation_snapshot()["state"])
+        return real_scan(root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", scan)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    with request_scope(owner_principal(surface="mcp")):
+        result = manager.invoke(command, (vault, schema_module.load_source_schema(vault)), {
+            "action": "record", "episode": KEY, "subject": "Reference recap",
+            "summary": "Recorded a reference target.", "worked_on": ["Used the target."],
+            "about": [reference],
+        })
+        stored = episode_recovery.EpisodeInputOwner(vault)._store().read(episode_model.episode_id(KEY))
+
+    assert states and set(states) == {"free"}
+    assert result["revision"] == 1 and result["about_skipped"] == 0
+    assert stored["state"]["input_revisions"][0]["evidence"]["about"] == [reference]
+
+
+def test_a_duplicate_arriving_during_policy_admission_is_reprepared_before_revision_selection(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import freshness, mutation_lock, writer_lease
+
+    identity = "11111111-1111-4111-8111-111111111111"
+    reference = _write_note(vault, "reference-target", identity)
+    states = []
+    real_scan = memory_refs._scan_pages
+    real_visible = egress._visible_candidates
+    changed = False
+
+    def scan(root):
+        states.append(mutation_lock.active_mutation_snapshot()["state"])
+        return real_scan(root)
+
+    def visible(*args, **kwargs):
+        nonlocal changed
+        result = real_visible(*args, **kwargs)
+        if not changed:
+            changed = True
+            _write_note(vault, "reference-duplicate", identity)
+            freshness.mark_external_pending(vault)
+        return result
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", scan)
+    monkeypatch.setattr(egress, "_visible_candidates", visible)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    with request_scope(owner_principal(surface="mcp")):
+        result = manager.invoke(command, (vault, schema_module.load_source_schema(vault)), {
+            "action": "record", "episode": KEY, "subject": "Reference recap",
+            "summary": "Recorded a reference target.", "worked_on": ["Used the target."],
+            "about": [reference],
+        })
+        stored = episode_recovery.EpisodeInputOwner(vault)._store().read(episode_model.episode_id(KEY))
+
+    assert states and set(states) == {"free"}
+    assert result["revision"] == 1 and result["about_skipped"] == 1
+    assert "about" not in stored["state"]["input_revisions"][0]["evidence"]
+
+
+def test_three_reference_captures_survive_concurrent_preparation_invalidation(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from exomem import writer_lease
 
-    assert "episode_memory" not in writer_lease._NARROW_BOUNDARY_COMMANDS
+    reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    prepared, checked = threading.Barrier(3), threading.Barrier(3)
+    first_finished, second_prepared, third_left_guard = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    real_owners, real_guard = memory_refs._reference_owners_read_only, manager.mutation_guard
+    counts, holds, outcomes = {}, {}, {}
+
+    def owners(*args, **kwargs):
+        name = threading.current_thread().name
+        result = real_owners(*args, **kwargs)
+        counts[name] = counts.get(name, 0) + 1
+        if counts[name] == 1:
+            prepared.wait(timeout=15)
+        elif name == "capture-1" and counts[name] == 2:
+            second_prepared.set()
+            assert third_left_guard.wait(15)
+        return result
+
+    @contextmanager
+    def guard(*args, **kwargs):
+        name = threading.current_thread().name
+        holds[name] = holds.get(name, 0) + 1
+        attempt = holds[name]
+        if attempt == 1:
+            checked.wait(timeout=15)
+            if name == "capture-1":
+                assert first_finished.wait(15)
+            elif name == "capture-2":
+                assert second_prepared.wait(15)
+        try:
+            with real_guard(*args, **kwargs) as value:
+                yield value
+        finally:
+            if name == "capture-0":
+                first_finished.set()
+            elif name == "capture-2" and attempt == 1:
+                third_left_guard.set()
+
+    monkeypatch.setattr(memory_refs, "_reference_owners_read_only", owners)
+    monkeypatch.setattr(manager, "mutation_guard", guard)
+
+    def capture(index):
+        try:
+            outcomes[index] = _reference_record(
+                manager, vault, reference, episode="ep-" + str(index + 1) * 32
+            )
+        except Exception as error:  # noqa: BLE001 - assert worker failures in the test thread
+            outcomes[index] = error
+
+    threads = [threading.Thread(target=capture, args=(i,), name=f"capture-{i}", daemon=True) for i in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(outcomes) == 3 and all(not isinstance(item, BaseException) for item in outcomes.values())
+    assert all(item["revision"] == 1 and item["about_skipped"] == 0 for item in outcomes.values())
+    assert len(_episodes(vault)) == 3
+
+
+def test_reference_preparation_survives_two_real_intervening_commits(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import vault as vault_module
+    from exomem import writer_lease
+
+    monkeypatch.setenv("EXOMEM_SYNC_WORKERS", "2")
+    reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    real_owners = memory_refs._reference_owners_read_only
+    written = []
+
+    def write_next(root):
+        path = root / "Knowledge Base" / f"intervening-{len(written)}.md"
+        vault_module.batch_atomic_write([vault_module.PlannedWrite(path, "# Intervening commit\n")])
+        written.append(path)
+
+    def owners(*args, **kwargs):
+        result = real_owners(*args, **kwargs)
+        if len(written) < 2:
+            manager.invoke(SimpleNamespace(name="next_writer", read_only=False, leaf=write_next), (vault,), {})
+        return result
+
+    monkeypatch.setattr(memory_refs, "_reference_owners_read_only", owners)
+    result = _reference_record(manager, vault, reference)
+    assert len(written) == 2 and all(path.exists() for path in written)
+    assert result["revision"] == 1 and result["about_skipped"] == 0
+    assert len(_episodes(vault)) == 1
+    assert writer_lease._take_capture_waiter_slot(), "the completed retry must release its admission"
+    writer_lease._release_capture_waiter_slot()
+
+
+@pytest.mark.parametrize("failure", [
+    "generation_unavailable", "allowance_exhausted", "delivery_reserve",
+    "delivery_reserve_after_retry", "unkeyed", "absorption_disabled",
+])
+def test_unproved_episode_references_return_a_bounded_retryable_failure_without_a_write(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from exomem import command_surface, freshness, request_budget, writer_lease
+
+    reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+    bound = command_surface.bind_vault(
+        command.leaf, vault, schema_module.load_source_schema(vault), command=command
+    )
+    scans = []
+    real_scan = memory_refs._scan_pages
+
+    def scan(root):
+        scans.append(root)
+        result = real_scan(root)
+        if failure != "delivery_reserve_after_retry" or len(scans) == 1:
+            freshness.mark_external_pending(root)
+        if failure == "delivery_reserve" or (
+            failure == "delivery_reserve_after_retry" and len(scans) == 2
+        ):
+            request_budget.current().deadline = 0
+        return result
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", scan)
+    if failure == "generation_unavailable":
+        monkeypatch.setattr(writer_lease, "read_commit_generation", lambda root: None)
+    elif failure == "allowance_exhausted":
+        monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "0")
+    elif failure == "absorption_disabled":
+        monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
+    arguments = {
+        "action": "record", "episode": KEY, "subject": "Reference recap",
+        "summary": "Recorded a reference target.", "worked_on": ["Used the target."],
+        "about": [reference],
+    }
+    if failure != "unkeyed":
+        arguments["idempotency_key"] = "reference-retry"
+    token = request_budget.set_current(
+        None if failure == "allowance_exhausted" else request_budget.RequestBudget(seconds=60)
+    )
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            result = bound(**arguments)
+            assert _episodes(vault) == []
+            with pytest.raises(EpisodeError, match="EPISODE_NOT_FOUND"):
+                episode_recovery.EpisodeInputOwner(vault).input_history(KEY)
+    finally:
+        request_budget.reset_current(token)
+
+    if failure == "generation_unavailable":
+        assert not scans
+    elif failure in {"allowance_exhausted", "delivery_reserve"}:
+        assert 0 < len(scans) <= 1
+    else:
+        assert 1 <= len(scans) <= 2
+    assert result["success"] is False
+    error = result["error"]
+    assert error["code"] == "REFERENCE_PREPARATION_UNAVAILABLE"
+    assert error["status"] == "retryable" and error["committed"] is False
+    assert error["cause"] == ("generation_unavailable" if failure == "generation_unavailable" else "preparation_changed")
+    assert "same idempotency key" in error["remediation"]
+    if failure == "allowance_exhausted":
+        monkeypatch.setattr(memory_refs, "_scan_pages", real_scan)
+        with request_scope(owner_principal(surface="mcp")):
+            first = bound(**arguments)
+            replay = bound(**arguments)
+            history = episode_recovery.EpisodeInputOwner(vault).input_history(KEY)
+        assert first["source"] == replay["source"] and first["revision"] == replay["revision"] == 1
+        assert len(_episodes(vault)) == len(history["revisions"]) == 1
+
+
+def test_reference_preparation_respects_existing_waiter_capacity_without_a_busy_error(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import freshness, mutation_lock, writer_lease
+    from exomem.cli_ops import OpError
+
+    monkeypatch.setenv("EXOMEM_SYNC_WORKERS", "2")
+    reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    real_owners = memory_refs._reference_owners_read_only
+    metrics = []
+
+    def owners(*args, **kwargs):
+        result = real_owners(*args, **kwargs)
+        freshness.mark_external_pending(vault)
+        return result
+
+    monkeypatch.setattr(memory_refs, "_reference_owners_read_only", owners)
+    monkeypatch.setattr(mutation_lock, "_bump_boundary_metric", lambda name, labels=None: metrics.append(name))
+    # The worker cap spans managers, even when this manager's FIFO is empty.
+    assert writer_lease._take_capture_waiter_slot()
+    try:
+        with pytest.raises(OpError) as failure:
+            _reference_record(manager, vault, reference)
+    finally:
+        writer_lease._release_capture_waiter_slot()
+    assert failure.value.code == "REFERENCE_PREPARATION_UNAVAILABLE"
+    assert failure.value.details["committed"] is False
+    assert "exomem_mutation_busy_total" not in metrics
+    assert _episodes(vault) == []
+    monkeypatch.setattr(memory_refs, "_reference_owners_read_only", real_owners)
+    assert _reference_record(manager, vault, reference)["revision"] == 1
 
 
 def test_blocked_episode_fanout_does_not_hold_the_next_writer(

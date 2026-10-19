@@ -9,16 +9,21 @@ boundary for 14-50 s and starved every other writer.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from record_fixtures import copy_vehicle_maintenance_fixture
 
 from exomem import (
     commands,
+    freshness,
+    memory_refs,
     mutation_lock,
     record_formats,
     reserved_paths,
+    semantic_contract,
     writer_lease,
 )
 from exomem import schema as schema_module
@@ -83,6 +88,72 @@ def test_a_cold_identity_walk_never_runs_inside_an_episode_boundary(
     assert result["source"]["path"]
     assert states, "the cold inventory should have been built by this write"
     assert set(states) == {"free"}
+
+
+def test_cold_episode_references_leave_the_boundary_free_for_another_writer(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corpus_cache_on
+) -> None:
+    """A stale reference snapshot must not exclude an unrelated canonical write."""
+    note = vault / "Knowledge Base/Notes/Insights/reference-target.md"
+    identity = "11111111-1111-4111-8111-111111111111"
+    note.write_text(
+        f"---\ntype: insight\nexomem_id: {identity}\ntitle: Reference target\n"
+        "status: active\ncreated: 2026-01-01\nupdated: 2026-01-01\n"
+        "sources: []\ntags: []\n---\n\n# Reference target\n\nA note.\n",
+        encoding="utf-8",
+    )
+    freshness.rebaseline(vault)
+    semantic_contract.build_corpus_context(vault)
+    note.write_text(note.read_text().replace("A note.", "A changed note."), encoding="utf-8")
+    freshness.on_files_changed(vault, changed=(note,))
+    assert semantic_contract.current_reference_identity_snapshot(vault) is None
+    started, release = threading.Event(), threading.Event()
+    states, results, errors = [], [], []
+    real_scan = memory_refs._scan_pages
+
+    def scan(root):
+        states.append(mutation_lock.active_mutation_snapshot()["state"])
+        if len(states) == 1:
+            started.set()
+            assert release.wait(15)
+        return real_scan(root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", scan)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
+
+    def capture():
+        try:
+            with request_scope(owner_principal(surface="mcp")):
+                results.append(manager.invoke(command, (vault, schema_module.load_source_schema(vault)), {
+                    "action": "record", "episode": EPISODE,
+                    "subject": "Reference recap", "summary": "Recorded the reference target.",
+                    "worked_on": ["Used a reference target."],
+                    "about": [memory_refs.memory_ref(identity)],
+                }))
+        except Exception as error:  # noqa: BLE001 - surface the capture thread's failure
+            errors.append(error)
+
+    thread = threading.Thread(target=capture, daemon=True)
+    thread.start()
+    try:
+        assert started.wait(15)
+        from exomem import vault as vault_module
+
+        def write_next(root):
+            vault_module.batch_atomic_write([
+                vault_module.PlannedWrite(root / "Knowledge Base/next-writer.md", "# Next writer\n")
+            ])
+
+        manager.invoke(SimpleNamespace(name="next_writer", read_only=False, leaf=write_next), (vault,), {})
+        assert (vault / "Knowledge Base/next-writer.md").exists()
+    finally:
+        release.set()
+        thread.join(15)
+    assert not thread.is_alive() and not errors
+    assert states and set(states) == {"free"}
+    assert len(results) == 1 and results[0]["revision"] == 1
+    assert results[0]["about_skipped"] == 0
 
 
 def test_a_cold_identity_walk_never_runs_inside_a_record_update_boundary(

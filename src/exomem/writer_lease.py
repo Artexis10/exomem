@@ -4271,13 +4271,33 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
     return wait
 
 
+@dataclass(frozen=True)
+class _CapturePreparationRetry:
+    """The invocation's existing allowance and admission for precommit retries."""
+
+    deadline: float
+    admit: Callable[[], bool]
+
+    def available(self) -> bool:
+        return time.monotonic() < self.deadline
+
+
+_ACTIVE_CAPTURE_PREPARATION_RETRY: ContextVar[_CapturePreparationRetry | None] = ContextVar(
+    "exomem_capture_preparation_retry", default=None
+)
+
+
+def _active_capture_preparation_retry() -> _CapturePreparationRetry | None:
+    return _ACTIVE_CAPTURE_PREPARATION_RETRY.get()
+
+
 class _FairCaptureQueue:
     """First-come-first-served order, within one process, for capture writes
     waiting on the boundary.
 
-    Only a write that has already met a busy boundary joins, and a write that
-    arrives while others wait joins behind them instead of racing for the lock,
-    so the waiter who has waited longest attempts next and none starves.
+    A write that meets a busy boundary or invalidated preparation joins. A
+    write that arrives while others wait joins behind them instead of racing
+    for the lock, so the waiter who has waited longest attempts next.
     """
 
     def __init__(self) -> None:
@@ -5743,12 +5763,21 @@ class LeaseManager:
             and kwargs.get("mode") == "tag-variants"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # Only record owns a short guard around fresh admission, revision
+        # selection and ledger binding; the other episode actions still rely
+        # on this command boundary. The action is a closed protocol enum.
+        narrow_episode_record = (
+            command.name == "episode_memory"
+            and kwargs.get("action") == "record"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
             or narrow_tag_variant_commit
+            or narrow_episode_record
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
@@ -6043,13 +6072,41 @@ class LeaseManager:
         re-run.
         """
         if key is None or not _capture_write_absorbs_contention(command.name, kwargs):
-            return run()
+            # An ineligible nested invocation must not borrow its parent's
+            # allowance or admission callback.
+            token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(None)
+            try:
+                return run()
+            finally:
+                _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
         started = time.monotonic()
         deadline = started + _capture_wait_seconds(self._mutation_timeout_seconds)
         queue = self._capture_queue
         ticket = None
         absorbed = 0
         holds_slot = False
+
+        def wait_turn() -> bool:
+            # A head ticket can return immediately even after its deadline.
+            return (
+                time.monotonic() < deadline
+                and queue.wait_turn(ticket, deadline)
+                and time.monotonic() < deadline
+            )
+
+        def admit_preparation_retry() -> bool:
+            nonlocal ticket, holds_slot
+            if time.monotonic() >= deadline:
+                return False
+            if not holds_slot:
+                if not _take_capture_waiter_slot():
+                    return False
+                holds_slot = True
+            if ticket is None:
+                ticket = queue.enter_line()
+            return wait_turn()
+
+        preparation_retry = _CapturePreparationRetry(deadline, admit_preparation_retry)
 
         def waited_ms() -> float:
             return round((time.monotonic() - started) * 1000, 2)
@@ -6085,15 +6142,19 @@ class LeaseManager:
                 holds_slot = True
                 ticket = queue.enter_line()
             while True:
-                if ticket is not None and not queue.wait_turn(ticket, deadline):
+                if ticket is not None and not wait_turn():
                     raise refuse(
                         uncounted_busy(),
                         "capture_wait_exhausted",
                         _CAPTURE_WAIT_EXHAUSTED_REMEDIATION,
                     )
                 try:
-                    with mutation_lock.absorbing_busy():
-                        result = run()
+                    token = _ACTIVE_CAPTURE_PREPARATION_RETRY.set(preparation_retry)
+                    try:
+                        with mutation_lock.absorbing_busy():
+                            result = run()
+                    finally:
+                        _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
                 except OpError as error:
                     if (
                         error.code != "MUTATION_BUSY"

@@ -130,6 +130,64 @@ def test_absorbed_retries_do_not_count_as_client_visible_busy(
     assert bumps.count("exomem_mutation_busy_total") == 1
 
 
+def test_preparation_admission_retains_its_allowance_and_slot_across_physical_contention(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_SYNC_WORKERS", "2")
+    manager = _manager(tmp_path)
+    deadlines = []
+
+    def run():
+        retry = writer_lease._active_capture_preparation_retry()
+        deadlines.append(retry.deadline)
+        assert retry.admit()
+        if len(deadlines) == 1:
+            raise _busy()
+        return "ok"
+
+    assert _run(manager, run) == "ok"
+    assert deadlines[0] == deadlines[1]
+    assert _run(manager, lambda: writer_lease._active_capture_preparation_retry().admit())
+
+
+def test_preparation_admission_rechecks_the_deadline_after_an_immediate_head_turn(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _manager(tmp_path)
+    wait_turn = manager._capture_queue.wait_turn
+    bumps = []
+    monkeypatch.setattr(mutation_lock, "_bump_boundary_metric", lambda name, labels=None: bumps.append(name))
+
+    def expires_at_turn(ticket, deadline):
+        assert wait_turn(ticket, deadline)
+        monkeypatch.setattr(writer_lease.time, "monotonic", lambda: deadline)
+        return True
+
+    monkeypatch.setattr(manager._capture_queue, "wait_turn", expires_at_turn)
+    assert _run(manager, lambda: writer_lease._active_capture_preparation_retry().admit()) is False
+    assert "exomem_mutation_busy_total" not in bumps
+
+
+@pytest.mark.parametrize("ineligible", ["unkeyed", "disabled"])
+def test_nested_ineligible_capture_cannot_borrow_preparation_admission(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, ineligible: str
+) -> None:
+    manager = _manager(tmp_path)
+
+    def outer():
+        assert writer_lease._active_capture_preparation_retry() is not None
+        if ineligible == "disabled":
+            monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
+        return manager._run_absorbing_capture_contention(
+            SimpleNamespace(name="episode_memory"), {},
+            lambda: writer_lease._active_capture_preparation_retry(),
+            key=None if ineligible == "unkeyed" else "nested",
+            commit_state={"observed": False}, request_id="nested",
+        )
+
+    assert _run(manager, outer) is None
+
+
 @pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e400", "1e18"])
 def test_a_non_finite_or_huge_wait_setting_never_crashes_a_queued_waiter(
     tmp_path, monkeypatch: pytest.MonkeyPatch, value: str

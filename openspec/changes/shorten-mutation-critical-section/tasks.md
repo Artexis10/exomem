@@ -217,6 +217,14 @@ authority and can be rolled back independently.
       arrival order (`_FairCaptureQueue`) around `idempotency.run`.
 - [ ] 10.3 Live: after deploy, `exomem_mutation_busy_total` stays flat under
       maximal capture and `contention_absorbed` log rows show the waits.
+- [ ] 10.4 Prepare managed episode reference owners outside the canonical guard;
+      seal exact batch ownership and reload pending custody and policy under it.
+      Share eligible preparation retries with existing capture allowance and waiter admission.
+      Preserve direct calls, serialized revisions and both acknowledgement modes.
+- [ ] 10.5 Prove another writer can commit during a cold owner scan, admission
+      invalidation triggers fresh preparation, and concurrent captures survive repeated invalidation.
+      Verify bounded admission and allowance exhaustion write nothing and permit same-identity recovery.
+      Verify structured retryability through the command facade and run affected checks.
 
 ## 11. Graph receipt identity after authority release
 
