@@ -7459,8 +7459,8 @@ def op_browse_memory(
         max_depth: Depth.
         samples: Per folder.
         recursive: Recurse in list mode.
-        limit: List page size; default 200, at most 1000.
-        cursor: A list response's next_cursor, to continue it.
+        limit: Page size: 200, max 1000.
+        cursor: A next_cursor, to continue.
     """
     if mode == "overview":
         if limit is not None or cursor is not None:

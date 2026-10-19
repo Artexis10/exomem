@@ -563,11 +563,11 @@
         },
         "limit": {
           "type": "integer",
-          "description": "List page size; default 200, at most 1000."
+          "description": "Page size: 200, max 1000."
         },
         "cursor": {
           "type": "string",
-          "description": "A list response's next_cursor, to continue it."
+          "description": "A next_cursor, to continue."
         }
       },
       "type": "object"
