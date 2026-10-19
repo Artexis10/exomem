@@ -91,23 +91,22 @@ def test_default_config_reproduces_no_config(vault: Path) -> None:
         assert [h.as_dict() for h in baseline] == [h.as_dict() for h in explicit]
 
 
-def test_type_boost_honors_config() -> None:
+def test_type_boost_honors_config(vault: Path) -> None:
     """_apply_type_boost must read multipliers from the passed config."""
     # Two repo-fixture paths at equal base score: a compiled insight + a raw source.
     insight = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
     source = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
-    fixtures = Path(__file__).resolve().parents[0] / "fixtures"  # read-only
     fused = [(insight, 1.0), (source, 1.0)]
 
     # DEFAULT: compiled x1.15 > source x0.85 → insight ranks first.
-    default_order = [p for p, _ in find_module._apply_type_boost(fused, fixtures)]
+    default_order = [p for p, _ in find_module._apply_type_boost(fused, vault)]
     assert default_order[0] == insight
 
     # Penalize compiled heavily → source overtakes the insight, proving the
     # config value (not the module constant) drives the multiplier.
     penalize = find_module.RankingConfig(compiled_boost=0.1)
     flipped = [
-        p for p, _ in find_module._apply_type_boost(fused, fixtures, penalize)
+        p for p, _ in find_module._apply_type_boost(fused, vault, penalize)
     ]
     assert flipped[0] == source
 
