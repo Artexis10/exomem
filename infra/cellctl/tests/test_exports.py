@@ -450,6 +450,13 @@ async def test_an_export_never_recreates_a_lost_claim(cell_db, monkeypatch):
         assert not [event for event in harness.cluster.events[events_before:] if event[0] == "apply_statefulset"]
         assert (await harness.cell(CELL)).last_error_code == "VOLUME_MISSING"
 
+        # Deleting the cell still ends the export and removes its open upload.
+        await harness.app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", CELL)
+        await harness.run(NOW + timedelta(seconds=20))
+        ended = await harness.export(export_id)
+        assert (ended["observed_state"], ended["error_code"]) == ("failed", "EXPORT_INTERRUPTED")
+        assert harness.s3.uploads == {}
+
 
 async def test_a_substituted_part_never_completes(cell_db, monkeypatch):
     """Defect: someone holding a part URL replaces the owner's archive before completion."""

@@ -1677,9 +1677,10 @@ async def _reconcile_row(
     # An import holding or claiming the volume goes first; the export waits.
     # A cell that has had a volume and lost its claim is decide()'s to report:
     # any apply from the export path would create an empty claim in its place.
+    # A deleted cell's export only ends its row and upload, so it still runs.
     if export_item is not None and import_decision is None and not _identity_conflict(
             row, observation, cluster_config.storage) and not (
-            claim_missing(observation) and row.volume_id is not None):
+            claim_missing(observation) and row.volume_id is not None and row.desired_state != "deleted"):
         export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id)
         volume_unavailable = (
             relocation_volume(row, observation, cluster_config.storage) is not None
