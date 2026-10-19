@@ -4561,6 +4561,34 @@ class LeaseManager:
             self._log_lease_event("lease_acquired", cause=cause)
             return record
 
+    def _renew_interval_seconds(self) -> float:
+        """How often the lease renews, and so the margin a grant needs to outlast the next renewal."""
+        return max(1.0, self.config.ttl_seconds / 3)
+
+    def _reusable_operation_grant(self) -> LeaseRecord | None:
+        """With the lock held: the grant this operation's outer guard holds, or None for a real acquire.
+
+        The coordinator revokes the holder and advances the token in the same transaction as every
+        fence change, and the commit boundary revalidates that token, so reusing the grant lets no
+        revoked writer commit. A nested guard never re-grants once work has started.
+        """
+        active = _ACTIVE_WRITE_FENCE.get()
+        if active is None or active[0] is not self or self._store_refused():
+            return None
+        token = active[1]
+        if (
+            self._fencing_token is None
+            or token != self._fencing_token
+            or self._active_mutations <= 0
+            # Only a real acquire derives the file-store marker from the acquisition record.
+            or (self._serves_collection_store and self._collection_store is None)
+            or self._expires_at is None
+            or self._expires_at - time.time() <= self._renew_interval_seconds()
+        ):
+            return None
+        self._record_lease_op("acquire", "reused")
+        return LeaseRecord(self.config.replica_id, self._expires_at, token, True)
+
     @contextmanager
     def consistency_guard(
         self,
@@ -4849,7 +4877,9 @@ class LeaseManager:
                 ) from None
         if self.config.enabled or self._collection_store is not None:
             with self._lock:
-                lease = self.ensure_writer()
+                lease = self._reusable_operation_grant()
+                if lease is None:
+                    lease = self.ensure_writer()
                 if self.config.enabled:
                     fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
                 if self._serves_collection_store and self._collection_store is None:
@@ -6388,7 +6418,7 @@ class LeaseManager:
                     self._raise_fenced(token)
                 if (due_only and self._last_renew_monotonic is not None
                         and time.monotonic() - self._last_renew_monotonic
-                        < max(1.0, self.config.ttl_seconds / 3)):
+                        < self._renew_interval_seconds()):
                     return
             head = self._collection_store.report_head(token)
             record = self.client.renew(
@@ -6659,7 +6689,7 @@ class LeaseManager:
             return True
 
     def _renew_loop(self) -> None:
-        interval = max(1.0, self.config.ttl_seconds / 3)
+        interval = self._renew_interval_seconds()
         while not self._stop.wait(interval):
             with self._lock:
                 token = self._fencing_token
