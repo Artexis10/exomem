@@ -1127,9 +1127,10 @@ class _OutsideSelection:
 def _validated_find_limit(
     scope: str, mode: str, limit: int, rerank_max_candidates: int | None,
 ) -> int:
-    # Scope and mode are closed tokens in the find request contract.
+    # nosemgrep: ep-word-membership -- The find API fixes these scope tokens.
     if scope not in ("kb", "vault", "kb-only"):
         raise ValueError(f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}")
+    # nosemgrep: ep-word-membership -- The find API fixes these mode tokens.
     if mode not in ("hybrid", "keyword", "vector"):
         raise ValueError(f"find: mode must be 'hybrid', 'keyword', or 'vector', got {mode!r}")
     if limit < 1:
