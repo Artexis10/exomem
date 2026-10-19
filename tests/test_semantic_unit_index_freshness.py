@@ -234,7 +234,7 @@ def test_registry_change_updates_selected_units_without_rebuilding_structural_ro
 
     _write_language_registry(tmp_path, alias="local_setting", canonical="setting")
     scheduled: list[Path] = []
-    monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda root, **_kwargs: scheduled.append(root))
 
     # Definition changes reinterpret the unchanged structural projection immediately.
     assert lexstore.search_semantic_units(

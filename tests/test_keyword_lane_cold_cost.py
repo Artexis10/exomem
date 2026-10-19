@@ -136,7 +136,7 @@ def test_one_write_reconciles_keyword_catalog_in_proportion_to_the_change(
     monkeypatch.setattr(find_module, "_walk_md", counted_walk)
     monkeypatch.setattr(find_module._CACHE, "get", counted_get)
     monkeypatch.setattr(freshness, "recall_delta_since", counted_delta)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
     paths = find_module._keyword_match_paths(
@@ -220,7 +220,7 @@ def test_large_cold_keyword_catalog_returns_typed_warming_without_a_walk(
 
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
     monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming) as raised:
         find_module._keyword_match_paths(
@@ -264,7 +264,7 @@ def test_large_lazy_empty_query_returns_typed_warming_without_a_walk(
 
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
     monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming):
         find_module.find(tmp_path, query="", mode="keyword", scope="kb")
@@ -400,7 +400,7 @@ def test_initial_warm_keeps_retained_catalogue_repair_with_the_warm_owner(
     readiness.manage_runtime()
     readiness.begin_warm()
     repairs: list[Path] = []
-    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", repairs.append)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda root, **_kwargs: repairs.append(root))
 
     with pytest.raises(find_module.RetrievalIndexWarming) as raised:
         find_module.find(
@@ -566,7 +566,7 @@ def test_read_only_recovery_probe_does_not_schedule_catalog_repair(
     monkeypatch.setattr(
         lexstore,
         "_schedule_runtime_catalog_repair",
-        lambda root: scheduled.append(root),
+        lambda root, **_kwargs: scheduled.append(root),
     )
     store = lexstore.get_store(tmp_path)
 
@@ -867,7 +867,7 @@ def test_large_cold_hybrid_catalog_returns_typed_warming_without_a_walk(
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
     monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming) as raised:
         find_module.find(
@@ -1104,7 +1104,7 @@ def test_discovered_catalog_staleness_revokes_configured_runtime_admission(
     readiness.mark_ready("retrieval_catalog")
     readiness.finish_warm()
     store.path.unlink()
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming):
         find_module.find(tmp_path, query="laterstale", mode="keyword", scope="kb")
@@ -1181,7 +1181,7 @@ def test_large_cold_vault_widening_returns_typed_warming_without_a_walk(
         yield  # pragma: no cover - keep this a generator-shaped test double
 
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
 
     with pytest.raises(find_module.RetrievalIndexWarming):
         find_module.find(
@@ -1221,7 +1221,7 @@ def test_access_policy_change_is_not_served_from_a_delta(
         raise AssertionError("an access-policy transition must take the full path")
 
     monkeypatch.setattr(store, "_apply_delta_rows", forbidden_delta_apply)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
     checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
 
     paths = find_module._keyword_match_paths(
@@ -1280,7 +1280,7 @@ def test_nonrepairing_incomplete_delta_returns_warming_without_a_walk(
 
     monkeypatch.setattr(freshness, "recall_delta_since", incomplete)
     monkeypatch.setattr(find_module, "_walk_md", counted_walk)
-    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root, **_kwargs: None)
     checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
 
     with pytest.raises(find_module.RetrievalIndexWarming):

@@ -395,6 +395,27 @@ def test_targeted_rows_without_current_admission_preserve_full_repair_demand(
     assert store.rebuilds == 1, "declined admission lost the full repair request"
 
 
+@pytest.mark.parametrize(("second_lag_only", "rebuilds"), [(True, 0), (False, 1)])
+def test_one_request_with_another_cause_restores_the_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_lag_only: bool, rebuilds: int
+) -> None:
+    """Folded requests stay lag-only only while every one of them was lag."""
+
+    class CatchingUpStore(_FakeStore):
+        def catch_up_lagging_delta(self) -> bool:
+            return True
+
+    store = CatchingUpStore()
+    _install(monkeypatch, store)
+    with lexstore._REPAIRS_LOCK:
+        lexstore._request_full_rebuild(tmp_path.resolve(), lag_only=True)
+
+    lexstore._schedule_repair(tmp_path, lag_only=second_lag_only)
+    assert _quiesce()
+
+    assert store.rebuilds == rebuilds
+
+
 def test_every_other_caller_still_gets_the_full_rebuild(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -780,10 +780,11 @@ _DEFERRED_UPSERTS: dict[Path, set[Path]] = {}
 #: sqlite error, a noncurrent schema, a source that moved. These are NOT
 #: contention, and none of them is fixed by re-applying rows.
 _FULL_REBUILD_REQUESTED: set[Path] = set()
-#: The pending full requests raised only by callers that saw the stored
-#: checkpoint trailing the registry. Only these may be answered by an exact
-#: delta replay: the replay is proved by checkpoint metadata, which cannot
-#: attest rows, so any other request clears its key here and keeps the rebuild.
+#: The pending full requests whose every cause was a stored checkpoint that
+#: differs from the registry's. Only these may be answered by an exact delta
+#: replay, and only when the worker then proves the catalogue exactly current.
+#: That proof reads checkpoint metadata, which cannot attest rows, so any other
+#: cause clears its key here and keeps the rebuild.
 _LAG_ONLY_REBUILDS: set[Path] = set()
 _REPAIR_PROGRESS: dict[Path, dict[str, object]] = {}
 _REPAIRS_LOCK = threading.Lock()
@@ -1810,10 +1811,12 @@ def _schedule_runtime_catalog_repair(
 ) -> None:
     """Order admission revocation before the repair that may restore it."""
     _mark_runtime_retrieval_unavailable_if_current(vault_root)
-    if deferred_paths is None:
-        _schedule_repair(vault_root, lag_only=lag_only)
-    else:
+    if deferred_paths is not None:
         _schedule_repair(vault_root, deferred_paths=deferred_paths)
+    elif lag_only:
+        _schedule_repair(vault_root, lag_only=True)
+    else:
+        _schedule_repair(vault_root)
 
 
 def request_repair(vault_root: Path) -> None:
@@ -1972,10 +1975,10 @@ def _schedule_repair(
     if they do not land, so a single deferred page stops costing a whole-corpus
     pass (#526).
 
-    `lag_only` marks a caller that saw only the stored checkpoint trailing the
-    registry. While every pending full request is lag-only, the worker first
-    replays the exact registry delta and skips the whole-corpus pass when the
-    catalogue then proves current.
+    `lag_only` marks a caller whose only observation was checkpoint metadata
+    differing from the registry's. While every pending full request is
+    lag-only, the worker first replays the exact registry delta and skips the
+    whole-corpus pass only when the catalogue then proves exactly current.
 
     Every other caller passes nothing and still gets the rebuild, so this can
     only ever do LESS work than before, never less repair: a targeted retry that
@@ -2124,6 +2127,7 @@ def _schedule_repair(
                         # a queued request asked for. Consume that level here so
                         # it cannot become a redundant pass immediately after.
                         _FULL_REBUILD_REQUESTED.discard(key)
+                        _LAG_ONLY_REBUILDS.discard(key)
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _FULL_REBUILDS_IN_FLIGHT.add(key)
                         _set_repair_progress(key, "building")
@@ -5814,7 +5818,8 @@ class LexicalStore:
             return False
         except OSError as e:
             log.info("lexical sidecar upsert source changed during repair (%s)", e)
-            # The registry holds the newer event; only these rows lag behind it.
+            # A source read moved under the apply; the worker's catch-up must
+            # prove the catalogue exactly current, or the full pass runs.
             _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
             return False
         if not applied:
@@ -5869,13 +5874,14 @@ class LexicalStore:
             applied = False
         except OSError as e:
             log.info("lexical watcher source changed during repair (%s)", e)
-            # The registry holds the newer event; only these rows lag behind it.
+            # A source read moved under the apply; the worker's catch-up must
+            # prove the catalogue exactly current, or the full pass runs.
             source_moved = True
             applied = False
-        if not applied:
-            _schedule_runtime_catalog_repair(
-                self.vault_root, deferred_paths=deferred_paths, lag_only=source_moved
-            )
+        if not applied and source_moved:
+            _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
+        elif not applied:
+            _schedule_runtime_catalog_repair(self.vault_root, deferred_paths=deferred_paths)
         else:
             if not self._hand_off_stranded_scopes():
                 _admit_after_bounded_runtime_repair(self.vault_root, applied)
@@ -8543,7 +8549,8 @@ class LexicalStore:
                             recall_checkpoint=target_checkpoint,
                         )
             if schedule_repair:
-                # Only the stored checkpoint trails the request's target here.
+                # The stored checkpoint differs from the target; the worker's catch-up
+                # must prove it exactly current, or the full pass runs.
                 _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
@@ -8941,7 +8948,9 @@ class LexicalStore:
             try:
                 readiness = self._view_readiness(view, scope, recall_checkpoint)
                 if not readiness.complete:
-                    _schedule_runtime_catalog_repair(self.vault_root)
+                    # The stored checkpoint differs from the target; the worker's catch-up
+                    # must prove it exactly current, or the full pass runs.
+                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(None, readiness)
                 return CatalogQueryResult(query_fn(view.connection), readiness)
             except RegistryError:
@@ -8983,8 +8992,9 @@ class LexicalStore:
                     # The pinned snapshot no longer matches the readiness proof — a
                     # publication landed between the verdict and this transaction.
                     # Defer rather than serve an unvalidated (possibly regressed)
-                    # generation; the repair worker reconciles it.
-                    _schedule_runtime_catalog_repair(self.vault_root)
+                    # generation; the repair worker reconciles it. The worker's catch-up
+                    # must prove it exactly current, or the full pass runs.
+                    _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
