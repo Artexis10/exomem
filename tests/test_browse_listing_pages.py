@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from exomem import commands, list_directory
-from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 _BULK = "Knowledge Base/Notes/Bulk"
 
@@ -128,7 +128,9 @@ def test_the_owners_page_and_cursor_skip_a_page_whose_deletion_is_pending(vault:
         vault, source_rel=f"{_BULK}/b-secret.md", trash_rel="Knowledge Base/_trash/b-secret.md"
     )
 
-    first = commands.op_browse_memory(vault, path=_BULK, mode="list", limit=2)
+    # The local owner holds whole-corpus authority, so the leaf withholds nothing.
+    with request_scope(owner_principal(surface="cli")):
+        first = commands.op_browse_memory(vault, path=_BULK, mode="list", limit=2)
 
     assert [Path(path).stem for path in _paths(first)] == ["a-open", "c-open"]
     assert list_directory.decode_cursor(first["next_cursor"], _BULK, False)[2] == f"{_BULK}/c-open.md"
