@@ -23,6 +23,7 @@ from typing import Any
 
 from . import add as add_module
 from . import (
+    call_spans,
     curation,
     episode_capture,
     episode_nudge,
@@ -329,6 +330,8 @@ def record(
 
     about_heat_paths = [about_paths[ref] for ref in recap.about if ref in about_paths]
 
+    # Measure this callback separately from the acknowledgement interval.
+    @call_spans.timed("episode.housekeeping")
     def record_housekeeping() -> None:
         if not idempotent:
             # A retry wrote nothing and records no new heat.
