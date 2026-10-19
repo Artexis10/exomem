@@ -78,8 +78,8 @@ PRECEDENTS_ROLE = "precedents"
 #: Material promoted only by the earlier conversation gets at most this share
 #: (a third) of the packet budget when the turn resolved something itself.
 PROMOTED_SHARE_DIVISOR = 3
-#: While the turn ranked material, a units lens that only an anchor default
-#: selected may not spend material's reserve: what material's first items
+#: While the turn ranked material, a units lens selected as an anchor default
+#: may not spend material's reserve: what material's first items
 #: cost, at most this share (a third) of the budget left after continuity and
 #: state. A packet-shape bound like `MAX_ITEMS_PER_ROLE`, the same for every
 #: vault, so it is not configuration.
@@ -653,10 +653,10 @@ def build_packet(
     listed_anchors = _listed_anchors(anchors)
     listed_ambiguity = [dict(entry) for entry in ambiguity[:working_set_resolve.MAX_AMBIGUITY_CHOICES]]
     role_ids = frozenset(str(role["id"]) for role in roles) if conversation_inferred else frozenset()
-    # A units lens that only an anchor default selected does not read the
-    # turn, so over a broad anchor it fills any budget with whatever is
-    # newest. `lane` is a registry-declared attribute and `source` a closed
-    # selection token; neither names a role.
+    # A units lens selected as an anchor default reads no turn text, even when
+    # a cue also matched, so over a broad anchor it fills any budget with
+    # whatever is newest. `lane` is a registry-declared attribute and `source`
+    # a closed selection token; neither names a role.
     yielding_roles = frozenset(
         str(role["id"]) for role in roles
         if role.get("lane") == "units" and role.get("source") == "anchor_default"
@@ -723,11 +723,14 @@ def build_packet(
             promoted_used += cost
 
     def _material_cost(item: LaneItem) -> int:
-        text = bounded_text(item.text)
-        if item.level == "page" or not text:
+        # Mirrors how the loop below serves a material item, without its caps.
+        if item.level == "page":
             return _charge("pointers", _pointer(item, "requires_read"))
+        text = bounded_text(item.text)
         if len(text) > (MAX_UNIT_CHARS if item.provenance.get("standing") else MAX_UNIT_HARD_CHARS):
             return _charge("pointers", _pointer(item, "unit_too_long"))
+        if not text:
+            return _charge("pointers", _pointer(item, "budget"))
         return _charge("units", _served_unit(item))
 
     def _defer(item: LaneItem, reason: str) -> None:

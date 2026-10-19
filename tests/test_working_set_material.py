@@ -551,7 +551,7 @@ def crowded_project(material_vault: Path) -> str:
               "assessors while the shelving keeps every crate label facing the aisle, ")
     for i in range(10):
         _note(material_vault, f"depot-{i}", "\n".join(
-            f"- [{category}] {filler}{filler}{category} {i}. ^{category}-{i}"
+            f"- [{category}] {filler}{filler}{filler}{category} {i}. ^{category}-{i}"
             for category in ("preference", "constraint", "decision")
         ), updated=f"2026-10-{10 + i:02d}")
     relay = _note(material_vault, "relay-handoff",

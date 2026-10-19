@@ -294,12 +294,13 @@ the combined selected order of units and pointers within existing role priority,
 character budgets and the conditional shared material allowance. Earlier categorical roles, including their pages
 and downgraded pointers, SHALL spend before a material group at its declared
 registry position; later roles SHALL follow. While material has admitted candidates
-in the packet's own tier, a role that a units lane serves and that an anchor default
-alone selected SHALL NOT spend material's reserve, as units or pointers: the lesser
-of what material's first three items cost as served and a third of the budget left
-after working continuity and current state. Identity, Records, Planning and
-turn-cued roles SHALL keep their priority, and material SHALL spend the reserve at
-its declared position. Categorical portions SHALL retain
+in the packet's own tier, a role that a units lane serves and that was selected as
+an anchor default, even when a turn cue also matched, SHALL NOT spend material's
+reserve, as units or pointers: the lesser of what material's first three items cost
+as served and a third of the budget that remains once working continuity, current
+state and any conversation headers are spent. Roles that other lanes serve and roles
+that only a turn cue selected SHALL keep their priority, and material SHALL spend
+the reserve at its declared position. Categorical portions SHALL retain
 unit-first ordering, and packets without material SHALL retain the old ordering.
 Own/promoted tiers and current-state/Planning precedence SHALL remain unchanged.
 Beyond the default three items, each additional served material item SHALL represent
@@ -347,7 +348,7 @@ prose budget SHALL NOT be presented as unchanged context overhead.
   or truncated evidence is not represented as a complete answer
 
 #### Scenario: Earlier categorical context survives a tight budget
-- **WHEN** a tight packet can afford either earlier identity or turn-cued
+- **WHEN** a tight packet can afford either earlier identity or cue-only
   constraint context, including a downgraded pointer, or lower-priority material
 - **THEN** the earlier role retains capacity, while later categorical units do
   not jump ahead of the combined material group solely because they are units
