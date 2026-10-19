@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from . import derived_receipts
+from . import call_spans, derived_receipts
 from .find_types import ParsedPage
 
 #: Bound content hydration, while the complete custody footprint stays available.
@@ -646,6 +646,7 @@ def reference_projection(vault_root: Path) -> ReferenceProjection | None:
     if not current.servable:
         from .find import RetrievalIndexWarming
 
+        call_spans.measure("pending_custody_unknown")
         raise RetrievalIndexWarming(site="pending_visibility_incomplete", status="temporarily_unavailable")
     if current.empty:
         return None

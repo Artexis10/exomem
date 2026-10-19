@@ -2079,6 +2079,50 @@ def test_optional_references_preserve_unknown_custody_and_error_input_exemptions
         egress.redact_withheld_references(tmp_path, f"Read {ref}", principal=who)
 
 
+@pytest.mark.parametrize("damaged_custody", [False, True])
+def test_reference_read_reports_which_pending_proof_refused_it(
+    tmp_path: Path, damaged_custody: bool,
+) -> None:
+    """Identical retryable errors must identify the failed proof without logging records."""
+    from exomem import call_spans, commands
+
+    identity = memory_refs.new_id()
+    ref = memory_refs.memory_ref(identity)
+    _write(tmp_path, "Knowledge Base/Notes/known.md", _page(
+        title="Known", body="Known material.", updated="2026-01-01", exomem_id=identity,
+    ))
+    pending = "Knowledge Base/Notes/uncertain.md"
+    after = _page(title="Pending", body="Pending material.", updated="2026-01-01")
+    _publish_change(
+        tmp_path, batch_id="read-diagnostic", generation="read-diagnostic",
+        changes=((pending, None, after, None),),
+    )
+    (tmp_path / pending).write_bytes(b"\xff")
+    if damaged_custody:
+        with sqlite3.connect(deferred_index.store_path(tmp_path)) as connection:
+            connection.execute("UPDATE pending_recall_rows SET canonical_generation = 'invalid'")
+    _reset_overlay()
+
+    token = "pending-reference-diagnostic"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        with library_scope(), pytest.raises(find_module.RetrievalIndexWarming) as refusal:
+            commands.op_get(tmp_path, path=ref)
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+        spans = {row["name"]: row for row in call_spans.pop_call_spans(token)}
+
+    assert refusal.value.site == "pending_visibility_incomplete"
+    assert refusal.value.status == "temporarily_unavailable"
+    fields = spans["read.resolve_identifier"]["fields"]
+    assert fields["pending_custody_unknown"] == int(damaged_custody)
+    assert fields["pending_identity_unknown"] == int(not damaged_custody)
+    assert set(fields) == {
+        "pending_custody_unknown", "pending_identity_unknown", "thread_cpu_us",
+    }
+    assert all(isinstance(value, int) for value in fields.values())
+
+
 def test_optional_reference_uses_the_proven_destination_of_a_pending_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
