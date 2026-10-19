@@ -7611,6 +7611,23 @@ def _reconcile_attention_counts(payload: Any) -> Any:
     return out
 
 
+@canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN))
+def _canonical_reference_decision(
+    vault_root: Path, rel_path: str, *, policy: Policy,
+    principal: RequestPrincipal, purpose: str | None,
+) -> Decision | None:
+    """Authorize reference metadata without claiming that physical bytes exist."""
+    from .. import structured_collections as collections
+
+    rel_path = collections._reference_key(vault_root, rel_path)
+    if rel_path is None:
+        return None
+    return projection_decision(
+        vault_root, rel_path, policy=policy, audience=principal.audience_id,
+        purpose=purpose, authorization_context=principal.verified_authorization_session,
+    )
+
+
 @canonical_read
 def filter_withheld_entries(
     vault_root: Path,
@@ -7917,7 +7934,20 @@ def filter_withheld_entries(
             # is decided against a path that does not exist.
             resolved = _resolve_vault_item(rel_path)
             if resolved is None:
-                continue  # not a vault item -> not the release plane's business
+                # Missing Markdown does not remove canonical collection ownership.
+                decision = _canonical_reference_decision(
+                    vault_root, rel_path, policy=policy, principal=who, purpose=declared_purpose,
+                )
+                if decision is not None:
+                    allowed = decision.level >= RELEASE_FLOOR
+                    _outcome_for_decision(
+                        vault_root, rel_path, decision=decision, policy=policy,
+                        audience=who.audience_id, purpose=declared_purpose,
+                        outcome="released" if allowed else "withheld",
+                    )
+                    if not allowed:
+                        return None
+                continue  # Ordinary unresolved references remain unchanged.
             if review_audience is not None and who.audience_id == OWNER_AUDIENCE:
                 # A bridge-review finding is owner work derived from an exact
                 # release approval. It remains actionable when that approval

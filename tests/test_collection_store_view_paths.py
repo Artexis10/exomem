@@ -349,3 +349,48 @@ def test_a_casefold_folder_spelling_cannot_bypass_the_aggregate_view_check(vault
     assert _as(vault, owner_principal(), lambda: egress.owner_only_aggregate(vault.root)) == {
         "available": False, "reason": "audience_restricted",
     }
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_maintenance_never_reports_or_repairs_a_restricted_vault_aggregate(vault, dry_run):
+    """A deleted hidden view must not change maintenance findings, counts or status."""
+    from exomem import commands, memory_refs, writer_lease
+
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "maintain_memory")
+
+    def report():
+        return writer_lease.invoke_command(command, vault.root, mode="reconcile", dry_run=dry_run)
+
+    _add_secret(vault)
+    memory_refs.ReferenceIndex(vault.root).rebuild_all()
+    before = _as(vault, _external(), report)
+    (vault.root / SECRET).unlink()
+    drift = memory_refs.drift(vault.root)
+    assert any(finding["path"] == SECRET for finding in drift)
+    assert _as(vault, _external(), report) == before == {
+        "available": False, "reason": "audience_restricted",
+    }
+    # A refused write-mode maintenance call cannot silently repair the hidden input.
+    assert memory_refs.drift(vault.root) == drift
+    owner = _as(vault, owner_principal(), lambda: writer_lease.invoke_command(
+        command, vault.root, mode="reconcile", dry_run=True))
+    assert SECRET in json.dumps(owner["remaining_drift"])
+    assert owner["references_refreshed"] == len(drift)
+
+
+def test_missing_view_references_use_canonical_authority_without_inventing_file_bytes(vault):
+    """A missing hidden view is filtered; released and ordinary unresolved references survive."""
+    _add_secret(vault)
+    (vault.root / SECRET).unlink()
+    (vault.root / OPEN).unlink()
+    missing = "Knowledge Base/Notes/not-created.md"
+    payload = {"entries": [{"path": path} for path in (SECRET, OPEN, missing)]}
+
+    def observe():
+        return egress.filter_withheld_entries(vault.root, payload)
+
+    assert _as(vault, _external(), observe) == {
+        "entries": [{"path": OPEN}, {"path": missing}],
+    }
+    assert _as(vault, owner_principal(), observe) == payload
+    assert _as(vault, owner_principal(), lambda: _call(vault, "get", path=OPEN)).startswith("NOT_FOUND:")
