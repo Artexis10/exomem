@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.128.0](https://github.com/Artexis10/exomem/compare/v0.127.5...v0.128.0) (2026-10-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **collections:** The first admitted writer upgrades an existing collection store to schema 13, even while item views remain disabled. Keep a matched pre-upgrade backup and a supported recovery route. Earlier binaries refuse the migrated store; a binary-only downgrade cannot undo the upgrade.
+
+### Features
+
+* **collections:** make history and routing canonical in SQLite ([5e847ad](https://github.com/Artexis10/exomem/commit/5e847ad296a19ab2eeef3d352d7d54db022b5baf))
+
+
+### Bug Fixes
+
+* **cli:** expose product command discovery in root help ([#1891](https://github.com/Artexis10/exomem/issues/1891)) ([bd159d7](https://github.com/Artexis10/exomem/commit/bd159d79b77c18751a3336e33533313760f3b45a))
+* **compiler:** preserve qualifications and supersession across roles ([83f0a8f](https://github.com/Artexis10/exomem/commit/83f0a8f3cad356fffac6fdf4ab4b0060f34eb80d))
+* **due:** reuse advice after first display ([#1883](https://github.com/Artexis10/exomem/issues/1883)) ([92f752d](https://github.com/Artexis10/exomem/commit/92f752d39e678c9c9eb3efb0892f8413e8bc435d))
+* **history:** report unavailable revisions and qualify coverage ([#1886](https://github.com/Artexis10/exomem/issues/1886)) ([747ed16](https://github.com/Artexis10/exomem/commit/747ed1670492186470d3e7e37fee6b460c7ae0eb))
+* **read:** keep pages available during link recovery ([#1880](https://github.com/Artexis10/exomem/issues/1880)) ([12cde60](https://github.com/Artexis10/exomem/commit/12cde6096e3b30008b7b7b9449aaedfe8913211b))
+* **recall:** pin every admitted catalogue checkpoint ([#1877](https://github.com/Artexis10/exomem/issues/1877)) ([b11f623](https://github.com/Artexis10/exomem/commit/b11f623d012346da7c23ecab43be4b5c7eefd61d))
+* **writer:** bound idempotency claim validation ([#1881](https://github.com/Artexis10/exomem/issues/1881)) ([806a37b](https://github.com/Artexis10/exomem/commit/806a37b5aba06f6864f81415cbf72851eb0d84dc))
+
+
+### Performance
+
+* **collections:** decode history paths once per transaction ([#1888](https://github.com/Artexis10/exomem/issues/1888)) ([e7d4f14](https://github.com/Artexis10/exomem/commit/e7d4f145690bc4ee5f88a6c460761b50591e822c))
+* **collections:** preserve warm state during publication ([#1882](https://github.com/Artexis10/exomem/issues/1882)) ([5671ec2](https://github.com/Artexis10/exomem/commit/5671ec2513748ef3d2e1966da9d3731fbc9373c7))
+
 ## [0.127.5](https://github.com/Artexis10/exomem/compare/v0.127.4...v0.127.5) (2026-10-18)
 
 
