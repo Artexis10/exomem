@@ -196,6 +196,52 @@ def test_edit_after_start_is_replayed_and_target_checkpoint_is_exact(
     assert stored.generation > pre_gen
 
 
+@pytest.mark.parametrize("edit_timing", ["observed_before", "missed_before", "observed_after"])
+def test_final_source_census_preserves_observed_edits_and_refuses_missed_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit_timing: str
+) -> None:
+    """An observed edit during final proof must not waste a completed build."""
+    page = _kb_file(tmp_path, "a.md", "- [config] beforecensus ^u1")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_walk = store._walk_entries
+    walks = 0
+
+    def edit() -> None:
+        page.write_text(_page_text("a", "- [config] aftercensus ^u1"), encoding="utf-8")
+        _touch_future(page)
+        if edit_timing != "missed_before":
+            freshness.on_files_changed(tmp_path, changed=[page])
+
+    def walk_with_late_edit() -> Any:
+        nonlocal walks
+        walks += 1
+        if walks == 2 and edit_timing != "observed_after":
+            edit()
+        snapshot = real_walk()
+        if walks == 2 and edit_timing == "observed_after":
+            edit()
+        return snapshot
+
+    monkeypatch.setattr(store, "_walk_entries", walk_with_late_edit)
+    published = store.rebuild_atomic()
+    assert walks >= 2
+    assert published is (edit_timing != "missed_before")
+    with sqlite3.connect(store.path) as live:
+        contents = {row[0] for row in live.execute("SELECT content FROM semantic_units")}
+    if not published:
+        assert any("beforecensus" in content for content in contents)
+        assert not any("aftercensus" in content for content in contents)
+        return
+    assert any("aftercensus" in content for content in contents)
+    assert not any("beforecensus" in content for content in contents)
+    for scope in ("kb", "vault"):
+        assert store.catalog_checkpoint(scope) == freshness.recall_checkpoint(tmp_path, scope)
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path, schedule_repair=False) is not None
+    assert any("aftercensus" in hit.content for hit in _units_in_category(tmp_path, "config"))
+
+
 def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
