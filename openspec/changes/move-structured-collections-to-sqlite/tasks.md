@@ -96,7 +96,14 @@ October 4 private runtime/create foundation: independent review approves current
   - Guarded append p95 < 20 ms at 1,000 and 10,000 items through the real dispatcher, with no stage over its budget, including a 10,000-row collection with 10% of rows ref-withheld, on Linux and on a Windows/NTFS runner (A7). Measure the partial audience's `COLLECTION_NOT_FOUND` refusal separately from successful fully authorized appends; both retain the applicable stage and p95 budgets.
   - No second commit or fsync on the acknowledgement path (the pending hash is written in the main transaction).
   - Bulk 500 < 1 s. Guard refresh through full public `inspect` p95 < 15 ms, including its unchanged counts/frequencies/presentation/coverage response; a private guard-only lookup is not this gate.
+  - Structured query latency no worse than the file path at 1,000 and 10,000 rows, on Linux and on Windows/NTFS. This bound is required; the spec requirement "Collection store latency is measured against its targets" keeps it.
   - Parity test green. Numbers recorded in `design.md` §12 and the PR.
+  - Evidence, 2026-10-19 (`design.md` §12, the isolated diagnostic at `99f136bd8`): the gate is measured on Linux/WSL ext4 and on a native Windows/NTFS runner at 1,000 and 10,000 rows, with the 10% ref-withheld split and bulk 500.
+    - Targets. Guarded append p95 is 24.25 and 24.15 ms on Linux, 132.03 and 120.66 ms on NTFS. Inspect p95 is 35.46 and 102.88 ms on Linux, 212.64 and 342.28 ms on NTFS. Bulk 500 meets 1 s on Linux (486.6 and 500.9 ms) and misses it on NTFS (1,425.8 and 2,032.8 ms). Every append and inspect target is missed, and the report gives each stage against its budget.
+    - Acknowledgement. One store transaction commits each guarded append, and the pending view hash is written in it. The lease's commit-generation file adds one more fsync on the same path (3.06–4.34 ms). That write predates the store and runs in file mode too, so the "no second fsync" bullet is reported as missed.
+    - Query bound. The batch fixes a Records query refusal: above about 500 items, both modes refused every query with `RECORD_RESPONSE_TOO_LARGE`. After the fix, the store answers each of four query cases faster than the cap-lifted file path: 6.7–7.5 times on Linux at both sizes and 29.7–32.7 times on NTFS at 1,000 rows. NTFS at 10,000 rows is unmeasured, because the file run did not finish within 40 minutes.
+    - Parity and resources. `tests/test_collection_store_wire.py` compares file and store query results in default CI. `tests/test_collection_store_release_cache.py::test_inspection_overflow_and_unreported_sql_keep_full_public_data` covers the 16 MiB inspection-contribution budget.
+    - This gate stays open on P1a.14c, on the NTFS query bound at 10,000 rows, and on whether the lease fsync counts against "no second fsync" or is a latency target under the ruling.
 
 ## P1b. Migration, snapshots and Cloud (dark)
 
@@ -189,6 +196,7 @@ October 4 private runtime/create foundation: independent review approves current
   - Backup under concurrent writes is integrity-checked at 10,000 items.
   - The current Cloud portability checks pass for export, restore and import.
   - Snapshot publication cost is reported in bytes per hour at 1, 10 and 60 writes per minute on a 10,000-row store, within the stated budget (A9). Cross-host transport measurement is deferred.
+    Evidence, 2026-10-19 (`design.md` A9): replica replacements land about 62 s apart at 1, 10 and 60 writes per minute, so the coalescing budget holds. Installed replica bytes are 1.28, 1.60 and 0.98–1.00 GB per hour. Each rate counts its one busy `retry_pending` call as installing nothing, because the replica signature was unchanged; the probe marks those windows partial.
   - Local handoff scenarios pass: routine idle-release re-acquisition never waits for another host, managed upgrade preserves committed rows, and explicit restore is writable. Cross-host handoff and adopt-local acceptance are deferred.
   - The reverse-export round trip is green.
 
@@ -259,6 +267,7 @@ October 4 private runtime/create foundation: independent review approves current
   - The edit-back matrix is green; the gate adds `collection-views-v1` to the release (`collection_store.capability.RELEASED`).
   - Report the SQLite acknowledgement against the P1a.15 targets: store, item render and pending state ≤ 4 ms p95, end to end < 20 ms. Under the 2026-10-19 owner ruling these are measured targets, not release blockers. Report physical publication separately.
   - Healthy-writer publication lag for item, manifest and aggregate views is reported and bounded under the harness. Blocked publication remains visibly pending; no numeric lag maximum is assumed.
+    Evidence, 2026-10-19 (`design.md` A9): at 60 writes per minute on 10,000 rows, all 297 item, manifest and aggregate views appeared 0.21–5.08 s after acknowledgement. The acknowledgement median reached 1.00 s and five of 300 slots were missed; that saturation is not attributed. The 1 and 10 writes-per-minute views appeared within 1.06 s.
 
 ## P3. Audit, history, and the GA gate
 
