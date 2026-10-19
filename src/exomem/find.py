@@ -3779,11 +3779,18 @@ class RetrievalIndexWarming(cli_ops.OpError):
             details["waited_ms"] = waited_ms
         # Exactly one content-free line per refusal: the decision trail this
         # path never had. Names the gate, never the query or any path.
+        request_id = None
+        if call_spans.MCP_CALL_TOKEN.get() is not None:
+            # Reuse the bound public UUID; the distinct call token is not a request ID.
+            from .command_surface import canonical_request_id, peek_request_id
+
+            request_id = canonical_request_id(peek_request_id())
         log.info(
-            "retrieval refusal: site=%s status=%s waited_ms=%s",
+            "retrieval refusal: site=%s status=%s waited_ms=%s request_id=%s",
             site,
             status,
             "n/a" if waited_ms is None else waited_ms,
+            request_id or "unbound",
         )
         super().__init__("RETRIEVAL_INDEX_WARMING", message, details=details)
 
