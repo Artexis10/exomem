@@ -27,17 +27,45 @@ Ordinary recall SHALL continue over its admitted retrieval projection and servab
 
 ### Requirement: Published catalogue admission survives strict readiness demotion
 
-After managed warm-up, ordinary recall SHALL re-prove a policy-compatible published catalogue even when strict live-projection readiness has been demoted. Every catalogue read SHALL use the admitted checkpoint, suppress every pending identity, and add only proven pending content. A stale projection SHALL load its paths from the matching catalogue without walking canonical files. Request admission SHALL NOT promote strict health readiness or escape into another request, vault or scope.
+After managed warm-up, ordinary recall SHALL re-prove a policy-compatible published catalogue even when strict live-projection readiness has been demoted. Catalogue selection SHALL retain one transaction that binds both scope checkpoints, schema, semantic identity, and policy identity. Every catalogue read SHALL use that view, suppress every pending identity, and add only proven pending content. Exact and stale projections SHALL load their paths from that view without walking canonical files. Request admission SHALL NOT promote strict health readiness or escape into another request, vault, thread, or scope.
+
+Selection SHALL materialize the evidence needed after the transaction closes. Query encoding, model loading, and reranking SHALL NOT retain the transaction. Canonical hydration SHALL match selected content hashes or exact request-owned pending evidence. A mismatch SHALL omit affected evidence and disclose incomplete coverage. Catalogue admission SHALL NOT weaken existing generation checks for independent indexes or claim a snapshot across separate stores. Partial results SHALL NOT enter shared result caches. Current disclosure authority and terminal byte checks SHALL remain mandatory.
 
 #### Scenario: Repair demotes readiness while a pending edit is durable
 
 - **WHEN** a compatible published catalogue exists, a committed edit has exact pending custody, and repair or health has demoted strict readiness
 - **THEN** keyword and hybrid recall return the committed edit with projection lag disclosed, without walking the corpus
 
+#### Scenario: Ordinary publication advances after request admission
+
+- **WHEN** an ordinary data publication advances the content checkpoint after a compatible catalogue is admitted
+- **THEN** selection continues from the retained catalogue without mixing rows, membership, or statistics with the newer publication
+- **AND** the response discloses known lag without disabling unrelated recall
+
 #### Scenario: Identity changes after request admission
 
-- **WHEN** access policy, semantic catalogue identity or the published content checkpoint changes before an admitted catalogue read
-- **THEN** that read refuses rather than serving rows under the previous proof
+- **WHEN** access policy or semantic catalogue identity changes while a request selects or finishes its admitted evidence
+- **THEN** that read refuses rather than serving rows under an invalid interpretation
+
+#### Scenario: Canonical bytes advance beyond selected evidence
+
+- **WHEN** a selected page's current bytes differ from its admitted content hash and no exact request-owned pending page proves them
+- **THEN** recall omits that evidence, preserves unaffected results, and discloses incomplete coverage without caching the partial result
+
+#### Scenario: Global retirement follows pending admission
+
+- **WHEN** publication retires global custody after a request obtained exact pending pages and their complete suppression footprint
+- **THEN** that request retains its proven pending evidence and does not revive suppressed persistent identities
+
+#### Scenario: Provider work follows catalogue selection
+
+- **WHEN** recall loads a model, encodes a query, or reranks selected candidates
+- **THEN** it holds no retained catalogue transaction during that work
+
+#### Scenario: Strict health observes a newer publication
+
+- **WHEN** a request retains an older admitted catalogue while strict readiness checks the current publication
+- **THEN** readiness uses its independent current proof and cannot borrow the request's older transaction
 
 #### Scenario: Nested recall or an exception ends a request
 

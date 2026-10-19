@@ -9,6 +9,7 @@ Pending index work must reduce coverage honestly while the service repairs it, w
 
 - Replace whole-request refusal for healthy, incomplete pending work with path-scoped suppression and an explicit coverage warning.
 - Keep proven pending pages available and suppress persistent evidence for every pending identity.
+- Retain one admitted catalogue during selection so ordinary publication cannot cancel a coherent read.
 - Treat the hydration limit as a body limit; use the existing custody rows for a complete path footprint during larger bursts.
 - Recover ready and stranded custody through the existing bounded service worker, including paths superseded outside governed writes.
 - Preserve current policy, access, tombstone, catalogue identity, and exact publication checks.
@@ -28,7 +29,7 @@ None.
 
 ## Impact
 
-The change affects pending snapshots, recall and reference overlays, derived worker recovery, and their integration checks.
+The change affects pending snapshots, catalogue selection, recall and reference overlays, derived worker recovery, and their integration checks.
 It changes the ordinary recall contract that currently requires a complete pending overlay before any catalogue read.
 It adds no model, external service, canonical data rewrite, or runtime flag.
 Existing optional heavy capabilities keep their current defaults and failure behavior.
