@@ -3225,11 +3225,17 @@ class CollectionWriter:
             }
             for name in declared.validators:
                 types.named_validator(name).validate(proposed, plans, write=None)
+            metadata = governance.manifest_metadata(manifest_text)
+            row_metadata = {key: governance.row_metadata(proposed.schema, values, metadata)
+                            for key, values in plans.items()}
             retired_pages = summary.page_paths(current) if mode_change else ()
-            self._preflight_views([current.path, *retired_pages, *(path for (path,) in self.connection.execute(
-                "SELECT view_path FROM items WHERE collection_id=? AND view_path IS NOT NULL UNION ALL "
-                "SELECT view_path FROM held_candidates WHERE collection_id=?",
-                (current.collection_id, current.collection_id),
+            # Unchanged row inputs and governance retain their immutable original manifest's render proof.
+            # Capture before replacing governance; held views lack that original-manifest chain.
+            self._preflight_views([current.path, *retired_pages, *(path for key, path, before in self.connection.execute(
+                "SELECT item_key,view_path,governance_json FROM items "
+                "WHERE collection_id=? AND view_path IS NOT NULL", (current.collection_id,),
+            ) if row_metadata[key] != before), *(path for (path,) in self.connection.execute(
+                "SELECT view_path FROM held_candidates WHERE collection_id=?", (current.collection_id,),
             ))])
             if mode_change and (self._publication.pending
                                 or summary.populated(self.connection, current.collection_id)
@@ -3253,10 +3259,8 @@ class CollectionWriter:
                 "UPDATE collections SET manifest_version = ?, audit_reader_version = 2 WHERE collection_id = ?",
                 (txn["manifest_version_after"], current.collection_id),
             )
-            metadata = governance.manifest_metadata(manifest_text)
             self._execute("UPDATE items SET governance_json=? WHERE collection_id=? AND item_key=?",
-                ((governance.row_metadata(proposed.schema, values, metadata), current.collection_id, key)
-                 for key, values in plans.items()), many=True)
+                ((value, current.collection_id, key) for key, value in row_metadata.items()), many=True)
             for held_id, kind, encoded, captured, path in self.connection.execute(
                 "SELECT held_id,kind,candidate_json,governance_json,view_path FROM held_candidates WHERE collection_id=?",
                 (current.collection_id,),

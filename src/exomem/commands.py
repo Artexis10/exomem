@@ -4054,6 +4054,7 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
     Narrower than `audit_fix`: it does NOT canonicalize wikilinks or
     backfill frontmatter (those are content rewrites you opt into).
     Idempotent; `dry_run=true` reports without writing.
+    Whole-vault findings and totals require unrestricted owner authority.
 
     Args:
         dry_run: If true, compute what would change without writing.
@@ -4068,6 +4069,9 @@ def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = 
          remaining_drift: [<audit findings>],
          dry_run: bool}
     """
+    refusal = egress_module.owner_only_aggregate(vault_root)
+    if refusal is not None:
+        return refusal
     from .writer_lease import (
         active_direct_mutation_guard,
         active_manager,
@@ -4294,7 +4298,12 @@ def op_get(
         NOT_FOUND (no such file); UNREADABLE (parse failure);
         SECRET_BLOCKED (opt-in raw content contains protected material).
     """
-    with call_spans_module.span("read.resolve_identifier"):
+    with (
+        call_spans_module.meter(
+            "pending_custody_unknown", "pending_identity_unknown",
+        ) as resolution_counts,
+        call_spans_module.span("read.resolve_identifier", resolution_counts),
+    ):
         path = _resolve_memory_identifier(vault_root, path)
     try:
         with call_spans_module.span("read.prepare"):

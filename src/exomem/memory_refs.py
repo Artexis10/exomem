@@ -831,6 +831,7 @@ def _apply_pending_identity(
         # a governed mutation to the wrong page. Path-based recall stays usable.
         from .find import RetrievalIndexWarming
 
+        call_spans.measure("pending_identity_unknown")
         raise RetrievalIndexWarming(
             site="pending_visibility_incomplete", status="temporarily_unavailable"
         )

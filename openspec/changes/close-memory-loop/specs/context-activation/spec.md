@@ -495,6 +495,29 @@ on any other page, SHALL be kept.
 - **THEN** the packet carries the lede once, by the page's ref, and no unit fragment of
   that page repeating it
 
+### Requirement: Exact outgoing unit relations remain actionable
+The compiler SHALL preserve admitted explicit outgoing relations from a selected exact unit as bounded exact read pointers.
+Each pointer SHALL bind the selected source version, canonical relation and unique admitted target.
+The compiler SHALL emit a pointer only when that source version survives packet assembly.
+Distinct sources that name one target SHALL retain distinct bindings.
+The compiler SHALL reuse the current discovery deadline and row bound without reducing incoming correction allowances.
+It SHALL apply existing pointer, context and disclosure limits without automatically including target bodies or changing claim currency.
+
+#### Scenario: A selected claim retains a qualification in another unit
+- **WHEN** a selected current claim authors a registered relation to an admitted exact unit on the same or another page
+- **THEN** a bounded pointer names the source reference, canonical relation and exact target reference
+- **AND** reading that pointer returns the target's current qualified content
+
+#### Scenario: Unproved or omitted sources produce no relation pointer
+- **WHEN** the source version changes, the source is omitted, or current graph publication becomes unavailable
+- **THEN** the compiler emits no tentative outgoing pointer from that source
+- **AND** it retains the existing incomplete discovery outcome without cold proof or waiting
+
+#### Scenario: A hidden or ambiguous target does not become a substitute
+- **WHEN** the target is hidden, missing or ambiguous
+- **THEN** the compiler emits no substitute unit or page pointer
+- **AND** a hidden target consumes no allowance and does not preserve an otherwise redundant source fragment
+
 ### Requirement: A Planning item anchor reports its item page
 Each active Planning item's `plan` anchor SHALL report the item's own canonical page as
 its ref, and the active-plans lane SHALL spell the item by that ref, so a turn that
