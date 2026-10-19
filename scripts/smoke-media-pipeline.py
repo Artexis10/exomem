@@ -14,6 +14,7 @@ Run from a box with the [media] extra: uv run python scripts/smoke-media-pipelin
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import importlib.util
 import io
 import json
@@ -61,6 +62,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # keep lane lines in order with the server's logs
+    faulthandler.enable()  # a native abort at exit names the threads still alive
     missing = _missing_dependencies()
     if missing:
         print(f"SMOKE: optional media lanes unavailable: {', '.join(sorted(missing))}")
