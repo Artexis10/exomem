@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.130.0](https://github.com/Artexis10/exomem/compare/v0.129.0...v0.130.0) (2026-10-19)
+
+
+### Features
+
+* **cloud:** let owners export their Cloud memory and record disk use ([#1708](https://github.com/Artexis10/exomem/issues/1708)) ([1148adc](https://github.com/Artexis10/exomem/commit/1148adc20a27d7881841af79f3c8dd799e562df1))
+
+
+### Bug Fixes
+
+* bound note and unit history reads to the requested page ([#1916](https://github.com/Artexis10/exomem/issues/1916)) ([21ba9d7](https://github.com/Artexis10/exomem/commit/21ba9d7bccdd2e9689d04243b6d2c6fb835efc15))
+* **cloud:** classify plugin eval writes from the command registry ([#1912](https://github.com/Artexis10/exomem/issues/1912)) ([5068540](https://github.com/Artexis10/exomem/commit/5068540d5af5e5129e6b3b2648515e8769a1c293))
+* **context:** keep room for turn-ranked material behind default lenses ([#1921](https://github.com/Artexis10/exomem/issues/1921)) ([2f9255c](https://github.com/Artexis10/exomem/commit/2f9255cffed9338a6c90a4d3228d5ac50d817b5e))
+* **graph:** keep a dependency on a deleted page visible to the compiler ([#1911](https://github.com/Artexis10/exomem/issues/1911)) ([2535c6c](https://github.com/Artexis10/exomem/commit/2535c6c79a15231800405524a053337fef471432))
+* **graph:** keep a dependency through a shared page name visible to the compiler ([#1917](https://github.com/Artexis10/exomem/issues/1917)) ([f944d88](https://github.com/Artexis10/exomem/commit/f944d885acc397c08af4e94d8339fb324d8b04c7))
+
+
+### Performance
+
+* **collections:** reuse the coordinator connection and record the store latency baseline ([#1913](https://github.com/Artexis10/exomem/issues/1913)) ([f84f43c](https://github.com/Artexis10/exomem/commit/f84f43cfb7743eb421739b6c12d8dc2cdc861737))
+* page browse_memory listings with a resumable cursor ([#1918](https://github.com/Artexis10/exomem/issues/1918)) ([43497d4](https://github.com/Artexis10/exomem/commit/43497d4e706fa6192d1215a6066efe4b48f028bd))
+* stop rewriting the due-state projection on writes that change nothing ([#1914](https://github.com/Artexis10/exomem/issues/1914)) ([cbc581f](https://github.com/Artexis10/exomem/commit/cbc581fcbc610f7979096f8f17978945f2e9de4e))
+
 ## [0.129.0](https://github.com/Artexis10/exomem/compare/v0.128.2...v0.129.0) (2026-10-19)
 
 

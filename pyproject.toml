@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.129.0" # x-release-please-version
+version = "0.130.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -138,6 +138,11 @@ media-cpu = [
 media = [
     "exomem[media-cpu]",
     "faster-whisper>=1.0",
+    # faster-whisper 1.2.1 decodes with av.open(metadata_errors=...), which PyAV 19
+    # removed, so every transcription fails. When a faster-whisper release carries
+    # its upstream fix (SYSTRAN/faster-whisper#1495), raise the faster-whisper floor
+    # to that release, then drop this bound.
+    "av>=11,<19",
     "ctranslate2>=4.6.3,<5",
     # CUDA-12 runtime owned by CTranslate2 on Linux and Windows. torch's cuBLAS
     # major is independent; the media parent discovers these wheel directories
