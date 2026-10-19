@@ -24,6 +24,10 @@ The existing semantic-block metadata syntax (`- relations: kind: [[Target]]`) SH
 - **AND** a reader denied the page gets the same destination and fragment outcome as in a vault without that page
 - **AND** a queued repair of a deleted page leaves the surviving authors' edges a full rebuild leaves
 
+#### Scenario: A fragment whose page name several pages share
+- **WHEN** a relation target carries a `#fragment` and its page name matches more than one page the derivation may see
+- **THEN** the relation keeps its unresolved page-level edge with the fragment and the `ambiguous` outcome
+
 #### Scenario: A target with no fragment is unaffected
 - **WHEN** a relation target carries no `#fragment`
 - **THEN** the resulting edge is identical to the one produced before unit-level destinations existed

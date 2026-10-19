@@ -27,8 +27,8 @@ material_vault = material_fixtures.material_vault
 owner = history_fixtures.owner
 
 
-def _create(root: Path, title: str, body: str) -> str:
-    args = dict(content=body, note_type="insight", title=title, projects=["harbor-study"])
+def _create(root: Path, title: str, body: str, note_type: str = "insight") -> str:
+    args = dict(content=body, note_type=note_type, title=title, projects=["harbor-study"])
     preview = commands.op_note(root, validate_only=True, **args)
     review = {}
     if preview.get("reviewed_none_required"):
@@ -154,6 +154,44 @@ def test_deleting_an_exact_dependency_page_leaves_its_claim_partial(material_vau
 
     assert primary_unit.unit_ref in {unit["ref"] for unit in packet["units"]}
     assert removed_unit.unit_ref not in {pointer["ref"] for pointer in packet["pointers"]}
+    assert packet["generation"]["correction_context"] == "partial"
+
+
+def test_an_exact_dependency_through_a_shared_page_name_leaves_its_claim_partial(
+    material_vault: Path, owner,
+) -> None:
+    root = material_vault
+    claim = "## Claim\n- category: observation\n- id: limitation\n\n{}\n"
+    first = _create(root, "Neutral operating envelope",
+                    claim.format("Operation is conditional on the seal passing its pressure check."))
+    second = _create(root, "Neutral operating envelope",
+                     claim.format("Operation needs a signed valve log."), note_type="pattern")
+    assert first != second and Path(first).stem == Path(second).stem
+    primary = _create(root, "Violet worksheet calibration", (
+        "## Claim\n- category: observation\n- id: authorization\n"
+        f"- relations: depends_on: [[{Path(first).stem}#limitation]]\n\n"
+        "Violet worksheet calibration may proceed.\n"
+    ))
+    primary_unit = semantic_index.current_parent_index_state(root, primary).document.resolve_fragment("authorization").unit
+    candidates = {
+        semantic_index.current_parent_index_state(root, path).document.resolve_fragment("limitation").unit.unit_ref
+        for path in (first, second)
+    }
+    lexstore.ensure_fresh(root)
+    assert graph_sync.drain_active_rebuilds()
+    freshness.seed(root, "vault", ((str(path), freshness.stat_signature(path))
+                                  for path in vault_module.walk_vault_md(root)))
+    find.evict_resolver_caches(root)
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    find.recall_resolver_snapshot(root, expected_checkpoint=freshness.live_recall_checkpoint(root, "vault"))
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(root).rebuild()
+    packet = commands.op_activate_context(
+        root, turn="In harbor-study, may violet worksheet calibration proceed?", max_chars=4000,
+    )
+
+    assert primary_unit.unit_ref in {unit["ref"] for unit in packet["units"]}
+    assert not candidates & {pointer["ref"] for pointer in packet["pointers"]}
     assert packet["generation"]["correction_context"] == "partial"
 
 
