@@ -371,7 +371,7 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
 
 #: The emission ledger lives beside the projection, not inside it. It changes
 #: on every delivered advisory; the projection changes on every governed
-#: write. Keeping them in one file made each delivery rewrite the whole
+#: write that changes state. Keeping them in one file made each delivery rewrite the whole
 #: projection (20 MB, ~600 ms on the personal vault) and, worse, made every
 #: read look like a state change to anything keyed on the projection file.
 EMISSION_FILENAME = ".due-state-emission.json"
