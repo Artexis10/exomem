@@ -1522,6 +1522,61 @@ def test_emitted_parent_hints_missing_row_is_incomplete(tmp_path):
     assert scoped_out.value is None
 
 
+def test_eligibility_metadata_work_stays_bound_to_candidates(
+    tmp_path, monkeypatch, warm_managed_cell
+):
+    """Unrelated pages must not turn a fixed candidate lookup into a vault scan."""
+    parent = "Knowledge Base/media/demo.mp4.md"
+    child = "Knowledge Base/media/demo.mp4.frames/scene.jpg.md"
+    missing = "Knowledge Base/missing.md"
+    steps = 0
+    connect = lexstore.LexicalStore._connect
+
+    def count_step():
+        nonlocal steps
+        steps += 1
+        return 0
+
+    def measured_connect(store, *args, **kwargs):
+        conn = connect(store, *args, **kwargs)
+        conn.set_progress_handler(count_step, 1)
+        return conn
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_connect", measured_connect)
+    work = {False: [], True: []}
+    for size in (200, 800):
+        root = tmp_path / str(size)
+        _write_page(root, parent, "transcript")
+        page = _write_page(root, child, "frame OCR")
+        page.write_text(
+            "---\ntype: source\nparent_media: Knowledge Base/media/demo.mp4\n"
+            "evidence_file: Knowledge Base/media/demo.mp4.frames/scene.jpg\n"
+            "updated: 2026-01-01\n---\n# frame\n\nframe OCR\n",
+            encoding="utf-8",
+        )
+        for number in range(size):
+            _write_page(root, f"Knowledge Base/filler/{number}.md", "unrelated text")
+        warm_managed_cell(root, prebuild_refs=False)
+
+        for parents_only in (False, True):
+            steps = 0
+            result = lexstore.eligibility_metadata_result(
+                root, {child, missing}, scope="kb", freshness=None,
+                parents_only=parents_only,
+            )
+            work[parents_only].append(steps)
+            assert result.readiness.complete
+            assert set(result.value) == {child, parent}
+            assert result.value[child].parent == parent
+            assert result.value[parent].parent is None
+            assert result.value[child].updated == "2026-01-01"
+            assert (result.value[child].view is None) == parents_only
+
+    for parents_only, (small, large) in work.items():
+        assert small > 0
+        assert large <= 1.5 * small, (parents_only, small, large)
+
+
 # ---------------------------------------------------------------- substring primitive
 
 

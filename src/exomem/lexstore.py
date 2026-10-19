@@ -3321,13 +3321,13 @@ def _eligibility_metadata_query(
 ) -> dict[str, EligibilityMetadata]:
     from .vocabulary.registry import RegistryError
 
-    view = "NULL" if parents_only else "eligibility_view_json"
+    view = "NULL" if parents_only else "p.eligibility_view_json"
     rows = conn.execute(
         "WITH requested AS (SELECT value AS path FROM json_each(?)), "
         "wanted AS (SELECT path FROM requested UNION "
         "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
-        f"SELECT path, {view}, emitted_parent_path, updated FROM pages "
-        "WHERE in_vault = 1 AND path IN (SELECT path FROM wanted)",
+        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated "
+        "FROM wanted w CROSS JOIN pages p ON p.path = w.path WHERE p.in_vault = 1",
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
     result = {}
