@@ -2897,7 +2897,7 @@ def _orchestrate(args: argparse.Namespace) -> int:
                 # Disabled wheels stage the release capability only in their test installation.
                 print(
                     "product-e2e: S1 Records summary journey "
-                    "(capability, enrolment, import, fields, copy, adoption, rollback)"
+                    "(capability, enrolment, import, fields, copy, adoption, rollback, migration)"
                 )
                 s1_journey = run_phase(
                     "records summary journey",
