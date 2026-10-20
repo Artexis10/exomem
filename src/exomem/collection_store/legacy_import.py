@@ -315,7 +315,7 @@ def _natural_key(manifest, values):
 
 
 def _body(manifest, values, body):
-    return record_formats.remove_item_presentation(records._semantic_body(body, manifest, values))
+    return records._semantic_body(body, manifest, values)
 
 
 def _envelope(captured, context, transition, generation, previous, *, original=None):

@@ -427,6 +427,34 @@ def test_managed_presentation_imports_under_the_file_mode_payload_identity(tmp_p
         assert (path.parent / "Items/Original.md").read_bytes() == before
 
 
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- exomem-record-presentation:v1 digest=sha256:" + "0" * 64 + " -->\n"
+        "Old rendering\n<!-- /exomem-record-presentation -->",
+        "<!-- exomem-item-presentation:v1 recipe=sha256:" + "0" * 64
+        + " item=sha256:" + "1" * 64 + " -->\nOld rendering\n<!-- /exomem-item-presentation:v1 -->",
+    ],
+    ids=["legacy", "shared"],
+)
+def test_import_preserves_presentation_text_without_its_recipe(tmp_path, marker):
+    # A removed recipe must neither crash import nor grant ownership of an old body span.
+    body = marker + "\n\n\nAuthored body\n"
+    root, path = _items(tmp_path, values={"title": "One"}, body=body)
+    item = path.parent / "Items/Original.md"
+    before = item.read_bytes()
+    expected_body = vault.parse_frontmatter(before.decode(), strict=True)[1]
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
+        with conn:
+            conn.execute("BEGIN")
+            legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        (record,) = captured.snapshot.records
+        assert conn.execute("SELECT body,payload_hash FROM items WHERE item_key=?", (KEY,)).fetchone() == (
+            expected_body, records._payload_hash(captured.manifest, KEY, record.values, record.body),
+        )
+        assert item.read_bytes() == before
+
+
 @pytest.mark.parametrize("change", ["manifest", "item", "held-add"])
 def test_changed_capture_refuses_before_commit(tmp_path, change):
     # No complete-capture claim survives an edited source or new held candidate.
