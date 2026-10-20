@@ -1467,6 +1467,13 @@ class CollectionWriter:
         if stop is not None and stop():
             result["warnings"].append("projection_pending")
             return result
+
+        def awaits_census(projection):
+            # A partial census cannot recreate an old path before finding an offline rename; bytes that
+            # never reached the path left no old path to find.
+            return (projection["kind"] == "item" and missing_ready is not None
+                    and not missing_ready(projection["collection_id"]) and views.may_have_reached_path(projection))
+
         with self._mutation(reconcile=True, stop=stop):
             batch = self._publication
             batch.bind(result)
@@ -1539,9 +1546,7 @@ class CollectionWriter:
                 batch.precommits[manifest.collection_id] = manifest
                 result["examined"] += 1
                 try:
-                    if projection["kind"] == "item" and missing_ready is not None \
-                            and not missing_ready(projection["collection_id"]):
-                        # A partial census cannot recreate an old path before finding an offline rename.
+                    if awaits_census(projection):
                         try:
                             parent = batch._parent(projection["path"])
                             opened = batch._fs().file(parent, Path(projection["path"]).name)
@@ -1581,8 +1586,7 @@ class CollectionWriter:
                     elif opened.error.code != "MISSING":
                         raise opened.error
                     digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
-                    if raw is None and projection["kind"] == "item" and missing_ready is not None \
-                            and not missing_ready(projection["collection_id"]):
+                    if raw is None and awaits_census(projection):
                         batch.pending = True
                         continue
                     observed = None if paths is None else paths[projection["path"]]
@@ -3237,8 +3241,9 @@ class CollectionWriter:
                 if refused is not None:
                     raise refused
             mode_change = proposed.view_mode != current.view_mode
-            if mode_change and summary.populated(self.connection, current.collection_id):
-                raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
+            refused = summary.mode_change_refusal(self.connection, current, proposed)
+            if refused is not None:
+                raise refused
             records._refuse_excluded_manifest_fields(proposed)
             if proposed.view_diagnostics:
                 diagnostic = proposed.view_diagnostics[0]

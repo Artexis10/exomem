@@ -8,6 +8,7 @@ neighborhood, and recorded contradictions/supersessions — over the top hits.
 Assembly is purely structural and deterministic (no generative or reasoning
 model), never mutates the vault, and never changes `find`'s hits or ordering
 when `pack` is off.
+
 ## Requirements
 
 ### Requirement: Optional Context Pack Assembly From `find`
@@ -111,7 +112,12 @@ deferring the judgment to the reader, and SHALL be computed only among the packe
 notes. When the embedding sidecar is unavailable (embeddings disabled or
 unimportable), `embeddings_available` SHALL be `false` and no proximity pair SHALL be
 surfaced, while asserted pairs and `superseded` edges (which need no embeddings) SHALL
-still be surfaced.
+still be surfaced. In an activated managed runtime, pack assembly SHALL read proximity
+pairs only from a resident corpus matrix that is current, or that the bounded catch-up
+makes current, and SHALL NOT load it on the request thread.
+While the background load runs, `embeddings_available` SHALL be `false`, no proximity
+pair SHALL be surfaced, and `truncation` SHALL say that the embedding matrix is still
+loading.
 
 Pack assembly SHALL NOT consult review state: an authored or stanced pair is
 reasoning context here, not a work item, and labelling it MUST NOT suppress it.
@@ -141,6 +147,15 @@ reasoning context here, not a work item, and labelling it MUST NOT suppress it.
   proximity pair
 - **THEN** the asserted pair appears first with `provenance: "asserted"` and the
   proximity pair follows with `provenance: "proximity"`
+
+#### Scenario: A pack names a still-loading embedding matrix
+
+- **WHEN** an activated managed runtime assembles a pack while its corpus matrix loads in
+  the background
+- **THEN** the pack does not wait for the load and surfaces no proximity pair
+- **AND** `embeddings_available` is `false` and `truncation` says the embedding matrix is
+  still loading
+- **AND** asserted pairs and `contradictions.superseded` are still surfaced
 
 ### Requirement: Bounded Assembly With Explicit Truncation
 
