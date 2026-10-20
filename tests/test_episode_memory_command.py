@@ -435,7 +435,7 @@ def test_offline_episode_references_scan_before_the_commit_boundary(
 def test_a_duplicate_arriving_during_policy_admission_is_reprepared_before_revision_selection(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import freshness, mutation_lock, writer_lease
+    from exomem import call_ledger, call_spans, freshness, mutation_lock, writer_lease
 
     identity = "11111111-1111-4111-8111-111111111111"
     reference = _write_note(vault, "reference-target", identity)
@@ -461,17 +461,47 @@ def test_a_duplicate_arriving_during_policy_admission_is_reprepared_before_revis
     monkeypatch.setattr(egress, "_visible_candidates", visible)
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "episode_memory")
-    with request_scope(owner_principal(surface="mcp")):
-        result = manager.invoke(command, (vault, schema_module.load_source_schema(vault)), {
-            "action": "record", "episode": KEY, "subject": "Reference recap",
-            "summary": "Recorded a reference target.", "worked_on": ["Used the target."],
-            "about": [reference],
-        })
-        stored = episode_recovery.EpisodeInputOwner(vault)._store().read(episode_model.episode_id(KEY))
+    token = "episode-reference-event-retry"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            result = manager.invoke(command, (vault, schema_module.load_source_schema(vault)), {
+                "action": "record", "episode": KEY, "subject": "Reference recap",
+                "summary": "Recorded a reference target.", "worked_on": ["Used the target."],
+                "about": [reference],
+            })
+            stored = episode_recovery.EpisodeInputOwner(vault)._store().read(episode_model.episode_id(KEY))
+    finally:
+        spans = call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
 
     assert states and set(states) == {"free"}
     assert result["revision"] == 1 and result["about_skipped"] == 1
     assert "about" not in stored["state"]["input_revisions"][0]["evidence"]
+    phase = next(span for span in spans if span["name"] == "episode.reference_commit")
+    row = call_ledger.build_row(
+        sequence=1,
+        prev_hash=call_ledger.GENESIS_HASH,
+        request_id=token,
+        tool="episode_memory",
+        outcome="ok",
+        duration_ms=None,
+        access="write",
+        spans=spans + [
+            {"name": f"synthetic.phase.{index}", "count": 1, "ms": phase["ms"] / 2}
+            for index in range(40)
+        ],
+    )
+    assert row["spans_truncated"] > 0
+    retained = next(span for span in row["spans"] if span["name"] == phase["name"])
+    assert {key: retained["fields"][key] for key in (
+        "preparation_attempts", "commit_changed", "event_proof_changed", "snapshot_changed"
+    )} == {
+        "preparation_attempts": 2,
+        "commit_changed": 0,
+        "event_proof_changed": 1,
+        "snapshot_changed": 0,
+    }
 
 
 def test_three_reference_captures_survive_concurrent_preparation_invalidation(
@@ -544,8 +574,8 @@ def test_three_reference_captures_survive_concurrent_preparation_invalidation(
 def test_reference_preparation_survives_two_real_intervening_commits(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import call_spans, writer_lease
     from exomem import vault as vault_module
-    from exomem import writer_lease
 
     monkeypatch.setenv("EXOMEM_SYNC_WORKERS", "2")
     reference = _write_note(vault, "reference-target", "11111111-1111-4111-8111-111111111111")
@@ -565,12 +595,27 @@ def test_reference_preparation_survives_two_real_intervening_commits(
         return result
 
     monkeypatch.setattr(memory_refs, "_reference_owners_read_only", owners)
-    result = _reference_record(manager, vault, reference)
+    token = "episode-reference-commit-retry"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        result = _reference_record(manager, vault, reference)
+    finally:
+        spans = call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
     assert len(written) == 2 and all(path.exists() for path in written)
     assert result["revision"] == 1 and result["about_skipped"] == 0
     assert len(_episodes(vault)) == 1
     assert writer_lease._take_capture_waiter_slot(), "the completed retry must release its admission"
     writer_lease._release_capture_waiter_slot()
+    phase = next(span for span in spans if span["name"] == "episode.reference_commit")
+    assert {key: phase["fields"][key] for key in (
+        "preparation_attempts", "commit_changed", "event_proof_changed", "snapshot_changed"
+    )} == {
+        "preparation_attempts": 3,
+        "commit_changed": 2,
+        "event_proof_changed": 0,
+        "snapshot_changed": 0,
+    }
 
 
 @pytest.mark.parametrize("failure", [
