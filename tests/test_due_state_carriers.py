@@ -417,6 +417,46 @@ def test_the_default_compact_response_carries_the_block(vault: Path) -> None:
     assert block["top"][0]["due_since"] == _yesterday()
 
 
+def test_a_public_write_keeps_projection_counts_when_the_ledger_clips_phases(
+    vault: Path,
+) -> None:
+    from exomem import call_ledger, call_spans
+
+    _scratch_page(vault)
+    _prime(vault)
+    token = "projection-write-counts"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        result = _observe(vault, "The connection pool has a bounded queue.")
+        spans = call_spans.pop_call_spans(token)
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    assert result["status"] == "committed"
+    phase = next(span for span in spans if span["name"] == "post_commit.due_state")
+    counts = phase["fields"]
+    assert counts["save_attempts"] == counts["saves"]
+    assert counts["saves"] + counts["unchanged"] > 0
+    assert (counts["saved_bytes"] > 0) == (counts["saves"] > 0)
+
+    row = call_ledger.build_row(
+        sequence=1,
+        prev_hash=call_ledger.GENESIS_HASH,
+        request_id="projection-write-counts",
+        tool="observe_memory",
+        outcome="ok",
+        duration_ms=None,
+        access="write",
+        spans=spans + [
+            {"name": f"synthetic.phase.{index}", "count": 1, "ms": phase["ms"] / 2}
+            for index in range(40)
+        ],
+    )
+    assert row["spans_truncated"] > 0
+    retained = next(span for span in row["spans"] if span["name"] == phase["name"])
+    assert retained["fields"] == counts
+
+
 def test_the_legacy_detail_omits_the_block(vault: Path) -> None:
     _overdue_prediction(vault, check_by=_yesterday())
     _scratch_page(vault)

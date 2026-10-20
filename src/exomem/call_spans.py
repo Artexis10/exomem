@@ -71,6 +71,17 @@ THREAD_CPU_US = "thread_cpu_us"
 #: thread CPU says other threads ran meanwhile, not that they blocked this one.
 PROCESS_CPU_US = "process_cpu_us"
 CPU_FIELDS = frozenset({THREAD_CPU_US, PROCESS_CPU_US})
+# These fixed measurements describe projection I/O as integer counts and byte totals.
+PROJECTION_SAVE_ATTEMPTS = "save_attempts"
+PROJECTION_SAVES = "saves"
+PROJECTION_SAVED_BYTES = "saved_bytes"
+PROJECTION_UNCHANGED = "unchanged"
+PROJECTION_WRITE_FIELDS = (
+    PROJECTION_SAVE_ATTEMPTS,
+    PROJECTION_SAVES,
+    PROJECTION_SAVED_BYTES,
+    PROJECTION_UNCHANGED,
+)
 #: A field key is a measurement name, never a value. Structural rather than a
 #: declared list, so a new count needs no registry edit, but a key carrying
 #: content cannot pass: no slashes, dots, spaces, digits or capitals, which is

@@ -5205,7 +5205,10 @@ def op_preserve(
     try:
         from . import due_state
 
-        with call_spans_module.span("post_commit.observation_delta"):
+        with (
+            call_spans_module.meter(*call_spans_module.PROJECTION_WRITE_FIELDS) as measured,
+            call_spans_module.span("post_commit.observation_delta", measured),
+        ):
             due_state.apply_observation_write_delta(
                 vault_root,
                 path=str(result.sidecar_path or ""),
