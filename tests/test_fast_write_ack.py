@@ -25,6 +25,7 @@ def _install_protocol(
     for seam in (
         "prepare_batch",
         "prove_committed",
+        "pending_visibility_complete",
         "publish_pending_visibility",
         "signal_components",
         "component_status",

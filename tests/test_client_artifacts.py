@@ -1911,6 +1911,90 @@ def test_a_fast_acknowledgement_session_carries_the_media_sidecar(
     assert terminal["derived_sync"] in {"pending", "completed", "failed"}
 
 
+def test_one_artifact_batch_publishes_each_pending_custody_once(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared navigation must not reparse already visible artifact sidecars."""
+    from exomem import (
+        client_artifacts,
+        deferred_index,
+        derived_receipts,
+        lexstore,
+        pending_recall,
+        writer_lease,
+    )
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
+    assert lexstore.get_store(vault).rebuild_atomic()
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(
+            tmp_path, file["file_id"], f"{file['file_id']}.bin", file["file_id"].encode()
+        ),
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    publications: list[tuple[str, set[str]]] = []
+
+    def publish(root, receipt):  # noqa: ANN001, ANN202
+        with sqlite3.connect(deferred_index.store_path(root)) as connection:
+            states = {
+                state
+                for (state,) in connection.execute(
+                    "SELECT state FROM pending_recall_rows WHERE batch_id = ?",
+                    (receipt.batch_id,),
+                )
+            }
+        publications.append((receipt.batch_id, states))
+        return pending_recall.publish(root, receipt)
+
+    monkeypatch.setattr(writer_lease, "_PENDING_VISIBILITY_PUBLISHER", publish)
+    terminal = writer_lease.invoke_command(
+        _command("preserve_artifacts"),
+        vault,
+        scope="case",
+        category="raw",
+        files=[
+            {"download_url": f"https://files.example/{index}", "file_id": f"file-{index}"}
+            for index in range(3)
+        ],
+        idempotency_key="shared-artifact-custody",
+    )
+
+    assert terminal["status"] == "committed", terminal
+    assert terminal["summary"] == {"stored": 3, "already_stored": 0, "failed": 0}
+    overlay = pending_recall.overlay(vault)
+    assert overlay.outcome == "ready", overlay.failure_code
+    sidecars = {f"{row['path']}.md" for row in terminal["files"]}
+    assert sidecars <= overlay.rows.keys()
+    assert all(overlay.rows[path].page is not None for path in sidecars)
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        states = [state for (state,) in connection.execute("SELECT state FROM pending_recall_rows")]
+        owed = {
+            component
+            for (component,) in connection.execute(
+                "SELECT DISTINCT component FROM derived_batch_components "
+                "WHERE state NOT IN ('completed', 'not_required', 'superseded')"
+            )
+            if component not in {
+                derived_receipts.DerivedComponent.GRAPH,
+                derived_receipts.DerivedComponent.WRITE_ADVISORY,
+            }
+        }
+    assert "prepared" not in states
+    assert "retired" in states
+    assert terminal["derived_sync"] == "pending"
+    assert set(terminal["derived_sync_components"]) == owed
+    assert len({batch_id for batch_id, _states in publications}) >= 3
+    assert all("prepared" in states for _batch_id, states in publications), publications
+
+
 @pytest.mark.parametrize(
     ("component_outcome", "expected_sync", "expected_components"),
     [
