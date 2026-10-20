@@ -1491,6 +1491,12 @@ class CollectionWriter:
             visited_parents = set()
             history_pages = {}
             refused = {}
+            sweep = self.handle.release_cache.queued_history_sweep()
+            if sweep is not None:
+                refused[sweep.key[0]] = self._publication_refused(sweep.key[0])
+                if refused[sweep.key[0]]:
+                    # One sweep serves the whole store: a collection that cannot publish must not hold it from the others.
+                    self.handle.release_cache.stage_history_sweep(None)
             consumed = after or ""
             for projection in rows:
                 if batch.stopped():
