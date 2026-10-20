@@ -198,7 +198,7 @@ def test_an_inline_reader_waits_for_the_background_load_instead_of_reading_again
 
     monkeypatch.setattr(index, "_load_all_rows", held_load)
     loading = index.start_corpus_matrix_load()
-    # An audit or a write advisory reads the matrix inline while the load runs.
+    # An audit, or an offline caller's write advisory, reads the matrix inline while the load runs.
     reader = threading.Thread(target=index.all_vectors, name="inline-reader")
     reader.start()
     reader.join(timeout=1)
@@ -219,3 +219,28 @@ def test_a_one_shot_caller_keeps_the_dense_lane_by_loading_inline(
 
     assert lane["status"] == "participated"
     assert loads == [threading.current_thread().name]
+
+
+def test_a_save_skips_its_overlap_advisory_instead_of_loading_a_cold_matrix(
+    managed_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save that arrived first after a promotion paid the whole load, about 100 s here."""
+    from exomem import corpus_aware
+
+    # The encoder is stubbed (`_seed_page_vector`); only the matrix is cold here.
+    monkeypatch.setattr(embeddings, "advisory_passages_fit", lambda _texts: True)
+    index = embeddings.get_embedding_index(managed_vault)
+    index.unload_cache()
+    loads = _count_loads(index, monkeypatch)
+
+    during_load = corpus_aware._best_cosine_per_file(
+        managed_vault, title="Metabolism", body="metabolism curriculum"
+    )
+    _settle(index)
+    after_load = corpus_aware._best_cosine_per_file(
+        managed_vault, title="Metabolism", body="metabolism curriculum"
+    )
+
+    assert during_load == {}
+    assert loads == ["exomem-matrix-load"]
+    assert after_load[_PAGE] > 0.99

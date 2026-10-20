@@ -50,7 +50,12 @@ class OverlapAdvisorySkipped(RuntimeError):
 
 def _skip_overlap(reason: str, *, strict: bool) -> dict[str, float]:
     # Closed reasons only: exception messages can contain the written text.
-    if reason in {"embeddings_warming", "model_warming", "model_busy"}:
+    if reason in {
+        "embeddings_warming",
+        recall_space.ServingEncoderCold.reason,
+        recall_space.CorpusMatrixCold.reason,
+        "model_busy",
+    }:
         log.debug("overlap advisory skipped: %s", reason)
     elif reason not in {"embeddings_disabled", "empty_text", "empty_vectors"}:
         log.warning("overlap advisory skipped: %s", reason)
@@ -1023,15 +1028,20 @@ def _best_cosine_per_file(
             # the matrix and hydrated text this discards, and the allowed-path
             # set was a walk of the whole corpus on every write.
             admits = _index_admitter(vault_root)
-            for hits in idx.search_many(vecs, k, admits=admits, encoded_for=encoded_for):
+            # A managed service never loads a cold corpus matrix on a save's
+            # thread: the sweep skips while the one background load runs.
+            for hits in idx.search_many(
+                vecs, k, admits=admits, encoded_for=encoded_for,
+                defer_cold_load=readiness.runtime_managed(),
+            ):
                 for fp, _cidx, score in hits:
                     if fp not in best_per_file or score > best_per_file[fp]:
                         best_per_file[fp] = score
             return best_per_file
     except OverlapAdvisorySkipped as error:
         return _skip_overlap(str(error), strict=strict)
-    except recall_space.ServingEncoderCold:
-        return _skip_overlap("model_warming", strict=strict)
+    except recall_space.ServingEncoderCold as error:
+        return _skip_overlap(error.reason, strict=strict)
     except runtime_resources.ModelBusyError:
         return _skip_overlap("model_busy", strict=strict)
     except recall_space.VectorSpaceMismatch:
@@ -1169,7 +1179,7 @@ def best_cosine_per_file_for_vectors(
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return _skip_overlap("embeddings_disabled", strict=strict)
     try:
-        from . import embeddings
+        from . import embeddings, readiness
 
         # The same span name as the encoding path, deliberately: both are "the
         # advisory's cosine sweep", and a diagnosis wants to compare them. What
@@ -1197,7 +1207,9 @@ def best_cosine_per_file_for_vectors(
             # deferred advisory ranks exactly what the synchronous one would.
             admits = _index_admitter(vault_root)
             kwargs = {} if encoded_for is _UNSPECIFIED_VECTOR_SPACE else {"encoded_for": encoded_for}
-            for hits in idx.search_many(rows, k, admits=admits, **kwargs):
+            for hits in idx.search_many(
+                rows, k, admits=admits, defer_cold_load=readiness.runtime_managed(), **kwargs
+            ):
                 for fp, _cidx, score in hits:
                     if self_canon and _canon(fp) == self_canon:
                         continue
@@ -1206,6 +1218,8 @@ def best_cosine_per_file_for_vectors(
             return best_per_file
     except OverlapAdvisorySkipped as error:
         return _skip_overlap(str(error), strict=strict)
+    except recall_space.ServingEncoderCold as error:
+        return _skip_overlap(error.reason, strict=strict)
     except recall_space.VectorSpaceMismatch:
         return _skip_overlap("vector_space_mismatch", strict=strict)
     except ImportError:
