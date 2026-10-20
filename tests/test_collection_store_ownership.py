@@ -658,11 +658,13 @@ def test_ownership_trusts_no_store_chain_that_lacks_the_recorded_head(service, m
         def __getattr__(self, name):
             return getattr(real, name)
 
-    monkeypatch.setattr(ownership, "_manager", lambda _root: Manager())
     read = lambda path: call(root, "read_memory", path=path.relative_to(root).as_posix())  # noqa: E731
-    if forged is None:
-        assert "Ordinary sibling body." in read(sibling)["body"]
-    else:
-        with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
-            read(sibling)
-    assert "Independent note." in read(note)["body"]
+    # Scoped, so the service fixture's teardown sees the real coordinator head.
+    with monkeypatch.context() as patch:
+        patch.setattr(ownership, "_manager", lambda _root: Manager())
+        if forged is None:
+            assert "Ordinary sibling body." in read(sibling)["body"]
+        else:
+            with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+                read(sibling)
+        assert "Independent note." in read(note)["body"]
