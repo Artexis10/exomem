@@ -198,7 +198,7 @@ def test_an_inline_reader_waits_for_the_background_load_instead_of_reading_again
 
     monkeypatch.setattr(index, "_load_all_rows", held_load)
     loading = index.start_corpus_matrix_load()
-    # An audit or a write advisory reads the matrix inline while the load runs.
+    # An audit, or an offline caller's write advisory, reads the matrix inline while the load runs.
     reader = threading.Thread(target=index.all_vectors, name="inline-reader")
     reader.start()
     reader.join(timeout=1)
