@@ -75,21 +75,14 @@ def test_a_whole_mcp_block_stays_one_short_paragraph():
         assert word in preamble
 
 
-def test_the_short_capture_check_points_at_rules_an_mcp_only_agent_can_read():
-    """The full capture rules are not in the hook; the pointer is the way to them. It must
-    be the vault path `exomem init` deploys the shipped engagement reference to, which
-    `read_memory` opens."""
-    from exomem import init as init_module
-    from exomem import vault as vault_module
+def test_the_short_capture_check_uses_rules_available_without_a_vault_copy():
+    """Installed clients use their skill; tool-only clients use the portable contract.
 
-    deployed = vault_module.shipped_schema_target(Path("/vault")) / "references" / "engagement.md"
-    pointer = deployed.relative_to("/vault").as_posix()
-    assert pointer == ".exomem/schema/references/engagement.md"
-    assert f"read_memory {pointer}" in capture.REMINDER_SHORT
-    assert any(
-        source.name == "engagement.md" and source.parent.name == "references"
-        for source in init_module.shipped_schema_sources()
-    )
+    A vault reference can be absent even when Exomem is connected and can capture.
+    """
+    assert "Exomem skill" in capture.REMINDER_SHORT
+    assert 'bootstrap(profile="compact")' in capture.REMINDER_SHORT
+    assert "read_memory" not in capture.REMINDER_SHORT
 
 
 def test_the_checkpoint_context_is_capped_at_two_kib():
