@@ -568,31 +568,22 @@ def test_file_only_release_keeps_legacy_wire_shape(tmp_path):
 def test_head_identity_and_tail_are_sampled_from_one_snapshot(runtime, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 
+    from exomem.collection_store import legacy_originals
     from exomem.record_memory import record_memory
 
     _create(runtime)
     before = runtime.sample_head()
     metadata_read, resume = threading.Event(), threading.Event()
-    original_open = connection.open_head_reader
+    original_metadata = legacy_originals.metadata
 
-    class PausedReader:
-        def __init__(self, reader):
-            self.reader = reader
+    def metadata(reader):
+        result = original_metadata(reader)
+        if threading.current_thread().name.startswith("snapshot"):
+            metadata_read.set()
+            assert resume.wait(3)
+        return result
 
-        def execute(self, statement):
-            if "FROM txns" in statement:
-                metadata_read.set()
-                assert resume.wait(3)
-            return self.reader.execute(statement)
-
-        def close(self):
-            self.reader.close()
-
-    def open_reader(*args, **kwargs):
-        reader = original_open(*args, **kwargs)
-        return PausedReader(reader) if threading.current_thread().name.startswith("snapshot") else reader
-
-    monkeypatch.setattr(connection, "open_head_reader", open_reader)
+    monkeypatch.setattr(legacy_originals, "metadata", metadata)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot") as pool:
         sample = pool.submit(runtime.sample_head)
         assert metadata_read.wait(2)
