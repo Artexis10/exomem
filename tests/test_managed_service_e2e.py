@@ -535,7 +535,7 @@ def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(tmp_pat
 
     async def scenario():
         (tmp_path / "standby-stalls").write_text("1")
-        async with live_fixture(tmp_path, warm_seconds="8") as (url, token, manager):
+        async with live_fixture(tmp_path) as (url, token, manager):
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
                 before = await client.call_tool("counted", {"marker": "before"})
                 serving = before.data["pid"]

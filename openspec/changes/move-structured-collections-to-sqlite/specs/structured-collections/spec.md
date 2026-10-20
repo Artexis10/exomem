@@ -15,6 +15,19 @@ Cross-host takeover, replica transport, fleet custody and divergent-host reconci
 - **WHEN** the hosting node captures a consistent store snapshot for backup or portability
 - **THEN** that snapshot is a restorable artifact, not a second query server or proof of cross-host writer takeover
 
+### Requirement: GA application rollback retains SQLite authority
+
+Before GA activation, release evidence SHALL identify and qualify an earlier application artifact. It SHALL support the admitted store schema and preserve original-file archives. Qualification SHALL prove admission, reads, writes, restart and archive preservation against a migrated disposable vault. Application rollback SHALL retain SQLite authority and SHALL NOT retire the store fence or select file authority.
+
+Whole-vault reverse export SHALL remain a separate downgrade operation with its existing eligibility rules. Selective reversal of newly migrated collections SHALL remain outside this contract.
+
+#### Scenario: Application rollback supports a mixed migrated store
+- **GIVEN** a store contains both store-native collections and collections imported from files
+- **WHEN** the qualified earlier application replaces the GA application
+- **THEN** both kinds of collection remain readable and writable in SQLite after restart
+- **AND** original-file archives remain intact
+- **AND** the store fence remains enrolled
+
 ### Requirement: Admitted canonical state determines collection ownership
 
 Collection ownership SHALL derive from the complete admitted local store: collections, their current manifests and the existing transition intent. The proof SHALL validate the complete set before principal filtering or discovery limits. Missing manifests, invalid declarations, overlapping regions or unresolved bindings SHALL NOT produce a partial set that permits file fallback. No second durable ownership catalog SHALL be added.
@@ -569,6 +582,25 @@ Partial export SHALL retain history projection bindings so resume can accept alr
 - **WHEN** a migrated vault is exported back to files
 - **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
 - **AND** file mode reads every collection as the store served it
+
+#### Scenario: First publication preserves exact reverse export
+- **WHEN** the admitted service first renders imported item, manifest and log views
+- **THEN** it stamps only source bytes that match the import proof, after their originals reach the verified replica
+- **AND** the imported history and source versions become readable through the unchanged governance checks
+- **AND** reverse export of a collection with no native mutations restores its exact pre-migration bytes
+- **AND** automatic stamping adds no native mutation or export checkpoint
+
+#### Scenario: Older imports preserve originals before first publication
+- **GIVEN** an admitted import predates the original-byte archive
+- **WHEN** its unchanged source bytes are captured at the same business head
+- **THEN** admission verifies a replica copy containing that archive before stamping, including after interruption
+- **AND** changed or missing source bytes cannot become replacement originals
+
+#### Scenario: An imported view moves before its first stamp
+- **WHEN** an owner moves an untouched imported item before the service first stamps it
+- **THEN** the completed census binds its identity and exact import digest to the new path before publication
+- **AND** the service records one governed move, preserves the filename and never recreates the old path
+- **AND** a later edit of the stamped view follows the ordinary governed update path
 
 #### Scenario: Reverse export retires history before its policy owner leaves
 - **GIVEN** a migrated collection has generated history with reasons and item links

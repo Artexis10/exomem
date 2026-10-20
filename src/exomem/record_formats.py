@@ -1223,7 +1223,7 @@ def _item_presentation_block(
             "<!-- exomem-item-presentation:v1 "
             f"recipe=sha256:{recipe_digest} item=sha256:{item_digest} -->"
         ),
-        f"# {_presentation_scalar(selected[recipe.title.field])}",
+        f"# {_item_presentation_title(manifest, selected)}",
         "",
         "<!-- generated: canonical frontmatter remains authoritative -->",
     ]
@@ -1342,36 +1342,60 @@ def _item_presentation_label(descriptor: collections.ItemPresentationField) -> s
     return html.escape(value, quote=False)
 
 
+def _item_presentation_title(manifest, values):
+    return _presentation_scalar(values.get(manifest.item_presentation.title.field))
+
+
+def item_display_title(manifest, values, body, path):
+    """Read the title of a canonical item without following its relationships."""
+    if manifest.item_presentation is not None:
+        body = f"# {_item_presentation_title(manifest, values)}\n" + body
+    return vault.resolve_display_title(dict(values), body, path)
+
+
 def presentation_relationship_resolver(
     vault_root: Path,
     manifest: collections.CollectionManifest,
-    snapshot: AdapterSnapshot,
+    snapshot: AdapterSnapshot | None,
     *,
     authorize_path: Callable[[str], bool] | None = None,
     item_paths: Mapping[str, str] | None = None,
+    lookup_item: Callable[[str], tuple[str, Mapping[str, Any], str] | None] | None = None,
+    lookup_path: Callable[[str], tuple[bool, str | None]] | None = None,
+    observe_read: Callable[[vault.PathGuard], None] | None = None,
+    wikilink_resolver: Callable[[], vault.WikilinkResolver] | None = None,
 ) -> Callable[[str, str], tuple[str, str] | None] | None:
     """Resolve selected canonical relationships without disclosing withheld targets."""
     recipe = manifest.item_presentation
     if recipe is None or not recipe.relationships:
         return None
     root = Path(vault_root)
+    if lookup_path is None or wikilink_resolver is None:
+        from .collection_store import preview
+
+    if lookup_path is None:
+        lookup_path = lambda path: preview.presentation_label(root, path)
+    if wikilink_resolver is None:
+        wikilink_resolver = lambda: preview.presentation_wikilinks(root)
+    records = snapshot.records if snapshot is not None else ()
     resolved_item_paths = (
         {
             record.identity.key: record.source.path
-            for record in snapshot.records
+            for record in records
             if not record.ambiguous
         }
         if item_paths is None
         else dict(item_paths)
     )
-    wikilinks = vault.WikilinkResolver(root)
+    wikilinks = None
     current_item_paths = {
         record.identity.key: record.source.path
-        for record in snapshot.records
+        for record in records
         if not record.ambiguous
     }
 
     def resolve(kind: str, raw: str) -> tuple[str, str] | None:
+        nonlocal wikilinks
         relative: str | None = None
         readable_relative: str | None = None
         parsed = (
@@ -1382,11 +1406,21 @@ def presentation_relationship_resolver(
             else None
         )
         if parsed is not None and parsed[0] == manifest.collection_id:
+            if lookup_item is not None:
+                target = lookup_item(parsed[1])
+                if target is None:
+                    return None
+                relative, values, body = target
+                if authorize_path is not None and not authorize_path(relative):
+                    return None
+                return relative, item_display_title(manifest, values, body, relative)
             relative = resolved_item_paths.get(parsed[1])
             readable_relative = current_item_paths.get(parsed[1])
         if relative is None:
             try:
                 target = memory_refs.resolve_identifier_read_only(root, raw)
+                if wikilinks is None:
+                    wikilinks = wikilink_resolver()
                 canonical, _warning = vault.normalize_wikilink(
                     target,
                     root,
@@ -1400,14 +1434,17 @@ def presentation_relationship_resolver(
             _path, source_relative = vault.resolve_under_vault(
                 root,
                 readable_relative or relative,
-                must_exist=True,
-                must_be_file=True,
             )
             if authorize_path is not None and not authorize_path(source_relative):
                 return None
-            data, _guard = vault.read_bounded_guarded_bytes(
+            handled, label = lookup_path(source_relative)
+            if handled:
+                return (relative, label) if label is not None else None
+            data, guard = vault.read_bounded_guarded_bytes(
                 root, source_relative, limit=_MAX_ITEM_BYTES
             )
+            if observe_read is not None:
+                observe_read(guard)
             text = data.decode("utf-8")
             frontmatter, body, _frontmatter_text = vault.parse_frontmatter(text)
             label = vault.resolve_display_title(frontmatter, body, source_relative)

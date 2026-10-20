@@ -633,8 +633,10 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
                     continue
                 with opened.require() as file:
                     before = file.version()
+                    from .legacy_originals import view_basis
+
                     if row["path"] not in force and _stat(before) == row["stat_identity"] \
-                            and row["state"] in ("current", "held"):
+                            and row["state"] in ("current", "held") and view_basis(writer.connection, row) is None:
                         continue
                     bound = collections._MAX_MANIFEST_BYTES if row["kind"] == "manifest" else (
                         record_formats._MAX_LOG_BYTES if row["kind"] == "log" else record_formats._MAX_ITEM_BYTES)

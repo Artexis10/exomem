@@ -221,13 +221,15 @@ def prove_into(root, manifests, staging, scratch, context, *, record=None, deadl
     ``record(captured, result)`` runs inside a ready collection's transaction, so what it
     writes commits with that collection's import. ``deadline`` is ``scanned``'s.
     """
-    with scanned(root, scratch, manifests, deadline=deadline) as (audit, blocked):
+    with scanned(root, scratch, manifests, deadline=deadline) as (audit, blocked), \
+            legacy_import.presentation_context(root, manifests=manifests) as presentation:
         if audit is None:
             return blocked
         rows = []
         for index, manifest in enumerate(manifests):
             try:
-                rows.append(_prove_one(root, manifest, staging, audit, context, record))
+                rows.append(_prove_one(root, manifest, staging, audit, context, record,
+                                       presentation_operation=presentation))
             except TimeoutError:
                 # The spool is spent: this and every later collection is unchecked, not clean.
                 rows.extend(_row(later.path, later, status="blocked", blocker=_DEADLINE)
@@ -236,9 +238,10 @@ def prove_into(root, manifests, staging, scratch, context, *, record=None, deadl
         return rows
 
 
-def _prove_one(root, manifest, staging, audit, context, record=None) -> dict:
+def _prove_one(root, manifest, staging, audit, context, record=None, *, presentation_operation=None) -> dict:
     try:
-        captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit)
+        captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit,
+                                                          presentation_operation=presentation_operation)
     except TimeoutError:
         raise
     except _REFUSALS as error:

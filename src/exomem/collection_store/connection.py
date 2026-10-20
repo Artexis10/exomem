@@ -507,6 +507,17 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
     return conn
 
 
+@contextmanager
+def reader_snapshot(path: Path):
+    """Keep related canonical reads in one read-only transaction, then close it."""
+    conn = open_reader(path)
+    try:
+        conn.execute("BEGIN")
+        yield conn
+    finally:
+        conn.close()
+
+
 # What every schema version keeps unchanged: the store's metadata and the columns of its commit chain.
 _HEAD_COLUMNS = {
     "store_meta": frozenset({"key", "value"}),

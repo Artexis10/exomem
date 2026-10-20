@@ -11,13 +11,13 @@ import hashlib
 import json
 import re
 import sqlite3
-from contextlib import closing
-from dataclasses import dataclass
+from contextlib import ExitStack, closing, contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import held_fs, planning, record_formats, records, vault
+from .. import held_fs, planning, record_formats, record_governance, records, vault
 from .. import structured_collections as collections
-from . import authority, chain, governance, log_view, summary, tokens, types
+from . import authority, chain, governance, legacy_originals, log_view, ownership, summary, tokens, types, views
 from .connection import CollectionStoreError
 from .connection import checked_sql as checked_sql
 from .legacy import LegacyAuditProof, LegacyAuditSpool
@@ -97,6 +97,9 @@ class CapturedLegacyCollection:
     legacy_audit_paths: tuple[str, ...]
     audit_proof: LegacyAuditProof
     log_frame: CapturedLogFrame | None
+    presentation_resolutions: tuple
+    presentation_guards: tuple[vault.PathGuard, ...]
+    presentation_operation: governance.OperationAuthorization | None
     input_digest: str
     #: ``input_digest`` without the vault-wide audit segment census, plus every per-collection
     #: proof value the checkpoint records: an unrelated activity-log write leaves it unchanged.
@@ -192,10 +195,67 @@ def _capture_log_frame(manifest, snapshot):
                             frame.final_newline)
 
 
-def _recheck(captured):
+@contextmanager
+def presentation_context(root, *, conn=None, ownership_proof=None, manifests=None):
+    """Use verified base data for labels without admitting unpublished file imports."""
+    if manifests is not None and not any(
+        manifest.item_presentation is not None and manifest.item_presentation.relationships
+        for manifest in manifests
+    ):
+        yield None
+        return
+    proof = ownership.current(root) if ownership_proof is None else ownership_proof
+    if not proof.entries and conn is None:
+        yield None
+        return
+    with ExitStack() as stack:
+        if conn is None:
+            conn, proof = stack.enter_context(ownership.read_snapshot(root))
+        # Pending file imports remain file inputs for this proof, not canonical label sources.
+        entries = [entry for entry in proof.entries if entry["collection_id"] in proof.admitted]
+        marker = {**proof.marker, "collections": entries} if entries else None
+        base = replace(proof, marker=marker)
+        operation = governance.OperationAuthorization(root, conn, mutation=False, ownership_proof=base)
+        stack.callback(operation.close)
+        yield operation
+
+
+def _capture_presentation(root, manifest, snapshot, *, check, operation=None):
+    recipe = manifest.item_presentation
+    if recipe is None or not recipe.relationships:
+        return (), ()
+    guards = []
+    resolver = record_formats.presentation_relationship_resolver(
+        root, manifest, snapshot,
+        authorize_path=operation.allows_file if operation else record_governance.full_release_filter(root),
+        observe_read=guards.append,
+        lookup_path=(lambda path: views.presentation_label(operation, path)) if operation else None,
+        wikilink_resolver=(lambda: views.presentation_wikilinks(operation, fresh=True)) if operation else None,
+    )
+    references = set()
+    for record in snapshot.records:
+        check()
+        for field in recipe.relationships:
+            value = record.values.get(field.field)
+            kind = manifest.schema.fields[field.field].link_kind or "memory"
+            # These are the renderer's existing vault-reference protocols.
+            if value is not None and kind in record_formats._VAULT_RELATION_KINDS:
+                references.add((kind, str(value)))
+    resolutions = []
+    for kind, raw in sorted(references):
+        check()
+        resolutions.append((kind, raw, resolver(kind, raw)))
+        check()
+    return tuple(resolutions), tuple(guards)
+
+
+def _recheck(captured, *, check):
     try:
+        check()
         captured.manifest_guard.recheck(captured.root)
-        for guard in captured.snapshot.path_guards + captured.snapshot.directory_guards:
+        for guard in (captured.snapshot.path_guards + captured.snapshot.directory_guards
+                      + captured.presentation_guards):
+            check()
             guard.recheck(captured.root)
         captured.held_guard.recheck(captured.root)
         for held in captured.held:
@@ -204,6 +264,12 @@ def _recheck(captured):
         raise CollectionStoreError(
             "COLLECTION_LEGACY_IMPORT_SOURCE_CHANGED", "captured source changed"
         ) from error
+    resolutions, _ = _capture_presentation(captured.root, captured.manifest, captured.snapshot, check=check,
+                                          operation=captured.presentation_operation)
+    if resolutions != captured.presentation_resolutions:
+        raise CollectionStoreError(
+            "COLLECTION_LEGACY_IMPORT_SOURCE_CHANGED", "captured relationship resolution changed"
+        )
 
 
 def importable(manifest: collections.CollectionManifest) -> bool:
@@ -213,7 +279,7 @@ def importable(manifest: collections.CollectionManifest) -> bool:
 
 
 def capture_legacy_collection(
-    root, manifest_path, *, audit: LegacyAuditSpool
+    root, manifest_path, *, audit: LegacyAuditSpool, presentation_operation=None
 ) -> CapturedLegacyCollection:
     """Capture files without writes; adapters retain their existing source limits.
 
@@ -263,6 +329,8 @@ def capture_legacy_collection(
         markers=_markers(manifest, snapshot),
         legacy_inspection=inspection,
     )
+    resolutions, presentation_guards = _capture_presentation(root, manifest, snapshot, check=audit._check,
+                                                            operation=presentation_operation)
     basis = {
         "manifest": _sha(data),
         "snapshot": snapshot.snapshot,
@@ -276,6 +344,7 @@ def capture_legacy_collection(
         "audit_events": proof.ordered_event_digest,
         "legacy_inspection": inspection,
         "legacy_audit_paths": captured_inspection.influencing_paths,
+        "presentation": resolutions,
     }
     collection_basis = {
         **{name: value for name, value in basis.items() if name != "audit_inputs"},
@@ -297,10 +366,13 @@ def capture_legacy_collection(
         captured_inspection.influencing_paths,
         proof,
         _capture_log_frame(manifest, snapshot),
+        resolutions,
+        presentation_guards,
+        presentation_operation,
         _sha(records._canonical_json(basis)),
         _sha(records._canonical_json(collection_basis)),
     )
-    _recheck(captured)
+    _recheck(captured, check=audit._check)
     audit.require_source_root(root)
     return captured
 
@@ -315,7 +387,7 @@ def _natural_key(manifest, values):
 
 
 def _body(manifest, values, body):
-    return record_formats.remove_item_presentation(records._semantic_body(body, manifest, values))
+    return records._semantic_body(body, manifest, values)
 
 
 def _envelope(captured, context, transition, generation, previous, *, original=None):
@@ -431,8 +503,8 @@ def _insert_envelope(conn, txn_id, envelope, original, receipt=None):
     return digest
 
 
-# This version describes the temporary normalized import and its proof, not canonical receipts.
-MATERIAL_VERSION = 1
+# This version describes temporary import material and its proof, not canonical receipts.
+MATERIAL_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,9 +517,10 @@ class LegacyMaterial:
     held: tuple
     projections: tuple
     envelopes: tuple
+    originals: tuple
 
     def digest(self, check=lambda: None):
-        digest = hashlib.sha256(b"exomem.legacy-material:v1\0")
+        digest = hashlib.sha256(b"exomem.legacy-material:v3\0")
 
         def frame(value):
             check()
@@ -469,6 +542,9 @@ class LegacyMaterial:
             frame(len(entries))
             for entry in entries:
                 frame(entry)
+        frame(len(self.originals))
+        for kind, identity, path, raw in self.originals:
+            frame((kind, identity, path, raw.hex()))
         check()
         return digest.hexdigest()
 
@@ -499,12 +575,12 @@ def _materialize(captured, envelopes, check):
         # The legacy adapter preserves the fixed Planning product wire contract, not a registry entity type.
         if manifest.semantic_profile == "planning":
             planning.require_planning_profile(manifest)
-            values = planning.normalize_item(values, vault_root=captured.root, stored=values,
+            planning.normalize_item(values, vault_root=captured.root, stored=values,
                 apply_defaults=False, validate_motivation=planning.motivation_is_governed(manifest))
             planning._validate_declared_text(manifest, values)
         allowed = (records._log_note_field(manifest),) if records._log_note_field(manifest) else ()
         manifest.schema.validate(values, allowed_fields=allowed)
-        values = collections.normalize_item_values(manifest.schema, values)
+        # The adapter's wire values define historical payload identity; normalization is for comparison.
         key = record.identity.key
         plans[key] = values
         natural = _natural_key(manifest, values)
@@ -536,9 +612,12 @@ def _materialize(captured, envelopes, check):
                            _json(records._encode_held_value(list(held.diagnostics))), held.path, held.held_at,
                            held_meta, _sha(entry.original_bytes)))
         projections.append((held.path, "held", 1, _sha(entry.original_bytes), None))
+    # The source kinds are fixed by projection_state.kind, not registry vocabulary.
+    originals = tuple(sorted((kind, key if kind == "item" else "source", path, sources[path])
+                             for path, kind, _version, _digest, key in projections if kind in ("item", "log")))
     return LegacyMaterial(manifest.collection_id, captured.collection_basis, collection, current_manifest,
                           tuple(items), tuple(sorted(held_items)),
-                          tuple(sorted(projections)), tuple(envelopes))
+                          tuple(sorted(projections)), tuple(envelopes), originals)
 
 
 def assemble(conn, material, check):
@@ -583,6 +662,10 @@ def assemble(conn, material, check):
         check()
         _insert_envelope(conn, first + index, json.loads(receipt), original, receipt)
     envelope = json.loads(material.envelopes[-1][0])
+    for kind, identity, path, raw in material.originals:
+        check()
+        legacy_originals.put(conn, cid, kind, identity, path, raw,
+                             (envelope["transition_id"], _event_hash(envelope)))
     return LegacyImportResult(cid, len(material.items), len(material.envelopes) - 1, checkpoint,
                               envelope["transition_id"], _event_hash(envelope), material.digest(check))
 
@@ -669,24 +752,32 @@ def retained_material(conn, entry, *, check):
         if item[5:] != ("current", None, None, None, None):
             return None
         projections.append(item[:5])
+    try:
+        originals = legacy_originals.material(conn, cid)
+    except CollectionStoreError:
+        return None
+    if originals is None:
+        return None
     material = LegacyMaterial(cid, entry["basis"], row, manifests[0], tuple(items), tuple(held),
-                              tuple(projections), tuple(envelopes))
+                              tuple(projections), tuple(envelopes), originals)
     if (material.digest(check) != entry["material_digest"] or len(items) != entry["rows"]
             or len(envelopes) != entry["legacy_events"] + 1 or row[6] != previous):
         return None
     return material
 
 
-def _prove_round_trip(captured, key, values, body, natural):
+def _prove_round_trip(captured, key, values, body, natural, *, resolve_relationship=None):
     manifest = captured.manifest
     if manifest.storage.strategy == "markdown-items":
-        rendered = record_formats.render_markdown_item(manifest, values, key, body)
+        rendered = record_formats.render_markdown_item(
+            manifest, values, key, body, resolve_relationship=resolve_relationship
+        )
         frontmatter, parsed_body, _ = vault.parse_frontmatter(rendered, strict=True)
         profile = records.profile_for(manifest.semantic_profile)
         parsed_key = frontmatter.pop(profile.item_id_property)
         for name in ("type", "collection_id", "schema_version"):
             frontmatter.pop(name)
-        parsed_values = collections.normalize_item_values(manifest.schema, frontmatter)
+        parsed_values = record_formats._json_value(frontmatter)
         parsed_body = _body(manifest, parsed_values, parsed_body)
     else:
         section = manifest.storage.descriptor["section"]
@@ -701,7 +792,7 @@ def _prove_round_trip(captured, key, values, body, natural):
             _refuse("b", "rendered log identity count differs")
         parsed_key, parsed_values, parsed_body = (
             parsed[0].identity.key,
-            collections.normalize_item_values(manifest.schema, parsed[0].values),
+            parsed[0].values,
             parsed[0].body,
         )
     if (parsed_key, parsed_values, parsed_body, _natural_key(manifest, parsed_values)) != (
@@ -711,6 +802,7 @@ def _prove_round_trip(captured, key, values, body, natural):
         natural,
     ):
         _refuse("b", "render/parse values, body, identity or natural key differ")
+    return rendered
 
 
 def _prove_log_block(captured, record, key):
@@ -736,6 +828,7 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
     ).fetchall()
     if len(stored) != len(original) or {row[0] for row in stored} != set(original):
         _refuse("a", "row count or identity set differs")
+    resolutions = {(kind, raw): value for kind, raw, value in captured.presentation_resolutions}
     for key, raw_values, body, natural, payload, version in stored:
         check()
         values = json.loads(raw_values)
@@ -746,12 +839,13 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
         ):
             _refuse("c", "payload_hash differs from captured legacy identity")
         if (
-            values != collections.normalize_item_values(manifest.schema, record.values)
+            values != record.values
             or body != _body(manifest, values, record.body)
             or natural != _natural_key(manifest, values)
         ):
             _refuse("b", "stored values, body or natural key differ")
-        _prove_round_trip(captured, key, values, body, natural)
+        _prove_round_trip(captured, key, values, body, natural,
+                          resolve_relationship=lambda kind, raw: resolutions.get((kind, raw)))
         if manifest.storage.strategy == "markdown-log":
             _prove_log_block(captured, record, key)
     count, head, previous = 0, None, None
@@ -894,7 +988,7 @@ def import_legacy_collection(
     if captured.manifest.view_mode != "items":
         # A file collection is an items view of its rows; summary is only ever a NEW collection.
         raise summary.mode_change_refused("items", captured.manifest.view_mode)
-    _recheck(captured)
+    _recheck(captured, check=audit._check)
     chain.verify_store_chain(staging_conn, check=audit._check)
     envelopes = []
     previous = None
@@ -926,7 +1020,7 @@ def import_legacy_collection(
     result = assemble(staging_conn, material, audit._check)
     checkpoint = result.checkpoint_txn_id
     _prove(staging_conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash, check=audit._check)
-    _recheck(captured)
+    _recheck(captured, check=audit._check)
     # Iterator acquisition rechecks audit files even for an empty baseline.
     with closing(audit.iter_reachable(captured.audit_proof)) as iterator:
         next(iterator, None)
