@@ -11,7 +11,9 @@ records a per-vault disable in the store that can only narrow it.
 
 ``collections-migrate-v1`` is the same kind of fence for moving existing file Records and
 Planning collections into the store (OpenSpec move-structured-collections-to-sqlite
-P1b.3). It stays off until the GA gate (P3.6) adds it to ``RELEASED``.
+P1b.3). The GA gate (P3.6) added it to ``RELEASED``: ``exomem collections migrate`` and the
+managed upgrade migrator run, and ``offline_migrations()`` declares the migration to the
+supervisor.
 
 ``collection-views-v1`` fences edit-back of store collection views (the same change, §6):
 the serving store thread turning an owner's edit of a view into a governed update or a
@@ -32,15 +34,9 @@ COLLECTIONS_MIGRATE_V1 = "collections-migrate-v1"
 MIGRATION_UNAVAILABLE = "COLLECTION_STORE_MIGRATION_UNAVAILABLE"
 COLLECTION_VIEWS_V1 = "collection-views-v1"
 
-#: The release capabilities this release enables. S1.8 added RECORDS_SUMMARY_V1 and P2.8
-#: COLLECTION_VIEWS_V1; P3.6 adds COLLECTIONS_MIGRATE_V1.
-RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1, COLLECTION_VIEWS_V1})
-#: What every store import answer tells the owner until the GA gate (P3.6 of
-#: move-structured-collections-to-sqlite), which deletes it: a pre-GA format change may
-#: need the preserved export imported again into a NEW collection (design O2).
-PRE_GA_REIMPORT = ("pre-GA: a later release may change how the collection store keeps these rows; the owner "
-                   "may then need to import the preserved export again into a NEW collection that they "
-                   "authorize, so keep the preserved source")
+#: The release capabilities this release enables: S1.8 added RECORDS_SUMMARY_V1, P2.8
+#: COLLECTION_VIEWS_V1 and the P3.6 GA gate COLLECTIONS_MIGRATE_V1.
+RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1, COLLECTION_VIEWS_V1, COLLECTIONS_MIGRATE_V1})
 # S1.8 defines one release capability and a one-way rollback, not a user vocabulary.
 DISABLED_KEY = "records_summary_disabled"
 DISABLED = "COLLECTION_STORE_DISABLED"

@@ -54,7 +54,6 @@ from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
 from ..query_engine import scalars
 from . import (
-    capability,
     connection,
     derived_rows,
     governance,
@@ -2067,7 +2066,6 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         **extra,
         **checked,
         **exported,
-        "reimport_risk": capability.PRE_GA_REIMPORT,
         "continuation": _JOB_PREFIX + job.id,
         "state": state,
         "reason": reason,
@@ -3580,7 +3578,6 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
     )
     return {
         "mode": "preview",
-        "reimport_risk": capability.PRE_GA_REIMPORT,
         "collection_id": row["collection_id"],
         "format": request.format,
         "source": {

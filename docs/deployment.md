@@ -873,15 +873,9 @@ from rollups. Existing Records and Planning collections stay in their files;
 a summary collection never migrates them. The store requires writer-lease
 coordination (see "Automatic single-writer lease and laptop takeover").
 
-Two things to know before you import:
-
-- Keep the preserved source. Until the collection store's GA release, a later
-  release may change how the store keeps rows. You may then need to import
-  the preserved export again into a NEW collection. Every import answer says
-  so in `reimport_risk`.
-- A summary collection whose derived rows are missing or were built under an
-  earlier layout rebuilds them from its import log at the service's next start.
-  The rebuild gives way to requests between batches.
+A summary collection whose derived rows are missing or were built under an
+earlier layout rebuilds them from its import log at the service's next start.
+The rebuild gives way to requests between batches.
 
 The owner creates a vault's first summary collection offline, which enrols the
 vault's store with the coordinator: stop the service, then run
