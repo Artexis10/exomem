@@ -89,7 +89,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -1466,15 +1466,20 @@ def reconcile(
     return payload
 
 
+def _sync_due_state_warm() -> bool:
+    """Whether the suite asked for due-state background work to run inline."""
+    return os.environ.get("EXOMEM_SYNC_DUE_STATE_WARM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _schedule_reconcile(
     vault_root: Path, *, today: dt.date
 ) -> dict[str, Any] | None:
     """Start one fail-soft projection rebuild without delaying the caller."""
-    if os.environ.get("EXOMEM_SYNC_DUE_STATE_WARM", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }:
+    if _sync_due_state_warm():
         # The pytest suite creates hundreds of disposable vaults and then tears
         # them down immediately. Let those tests preserve deterministic carrier
         # assertions without leaving daemon workers racing tmpdir cleanup; the
@@ -2816,7 +2821,11 @@ def served_entries(
     and reused while the projection and review inputs are unchanged, the clock
     has not reached the earliest future
     `due_at` the build skipped, and the build is younger than
-    `_SERVE_CACHE_TTL_SECONDS`.
+    `_SERVE_CACHE_TTL_SECONDS`. A build older than that, but younger than
+    `_SERVE_CACHE_STALE_SECONDS`, is still served after the same live
+    re-checks, and one background rebuild per key replaces it
+    (`_schedule_served_refresh`), so a reader that returns within that age does
+    not pay the build.
 
     What the build reads live, a hit re-checks live, at the cost the profile
     showed to be milliseconds against the build's seconds: the release plane
@@ -2852,12 +2861,7 @@ def served_entries(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )[0]
     with call_spans.span("recall.due_state.identity", {}):
-        projection_token = _served_content_token(vault_root)
-        payload = _load_shared(vault_root) if projection_token is not None else None
-        review_token = (
-            _review_content_token(vault_root)
-            if payload is not None and not _owes_nothing(payload) else None
-        )
+        projection_token, payload, review_token = _served_identity(vault_root)
     if projection_token is None or review_token is None:
         rows, *_ = _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
@@ -2877,9 +2881,10 @@ def served_entries(
     monotonic = time.monotonic()
     with _SERVE_LOCK:
         hit = _SERVE_CACHE.get(key)
+    age = monotonic - hit["built"] if hit is not None else None
     if (
         hit is not None
-        and monotonic - hit["built"] < _SERVE_CACHE_TTL_SECONDS
+        and age < _SERVE_CACHE_STALE_SECONDS
         and (hit["horizon"] is None or effective_now < hit["horizon"])
     ):
         with call_spans.span("recall.due_state.verdicts", {"paths": len(hit["asked"])}):
@@ -2903,24 +2908,61 @@ def served_entries(
                 unchanged = _role_token(vault_root, keep) == hit["role_token"]
         if unchanged:
             with call_spans.span("recall.due_state.exists", {"rows": len(hit["rows"])}):
-                return [
+                rows = [
                     dict(row)
                     for row in hit["rows"]
                     if not row.get("path") or _page_exists(vault_root, row["path"])
                 ]
+            if age >= _SERVE_CACHE_TTL_SECONDS:
+                _schedule_served_refresh(
+                    vault_root, key, today=today, now=now, principal=who, purpose=purpose
+                )
+            return rows
+    rows, _stored = _build_served(
+        vault_root, key, today=today, now=effective_now, principal=who,
+        purpose=purpose, payload=payload, built=monotonic,
+    )
+    return rows
+
+
+def _served_identity(
+    vault_root: Path,
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """The projection token, its payload and the review token a served key binds."""
+    projection_token = _served_content_token(vault_root)
+    payload = _load_shared(vault_root) if projection_token is not None else None
+    review_token = (
+        _review_content_token(vault_root)
+        if payload is not None and not _owes_nothing(payload) else None
+    )
+    return projection_token, payload, review_token
+
+
+def _build_served(
+    vault_root: Path,
+    key: tuple[Any, ...],
+    *,
+    today: dt.date,
+    now: dt.datetime,
+    principal: Any,
+    purpose: str | None,
+    payload: dict[str, Any] | None,
+    built: float,
+) -> tuple[list[dict[str, Any]], tuple[Any, ...] | None]:
+    """Build the served rows for `key` and memoise them; the key they were stored under."""
     with call_spans.span("recall.due_state.build", {}):
         try:
             review_payload = review_state_module.ReviewStateStore(vault_root).load()
         except ValueError:
-            return []
+            return [], None
         # Bind the memo to the review snapshot the build consumes, including a
         # replacement between the initial identity lookup and this read.
         key = (*key[:-1], _payload_content_token(review_payload, "surfaced"))
         rows, horizon, asked, role_token = _served_entries_uncached(
             vault_root,
             today=today,
-            now=effective_now,
-            principal=who,
+            now=now,
+            principal=principal,
             purpose=purpose,
             payload=payload,
             review_payload=review_payload,
@@ -2931,11 +2973,104 @@ def served_entries(
         _SERVE_CACHE[key] = {
             "rows": [dict(row) for row in rows],
             "horizon": horizon,
-            "built": monotonic,
+            "built": built,
             "asked": asked,
             "role_token": role_token,
         }
-    return rows
+    return rows, key
+
+
+def _schedule_served_refresh(
+    vault_root: Path,
+    key: tuple[Any, ...],
+    *,
+    today: dt.date,
+    now: dt.datetime | None,
+    principal: Any,
+    purpose: str | None,
+) -> None:
+    """Rebuild one expired served build off the request thread, once per key."""
+    from .governance import principal as principal_module
+
+    # The worker reads under the request's own binding, never an owner scope:
+    # a build under any other principal would memoise rows for this key that
+    # this audience was not asked about.
+    bound = principal_module.current_principal()
+    with _SERVE_LOCK:
+        if key in _SERVE_REFRESHING:
+            return
+        _SERVE_REFRESHING.add(key)
+
+    def _run(wait: bool) -> None:
+        try:
+            from . import foreground_activity
+
+            if wait:
+                # Build after the call that noticed the expiry, not beside it:
+                # the build's CPU would contend with that call for the GIL.
+                deadline = time.monotonic() + _SERVE_REFRESH_WAIT_SECONDS
+                while (
+                    foreground_activity.foreground_active(vault_root)
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(_SERVE_REFRESH_POLL_SECONDS)
+            with (
+                principal_module.request_scope(bound) if bound is not None
+                else nullcontext()
+            ), foreground_activity.background_scope(vault_root):
+                _refresh_served(
+                    vault_root, key, today=today, now=now, principal=principal, purpose=purpose
+                )
+        except Exception:  # noqa: BLE001
+            # Dropping the expired build sends the next read to an inline build,
+            # which is the behaviour this refresh replaced.
+            with _SERVE_LOCK:
+                _SERVE_CACHE.pop(key, None)
+            log.warning("background due-state serve refresh failed for %s", vault_root, exc_info=True)
+        finally:
+            with _SERVE_LOCK:
+                _SERVE_REFRESHING.discard(key)
+
+    if _sync_due_state_warm():
+        _run(wait=False)
+        return
+    try:
+        threading.Thread(
+            target=_run, args=(True,), name="exomem-due-state-serve-refresh", daemon=True
+        ).start()
+    except RuntimeError:
+        with _SERVE_LOCK:
+            _SERVE_REFRESHING.discard(key)
+        log.warning("could not start the due-state serve refresh for %s", vault_root, exc_info=True)
+
+
+@canonical_read
+def _refresh_served(
+    vault_root: Path,
+    key: tuple[Any, ...],
+    *,
+    today: dt.date,
+    now: dt.datetime | None,
+    principal: Any,
+    purpose: str | None,
+) -> None:
+    """Replace one expired served build, or drop it when its inputs changed.
+
+    `@canonical_read`, as `served_entries` is: the build resolves collection
+    ownership once for the whole result instead of once per path.
+    """
+    projection_token, payload, review_token = _served_identity(vault_root)
+    stored = None
+    if projection_token is not None and review_token is not None:
+        _rows, stored = _build_served(
+            vault_root, (*key[:-2], projection_token, review_token),
+            today=today, now=now or dt.datetime.now(dt.UTC),
+            principal=principal, purpose=purpose, payload=payload,
+            built=time.monotonic(),
+        )
+    if stored != key:
+        with _SERVE_LOCK:
+            _SERVE_CACHE.pop(key, None)
 
 
 def _served_content_token(vault_root: Path) -> str | None:
@@ -3006,6 +3141,16 @@ _CONTENT_TOKENS: dict[tuple[str, tuple[int, int, int]], str] = {}
 _SERVE_LOCK = threading.Lock()
 _SERVE_CACHE_CAP = 64
 _SERVE_CACHE_TTL_SECONDS = 300.0
+#: An expired build is served, after its live re-checks, until this age while a
+#: background rebuild replaces it. The TTL bounds the inputs no key covers
+#: (collection manifests, the review-ref sidecar); serving stale lets those lag
+#: by up to this age instead of the TTL. Past it, a read rebuilds inline.
+_SERVE_CACHE_STALE_SECONDS = 2 * _SERVE_CACHE_TTL_SECONDS
+#: Keys whose expired build a background refresh is rebuilding.
+_SERVE_REFRESHING: set[tuple[Any, ...]] = set()
+#: How long a refresh waits for the call that started it to finish.
+_SERVE_REFRESH_WAIT_SECONDS = 30.0
+_SERVE_REFRESH_POLL_SECONDS = 0.05
 
 
 def reset_serve_cache() -> None:
@@ -3013,6 +3158,7 @@ def reset_serve_cache() -> None:
     with _SERVE_LOCK:
         _SERVE_CACHE.clear()
         _CONTENT_TOKENS.clear()
+        _SERVE_REFRESHING.clear()
     with _FINGERPRINTS_LOCK:
         _FINGERPRINTS.clear()
     with _SHARED_LOCK:

@@ -340,3 +340,77 @@ def test_reset_drops_every_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     due_state.reset_serve_cache()
     due_state.served_entries(tmp_path, now=now, principal=_principal())
     assert len(calls) == 2
+
+
+def test_an_expired_build_is_served_while_one_background_build_replaces_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured 2026-10-19: a canary asking every 5 min 20 s rebuilt the block on
+    every ask, 1.5-3.5 s, because each found the 300 s build expired."""
+    import threading
+
+    from exomem.governance import principal as principal_module
+
+    monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
+    _persist(tmp_path)
+    calls = _spy(monkeypatch)
+    spied = due_state._served_entries_uncached
+    release = threading.Event()
+    bound: list[object] = []
+
+    def gated(*args, **kwargs):
+        if calls:  # every build after the first waits for the test
+            bound.append(principal_module.current_principal())
+            assert release.wait(5)
+        return spied(*args, **kwargs)
+
+    monkeypatch.setattr(due_state, "_served_entries_uncached", gated)
+    now = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
+    who = _principal()
+    with principal_module.request_scope(who):
+        due_state.served_entries(tmp_path, now=now, principal=who)
+        monkeypatch.setattr(due_state, "_SERVE_CACHE_TTL_SECONDS", 0.0)
+        expired = due_state.served_entries(tmp_path, now=now, principal=who)
+        again = due_state.served_entries(tmp_path, now=now, principal=who)
+    assert [row["ref"] for row in expired + again] == ["exomem://memory/1"] * 2
+    assert len(calls) == 1  # neither read built inline
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "exomem-due-state-serve-refresh":
+            thread.join(5)
+    assert len(calls) == 2  # one background build for both expired reads
+    assert bound == [who]  # under the caller's binding, not an owner scope
+    monkeypatch.setattr(due_state, "_SERVE_CACHE_TTL_SECONDS", 300.0)
+    fresh = due_state.served_entries(tmp_path, now=now, principal=who)
+    assert [row["ref"] for row in fresh] == ["exomem://memory/2"]
+    assert len(calls) == 2
+
+
+def test_an_expired_build_whose_verdict_was_revoked_is_never_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _persist(tmp_path)
+    calls = _spy(monkeypatch)
+    now = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
+    due_state.served_entries(tmp_path, now=now, principal=_principal())
+    monkeypatch.setattr(due_state, "_SERVE_CACHE_TTL_SECONDS", 0.0)
+    monkeypatch.setattr(egress, "release_walk_filter", lambda *_a, **_k: lambda path: path != PAGE)
+    served = due_state.served_entries(tmp_path, now=now, principal=_principal())
+    # Rebuilt inline under the new verdict; the expired rows never left the memo.
+    assert [row["ref"] for row in served] == ["exomem://memory/2"]
+    assert len(calls) == 2
+
+
+def test_a_build_past_its_stale_limit_is_rebuilt_inline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The limit bounds how far the inputs no key covers can lag behind a serve."""
+    _persist(tmp_path)
+    calls = _spy(monkeypatch)
+    now = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
+    due_state.served_entries(tmp_path, now=now, principal=_principal())
+    monkeypatch.setattr(due_state, "_SERVE_CACHE_TTL_SECONDS", 0.0)
+    monkeypatch.setattr(due_state, "_SERVE_CACHE_STALE_SECONDS", 0.0)
+    served = due_state.served_entries(tmp_path, now=now, principal=_principal())
+    assert [row["ref"] for row in served] == ["exomem://memory/2"]
+    assert len(calls) == 2
