@@ -397,20 +397,20 @@ def get_clip_model():
 
 
 def embed_image(path: Path) -> np.ndarray:
-    """Encode an image file → float32 (512,), L2-normalized for cosine.
+    """Encode decoded pixels as an L2-normalized float32 visual vector."""
+    from . import image_codecs
 
-    Raises ClipUnavailable when CLIP/Pillow aren't installed so callers can soft-skip.
-    """
     try:
-        from PIL import Image
-    except ImportError as e:
-        raise ClipUnavailable(f"Pillow not installed: {e}") from e
-    try:
-        model = get_clip_model()
-    except ImportError as e:
-        raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    with Image.open(path) as img, CLIP_GUARD.active(), runtime_resources.model_execution():
-        vec = model.encode(img.convert("RGB"), convert_to_numpy=True, normalize_embeddings=True)
+        image = image_codecs.open_image(path)
+    except ImportError as error:
+        raise ClipUnavailable(str(error)) from error
+    with image as img:
+        try:
+            model = get_clip_model()
+        except ImportError as error:
+            raise ClipUnavailable(f"sentence-transformers not installed: {error}") from error
+        with CLIP_GUARD.active(), runtime_resources.model_execution():
+            vec = model.encode(img.convert("RGB"), convert_to_numpy=True, normalize_embeddings=True)
     return vec.astype(np.float32, copy=False)
 
 

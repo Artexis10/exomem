@@ -437,6 +437,7 @@ def test_warm_all_marks_components_ready_in_semantic_lexical_model_order(
     )
     monkeypatch.setattr(embeddings, "get_clip_model", lambda: call_order.append("clip") or object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: type("Index", (), {"has_vectors": lambda self: True})())
 
     warmup.warm_all(tmp_path)
 
@@ -883,6 +884,9 @@ def test_warm_caches_gates_matrix_warm_on_preload_models(
     calls: list[int] = []
 
     class _Idx:
+        def has_vectors(self):
+            return True
+
         def search(self, q, k):
             calls.append(k)
             return []
@@ -948,6 +952,7 @@ def test_warm_all_soft_fails_one_step_and_continues_to_later_steps(
     monkeypatch.setattr(embeddings, "get_reranker", lambda: reranker_called.append(1) or object())
     monkeypatch.setattr(embeddings, "get_clip_model", lambda: clip_called.append(1) or object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: type("Index", (), {"has_vectors": lambda self: True})())
 
     warmup.warm_all(tmp_path)
 
@@ -1051,6 +1056,7 @@ def test_warm_all_runs_a_throwaway_encode_after_each_preload(
     monkeypatch.setattr(embeddings, "get_reranker", _FakeCE)
     monkeypatch.setattr(embeddings, "get_clip_model", _FakeST)
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: type("Index", (), {"has_vectors": lambda self: True})())
 
     warmup.warm_all(tmp_path)
 

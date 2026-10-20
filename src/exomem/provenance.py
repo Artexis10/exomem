@@ -63,7 +63,10 @@ def evidence_version(content: str) -> str:
         frontmatter, body, _ = parse_frontmatter(content, strict=True)
         material = {key: value for key, value in frontmatter.items() if key != "ingested_into"}
         encoded = _canonical_json(["exomem-evidence-v1", _canonical_value(material), body])
-    except (FrontmatterError, TypeError, ValueError, OverflowError, RecursionError) as error:
+    except (
+        FrontmatterError, TypeError, ValueError, OverflowError, RecursionError,
+        AttributeError, KeyError,  # PyYAML constructors reject malformed explicit scalars with these errors.
+    ) as error:
         raise ValueError("EVIDENCE_VERSION_INVALID: metadata cannot bind retained evidence") from error
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

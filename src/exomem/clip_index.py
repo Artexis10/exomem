@@ -222,6 +222,29 @@ class ClipIndex:
             own_instance,
         )
 
+    def has_vectors(self) -> bool:
+        """Probe held read-only storage without creating or loading a matrix."""
+        try:
+            with reserved_paths._subsystem_authority_scope("clip_index"):
+                with reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=("clip-store",),
+                    identity_may_change=False,
+                ):
+                    with reserved_paths._sqlite_owner_target_scope(
+                        self.vault_root, self.path, "clip-store", create=False,
+                    ) as target:
+                        connection = _sqlite_connect_owned(
+                            f"{target.resolve().as_uri()}?mode=ro", uri=True
+                        )
+                        try:
+                            connection.execute("PRAGMA query_only=ON")
+                            return connection.execute("SELECT 1 FROM images LIMIT 1").fetchone() is not None
+                        finally:
+                            connection.close()
+        except FileNotFoundError:
+            return False
+
     def frame_timestamps(self, rel_path: str) -> list[float]:
         """Read existing keyframe timestamps without creating or migrating the index."""
 

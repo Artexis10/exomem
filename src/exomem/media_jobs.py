@@ -437,6 +437,8 @@ class MediaJobResult:
     payload: dict[str, Any]
     payload_hash: str
     job: MediaJob
+    sidecar_before_evidence_version: str | None = None
+    target_evidence_version: str | None = None
     target_hash: str | None = None
     target_size: int | None = None
     receipt_revision: int | None = None
@@ -606,11 +608,13 @@ class MediaJobStore:
                         claim_revision INTEGER NOT NULL,
                         kind TEXT NOT NULL,
                         sidecar_before_hash TEXT NOT NULL,
+                        sidecar_before_evidence_version TEXT,
                         binary_identity_json TEXT NOT NULL,
                         payload_json TEXT NOT NULL,
                         payload_hash TEXT NOT NULL,
                         ocr_generation INTEGER NOT NULL DEFAULT 0,
                         target_hash TEXT,
+                        target_evidence_version TEXT,
                         target_size INTEGER,
                         receipt_revision INTEGER,
                         created_at REAL NOT NULL,
@@ -706,6 +710,10 @@ class MediaJobStore:
                 "ALTER TABLE media_job_results "
                 "ADD COLUMN ocr_generation INTEGER NOT NULL DEFAULT 0"
             )
+        if "sidecar_before_evidence_version" not in columns:
+            conn.execute("ALTER TABLE media_job_results ADD COLUMN sidecar_before_evidence_version TEXT")
+        if "target_evidence_version" not in columns:
+            conn.execute("ALTER TABLE media_job_results ADD COLUMN target_evidence_version TEXT")
 
     def _migrate_job_key(self, conn: sqlite3.Connection) -> None:
         """Re-key existing rows onto (binary_rel, media_type), collapsing duplicates.
@@ -1027,6 +1035,7 @@ class MediaJobStore:
         *,
         kind: str,
         sidecar_before_hash: str,
+        sidecar_before_evidence_version: str | None = None,
         binary_identity: dict[str, Any],
         payload: dict[str, Any],
         terminal_state: str | None = None,
@@ -1040,6 +1049,8 @@ class MediaJobStore:
             return False
         validated = _validated_result_payload(kind, payload)
         if validated is None or not _is_sha256(sidecar_before_hash):
+            return False
+        if sidecar_before_evidence_version is not None and not _is_sha256(sidecar_before_evidence_version):
             return False
         identity = _validated_binary_identity(binary_identity)
         if identity is None:
@@ -1071,14 +1082,14 @@ class MediaJobStore:
                     """
                     INSERT INTO media_job_results(
                         job_id, schema_version, claim_revision, kind, sidecar_before_hash,
-                        binary_identity_json, payload_json, payload_hash, ocr_generation,
+                        sidecar_before_evidence_version, binary_identity_json, payload_json, payload_hash, ocr_generation,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(job_id) DO NOTHING
                     """,
                     (
                         job.id, _RESULT_SCHEMA_VERSION, job.claim_revision, kind, sidecar_before_hash,
-                        identity_json, payload_json, digest, job.ocr_generation, now, now,
+                        sidecar_before_evidence_version, identity_json, payload_json, digest, job.ocr_generation, now, now,
                     ),
                 ).rowcount
             else:
@@ -1086,14 +1097,14 @@ class MediaJobStore:
                     """
                     INSERT INTO media_job_results(
                         job_id, schema_version, claim_revision, kind, sidecar_before_hash,
-                        binary_identity_json, payload_json, payload_hash, ocr_generation,
+                        sidecar_before_evidence_version, binary_identity_json, payload_json, payload_hash, ocr_generation,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(job_id) DO NOTHING
                     """,
                     (
                         job.id, _RESULT_SCHEMA_VERSION, job.claim_revision, kind, sidecar_before_hash,
-                        identity_json, payload_json, digest, job.ocr_generation, now, now,
+                        sidecar_before_evidence_version, identity_json, payload_json, digest, job.ocr_generation, now, now,
                     ),
                 ).rowcount
                 if changed:
@@ -1337,9 +1348,10 @@ class MediaJobStore:
                 """
                 SELECT jobs.*, media_job_results.schema_version,
                        media_job_results.claim_revision AS result_claim_revision,
-                       kind, sidecar_before_hash, binary_identity_json, payload_json,
+                       kind, sidecar_before_hash, sidecar_before_evidence_version,
+                       binary_identity_json, payload_json,
                        payload_hash, media_job_results.ocr_generation AS result_ocr_generation,
-                       target_hash, target_size, receipt_revision
+                       target_hash, target_evidence_version, target_size, receipt_revision
                 FROM media_job_results JOIN jobs ON jobs.id = media_job_results.job_id
                 ORDER BY media_job_results.updated_at, jobs.id LIMIT ?
                 """,
@@ -1427,9 +1439,12 @@ class MediaJobStore:
             conn.close()
 
     def persist_prepared_result(
-        self, result: MediaJobResult, *, target_hash: str, target_size: int, receipt_revision: int
+        self, result: MediaJobResult, *, target_hash: str, target_size: int, receipt_revision: int,
+        target_evidence_version: str | None = None,
     ) -> bool:
         if not _is_sha256(target_hash) or target_size < 0 or receipt_revision <= 0:
+            return False
+        if target_evidence_version is not None and not _is_sha256(target_evidence_version):
             return False
         conn = self._connect()
         try:
@@ -1437,7 +1452,7 @@ class MediaJobStore:
             changed = conn.execute(
                     """
                     UPDATE media_job_results SET target_hash = ?, target_size = ?,
-                        receipt_revision = ?, updated_at = ?
+                        target_evidence_version = ?, receipt_revision = ?, updated_at = ?
                     WHERE job_id = ? AND claim_revision = ? AND payload_hash = ?
                       AND EXISTS (
                           SELECT 1 FROM jobs
@@ -1451,7 +1466,7 @@ class MediaJobStore:
                             )
                       )
                     """,
-                    (target_hash, target_size, receipt_revision, time.time(), result.job_id,
+                    (target_hash, target_size, target_evidence_version, receipt_revision, time.time(), result.job_id,
                      result.claim_revision, result.payload_hash),
                 ).rowcount
             if changed != 1:
@@ -2062,12 +2077,19 @@ class MediaJobStore:
                 != payload_hash
             ):
                 return None
+            sidecar_before_evidence_version = row["sidecar_before_evidence_version"]
+            target_evidence_version = row["target_evidence_version"]
+            if any(
+                version is not None and not _is_sha256(version)
+                for version in (sidecar_before_evidence_version, target_evidence_version)
+            ):
+                return None
             target_hash = row["target_hash"]
             target_size = row["target_size"]
             receipt_revision = row["receipt_revision"]
             prepared = (target_hash, target_size, receipt_revision)
             if any(value is None for value in prepared):
-                if any(value is not None for value in prepared):
+                if any(value is not None for value in prepared) or target_evidence_version is not None:
                     return None
             elif (
                 not _is_sha256(target_hash)
@@ -2087,6 +2109,8 @@ class MediaJobStore:
             ocr_generation=ocr_generation,
             kind=kind,
             sidecar_before_hash=sidecar_before_hash,
+            sidecar_before_evidence_version=sidecar_before_evidence_version,
+            target_evidence_version=target_evidence_version,
             binary_identity=identity,
             payload=payload,
             payload_hash=payload_hash,

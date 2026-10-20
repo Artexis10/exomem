@@ -684,7 +684,7 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
     result = _preserve_media_stub(vault, filename="guarded.mp3")
     sidecar = vault / result.sidecar_path
     manager = _RecordingMutationManager(vault)
-    original_update = preserve.update_sidecar_extraction
+    original_update = preserve.commit_media_sidecar_writes
     fanout_depths: list[int] = []
 
     def extract_outside(*_args, **_kwargs):
@@ -699,7 +699,7 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
 
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
     monkeypatch.setattr(extract, "extract_text", extract_outside)
-    monkeypatch.setattr(preserve, "update_sidecar_extraction", update_inside)
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", update_inside)
     monkeypatch.setattr(
         media_worker.index_sync,
         "upsert_after_write",
@@ -1011,7 +1011,7 @@ def test_newer_graph_epoch_supersedes_stale_media_postlude_without_fanout_or_rec
     result = _preserve_media_stub(vault, filename="postlude-race.m4a")
     sidecar = vault / result.sidecar_path
     rel = sidecar.relative_to(vault).as_posix()
-    original_update = preserve.update_sidecar_extraction
+    original_update = preserve.commit_media_sidecar_writes
     original_add_full = deferred_index.add_full
     fanout_calls: list[tuple[Path | None, list[Path]]] = []
 
@@ -1045,7 +1045,7 @@ def test_newer_graph_epoch_supersedes_stale_media_postlude_without_fanout_or_rec
         )
         return written
 
-    monkeypatch.setattr(preserve, "update_sidecar_extraction", commit_a_then_advance_b)
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", commit_a_then_advance_b)
     monkeypatch.setattr(
         deferred_index, "add_full_receipts", admit_full_receipts, raising=False
     )
@@ -1080,7 +1080,7 @@ def _assert_media_postlude_mismatch_retains_receipt(
     sidecar = vault / result.sidecar_path
     rel = sidecar.relative_to(vault).as_posix()
     checkpoint_path = graph_sync.checkpoint_path(vault)
-    original_update = preserve.update_sidecar_extraction
+    original_update = preserve.commit_media_sidecar_writes
     original_add_full = deferred_index.add_full
     original_publish_hook = vault_module._after_batch_destination_published
     published: list[Path] = []
@@ -1134,7 +1134,7 @@ def _assert_media_postlude_mismatch_retains_receipt(
     monkeypatch.setattr(
         deferred_index, "add_full_receipts", admit_full_receipts, raising=False
     )
-    monkeypatch.setattr(preserve, "update_sidecar_extraction", commit_then_mismatch)
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", commit_then_mismatch)
     monkeypatch.setattr(
         vault_module,
         "_after_batch_destination_published",
@@ -1279,7 +1279,7 @@ def test_absent_media_predecessor_refuses_new_malformed_checkpoint(
     rel = sidecar.relative_to(vault).as_posix()
     checkpoint_path = graph_sync.checkpoint_path(vault)
     checkpoint_path.unlink()
-    original_update = preserve.update_sidecar_extraction
+    original_update = preserve.commit_media_sidecar_writes
     fanout_calls: list[object] = []
 
     def commit_then_add_malformed_checkpoint(*args, **kwargs):  # noqa: ANN002, ANN003
@@ -1298,7 +1298,7 @@ def test_absent_media_predecessor_refuses_new_malformed_checkpoint(
     )
     monkeypatch.setattr(
         preserve,
-        "update_sidecar_extraction",
+        "commit_media_sidecar_writes",
         commit_then_add_malformed_checkpoint,
     )
     monkeypatch.setattr(
@@ -1863,7 +1863,7 @@ def test_crlf_pending_sidecar_uses_raw_byte_identity_at_transcript_commit(
     preserved = (
         f"\n{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n"
         "## Preserved notes\n\nOriginal cassette label.\n"
-    ).encode("utf-8")
+    ).encode()
     sidecar.write_bytes((sidecar.read_bytes() + preserved).replace(b"\n", b"\r\n"))
     worker = media_worker.MediaWorker(vault, execution_mode="inline")
     job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
@@ -2177,7 +2177,7 @@ def test_media_commit_exception_releases_mutation_guard(
     def fail_commit(*_args, **_kwargs):
         raise RuntimeError("commit failed")
 
-    monkeypatch.setattr(preserve, "update_sidecar_extraction", fail_commit)
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", fail_commit)
     worker = media_worker.MediaWorker(vault, execution_mode="inline")
 
     with pytest.raises(RuntimeError, match="commit failed"):
