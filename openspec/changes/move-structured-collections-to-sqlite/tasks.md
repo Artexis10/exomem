@@ -213,10 +213,13 @@ October 4 private runtime/create foundation: independent review approves current
   - Prove a lagging replica plus a newer acknowledged canonical row, wrong binding, corrupt history, publication scratch filtering and older-schema byte preservation. Restored bytes do not claim destination admission.
   Delivered in PR #1849, merged as `72929f5b450f81ac831e4d5f88cf0dbe643c7bb4`. `tests/test_cloud_operator_portability.py` proves export, staged restore, source binding, bounded copying and schema preservation. The main integration runs that module with recall and managed history checks: 69 cases pass. Merged-main CI `39101988862` also passes. Cloud coordination and operational enablement remain separate under P1b.7a.
 - [ ] P1b.7a Configure and verify writer-lease coordination for Cloud cells before store enablement. Reuse the coordinator contract, credentials, capability and topology. Preserve generation-2+ refusal on a fresh coordinator; do not reset an imported fence. Snapshot and restore wiring alone does not satisfy this dependency.
-- [ ] P1b.8 **Phase gate.**
+- [x] P1b.8 **Phase gate.**
   - The round-trip proof is green on the generated legacy vaults.
+    Evidence: P1b.1, which runs in default CI.
   - Backup under concurrent writes is integrity-checked at 10,000 items.
+    Evidence: `tests/test_collection_store_snapshot.py::test_snapshot_pins_one_wal_boundary_and_releases_reader_before_yield` commits a write during the copy of a 10,000-row store, then runs `integrity_check` and `foreign_key_check`. The `exomem collections backup` tests in P1b.5 use that primitive on smaller stores.
   - The current Cloud portability checks pass for export, restore and import.
+    Evidence: P1b.7 (`tests/test_cloud_operator_portability.py`). P1b.7a, Cloud writer-lease coordination, is Cloud enablement and not a one-host gate.
   - Snapshot publication cost is reported in bytes per hour at 1, 10 and 60 writes per minute on a 10,000-row store, within the stated budget (A9). Cross-host transport measurement is deferred.
     Evidence, 2026-10-19 (`design.md` A9): publication attempts land about 60–65 s apart, and replacements inside a window at least 60 s apart, at 1, 10 and 60 writes per minute, so the coalescing budget holds. Each replacement installs the whole replica, about 27.5 MB, so steady writes cost about 1.6 GB per hour at every measured rate. Windows with fewer replacements had a busy `retry_pending` attempt, which left the replica signature unchanged, or an attempt phase that put only four attempts inside the 300-second window; they are marked partial.
   - Local handoff scenarios pass: routine idle-release re-acquisition never waits for another host, managed upgrade preserves committed rows, and explicit restore is writable. Cross-host handoff and adopt-local acceptance are deferred.
@@ -224,6 +227,7 @@ October 4 private runtime/create foundation: independent review approves current
     Upgrade evidence: `::test_a_failed_migration_is_a_pending_takeover_that_hands_back_the_lease_and_retries` reads the row that the schema-10 release committed after the writer migrates the store to the current schema. `tests/test_collection_store_service.py::test_an_upgraded_service_migrates_its_fenced_store_from_the_previous_schema_and_stays_writable` covers the service handoff from the previous worker; its store has no rows before the upgrade.
     Restore evidence: `::test_staged_restore_carries_the_replica_and_admits_the_c_vault` restores an exported vault, adopts its replica on fresh state, reads the committed row and commits a new write.
   - The reverse-export round trip is green.
+    Evidence: P1b.4, `tests/test_collection_store_export.py::test_export_returns_a_migrated_vault_to_files_file_mode_reads_as_the_store_served`.
 
 ## P2. Rendered views and edit-back
 
