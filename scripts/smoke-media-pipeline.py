@@ -38,9 +38,10 @@ def _wait(predicate, *, timeout=120.0, what="condition", explain=None):
     started = time.monotonic()
     deadline = started + timeout
     while time.monotonic() < deadline:
-        if predicate():
+        result = predicate()
+        if result:
             print(f"  waited {time.monotonic() - started:.1f}s for {what}")
-            return True
+            return result
         time.sleep(0.5)
     detail = f"\n{explain()}" if explain is not None else ""
     raise AssertionError(f"timed out waiting for {what}{detail}")
@@ -84,7 +85,7 @@ def main() -> int:
     # The server's shutdown does not join its background embedding work. A thread
     # still inside torch when the interpreter finalizes is aborted through
     # std::terminate (exit 134), which would turn every result here red. That
-    # shutdown defect is tracked on its own; this smoke's verdict is the lanes.
+    # shutdown defect is outside this smoke, whose verdict is the lanes.
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(code)
@@ -160,9 +161,8 @@ def _lanes(vault: Path, client) -> int:
     post("red.png", red.getvalue(), "image/png", "Smoke", "02")
     red_rel = "Knowledge Base/Evidence/Smoke/02/red.png"
     _wait(lambda: embeddings.ClipIndex(vault).has(red_rel), what="CLIP index of red.png", explain=queue)
-    _wait(lambda: found("a solid red square", "hybrid", "red.png.md"),
-          what="CLIP to surface the textless red image")
-    red_hit = found("a solid red square", "hybrid", "red.png.md")
+    red_hit = _wait(lambda: found("a solid red square", "hybrid", "red.png.md"),
+                    what="CLIP to surface the textless red image")
     assert red_hit[0].as_dict().get("media_type") == "image"
     print("  [2] textless image -> found by CLIP visual match  PASS")
 
