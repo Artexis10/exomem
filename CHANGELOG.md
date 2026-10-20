@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.131.0](https://github.com/Artexis10/exomem/compare/v0.130.1...v0.131.0) (2026-10-20)
+
+
+### Features
+
+* **collection-store:** release collection-views-v1 ([#1929](https://github.com/Artexis10/exomem/issues/1929)) ([6a35bd5](https://github.com/Artexis10/exomem/commit/6a35bd5497816187fffe796b6526d637ad8230c9))
+
+
+### Bug Fixes
+
+* **reads:** retry identity scans invalidated by owner publication ([#1937](https://github.com/Artexis10/exomem/issues/1937)) ([2342f4a](https://github.com/Artexis10/exomem/commit/2342f4a3b5d299b5ed252499ec079a2ee389c6b9))
+* **recall:** keep a managed pack off a cold corpus matrix ([#1934](https://github.com/Artexis10/exomem/issues/1934)) ([23d3d5b](https://github.com/Artexis10/exomem/commit/23d3d5b06202cd65ade8ada497ba1d49c93d59fa))
+
+
+### Performance
+
+* **writes:** expose due-state persistence costs ([#1936](https://github.com/Artexis10/exomem/issues/1936)) ([8942cc5](https://github.com/Artexis10/exomem/commit/8942cc5ebc1b0b7b58dcfe272a500cbec4191b02))
+
 ## [0.130.1](https://github.com/Artexis10/exomem/compare/v0.130.0...v0.130.1) (2026-10-20)
 
 
