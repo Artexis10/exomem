@@ -1885,10 +1885,6 @@ class MediaWorker:
             if not ef:
                 continue
             binary = self._vault_root / ef.group(1).strip()
-            # Reconciliation renders a preserved stub and queues it itself. A job
-            # claimed against the stub went stale as soon as it did.
-            if media_processing.awaits_reconciliation(self._vault_root, binary, text):
-                continue
             # Enqueue only the sidecar this binary actually owns. A stray copy —
             # a Syncthing `.sync-conflict-*.md`, a manual duplicate — still carries
             # `evidence_file:` pointing back here, and queueing it minted a SECOND
@@ -1896,6 +1892,10 @@ class MediaWorker:
             # two workers extracted one binary into two different sidecars.
             if not _is_canonical_sidecar(sidecar, binary):
                 skipped_strays += 1
+                continue
+            # Reconciliation renders a preserved stub and queues it itself. A job
+            # claimed against the stub went stale as soon as it did.
+            if media_processing.awaits_reconciliation(self._vault_root, binary, text):
                 continue
             mt_match = _MEDIA_TYPE_RE.search(head)
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
@@ -2192,7 +2192,9 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     if media_processing.has_completed_transcript(
                         current_content, media_type=job.media_type
                     ):
-                        store.retire_ocr(job)
+                        # This claim already ran its CLIP and re-embed stages; a
+                        # stage queued while it ran stays.
+                        store.complete(job)
                     elif binary_only_stale:
                         store.discard(job)
                     else:

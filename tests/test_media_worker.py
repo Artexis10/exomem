@@ -2572,6 +2572,58 @@ def test_reconcile_after_ocr_keeps_the_queued_clip_stage(
     assert embeddings.ClipIndex(vault).has(stub.path)
 
 
+def test_failed_ocr_whose_transcript_completes_elsewhere_still_gets_clip(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reconcile turned a failed OCR row whose result still waited for the parent
+    into a pending CLIP row. The parent could then never settle that result, and
+    the supervisor launched no child for any media in the vault again."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_image", lambda _path: np.ones(embeddings.CLIP_DIM, dtype=np.float32)
+    )
+    stub = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="scan.png", data=b"\x89PNG fake"
+    )
+    binary = vault / stub.path
+    sidecar = vault / stub.sidecar_path
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.do_clip
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"error": "decoder failed", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+    sidecar.write_text(
+        preserve.render_sidecar_extraction(
+            sidecar.read_text(encoding="utf-8"),
+            text="SCANNED LEASE 2026",
+            engine="tesseract",
+            speakers=[],
+            speaker_verification="unavailable",
+            attempts=1,
+        ),
+        encoding="utf-8",
+    )
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
+
+    worker._drain_parent_results()
+
+    assert store.pending_result_count() == 0  # the parent settled it; children launch again
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+    assert embeddings.ClipIndex(vault).has(stub.path)
+
+
 def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)

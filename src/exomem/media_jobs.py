@@ -486,6 +486,24 @@ def _windows_pid_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
+    """Drop the OCR stage of the rows `match` selects; later stages stay queued.
+
+    A row with a CLIP or re-embed stage left becomes pending without the blocked
+    state that belonged to its OCR stage; a row with nothing left goes.
+    """
+    deleted = conn.execute(
+        "DELETE FROM jobs WHERE " + match + " AND do_clip = 0 AND do_reembed = 0", params
+    ).rowcount
+    kept = conn.execute(
+        "UPDATE jobs SET do_ocr = 0, state = 'pending', last_error = NULL, blocked_reason = NULL, "
+        "blocked_context = NULL, memory_stops = 0, memory_soft_stops = 0, updated_at = ? WHERE "
+        + match,
+        (time.time(), *params),
+    ).rowcount
+    return int(deleted + kept)
+
+
 class MediaJobStore:
     def __init__(self, vault_root: Path, *, create: bool = True) -> None:
         self.vault_root = vault_root.resolve()
@@ -826,31 +844,22 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def retire_ocr(self, job: MediaJob) -> int:
+    def retire_ocr(self, binary_path: Path, media_type: str) -> int:
         """Retire the OCR stage of an artifact already completed in Markdown.
 
-        A queued CLIP or re-embed stage stays queued, and the row goes only when
-        no stage remains. Without a claim, a running row is left to its own result.
+        A queued CLIP or re-embed stage stays queued. A running claim, or a row
+        whose result waits for the parent, is left to that result.
         """
-        binary_rel = self._relative(job.binary_path)
-        key = self._key(binary_rel, job.media_type)
-        if job.id is not None:
-            match, params = "do_ocr = 1 AND id = ? AND claim_revision = ?", (job.id, job.claim_revision)
-        else:
-            match, params = "do_ocr = 1 AND job_key = ? AND state != 'running'", (key,)
+        key = self._key(self._relative(binary_path), media_type)
         conn = self._connect()
         try:
             with conn:
-                deleted = conn.execute(
-                    "DELETE FROM jobs WHERE " + match + " AND do_clip = 0 AND do_reembed = 0",
-                    params,
-                ).rowcount
-                kept = conn.execute(
-                    "UPDATE jobs SET do_ocr = 0, state = 'pending', last_error = NULL, "
-                    "updated_at = ? WHERE " + match,
-                    (time.time(), *params),
-                ).rowcount
-                return int(deleted + kept)
+                return _drop_ocr_stage(
+                    conn,
+                    "do_ocr = 1 AND job_key = ? AND state != 'running' AND NOT EXISTS "
+                    "(SELECT 1 FROM media_job_results WHERE job_id = jobs.id)",
+                    (key,),
+                )
         finally:
             conn.close()
 
@@ -1297,23 +1306,14 @@ class MediaJobStore:
         Its media then waits with a pending sidecar and no job until reconciliation
         queues it for the enabled engine. Later stages of the same job stay queued.
         """
-        guard = (job.id, job.blocked_reason, job.claim_revision)
         conn = self._connect()
         try:
             with conn:
-                if job.do_clip or job.do_reembed:
-                    return conn.execute(
-                        "UPDATE jobs SET do_ocr = 0, state = 'pending', last_error = NULL, "
-                        "blocked_reason = NULL, blocked_context = NULL, updated_at = ? "
-                        "WHERE id = ? AND state = 'blocked' AND blocked_reason IS ? "
-                        "AND claim_revision = ?",
-                        (time.time(), *guard),
-                    ).rowcount == 1
-                return conn.execute(
-                    "DELETE FROM jobs WHERE id = ? AND state = 'blocked' AND blocked_reason IS ? "
-                    "AND claim_revision = ?",
-                    guard,
-                ).rowcount == 1
+                return _drop_ocr_stage(
+                    conn,
+                    "id = ? AND state = 'blocked' AND blocked_reason IS ? AND claim_revision = ?",
+                    (job.id, job.blocked_reason, job.claim_revision),
+                ) == 1
         finally:
             conn.close()
 

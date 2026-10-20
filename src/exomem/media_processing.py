@@ -1089,13 +1089,7 @@ def _retire_completed_ocr(
 ) -> None:
     if not media_jobs.job_store_path(vault).exists():
         return
-    media_jobs.MediaJobStore(vault, create=False).retire_ocr(
-        media_jobs.MediaJob(
-            binary_path=binary,
-            sidecar_path=sidecar,
-            media_type=media_type,
-        )
-    )
+    media_jobs.MediaJobStore(vault, create=False).retire_ocr(binary, media_type)
 
 
 def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
