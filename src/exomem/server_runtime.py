@@ -147,6 +147,8 @@ class LocalRuntimeActivation:
         # event: every path that stops the other workers stops it too.
         self._vocabulary_stop = threading.Event()
         self.recall_reembed: Any | None = None
+        self.retrieval_warmup: threading.Thread | None = None
+        self.matrix_warmup: threading.Thread | None = None
         self.dreamer: Any | None = None
         self.graph_drain: threading.Thread | None = None
         self.graph_cleanup_attempted = False
@@ -158,11 +160,12 @@ class LocalRuntimeActivation:
             self._commit_recall_reembed()
 
     def _bind_graph_rebuild_lifetime(self) -> None:
-        from . import graph_sync
+        from . import graph_sync, working_set_runtime
         from .writer_lease import active_manager
 
         state = active_manager()._mutation_coordinator_for(self.vault_root).state_root
         graph_sync.rebuild_coordinator(self.vault_root, state_root=state).bind_shutdown(self._shutdown)
+        working_set_runtime.bind_shutdown(self.vault_root, self._shutdown)
 
     def release(self) -> None:
         """Hand this process the ownership a standby refused, then activate."""
@@ -215,7 +218,7 @@ class LocalRuntimeActivation:
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
-        self._start_component("retrieval", _start_compute_runtime)
+        self._start_component("retrieval", self._start_compute_runtime)
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
@@ -252,12 +255,17 @@ class LocalRuntimeActivation:
             return
         # Lazily, once the drain is done and off this thread: nothing below
         # waits on a matrix load, and the reaper still frees it when idle.
-        threading.Thread(
+        self.matrix_warmup = threading.Thread(
             target=_warm_embedding_matrix,
             args=(self.vault_root,),
             name="exomem-matrix-warm",
             daemon=True,
-        ).start()
+        )
+        try:
+            self.matrix_warmup.start()
+        except Exception:
+            self.matrix_warmup = None
+            raise
         starters = (
             ("graph drain", self._start_graph_drain),
             ("media", self._start_media_worker),
@@ -340,6 +348,9 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
+        from . import working_set_runtime
+
+        working_set_runtime.stop_builds(self.vault_root)
         with self._lock:
             # The retry lock prevents any later repair scheduling after stop.
             self._catalogue_stop.set()
@@ -399,6 +410,21 @@ class LocalRuntimeActivation:
 
     def _start_media_worker(self, vault_root: Path) -> None:
         self.media_worker = _start_media_worker(vault_root)
+
+    def _start_compute_runtime(self, vault_root: Path) -> None:
+        _start_compute_runtime(vault_root, owner=self)
+
+    def _join_native_workers(self) -> None:
+        """Finish owned native work after activation can no longer assign workers."""
+        from . import working_set_runtime
+
+        for thread in (self.retrieval_warmup, self.matrix_warmup, self.recall_reembed):
+            if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
+                thread.join()
+        working_set_runtime.join_builds(self.vault_root)
+        join = getattr(self.semantic_drain, "join", None)
+        if callable(join):
+            join()
 
     def _start_graph_drain(self, vault_root: Path) -> None:
         self.graph_drain = _start_graph_drain(vault_root)
@@ -510,48 +536,59 @@ class LocalRuntimeActivation:
             try:
                 yield {}
             finally:
-                with self._lock:
-                    self._shutdown.set()
-                    timer = self._timer
-                    self._timer = None
-                    thread = self._thread
-                if timer is not None:
-                    timer.cancel()
-                shutdown_error = None
-                try:
-                    self._stop_background_workers()
-                except RuntimeError as error:
-                    shutdown_error = error
-                if thread is not None and thread is not threading.current_thread():
-                    await anyio.to_thread.run_sync(thread.join)
-                # A starter may have assigned its worker after the first stop.
-                try:
-                    self._stop_background_workers()
-                except RuntimeError as error:
-                    shutdown_error = error
-                # Activation may have started the watcher after the stop above;
-                # it saw the stop event already set, so this join is short.
-                self._vocabulary_stop.set()
-                await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
-                from . import graph_sync
-
-                if not self._deferred:
-                    self.graph_cleanup_attempted = True
-                    drained = await anyio.to_thread.run_sync(
-                        lambda: graph_sync.drain_active_rebuilds(timeout=5.0)
-                    )
-                    if not drained:
-                        shutdown_error = RuntimeError("graph rebuilds are still running during shutdown")
-                # A discarded standby must not leave the catalogue it built
-                # behind; a no-op for any worker that is not an unpromoted one.
-                # Off the loop: it may wait, bounded, for a build to stop, and
-                # shielded so a cancelled shutdown still finishes the removal.
-                from . import service_standby
-
                 with anyio.CancelScope(shield=True):
+                    with self._lock:
+                        self._shutdown.set()
+                        timer = self._timer
+                        self._timer = None
+                        thread = self._thread
+                    if timer is not None:
+                        timer.cancel()
+                    shutdown_error = None
+                    try:
+                        await anyio.to_thread.run_sync(self._stop_background_workers)
+                    except RuntimeError as error:
+                        shutdown_error = error
+                    if thread is not None and thread is not threading.current_thread():
+                        await anyio.to_thread.run_sync(thread.join)
+                    # A starter may have assigned its worker after the first stop.
+                    try:
+                        await anyio.to_thread.run_sync(self._stop_background_workers)
+                    except RuntimeError as error:
+                        shutdown_error = error
+                    # The supervisor owns the outer deadline; Python cannot tear down
+                    # while a daemon still owns a native forward or its model handle.
+                    await anyio.to_thread.run_sync(self._join_native_workers)
+                    # Recheck the stopped owners after the final join: a timed stop
+                    # that subsequently finished is no longer a shutdown failure.
+                    try:
+                        await anyio.to_thread.run_sync(self._stop_background_workers)
+                    except RuntimeError as error:
+                        shutdown_error = error
+                    else:
+                        shutdown_error = None
+                    # Activation may have started the watcher after the stop above;
+                    # it saw the stop event already set, so this join is short.
+                    self._vocabulary_stop.set()
+                    await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
+                    from . import graph_sync
+
+                    if not self._deferred:
+                        self.graph_cleanup_attempted = True
+                        drained = await anyio.to_thread.run_sync(
+                            lambda: graph_sync.drain_active_rebuilds(timeout=5.0)
+                        )
+                        if not drained:
+                            shutdown_error = RuntimeError("graph rebuilds are still running during shutdown")
+                    # A discarded standby must not leave the catalogue it built
+                    # behind; a no-op for any worker that is not an unpromoted one.
+                    # Off the loop: it may wait, bounded, for a build to stop, and
+                    # shielded so a cancelled shutdown still finishes the removal.
+                    from . import service_standby
+
                     await anyio.to_thread.run_sync(service_standby.discard)
-                if shutdown_error is not None:
-                    raise shutdown_error
+                    if shutdown_error is not None:
+                        raise shutdown_error
 
         return _lifespan
 
@@ -823,29 +860,45 @@ def _start_metrics_persistence() -> None:
         log.warning("metrics persistence unavailable at startup: %s", exc)
 
 
-def _start_retrieval_runtime(vault_root: Path) -> None:
+def _start_retrieval_runtime(
+    vault_root: Path, *, stop: threading.Event | None = None,
+) -> threading.Thread | None:
     """Start core catalog/cache warm-up independently of optional models."""
     from . import warmup
 
     if warmup.warmup_enabled():
         if os.environ.get("EXOMEM_EAGER_BOOT"):
-            from . import readiness
+            from . import foreground_priority, readiness, runtime_resources
 
             readiness.begin_warm()
             try:
-                warmup.warm_all(vault_root)
+                with (
+                    foreground_priority.cancellable(stop),
+                    runtime_resources.model_work("bulk", cancel_event=stop),
+                ):
+                    warmup.warm_all(vault_root)
+            except foreground_priority.BulkCancelled:
+                pass
             finally:
                 readiness.finish_warm()
         else:
-            warmup.start_background(vault_root)
+            return warmup.start_background(vault_root, stop)
+    return None
 
 
-def _start_compute_runtime(vault_root: Path) -> None:
+def _start_compute_runtime(
+    vault_root: Path, *, owner: LocalRuntimeActivation | None = None,
+) -> None:
     """Start retrieval warm-up, model unloading, and live compute-mode watching."""
     from . import mode
 
     log.info("compute policy: %s", mode.resolved())
-    _start_retrieval_runtime(vault_root)
+    warm_thread = _start_retrieval_runtime(
+        vault_root, stop=owner._shutdown if owner is not None else None,
+    )
+    # Ownership lands before optional compute setup can fail or another warm can start.
+    if owner is not None:
+        owner.retrieval_warmup = warm_thread
 
     if mode.release_when_idle():
         from . import model_reaper

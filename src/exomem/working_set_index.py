@@ -42,8 +42,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import find_corpus, freshness, sidecar_store
-from .collection_store.preview import QUERY_RECEIPT_BOUNDARY, bound_writer, canonical_read, selected_writer
+from . import find_corpus, foreground_priority, freshness, sidecar_store
+from .collection_store.preview import (
+    QUERY_RECEIPT_BOUNDARY,
+    bound_writer,
+    canonical_read,
+    selected_writer,
+)
 from .kbdir import kb_dirname
 from .state_paths import vault_state_dir
 
@@ -1312,6 +1317,7 @@ def _walk_page_entries(
     folders: dict[Path, str] = {}
     settled_before = time.time_ns() - _RACY_WINDOW_NS
     for path in _walk_kb(vault_root, skip_folders=conventions.skip_folders):
+        foreground_priority.check_cancelled()
         folder = folders.get(path.parent)
         if folder is None:
             folder = folders[path.parent] = path.parent.relative_to(vault_root).as_posix()
@@ -2728,6 +2734,7 @@ class WorkingSetIndex:
     def _write(
         self, *, full: bool, freshness_stamp: str | None = None, load_encoder: bool = False
     ) -> dict[str, Any]:
+        foreground_priority.check_cancelled()
         if disabled():
             return {"anchors": 0, "generation": 0, "disabled": True}
         conn = self._connect()
@@ -2748,6 +2755,7 @@ class WorkingSetIndex:
         candidates, edges, page_names, term_counts = self._collect(
             project_registry=project_registry, reuse=not full
         )
+        foreground_priority.check_cancelled()
         rows = _catalogue_rows(candidates, edges, page_names, term_counts)
         terms_text = {candidate.anchor_id: " ".join(candidate.terms) for candidate in candidates}
         stored = self._stored_catalogue(conn)
@@ -2760,6 +2768,8 @@ class WorkingSetIndex:
             or bool(stale_fts or fresh_fts)
         )
         plan = self._plan_vectors(conn, candidates, load_encoder=load_encoder)
+        # Cancellation ends preparation, never an open publication transaction.
+        foreground_priority.check_cancelled()
         if not changed and plan is not None and plan.changed:
             # The catalogue did not move but its vectors did: an encoder became
             # resident, changed, or caught up on a bounded inline pass.
@@ -2963,11 +2973,13 @@ class WorkingSetIndex:
         if missing:
             try:
                 if fingerprint is None and load_encoder:
+                    foreground_priority.check_cancelled()
                     embeddings.get_activation_model()
                     fingerprint = embeddings.activation_fingerprint()
                     keep = reusable(fingerprint)
                     missing = [c for c in candidates if c.signature and c.anchor_id not in keep]
                 if missing and fingerprint is not None:
+                    foreground_priority.check_cancelled()
                     batch = missing if load_encoder else missing[:INLINE_VECTOR_ENCODE_LIMIT]
                     import numpy as np
 
@@ -2979,6 +2991,7 @@ class WorkingSetIndex:
                         if load_encoder
                         else embeddings.embed_activation_passages_if_loaded(texts)
                     )
+                    foreground_priority.check_cancelled()
                     if matrix is not None and embeddings.activation_fingerprint() == fingerprint:
                         new = {
                             c.anchor_id: (wanted[c.anchor_id], np.asarray(vector, dtype=np.float32).tobytes())

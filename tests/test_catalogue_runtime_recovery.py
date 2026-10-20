@@ -62,7 +62,7 @@ def test_readiness_only_traffic_recovers_a_failed_catalogue_publication(
 
     monkeypatch.setattr(lexstore.reserved_paths, "_move_owner_file", publish)
 
-    def compute(root):
+    def compute(root, **_kwargs):
         readiness.begin_warm()
         assert warmup.warm_retrieval_catalog(root) is not during_startup
         assert lexstore.await_repairs_idle(root, timeout=3)

@@ -1271,7 +1271,7 @@ def _encode_in_turns(model, texts: list[str], *, admission, execution) -> np.nda
     sentence-transformers forms them, so they pad no more than one call did;
     rows come back in input order.
     """
-    from . import mode
+    from . import foreground_priority, mode
 
     size = encode_batch_size(model)
     if (
@@ -1286,8 +1286,11 @@ def _encode_in_turns(model, texts: list[str], *, admission, execution) -> np.nda
     parts: list[np.ndarray] = []
     with admission():
         for start in range(0, len(texts), size):
+            # A running native forward completes; an owned stop prevents the next one.
+            foreground_priority.check_cancelled()
             batch = [texts[i] for i in order[start : start + size]]
             with execution():
+                foreground_priority.check_cancelled()
                 vecs = model.encode(
                     batch,
                     batch_size=size,

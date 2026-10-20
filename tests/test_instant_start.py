@@ -1168,7 +1168,7 @@ def test_build_server_uses_background_warmup_by_default(
     # it: these tests only care about the warmup dispatch, not .env loading.
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **kw: None)
     calls: list[str] = []
-    monkeypatch.setattr(warmup, "start_background", lambda vr: calls.append("background"))
+    monkeypatch.setattr(warmup, "start_background", lambda vr, stop=None: calls.append("background"))
     monkeypatch.setattr(warmup, "warm_all", lambda vr: calls.append("eager"))
 
     mcp = server.build_server(require_auth=False)
@@ -1187,7 +1187,7 @@ def test_build_server_uses_eager_warmup_when_env_set(
     monkeypatch.setenv("EXOMEM_EAGER_BOOT", "1")
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **kw: None)  # see note above
     calls: list[str] = []
-    monkeypatch.setattr(warmup, "start_background", lambda vr: calls.append("background"))
+    monkeypatch.setattr(warmup, "start_background", lambda vr, stop=None: calls.append("background"))
     monkeypatch.setattr(warmup, "warm_all", lambda vr: calls.append("eager"))
 
     mcp = server.build_server(require_auth=False)
@@ -1206,7 +1206,7 @@ def test_build_server_calls_neither_warmup_path_when_disabled(
     monkeypatch.delenv("EXOMEM_EAGER_BOOT", raising=False)
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **kw: None)  # see note above
     calls: list[str] = []
-    monkeypatch.setattr(warmup, "start_background", lambda vr: calls.append("background"))
+    monkeypatch.setattr(warmup, "start_background", lambda vr, stop=None: calls.append("background"))
     monkeypatch.setattr(warmup, "warm_all", lambda vr: calls.append("eager"))
 
     mcp = server.build_server(require_auth=False)

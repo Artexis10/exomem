@@ -43,7 +43,7 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
         def finish_startup_recovery(self) -> None:
             calls.append("drain")
 
-    def start_compute(_root) -> None:
+    def start_compute(_root, **_kwargs) -> None:
         readiness.begin_warm()
         readiness.mark_ready("retrieval_catalog")
         readiness.mark_ready("semantic_corpus")

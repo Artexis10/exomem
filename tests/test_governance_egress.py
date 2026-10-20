@@ -5271,3 +5271,34 @@ def test_each_pass_reads_the_tombstone_set_once_and_sees_a_new_deletion(
     assert after["items"] == [{"path": OPEN_PATH}]
     # One sweep per pass, however many paths it decides.
     assert (first_pass_sweeps, len(sweeps)) == (1, 1)
+
+
+def test_nested_artifact_references_share_one_lifecycle_capture_per_pass(vault, monkeypatch):
+    """Repeated free-text references must not rescan lifecycle state or survive the next deletion pass."""
+    from exomem.governance import lifecycle
+
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.RELEASE_FLOOR)
+    _reset_caches()
+    real = lifecycle.tombstoned_paths
+    captures = []
+
+    def counted(root):
+        captures.append(root)
+        return real(root)
+
+    monkeypatch.setattr(lifecycle, "tombstoned_paths", counted)
+    payload = {"content": [{"text": f"[[{RESTRICTED_PATH}]] twice [[{RESTRICTED_PATH}]]"},
+                           {"content": [{"text": f"Read [[{RESTRICTED_PATH}]]"}]}]}
+    with request_scope(_external()):
+        before = egress.gate_artifact_references(vault, payload, scan_all=True)
+    assert before == payload
+    assert len(captures) == 1
+    lifecycle.begin_deletion(vault, source_rel=RESTRICTED_PATH,
+                             trash_rel="Knowledge Base/_trash/deleted.md")
+    captures.clear()
+    with request_scope(_external()):
+        after = egress.gate_artifact_references(vault, payload, scan_all=True)
+    assert RESTRICTED_PATH not in str(after)
+    assert egress.WITHHELD_REFERENCE in str(after)
+    assert len(captures) == 1
