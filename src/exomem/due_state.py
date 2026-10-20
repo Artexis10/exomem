@@ -240,6 +240,7 @@ def state_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / STATE_FILENAME
 
 
+@call_spans.timed("due_state.load")
 def load(vault_root: Path) -> dict[str, Any] | None:
     """Return the persisted projection, or None when it is missing or unusable.
 
@@ -313,6 +314,7 @@ def _remember_written(
         _SHARED[key] = (written, payload)
 
 
+@call_spans.timed("due_state.save")
 def save(vault_root: Path, payload: dict[str, Any]) -> None:
     """Atomically replace the projection state. Best effort; never raises.
 
@@ -320,6 +322,7 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
     so a caller never edits it, or anything `reconcile` or a delta returns,
     after this call.
     """
+    call_spans.measure(call_spans.PROJECTION_SAVE_ATTEMPTS)
     path = state_path(vault_root)
     try:
         from . import state_paths, vault
@@ -351,6 +354,8 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
             vault.replace_tolerating_transient_sharing(
                 lambda: os.replace(temp_name, path)
             )
+            call_spans.measure(call_spans.PROJECTION_SAVES)
+            call_spans.measure(call_spans.PROJECTION_SAVED_BYTES, info.st_size)
             # Write-through: the next read would otherwise re-parse the whole
             # file this call just serialised. Bind the entry to the temp file's
             # identity and keep it only if the destination still shows that
@@ -2079,6 +2084,7 @@ def _save_unless_unchanged(
     deep compare only of the entries the delta replaced.
     """
     if _without_bookkeeping(updated) == _without_bookkeeping(current):
+        call_spans.measure(call_spans.PROJECTION_UNCHANGED)
         return
     save(vault_root, updated)
 
