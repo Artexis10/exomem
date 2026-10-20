@@ -132,14 +132,14 @@ _KB_WRITE = re.compile(
 )
 
 #: The capture check, one short line on every fire. It names the rules that prevent known
-#: incidents and points at where the full capture rules live: the shipped engagement
-#: reference, which `read_memory` opens from the vault (`exomem init` deploys it there).
+#: incidents and points at the installed skill or portable operating contract.
+#: A connected vault need not contain a readable copy of the shipped references.
 #: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
     "[Exomem capture check] Per live policy: no transcripts; replace_memory supersedes a "
     "contradicted conclusion; intent->Planning/plan_memory, outcome->Records/record_memory; "
     "no transient code/test/CI; nothing durable: stop. "
-    "Rules: read_memory .exomem/schema/references/engagement.md"
+    'Rules: Exomem skill or bootstrap(profile="compact").'
 )
 
 #: The episode ask. `{key}` is the session's episode key.
