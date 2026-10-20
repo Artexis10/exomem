@@ -59,6 +59,7 @@ LATER = "44444444-4444-4444-8444-444444444444"
 ONLY_ON_COPY = "55555555-5555-4555-8555-555555555555"
 RELEASED = frozenset({capability.RECORDS_SUMMARY_V1})
 OLDER = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", "")
+PREVIOUS = os.environ.get("EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON", "")
 
 
 @contextmanager
@@ -1509,32 +1510,48 @@ def test_takeover_preserves_a_check_error_even_when_its_code_describes_invalid_b
     assert not list(abc.session.path.parent.glob(".exomem-adopt-*.sqlite"))
 
 
-def test_launcher_refuses_an_actual_v1_marker_candidate_before_handoff(abc, tmp_path, monkeypatch):
-    """A store-aware candidate that passes capability admission but cannot preserve version-two path ownership."""
+def test_launcher_refuses_the_release_one_store_schema_back_before_handoff(abc, tmp_path, monkeypatch):
+    """Defect: a store-aware release one schema back passes capability admission and takes over a newer store."""
     import asyncio
+
+    from conftest import _drain_background_threads
+    from test_service_manager import _supervisor
 
     from exomem.service_manager import WorkerRuntime
 
-    interpreter = os.environ.get("EXOMEM_TEST_MARKER_V1_PYTHON")
-    if not interpreter:
-        pytest.skip("requires an installed version-one marker candidate")
-    before = authority.read_marker(abc.root)
-    assert authority.parse_marker(abc.root, before)["version"] == 2
-    copy = tmp_path / "marker-copy"
-    shutil.copytree(abc.root, copy)
-    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "marker-fresh-state"))
-    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(copy))
-    probe = subprocess.run([interpreter, "-I", "-c", "import json; from importlib.metadata import version; "
+    assert PREVIOUS, "the gate runner provides EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON"
+    probe = subprocess.run([PREVIOUS, "-I", "-c", "import json; from importlib.metadata import version; "
         "from exomem.state_migration import supported_state_compatibility_ids; "
         "print(json.dumps([version('exomem'), supported_state_compatibility_ids()]))"],
         capture_output=True, text=True, check=True)
     version, supported = json.loads(probe.stdout)
-    assert "collections-store-v1" in supported and state_migration.COLLECTION_MARKER_COMPATIBILITY_ID not in supported
-    runtime = WorkerRuntime(tmp_path / "marker-worker.sock", host="127.0.0.1", port=8765)
-    target = asyncio.run(runtime.inspect({"python": interpreter, "version": version}))
+    *earlier, current = schema.compatibility_ids()
+    # The candidate supports every boundary but this release's schema, so the pin moves with each schema.
+    assert {"collections-store-v1", state_migration.COLLECTION_MARKER_COMPATIBILITY_ID, earlier[-1]} <= set(supported)
+    assert current not in supported
+    abc.release()
+    _drain_background_threads()
+    before = authority.read_marker(abc.root)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(abc.root))
+    runtime = WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=8765)
+    target = asyncio.run(runtime.inspect({"python": PREVIOUS, "version": version}))
     with pytest.raises(ValueError, match="does not support required state compatibility"):
         runtime.migration_required(target)
-    assert authority.read_marker(copy) == before
+
+    async def refuse_before_handoff():
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        serving.inspect = runtime.inspect
+        serving.migration_required = runtime.migration_required
+        result = await manager.upgrade({"python": PREVIOUS, "version": version})
+        assert not result["ok"]
+        assert result["error"] == "target interpreter verification failed; current admission unchanged"
+        assert serving.pid == 100
+        assert serving.events == ingress.events == []
+        assert manager.records.pending() is None
+
+    asyncio.run(refuse_before_handoff())
+    assert authority.read_marker(abc.root) == before
+    assert _schema(abc.session.path) == schema.SCHEMA_VERSION
 
 
 @pytest.mark.parametrize("field,value", [("source_path", "Knowledge Base/Records/Other/Items"),
