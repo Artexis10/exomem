@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.132.4](https://github.com/Artexis10/exomem/compare/v0.132.3...v0.132.4) (2026-10-20)
+
+
+### Performance
+
+* **episode:** attribute recap commit phases ([#1954](https://github.com/Artexis10/exomem/issues/1954)) ([ab6edee](https://github.com/Artexis10/exomem/commit/ab6edee85f1f429b3ce738919709be0a995e8ca8))
+
 ## [0.132.3](https://github.com/Artexis10/exomem/compare/v0.132.2...v0.132.3) (2026-10-20)
 
 
