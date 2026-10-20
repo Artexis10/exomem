@@ -191,6 +191,32 @@ def _crash_before_original_replica(environment, database, released):
     raise AssertionError("the publication cut was not reached")
 
 
+def test_an_edited_unstamped_copy_keeps_a_legacy_rename_ambiguous(env, capsys, monkeypatch):  # noqa: F811
+    """The matching original digest cannot choose between two destinations with one item identity."""
+    root = legacy_vault(env)
+    assert migrate(root, "apply") == 0 and printed(capsys)["status"] == "marker_admitted"
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        original = reader.execute("SELECT view_path FROM items WHERE collection_id=? AND item_key=?", (CID, KEY)).fetchone()[0]
+    source = root / original
+    raw = source.read_bytes()
+    exact, edited = source.with_name("A.md"), source.with_name("B.md")
+    source.rename(exact)
+    changed = raw.replace(b"count: 3", b"count: 9")
+    assert changed != raw
+    edited.write_bytes(changed)
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {
+        capability.COLLECTION_VIEWS_V1, capability.RECORDS_SUMMARY_V1})
+    service = start_service(root)
+    try:
+        _until(lambda: call(root, "record_memory", action="inspect", collection=WORK)["projection"]["held_view_corrections"])
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            assert reader.execute("SELECT view_path FROM items WHERE collection_id=? AND item_key=?", (CID, KEY)).fetchone()[0] == original
+            assert reader.execute("SELECT COUNT(*) FROM txns WHERE collection_id=? AND operation='view_move'", (CID,)).fetchone()[0] == 0
+        assert exact.read_bytes() == raw and edited.read_bytes() == changed
+    finally:
+        service.stop()
+
+
 def test_a_backfill_interrupted_before_replication_retries_before_stamping_originals(env, capsys, monkeypatch, tmp_path):  # noqa: F811
     """A same-head retry must copy archived originals before publication destroys their only file copy."""
     root = legacy_vault(env)

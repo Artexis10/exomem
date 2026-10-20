@@ -1317,8 +1317,8 @@ class CollectionWriter:
             if legacy_exact:
                 duplicate = len(census.db.execute(
                     "SELECT path FROM temp.candidates WHERE cid=? AND item_key=? AND conflict=0 "
-                    "AND json_type(stamp)='null' AND digest=? LIMIT 2",
-                    (cid, facts["item_key"], facts["digest"])).fetchall())
+                    "AND json_type(stamp)='null' LIMIT 2",
+                    (cid, facts["item_key"])).fetchall())
             old_guard = None
             if not outside and current and duplicate == 1 and not sync_providers.is_conflict_copy(self.root, Path(path).name):
                 try:
