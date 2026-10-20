@@ -79,7 +79,8 @@ EVIDENCE_KINDS: tuple[str, ...] = (
 #: long; two characters is an ordinary word in CJK — a city, a company, a
 #: person — and counting code points there turns a real name into a
 #: non-name. A term that is not all-ASCII keeps whatever rarity its
-#: document count earns it.
+#: document count earns it, provided it carries a letter: a bare number is
+#: never a lead.
 #:
 #: And not to a two-letter ACRONYM both sides spell as one: the turn writes
 #: it as exactly two capitals ("AI", "UI", "EU") AND the anchor's own title
@@ -945,7 +946,7 @@ def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset(
     """Is `term` long enough to be a lead?
 
     `RARE_TERM_MIN_CHARS` code points, for an all-ASCII-letter term only.
-    Any term carrying a character outside `a-z` is exempt: the floor's whole
+    Any other term that carries a letter is exempt: the floor's whole
     argument is about English word lengths, and a script that writes a name
     in two characters is not the case it was reasoned about. So is a term in
     `acronyms` — the caller's intersection of the turn's two-capital words
@@ -953,7 +954,7 @@ def _clears_rare_term_length(term: str, *, acronyms: frozenset[str] = frozenset(
 
     A term with no letter at all is never a lead: "08:30" splits into "08"
     and "30", and a clock, a count or a year names nothing on its own. A
-    model number such as "zq7400" carries letters and keeps the exemption.
+    model number such as "q3" carries a letter and keeps the exemption.
     """
     if not any(character.isalpha() for character in term):
         return False

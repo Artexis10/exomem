@@ -561,11 +561,11 @@ def test_a_number_from_a_clock_time_never_earns_rare_term() -> None:
     assert candidates == ()
 
 
-def test_a_model_number_with_letters_still_earns_rare_term() -> None:
-    row = _term_row("zq7400-pump.md", "ZQ7400 pump", terms=("zq7400", "pump"))
-    analysis = resolve_module.analyze_turn("is the zq7400 in stock")
+def test_a_short_model_number_with_a_letter_still_earns_rare_term() -> None:
+    row = _term_row("q3-dosing-pump.md", "Q3 dosing pump", terms=("q3", "dosing", "pump"))
+    analysis = resolve_module.analyze_turn("is the q3 in stock")
     candidates = resolve_module.candidates_for(
-        analysis, (row,), term_anchor_counts={"zq7400": 1}
+        analysis, (row,), term_anchor_counts={"q3": 1}
     )
 
     assert len(candidates) == 1
