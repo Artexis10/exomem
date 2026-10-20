@@ -690,9 +690,11 @@ class CollectionStoreRuntime:
         """Install the views that committed changes left pending, before a handoff or a stop (design §5).
 
         It publishes what the serving store thread would, under the release that lets that
-        thread publish, through the same reconcile. Half of the time left sets a cooperative
-        cutoff for starting optional work; in-flight filesystem calls and required finalization
-        still finish. Unfinished views stay pending for the next holder's startup pass.
+        thread publish, through the same reconcile. Its writer is fresh, so it runs no census: an
+        item view missing from a path its bytes may have reached waits for the next holder's census.
+        Half of the time left sets a cooperative cutoff for starting optional work; in-flight
+        filesystem calls and required finalization still finish. Unfinished views stay pending
+        for the next holder's startup pass.
         """
         from . import capability
 
@@ -717,7 +719,7 @@ class CollectionStoreRuntime:
                         return
                     after = writer.reconcile_views(
                         limit=VIEW_BATCH_PATHS, after=after, pending_only=True, stop=stopped,
-                        missing_ready=handle.census(self.root).missing_ready
+                        missing_ready=(lambda cid: False)
                         if capability.collection_views_enabled(self.root) else None)["next_path"]
                     passes += after is None
         except Exception:  # noqa: BLE001 - the next holder's startup pass installs what is left

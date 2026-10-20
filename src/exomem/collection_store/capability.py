@@ -15,8 +15,8 @@ P1b.3). It stays off until the GA gate (P3.6) adds it to ``RELEASED``.
 
 ``collection-views-v1`` fences edit-back of store collection views (the same change, §6):
 the serving store thread turning an owner's edit of a view into a governed update or a
-held correction, and publishing pending views without a summary release. It stays off
-until the P2.8 gate adds it to ``RELEASED``, and the per-vault rollback narrows it too.
+held correction, and publishing pending views without a summary release. The P2.8 gate
+added it to ``RELEASED``; the per-vault rollback narrows it too.
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ COLLECTIONS_MIGRATE_V1 = "collections-migrate-v1"
 MIGRATION_UNAVAILABLE = "COLLECTION_STORE_MIGRATION_UNAVAILABLE"
 COLLECTION_VIEWS_V1 = "collection-views-v1"
 
-#: The release capabilities this release enables. S1.8 added RECORDS_SUMMARY_V1; P3.6 adds
-#: COLLECTIONS_MIGRATE_V1; P2.8 adds COLLECTION_VIEWS_V1.
-RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1})
+#: The release capabilities this release enables. S1.8 added RECORDS_SUMMARY_V1 and P2.8
+#: COLLECTION_VIEWS_V1; P3.6 adds COLLECTIONS_MIGRATE_V1.
+RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1, COLLECTION_VIEWS_V1})
 #: What every store import answer tells the owner until the GA gate (P3.6 of
 #: move-structured-collections-to-sqlite), which deletes it: a pre-GA format change may
 #: need the preserved export imported again into a NEW collection (design O2).
