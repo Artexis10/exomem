@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.132.0](https://github.com/Artexis10/exomem/compare/v0.131.0...v0.132.0) (2026-10-20)
+
+
+### Features
+
+* **context:** list related pages for unresolved turns ([#1940](https://github.com/Artexis10/exomem/issues/1940)) ([af2a884](https://github.com/Artexis10/exomem/commit/af2a884d622861f65b826bc16ae5d3a4f6f98740))
+
 ## [0.131.0](https://github.com/Artexis10/exomem/compare/v0.130.1...v0.131.0) (2026-10-20)
 
 
