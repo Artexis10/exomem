@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.132.1](https://github.com/Artexis10/exomem/compare/v0.132.0...v0.132.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **context:** report visible dependency ambiguity ([#1944](https://github.com/Artexis10/exomem/issues/1944)) ([0db96ff](https://github.com/Artexis10/exomem/commit/0db96ffe039fd24c126abc9e2337f016815507ef))
+* **media:** preserve valid results and decode HEIC images ([#1941](https://github.com/Artexis10/exomem/issues/1941)) ([510873e](https://github.com/Artexis10/exomem/commit/510873ebe56779ee6aef63ee914fff2511a31f10))
+
 ## [0.132.0](https://github.com/Artexis10/exomem/compare/v0.131.0...v0.132.0) (2026-10-20)
 
 
