@@ -1093,15 +1093,14 @@ def test_the_stores_own_render_is_left_alone_and_then_skipped_by_its_stat(store,
     reads = []
     read = platform.read
     def observe_read(fs, file, **kwargs):
-        if file.name != "_history.md":
-            reads.append(file)
+        reads.append(file)
         return read(fs, file, **kwargs)
 
     monkeypatch.setattr(platform, "read", observe_read)
     runner = passes(store, 0.0)
-    assert len(reads) == 2  # the first pass reads the manifest and item views
+    assert len(reads) == 3  # the first pass reads the manifest, item and history views
     until(lambda: runner.run(store, now=60.0) > 0)
-    assert len(reads) == 2  # the next full pass only stats them
+    assert len(reads) == 3  # the next full pass only stats them
     assert txns(store) == before and holds(store) == [] and path.read_bytes() == rendered
 
 

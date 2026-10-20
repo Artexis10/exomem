@@ -149,6 +149,16 @@ class CollectionWriter:
             self._publication.precommits[manifest.collection_id] = manifest
         self._operation.require_collection(manifest.collection_id, refresh=True)
 
+    def _publication_refused(self, cid):
+        """Whether the write authorization refuses this collection: the check ``_precommit`` ends a publication on."""
+        try:
+            self._operation.require_collection(cid, refresh=True)
+        except collections.CollectionError as error:
+            if error.code != "COLLECTION_NOT_FOUND":
+                raise
+            return True
+        return False
+
     def _recheck_guard(self, guard, *, publication=False):
         self._publication.guards[id(guard)] = (guard, publication)
         try:
@@ -1480,6 +1490,13 @@ class CollectionWriter:
                 rows = rows[:limit]
             visited_parents = set()
             history_pages = {}
+            refused = {}
+            sweep = self.handle.release_cache.queued_history_sweep()
+            if sweep is not None:
+                refused[sweep.key[0]] = self._publication_refused(sweep.key[0])
+                if refused[sweep.key[0]]:
+                    # One sweep serves the whole store: a collection that cannot publish must not hold it from the others.
+                    self.handle.release_cache.stage_history_sweep(None)
             consumed = after or ""
             for projection in rows:
                 if batch.stopped():
@@ -1487,6 +1504,12 @@ class CollectionWriter:
                     break
                 preceding, consumed = consumed, projection["path"]
                 if not batch.eligible(projection):
+                    continue
+                if projection["collection_id"] not in refused:
+                    refused[projection["collection_id"]] = self._publication_refused(projection["collection_id"])
+                if refused[projection["collection_id"]]:
+                    # Fail closed for that collection alone: its views stay pending, and its refusal must not stop the others.
+                    batch.pending = True
                     continue
                 _, manifest, _ = self._collection(projection["collection_id"])
                 if projection["kind"] == "history":
@@ -1661,10 +1684,14 @@ class CollectionWriter:
                           "AND kind='history' AND state!='pending'", (cid,))
 
     def invalidate_history_pages(self):
-        """Queue derived history after governance changes; the normal drain does all publication."""
+        """Queue derived history after its release inputs change; the normal drain does all publication."""
+        from . import history
+
+        # Read before the pages are marked: an input that moves later differs from this value at the next tick.
+        inputs = history.release_inputs(self.root)
         with self._mutation(reconcile=True):
             self._execute("UPDATE projection_state SET state='pending' WHERE kind='history' AND state!='pending'")
-            return self._operation.policy.fingerprint
+            return inputs
 
     def apply_view_edit(self, observation, found):
         """Apply one settled, valid view edit as ONE governed update through the ordinary leaf.

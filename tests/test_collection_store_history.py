@@ -1,12 +1,15 @@
 """Canonical history survives corrections, policy changes and derived-state damage."""
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+from test_collection_store_edit_back import served as served
 from test_collection_store_legacy import _event, _rewrite
 from test_collection_store_legacy_import import CONTEXT, _capture, _items
+from test_collection_store_migration import env as env
 from test_collection_store_service import service as service
-from test_collection_store_writer import CID, KEY, create
+from test_collection_store_writer import CID, KEY, OTHER, create, manifest_text
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
@@ -293,6 +296,7 @@ def test_history_page_partition_grows_only_at_its_tail_and_policy_repairs_old_pa
         with pytest.raises(ValueError, match="NOT_FOUND"):
             commands.op_get(store.root, path=first.relative_to(store.root).as_posix())
     monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {capability.COLLECTION_VIEWS_V1})
+    store.invalidate_history_pages()  # the store thread queues every page when a release input changes, as in production
     passes(store, 0.0, 2.0)
     assert not first.exists() and not tail.exists()
     assert KEY not in (store.root / history.main_path(manifest)).read_text()
@@ -627,6 +631,37 @@ def test_history_withdraws_rows_when_current_content_access_changes(store, monke
     assert KEY not in history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]
 
 
+@pytest.mark.parametrize("boundary", ["excluded", "tombstoned"])
+def test_a_running_store_republishes_history_when_access_or_tombstones_change(served, monkeypatch, boundary):
+    """The store thread must queue every history page when an access file or tombstone changes, with no census render."""
+    from test_collection_store_edit_back import VIEWS, WORK, published_view, store_rows
+    from test_collection_store_s1_gate import _until
+
+    from exomem.collection_store import capability, runtime
+    from exomem.governance import lifecycle
+
+    root = served.root
+    relative, _ = published_view(root, "Withdrawn", count=1)
+    page = root / Path(WORK).parent / "_history.md"
+    _until(lambda: page.exists() and relative in page.read_text())
+    # No edit-back census: only the tick can repair a page, as on a release that publishes views without it.
+    monkeypatch.setattr(capability, "RELEASED", (capability.RELEASED - {VIEWS}) | {capability.RECORDS_SUMMARY_V1})
+    txns = store_rows(root, "SELECT COUNT(*) FROM txns")
+    # Withdraw the page's own path: a withheld row would make the publishing write refuse the whole collection.
+    withdrawn_path = page.relative_to(root).as_posix()
+    if boundary == "excluded":
+        (root / "Knowledge Base/_access.yaml").write_text(f"excluded: [{withdrawn_path.removeprefix('Knowledge Base/')}]\n")
+    else:
+        monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda _root: frozenset({withdrawn_path}))
+
+    def republished():
+        runtime._server(root).call(lambda: None)  # each served request wakes the store thread's views tick
+        return relative not in page.read_text()
+
+    _until(republished)
+    assert store_rows(root, "SELECT COUNT(*) FROM txns") == txns
+
+
 def test_blocked_history_policy_cannot_broaden_the_generated_page(store):
     """A failed policy read must refuse instead of releasing every transition through empty scopes."""
     from test_governance_egress import write_broken_policy
@@ -784,6 +819,39 @@ def test_history_catchup_keeps_its_target_through_inspection_append_rollback_and
         assert (root / main).read_text().count("## ") == 200
         assert [(root / history.page_path(manifest, number)).read_text().count("## ")
                 for number in range(1, 5)] == [500, 500, 500, 2]
+
+
+def test_a_refused_collection_holding_the_history_sweep_does_not_stall_the_others(store):
+    """Defect: a withheld row refuses its collection's publishing write, and the unfinished history sweep it
+    holds then refuses every later window, so a collection sorting after it never publishes."""
+    from exomem.collection_store import history
+
+    create(store)
+    store.create_collection("Knowledge Base/Records/Zeta/_collection.md",
+                            manifest_text().replace(CID, OTHER).replace("title: Work", "title: Zeta"),
+                            why="a collection that sorts after Work", scaffold=False)
+    _append(store)
+    for count in range(2, 702):
+        _correct(store, count)
+    manifest = store._projection_manifest(CID)
+    store.reconcile_views(limit=1, after=manifest.path)
+    assert store.handle.release_cache.history_sweep is not None  # Work's page discovery is queued and unfinished
+    store.append_record(OTHER, item={"title": "Later"}, item_key="33333333-3333-4333-8333-333333333333",
+                        why="a write beside the refused collection")
+    row = store.connection.execute("SELECT path FROM projection_state WHERE collection_id=? AND kind='item'",
+                                   (CID,)).fetchone()[0]
+    (store.root / "Knowledge Base/_access.yaml").write_text(f"excluded: [{row.removeprefix('Knowledge Base/')}]\n")
+    for _ in range(3):
+        store.reconcile_views(pending_only=True, limit=16)
+    later = store.connection.execute("SELECT path,state FROM projection_state WHERE collection_id=? AND kind='item'",
+                                     (OTHER,)).fetchone()
+    assert later[1] == "current" and "Later" in (store.root / later[0]).read_text()
+    # Work no longer holds the single sweep slot, so Zeta's own history page is discovered and published too.
+    assert (store.root / history.main_path(store._projection_manifest(OTHER))).exists()
+    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?",
+                                    (history.main_path(manifest),)).fetchone() == ("pending",)
+    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?",
+                                    (history.page_path(manifest, 1),)).fetchone() == ("pending",)
 
 
 def test_interrupted_discovery_keeps_negative_holes_and_page_specific_readers_private(store):

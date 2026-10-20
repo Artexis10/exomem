@@ -505,30 +505,59 @@ class _Window:
     queued: tuple[int, int, int] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _FileInputs:
+    """The file-held inputs of a history release; ``key`` names the access state and tombstones for a page's epoch."""
+
+    policy: object
+    tombstones: frozenset
+    access: dict
+    access_blocked: bool
+    key: tuple
+
+
+def _file_inputs(root):
+    """Read a release's file-held inputs once; a page's epoch and the repair key both come from here, so they cannot drift."""
+    from .. import access
+    from ..governance import lifecycle, policy
+
+    loaded, tombstones = policy.load(root), lifecycle.tombstoned_paths(root)
+    access_fingerprint, rules, blocked = access._policy_state(root)
+    return _FileInputs(loaded, tombstones, rules, blocked, (access_fingerprint, blocked, tuple(sorted(tombstones))))
+
+
+def release_inputs(root):
+    """One digest over every file-held input of a history release; it moves when any of them does.
+
+    The store thread keys its history repair on this, so a changed policy, access file, blocked flag
+    or tombstone marks the pages pending without a census render. It reads no history.
+    """
+    found = _file_inputs(root)
+    return hashlib.sha256(json.dumps([found.policy.fingerprint, *found.key]).encode()).hexdigest()
+
+
 class PageContext:
     """One release projector; retained windows contain only bounded scalar evidence."""
 
     def __init__(self, conn, root, manifest, *, cache=None, through=None):
-        from .. import access
-        from ..governance import lifecycle, membership, policy
+        from ..governance import membership
         from . import governance
 
         self.conn, self.root, self.manifest, self.cache = conn, root, manifest, cache
         self.through = through
-        self.policy = policy.load(root)
+        found = _file_inputs(root)
+        self.policy, self.tombstones, self.access, self.access_blocked = (
+            found.policy, found.tombstones, found.access, found.access_blocked)
         # A failed policy read cannot turn its empty scopes into permission to publish history.
         if self.policy.blocked:
             governance.OperationAuthorization.refuse()
-        self.tombstones = lifecycle.tombstoned_paths(root)
-        access_fingerprint, self.access, self.access_blocked = access._policy_state(root)
         self.membership = membership
         (self.path, self.source, self.layout, self.view_mode, self.metadata, self.declared,
          self.make, raw, version, digest) = governance.subject_factory(conn, manifest.collection_id, "unbound")
         self.manifest_subject = self.make(self.path, None, self.path, "collection", raw, version, digest, "manifest")
         basis = self.manifest_subject.basis
         self.epoch = (self.path, self.source, self.layout, self.view_mode, version, digest,
-                      basis.type_name, basis.type_version, basis.declaration_hash, basis.default_audience,
-                      access_fingerprint, self.access_blocked, tuple(sorted(self.tombstones)))
+                      basis.type_name, basis.type_version, basis.declaration_hash, basis.default_audience, found.key)
         self.subjects, self.windows, self.reader_sets = OrderedDict(), OrderedDict(), OrderedDict()
         self.unresolved = False
         if cache is not None:

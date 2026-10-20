@@ -1099,7 +1099,7 @@ class StoreServer:
         self._views_passes = 0  # completed passes since the last maintenance wake
         self._edit_back = None  # this store's edit-back settle state, made at its first views tick
         self._edit_handle = None
-        self._history_policy = None  # the handle and compiled policy whose history pages the drain has queued
+        self._history_policy = None  # the handle and release inputs whose history pages the drain has queued
         # False waits for exact-path lookup; True retains an unhandled hint for the census.
         self._view_changes = {}
         self._view_census_needed = False
@@ -1555,13 +1555,14 @@ class StoreServer:
                     and any(not checked for checked in self._view_changes.values()):
                 wait = 0.0
         try:
-            from ..governance import policy
+            from . import history
 
-            history_policy = (self.runtime._handle, policy.load(self.root).fingerprint)
+            # Every file-held input of a history release, not the policy alone: no census render repairs the rest.
+            history_policy = (self.runtime._handle, history.release_inputs(self.root))
             if history_policy != self._history_policy:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                    fingerprint = _mutate(self.root, writer.invalidate_history_pages)
-                    self._history_policy = (self.runtime._handle, fingerprint)
+                    inputs = _mutate(self.root, writer.invalidate_history_pages)
+                    self._history_policy = (self.runtime._handle, inputs)
             with closing(connection.open_reader(self.runtime.path)) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0
