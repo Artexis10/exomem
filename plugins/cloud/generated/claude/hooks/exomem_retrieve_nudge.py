@@ -194,6 +194,12 @@ _WORKING_SET_NAMED_LINE = (
     "The turn named these pages, but none was carried. "
     + _WORKING_SET_ANCHOR_INSTRUCTION
 )
+#: The lead for pages the service listed because the turn's words and the
+#: stored text agree on them, though the turn named none. They are listed, never
+#: loaded, so the agent reads one itself if it bears on the turn.
+_WORKING_SET_RELATED_LINE = (
+    "Related pages (not loaded). `read_memory` one if it bears on this turn."
+)
 # Evidence kinds meaning the TURN'S OWN WORDS reached the anchor, as against
 # recall having surfaced it. This is the whole filter on an `unresolved` block: a
 # turn about a Planning item or a Records collection routinely ends `unresolved`
@@ -1884,6 +1890,18 @@ def _worded_candidates(packet: dict) -> list[dict]:
     return out
 
 
+def _related_lines(packet: dict) -> list[str]:
+    """The packet's related pages, one whole line each: title and path only."""
+    related = packet.get("related")
+    if not isinstance(related, (list, tuple)):
+        return []
+    return [
+        _packet_line("related", str(entry.get("title") or entry.get("path") or ""), str(entry.get("path") or ""))
+        for entry in related
+        if isinstance(entry, dict) and (entry.get("path") or entry.get("title"))
+    ]
+
+
 def _format_unresolved_block(packet: dict, max_chars: int) -> str:
     """The worded candidates of an `unresolved` turn, for the agent to choose from.
 
@@ -1910,6 +1928,11 @@ def _format_unresolved_block(packet: dict, max_chars: int) -> str:
         )
         for anchor in candidates
     ]
+    related = _related_lines(packet)
+    if not candidates and related:
+        # The service lists related pages only when nothing else was named, so
+        # this is the whole menu; its own lead says they are not loaded.
+        return _menu_block(packet, related, _WORKING_SET_RELATED_LINE, max_chars)
     closing = (
         _WORKING_SET_NAMED_LINE
         if candidates
@@ -1919,7 +1942,7 @@ def _format_unresolved_block(packet: dict, max_chars: int) -> str:
         )
         else _WORKING_SET_UNRESOLVED_LINE
     )
-    return _menu_block(packet, lines, closing, max_chars)
+    return _menu_block(packet, [*lines, *related], closing, max_chars)
 
 
 def _abstention_reason(packet: dict) -> str:
