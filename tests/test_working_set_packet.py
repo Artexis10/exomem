@@ -8,6 +8,7 @@ Records-first current-state rule, the abstained shape, and the graph depths.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -300,6 +301,23 @@ def test_role_priority_order_survives_the_budget() -> None:
 # --------------------------------------------------------------------------- #
 # Lifecycle
 # --------------------------------------------------------------------------- #
+
+
+def test_task_matches_cannot_displace_standing_or_current_knowledge() -> None:
+    # Lexical task rank must not turn an obsolete action into the current instruction.
+    packet = working_set.build_packet(
+        items=(
+            replace(_item("constraints", ref="old-action", lifecycle="superseded"), task_order=0),
+            _item("constraints", ref="current-baseline"),
+            replace(_item("constraints", ref="current-task"), task_order=0),
+            _item("constraints", ref="standing", updated="2020-01-01", provenance={"standing": True}),
+        ),
+        anchors=(), roles=({"id": "constraints", "lane": "units", "source": "anchor_default"},),
+        current_state=(), ambiguity=(), missing=(), max_chars=4000,
+        generation=_generation(), status="resolved",
+    )
+
+    assert [unit["ref"] for unit in packet["units"]] == ["standing", "current-task", "current-baseline"]
 
 
 def test_superseded_unit_is_marked_with_its_successor() -> None:
