@@ -1051,6 +1051,30 @@ def test_a_revise_cannot_turn_an_empty_summary_collection_into_an_items_mode_one
             "COLLECTION_STORE_SUMMARY_REQUIRED")
 
 
+def test_a_collection_whose_publication_is_refused_does_not_stall_the_views_of_others(service, caplog):
+    """Defect: a withheld row refuses its collection's whole publishing write, and that refusal stops a
+    collection sorting after it from publishing its new views."""
+    root = service.root
+
+    def pending(cid):
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT COUNT(*) FROM projection_state WHERE collection_id=? AND state='pending'",
+                                  (cid,)).fetchone()[0]
+
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+         why="a collection that sorts before Work")
+    call(root, "record_memory", action="append", collection=DAILY, item={"title": "Daily row"}, why="first row")
+    _until(lambda: pending(DAILY) == 0 and pending(CID) == 0)
+    # A summary row's path is its manifest, so withholding it refuses every write to Daily.
+    (root / "Knowledge Base/_access.yaml").write_text("excluded: [Records/Daily/_collection.md]\n")
+    call(root, "record_memory", action="append", collection=CID, item={"title": "Later row"}, item_key=LATER,
+         why="a write beside the refused collection")
+    _until(lambda: pending(CID) == 0)
+    assert titles(root, CID) == ["Canonical", "Later row"]
+    assert pending(DAILY) > 0  # visibly pending, not published
+    assert "could not publish" not in caplog.text
+
+
 def test_a_coordinator_that_never_enrolled_the_store_names_adopt_local_which_serves_it(
         service, tmp_path, capsys):
     """Defect: a vault whose coordinator never enrolled its store (a copy, or a replaced coordinator)

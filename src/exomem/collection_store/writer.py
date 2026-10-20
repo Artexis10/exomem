@@ -149,6 +149,16 @@ class CollectionWriter:
             self._publication.precommits[manifest.collection_id] = manifest
         self._operation.require_collection(manifest.collection_id, refresh=True)
 
+    def _publication_refused(self, cid):
+        """Whether the write authorization refuses this collection: the check ``_precommit`` ends a publication on."""
+        try:
+            self._operation.require_collection(cid, refresh=True)
+        except collections.CollectionError as error:
+            if error.code != "COLLECTION_NOT_FOUND":
+                raise
+            return True
+        return False
+
     def _recheck_guard(self, guard, *, publication=False):
         self._publication.guards[id(guard)] = (guard, publication)
         try:
@@ -1480,6 +1490,7 @@ class CollectionWriter:
                 rows = rows[:limit]
             visited_parents = set()
             history_pages = {}
+            refused = {}
             consumed = after or ""
             for projection in rows:
                 if batch.stopped():
@@ -1487,6 +1498,12 @@ class CollectionWriter:
                     break
                 preceding, consumed = consumed, projection["path"]
                 if not batch.eligible(projection):
+                    continue
+                if projection["collection_id"] not in refused:
+                    refused[projection["collection_id"]] = self._publication_refused(projection["collection_id"])
+                if refused[projection["collection_id"]]:
+                    # Fail closed for that collection alone: its views stay pending, and its refusal must not stop the others.
+                    batch.pending = True
                     continue
                 _, manifest, _ = self._collection(projection["collection_id"])
                 if projection["kind"] == "history":
