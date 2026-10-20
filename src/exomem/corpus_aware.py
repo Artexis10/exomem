@@ -1095,7 +1095,7 @@ def pairwise_best_cosine_from_sidecar(
     try:
         import numpy as np
 
-        from . import embeddings
+        from . import embeddings, readiness
 
         # Same span as the encoding sweep on purpose (see
         # `best_cosine_per_file_for_vectors`): `texts=0` is what says it
@@ -1105,7 +1105,13 @@ def pairwise_best_cosine_from_sidecar(
             from . import cloud_cell
             if cloud_cell.resource_policy() == "service-v1":
                 return idx.pairwise_current_chunks(wanted)
-            metadata, matrix = idx.all_vectors()
+            # A managed service never loads a cold corpus matrix on a request's
+            # thread: a cold one starts the one background load and raises, and
+            # the pack degrades to no tension below, as with no sidecar.
+            resident = idx.require_resident_matrix() if readiness.runtime_managed() else None
+            metadata, matrix = (
+                (resident.metadata, resident.matrix) if resident is not None else idx.all_vectors()
+            )
             rows_by_page: dict[str, list[tuple[int, int]]] = {}
             for row, (file_path, chunk_index) in enumerate(metadata):
                 if file_path in wanted:
