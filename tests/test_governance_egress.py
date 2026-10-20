@@ -5240,7 +5240,7 @@ def test_owner_explain_labels_purpose_branches_before_conservative_meet(
 def test_each_pass_reads_the_tombstone_set_once_and_sees_a_new_deletion(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A long listing paid two tombstone-tree scans per path; a pass now pays one."""
+    """A long listing rescanned the tombstone tree for every path; a pass now reads it once."""
     from exomem.governance import lifecycle
 
     # Released to the caller, but under a restricting rule, so its deletion is
@@ -5269,5 +5269,5 @@ def test_each_pass_reads_the_tombstone_set_once_and_sees_a_new_deletion(
 
     assert before["items"] == [{"path": page}, {"path": OPEN_PATH}]
     assert after["items"] == [{"path": OPEN_PATH}]
-    # One sweep per pass; deciding each of the two paths live took four.
+    # One sweep per pass, however many paths it decides.
     assert (first_pass_sweeps, len(sweeps)) == (1, 1)

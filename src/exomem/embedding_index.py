@@ -13,13 +13,14 @@ import logging
 import sqlite3
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn
 
 import numpy as np
 
@@ -104,6 +105,12 @@ CHUNK_PATH_LOG = sidecar_store.PathChangeLog(
 # answer.
 CATCHUP_MAX_PATHS = 32
 CATCHUP_MAX_GENERATIONS = 64
+# After a background corpus-matrix load fails, a managed recall reports the
+# dense lane failed, not warming, and starts no load for this long. A load that
+# fails late has read the whole corpus, so retrying on every recall would repeat
+# that read; the wait starts short, so a transient failure (a busy lock) costs
+# seconds of dense recall, and doubles with each consecutive failure up to 64x.
+MATRIX_LOAD_RETRY_SECONDS = 5.0
 
 # --------------------------------------------------------------- generation meta
 #
@@ -738,6 +745,12 @@ class EmbeddingIndex:
         # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
         # stalls a chunk write's `_patch_cache`.
         self._unit_lock = threading.Lock()
+        # Guards `_matrix_load`, the one background corpus-matrix load. A leaf:
+        # it is taken under `_lock` but never waits on it.
+        self._matrix_load_lock = threading.Lock()
+        self._matrix_load: threading.Thread | None = None
+        self._matrix_load_failed_at: float | None = None
+        self._matrix_load_failures = 0
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -1543,11 +1556,30 @@ class EmbeddingIndex:
             self.unload_cache()
             loaded = self._load_all_rows()
             return loaded.metadata, loaded.matrix
-        # Snapshot the cache tuple ONCE: another thread may swap or null it between
-        # reads. This fast path takes no lock — the common case.
         from . import recall_policy
 
         policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+        served = self._serve_resident(policy_identity)
+        if served is not None:
+            return served.metadata, served.matrix
+        while True:
+            loading = self._matrix_loading()
+            if loading is not None:
+                # Wait off the lock for the load already running, never a second one.
+                loading.join()
+            with self._lock:
+                served = self._serve_or_catch_up_locked(policy_identity)
+                if served is not None:
+                    return served.metadata, served.matrix
+                if self._matrix_loading() is not None:
+                    continue
+                loaded = self._full_load_locked()
+                return loaded.metadata, loaded.matrix
+
+    def _serve_resident(self, policy_identity: tuple[str, str]) -> _EmbCache | None:
+        """The cache when it serves the current publication, read without the lock."""
+        # Snapshot the cache tuple ONCE: another thread may swap or null it between
+        # reads. This fast path takes no lock — the common case.
         c = self._cache
         served = (
             sidecar_store.try_serve_cached(c, self.path)
@@ -1556,51 +1588,149 @@ class EmbeddingIndex:
         )
         if served is not None and _cache_covers_publication(served, self._identity_token):
             self._hits += 1
-            return served.metadata, served.matrix
+            return served
+        return None
+
+    def require_resident_matrix(self) -> _EmbCache | None:
+        """The matrix that serves now, or a background load and a raise.
+
+        A matrix that serves, or catches up within the bound, is returned.
+        Otherwise this starts the one background load and raises
+        `recall_space.CorpusMatrixCold`, or a plain error while a failed load
+        backs off. None means no resident matrix applies (no sidecar, or the
+        disk-scoring profile). A long-running service's recall serves through
+        this: a whole-corpus load took minutes on a request thread.
+        """
+        if not self.path.exists() or cloud_cell.resource_policy() == "service-v1":
+            return None
+        from . import recall_policy
+
+        policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+        served = self._serve_resident(policy_identity)
+        if served is not None:
+            return served
+        if self._matrix_loading() is not None:
+            raise recall_space.CorpusMatrixCold("corpus matrix is loading")
         with self._lock:
-            # Re-check under the lock: another thread may have loaded while we
-            # waited, or the fast-path token read may have failed transiently.
-            c = self._cache
-            served = (
-                sidecar_store.try_serve_cached(c, self.path)
-                if c is not None and c.recall_policy_identity == policy_identity
-                else None
-            )
-            if served is not None and _cache_covers_publication(served, self._identity_token):
-                self._hits += 1
-                return served.metadata, served.matrix
-            # Bounded catch-up BEFORE the full reload: a cache a couple of
-            # generations behind (the common case — another instance wrote, or a
-            # patch was refused as non-contiguous) is patched from the changed
-            # paths' rows alone, instead of paying the O(vault) SELECT + stack.
-            if c is not None and c.recall_policy_identity == policy_identity:
-                try:
-                    with call_spans.span("embeddings.matrix_catch_up"):
-                        patched = self._catch_up_cache(c)
-                except Exception as e:  # noqa: BLE001 — always fall back, never raise
-                    log.warning(
-                        "embedding matrix catch-up failed (%s); taking the full load", e
-                    )
-                    patched = None
-                if patched is not None:
-                    self._cache = patched
-                    self._hits += 1
-                    return patched.metadata, patched.matrix
-            # Keep this call zero-argument: cache tests and production probes
-            # deliberately wrap the named full-reload seam.
-            with call_spans.span("embeddings.matrix_load"):
-                loaded = self._load_all_rows()
-            log.info(
-                "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d cached_gen=%d",
-                sidecar_store.reload_reason(c, loaded.epoch, loaded.generation),
-                len(loaded.metadata),
-                loaded.generation,
-                loaded.epoch,
-                c.generation if c is not None else -1,
-            )
-            self._cache = loaded
+            served = self._serve_or_catch_up_locked(policy_identity)
+            if served is not None:
+                return served
+            self._defer_matrix_load()
+
+    def _serve_or_catch_up_locked(self, policy_identity: tuple[str, str]) -> _EmbCache | None:
+        """The cache that serves the current publication, else None. Hold `self._lock`."""
+        # Re-check under the lock: another thread may have loaded while we
+        # waited, or the fast-path token read may have failed transiently.
+        c = self._cache
+        served = (
+            sidecar_store.try_serve_cached(c, self.path)
+            if c is not None and c.recall_policy_identity == policy_identity
+            else None
+        )
+        if served is not None and _cache_covers_publication(served, self._identity_token):
             self._hits += 1
-            return loaded.metadata, loaded.matrix
+            return served
+        # Bounded catch-up BEFORE the full reload: a cache a couple of
+        # generations behind (the common case — another instance wrote, or a
+        # patch was refused as non-contiguous) is patched from the changed
+        # paths' rows alone, instead of paying the O(vault) SELECT + stack.
+        if c is not None and c.recall_policy_identity == policy_identity:
+            try:
+                with call_spans.span("embeddings.matrix_catch_up"):
+                    patched = self._catch_up_cache(c)
+            except Exception as e:  # noqa: BLE001 — always fall back, never raise
+                log.warning(
+                    "embedding matrix catch-up failed (%s); taking the full load", e
+                )
+                patched = None
+            if patched is not None:
+                self._cache = patched
+                self._hits += 1
+                return patched
+        return None
+
+    def _full_load_locked(self) -> _EmbCache:
+        """Replace the cache with every stored row. Hold `self._lock`."""
+        c = self._cache
+        # Keep this call zero-argument: cache tests and production probes
+        # deliberately wrap the named full-reload seam.
+        with call_spans.span("embeddings.matrix_load"):
+            loaded = self._load_all_rows()
+        log.info(
+            "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d cached_gen=%d",
+            sidecar_store.reload_reason(c, loaded.epoch, loaded.generation),
+            len(loaded.metadata),
+            loaded.generation,
+            loaded.epoch,
+            c.generation if c is not None else -1,
+        )
+        self._cache = loaded
+        self._hits += 1
+        self._matrix_load_failed_at = None
+        self._matrix_load_failures = 0
+        return loaded
+
+    def start_corpus_matrix_load(self) -> threading.Thread:
+        """Start the one background corpus-matrix load, or return the one running."""
+        with self._matrix_load_lock:
+            loading = self._matrix_load
+            if loading is None or not loading.is_alive():
+                loading = threading.Thread(
+                    target=self._load_corpus_matrix, name="exomem-matrix-load", daemon=True
+                )
+                loading.start()
+                self._matrix_load = loading
+            return loading
+
+    def _matrix_loading(self) -> threading.Thread | None:
+        with self._matrix_load_lock:
+            loading = self._matrix_load
+            return loading if loading is not None and loading.is_alive() else None
+
+    def _defer_matrix_load(self) -> NoReturn:
+        """Start the background load, or report that the last one failed recently."""
+        failed_at = self._matrix_load_failed_at
+        backoff = MATRIX_LOAD_RETRY_SECONDS * 2 ** min(self._matrix_load_failures - 1, 6)
+        if failed_at is not None and time.monotonic() - failed_at < backoff:
+            raise RuntimeError("the background corpus matrix load failed; retrying after a backoff")
+        self.start_corpus_matrix_load()
+        raise recall_space.CorpusMatrixCold("corpus matrix is loading")
+
+    def _load_corpus_matrix(self) -> None:
+        """Read every row off `self._lock`, so writers and recall never wait on the read."""
+        from . import recall_policy
+
+        # Like every reader here, never create the sidecar it would read.
+        if not self.path.exists() or cloud_cell.resource_policy() == "service-v1":
+            return
+        started = time.perf_counter()
+        try:
+            policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+            loaded = self._load_all_rows()
+            with self._lock:
+                reason = sidecar_store.reload_reason(self._cache, loaded.epoch, loaded.generation)
+                served = self._serve_or_catch_up_locked(policy_identity)
+                if served is None:
+                    self._cache = loaded
+                    served = self._serve_or_catch_up_locked(policy_identity)
+                if served is None:
+                    # Writes outran the read and the catch-up bound: read once
+                    # more under the lock, which holds the writers' cache patches.
+                    served = self._full_load_locked()
+        except Exception:  # noqa: BLE001 — recall reports the failure until the backoff ends
+            self._matrix_load_failures += 1
+            self._matrix_load_failed_at = time.monotonic()
+            log.warning("background embedding matrix load failed", exc_info=True)
+            return
+        self._matrix_load_failed_at = None
+        self._matrix_load_failures = 0
+        log.info(
+            "embedding matrix background load: reason=%s rows=%d gen=%d in %.0f ms",
+            reason,
+            len(served.metadata),
+            served.generation,
+            (time.perf_counter() - started) * 1000.0,
+        )
 
     def unload_cache(self) -> bool:
         """Drop the resident chunk and unit matrices without deleting sidecar rows."""
@@ -1783,6 +1913,7 @@ class EmbeddingIndex:
         *,
         allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE,
+        defer_cold_load: bool = False,
     ) -> list[tuple[str, int, str, float]]:
         """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
 
@@ -1814,7 +1945,10 @@ class EmbeddingIndex:
             vec_hits = self._vec_search(query_vec, k)
             if vec_hits is not None:
                 return vec_hits
-        metadata, matrix = self.all_vectors()
+        resident = self.require_resident_matrix() if defer_cold_load else None
+        metadata, matrix = (
+            (resident.metadata, resident.matrix) if resident is not None else self.all_vectors()
+        )
         if not metadata:
             return []
         mask: np.ndarray | None = None

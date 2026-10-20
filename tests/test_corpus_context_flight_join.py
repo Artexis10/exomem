@@ -694,6 +694,17 @@ _DECLARED_UNBOUNDED_JOINS = {
     ): "single-flight graph proof: bounded by the one proof the waiter would otherwise "
     "run itself; the owner sets the Event in finally, and graph recall without a relation "
     "filter never waits",
+    (
+        "embedding_index.py",
+        "EmbeddingIndex.all_vectors",
+        "loading.join",
+    ): "single-flight corpus-matrix load: bounded by the one load the inline reader would "
+    "otherwise run itself; a managed recall defers with matrix_warming and never waits",
+    (
+        "server_runtime.py",
+        "_warm_embedding_matrix",
+        "embeddings.get_embedding_index(vault_root).start_corpus_matrix_load().join",
+    ): "startup warm thread joins the background matrix load it shares; not a request path",
 }
 
 

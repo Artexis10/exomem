@@ -293,15 +293,10 @@ def test_heterogeneous_filter_eligibility_is_identical_for_vector_backends(
         *,
         k: int,
         allowed_paths: set[str] | None = None,
-        encoded_for=None,
+        **kwargs: object,
     ) -> list[tuple[str, int, str, float]]:
         assert allowed_paths is not None
-        result = original_search(
-            query_vector,
-            k=k,
-            allowed_paths=allowed_paths,
-            encoded_for=encoded_for,
-        )
+        result = original_search(query_vector, k=k, allowed_paths=allowed_paths, **kwargs)
         observed_searches.append(
             (set(allowed_paths), {path for path, _index, _text, _score in result})
         )
