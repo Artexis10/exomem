@@ -2081,7 +2081,8 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(import_samples(journey))
         asyncio.run(field_release_journey(journey))
         copied = asyncio.run(copy_and_adopt(journey))
-        asyncio.run(migrate_copy(copied))
+        with journey.step("7. migrate the adopted copy and prove store-mode workflows"):
+            asyncio.run(migrate_copy(copied))
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
         capability_after = capability_file.read_bytes()
