@@ -2910,7 +2910,11 @@ def _orchestrate(args: argparse.Namespace) -> int:
                         str(executable),
                         "--older-python",
                         args.older_python,
-                        *(["--compatible-python", args.compatible_python] if args.compatible_python else []),
+                        *(
+                            ["--compatible-python", args.compatible_python]
+                            if args.compatible_python
+                            else []
+                        ),
                         "--vault",
                         str(s1 / "vault"),
                         "--work",
@@ -2981,7 +2985,10 @@ def main() -> int:
     parser.add_argument(
         "--older-python", default=os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", "")
     )
-    parser.add_argument("--compatible-python", default="", help="the earlier wheel installation for SQLite rollback qualification")
+    parser.add_argument(
+        "--compatible-python", default="",
+        help="the earlier wheel installation for SQLite rollback qualification",
+    )
     parser.add_argument("--http-server", default="")
     parser.add_argument("--vault", default="")
     parser.add_argument("--work", default="")
