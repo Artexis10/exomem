@@ -463,11 +463,15 @@ def test_import_preserves_temporal_spelling_and_the_legacy_payload_identity(tmp_
         assert item.read_bytes() == before
 
 
-def test_relationships_import_render_and_export_from_canonical_items_without_recursion(tmp_path):
+@pytest.mark.parametrize("title_field", ["title", "caption"])
+def test_relationships_import_render_and_export_from_canonical_items_without_recursion(tmp_path, title_field):
     text = manifest_text().replace(
         "item_schema:\n",
-        "item_presentation:\n  version: 1\n  title: title\n  relationships: [related]\nitem_schema:\n",
-    ).replace("    count: {type: integer}\n", "    related: {type: link, link_kind: record}\n")
+        f"item_presentation:\n  version: 1\n  title: {title_field}\n  relationships: [related]\nitem_schema:\n",
+    ).replace(
+        "    count: {type: integer}\n",
+        "    related: {type: link, link_kind: record}\n    caption: {type: string}\n",
+    )
     root, path = _items(tmp_path, text=text)
     manifest = collections.load_manifest(root, path)
     target_key = "22222222-2222-4222-8222-222222222222"

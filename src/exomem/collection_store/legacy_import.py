@@ -205,7 +205,7 @@ def presentation_context(root, *, conn=None, ownership_proof=None, manifests=Non
         yield None
         return
     proof = ownership.current(root) if ownership_proof is None else ownership_proof
-    if not proof.entries:
+    if not proof.entries and conn is None:
         yield None
         return
     with ExitStack() as stack:

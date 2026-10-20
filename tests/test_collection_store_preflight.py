@@ -115,7 +115,7 @@ def test_a_failed_proof_names_its_collection_and_check(tmp_path, monkeypatch):
     root = vault(tmp_path)
     (root / BROKEN).unlink()
 
-    def drift(captured, *args):
+    def drift(captured, *args, **kwargs):
         legacy_import._refuse("b", "render/parse values, body, identity or natural key differ")
 
     monkeypatch.setattr(legacy_import, "_prove_round_trip", drift)

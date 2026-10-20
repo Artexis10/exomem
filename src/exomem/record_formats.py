@@ -1343,7 +1343,7 @@ def _item_presentation_label(descriptor: collections.ItemPresentationField) -> s
 
 
 def _item_presentation_title(manifest, values):
-    return _presentation_scalar(values[manifest.item_presentation.title.field])
+    return _presentation_scalar(values.get(manifest.item_presentation.title.field))
 
 
 def item_display_title(manifest, values, body, path):

@@ -765,6 +765,8 @@ class Journey:
     def __init__(self, args: argparse.Namespace) -> None:
         self.executable, self.python = Path(args.executable), Path(args.python)
         self.older_python = getattr(args, "older_python", "")
+        compatible = getattr(args, "compatible_python", "")
+        self.compatible_python = Path(compatible).expanduser().absolute() if compatible else None
         self.vault, self.work, self.home = Path(args.vault), Path(args.work), Path(args.home)
         self.work.mkdir(parents=True, exist_ok=True)
         # The outer E2E collector rescues this directory before scratch cleanup.
@@ -828,7 +830,7 @@ class Journey:
             self.timings[name] = round(time.monotonic() - started, 1)
 
     @contextlib.asynccontextmanager
-    async def service(self, label: str, *, measure_memory=False) -> AsyncIterator[Session]:
+    async def service(self, label: str, *, measure_memory=False, python=None) -> AsyncIterator[Session]:
         """The installed stdio service on this vault, holding the writer lease while it runs."""
         from fastmcp import Client
         from fastmcp.client.transports import StdioTransport
@@ -837,6 +839,8 @@ class Journey:
         observation = ((self.observer_log_root / label / (secrets.token_hex(16) + ".json"), secrets.token_hex(16))
                        if measure_memory else None)
         server = self.observed_server(label, "--transport", "stdio", process_observation=observation)
+        if python is not None:
+            server[0] = str(python)
         client = Client(
             StdioTransport(
                 command=server[0],
@@ -958,6 +962,7 @@ class Journey:
     def fork(self, label: str, vault: Path) -> Journey:
         child = Journey(argparse.Namespace(
             executable=str(self.executable), python=str(self.python), older_python=self.older_python,
+            compatible_python=self.compatible_python,
             vault=str(vault), work=str(self.work / label / "work"), home=str(self.work / label / "home"),
             request_timeout=self.timeout,
         ))
@@ -1759,7 +1764,7 @@ async def store_state(journey: Journey, service: Session) -> dict[str, Any]:
     }
 
 
-async def migrate_copy(copied: Journey) -> None:
+async def migrate_copy(copied: Journey) -> dict[str, Any]:
     """Step 7: the owner moves the adopted copy's file Records and Planning collections into its
     live S1 store, then Records and Planning work in store mode. The copy looks like a real vault:
     a live summary store beside file collections that hold items."""
@@ -1821,6 +1826,63 @@ async def migrate_copy(copied: Journey) -> None:
             expect(await store_state(copied, service) == settled,
                    "a restart lost or changed a committed change", settled)
             expect(marker_entries(copied) == routed, "a restart changed the routing marker")
+    return settled
+
+
+async def compatible_rollback(copied: Journey, settled: dict[str, Any]) -> dict[str, Any]:
+    """Run the earlier wheel on the same migrated state, keeping SQLite and its original archives."""
+    if copied.compatible_python is None:
+        return {"status": "unverified", "reason": "no compatible application supplied"}
+    with copied.step("7. compatible application rollback keeps SQLite authority and archives"):
+        admission = copied.installed_helper("--compatible-launcher", copied.vault,
+                                           compatible_python=str(copied.compatible_python))
+        before = snapshot_state(copied, "before-compatible-rollback")
+        expect(before["legacy_originals"]["rows"] > 0, "the migrated fixture has no original-file archive")
+        expect(before["store"]["store_id"] == admission["fence"]["store_id"],
+               "the admitted fence names another store")
+        routed = marker_entries(copied)
+        records, planning = copied.file_collections["records"], copied.file_collections["planning"]
+        async with copied.service("compatible", python=copied.compatible_python) as service:
+            expect(await store_state(copied, service) == settled, "the earlier application changed existing answers")
+            rows = await service.records(action="query", collection=records,
+                                         columns=["occurred_on", "title", "status"], limit=20)
+            row = next(row for row in rows["rows"] if row["record_id"] == NATIVE_RECORDS_KEY)
+            title = row["title"] + " (rollback)"
+            changed = await service.mutate(
+                "record_memory", action="update", collection=records, item_key=NATIVE_RECORDS_KEY,
+                changes={"title": title}, expected_container_hash=rows["snapshot"],
+                expected_item_version=row["item_version"], why="verify the compatible application write")
+            plan = await service.call("plan_memory", action="query", collection=planning, limit=20, lifecycle="all")
+            item = next(key for key, values in PLAN_ITEMS.items() if "priority" in values)
+            row = next(row for row in plan["rows"] if row["plan_id"] == item)
+            priority = PLAN_ITEMS[item]["priority"]
+            expect(row["priority"] != priority, "the rollback fixture has no distinct Planning update")
+            await service.mutate(
+                "plan_memory", action="update", collection=planning, plan_id=item, changes={"priority": priority},
+                expected_container_hash=plan["snapshot"], expected_item_version=row["item_version"],
+                why="verify the compatible application Planning write")
+            expected = {**settled,
+                "records": [(key, title if key == NATIVE_RECORDS_KEY else value, status)
+                            for key, value, status in settled["records"]],
+                "planning": [(key, priority if key == item else value) for key, value in settled["planning"]],
+                "records history": [("update", NATIVE_RECORDS_KEY), *settled["records history"]],
+                "records transitions": [changed["audit_correlation"], *settled["records transitions"]]}
+
+            async def retained() -> bool:
+                return await store_state(copied, service) == expected
+
+            await until(retained, within=EDIT_BACK_WINDOW, what="both compatible writes and their published history")
+        async with copied.service("compatible-restarted", python=copied.compatible_python) as service:
+            expect(await store_state(copied, service) == expected, "the earlier application lost changes after restart")
+        after = snapshot_state(copied, "after-compatible-rollback")
+        expect(after["legacy_originals"] == before["legacy_originals"], "the earlier application changed exact archives")
+        expect(after["store"] == before["store"] and marker_entries(copied) == routed,
+               "the earlier application changed SQLite authority")
+        verified = copied.installed_helper("--compatible-launcher", copied.vault,
+                                          compatible_python=str(copied.compatible_python))
+        expect(verified == admission, "the earlier application, its admission or its fence changed")
+    return {"status": "passed", "application": admission, "archives": after["legacy_originals"],
+            "release_origin": "unverified; the caller must bind the wheel digest to the official release"}
 
 
 async def same_answers(journey: Journey, service: Session, references: dict[str, Any], summary_before: list) -> None:
@@ -1977,6 +2039,7 @@ def inspect_snapshot_state(path: Path) -> int:
     """Compare business state and job checkpoints in private, integrity-checked backup files."""
     from contextlib import closing
 
+    from exomem.collection_store import legacy_originals, schema
     from exomem.collection_store.connection import open_reader
 
     with closing(open_reader(path)) as reader:
@@ -1989,7 +2052,51 @@ def inspect_snapshot_state(path: Path) -> int:
             rows = reader.execute(f"SELECT * FROM {table} ORDER BY {order}").fetchall()
             encoded = json.dumps(rows, separators=(",", ":"), default=repr).encode()
             proof[table] = {"rows": len(rows), "sha256": hashlib.sha256(encoded).hexdigest()}
+        metadata = legacy_originals.metadata(reader)
+        proof["store"] = {"store_id": metadata[schema.META_STORE_ID],
+                          "schema_version": metadata[schema.META_SCHEMA_VERSION]}
+        archive_hash, count = hashlib.sha256(), 0
+        for row in reader.execute("SELECT key,value FROM store_meta WHERE substr(key,1,?)=? ORDER BY key",
+                                  (len(legacy_originals.PREFIX), legacy_originals.PREFIX)):
+            encoded = json.dumps(row, separators=(",", ":")).encode()
+            archive_hash.update(len(encoded).to_bytes(8, "big"))
+            archive_hash.update(encoded)
+            count += 1
+        proof["legacy_originals"] = {"rows": count, "sha256": archive_hash.hexdigest()}
     print(json.dumps(proof))
+    return 0
+
+
+def inspect_compatible_launcher(args: argparse.Namespace) -> int:
+    """Bind rollback behavior to an intact wheel and assess the existing managed admission boundary."""
+    from dataclasses import asdict
+    from urllib.parse import urlsplit
+    from urllib.request import url2pathname
+
+    from exomem import service_upgrade, writer_lease
+    from exomem.service_manager import WorkerRuntime
+
+    python = Path(args.compatible_python).expanduser().absolute()
+    identity = service_upgrade._staged_identity(python, wheel=True)
+    source = identity.get("direct_url")
+    # The qualification uses wheel provenance so the maintained verifier binds the installed bytes.
+    expect(isinstance(source, dict) and isinstance(source.get("url"), str), "the compatible wheel has no provenance")
+    location = urlsplit(source["url"])
+    expect(location.scheme == "file" and not location.netloc, "the compatible wheel snapshot is not local")
+    wheel = Path(url2pathname(location.path))
+    digest = service_upgrade._sha256_file(wheel)
+    service_upgrade._verify_wheel_install(identity, wheel, digest, identity["version"])
+    expect(service_upgrade._sha256_file(wheel) == digest, "the compatible wheel changed during verification")
+    runtime = WorkerRuntime(Path(args.work) / "compatible.sock", host="127.0.0.1", port=0)
+    target = asyncio.run(runtime.inspect({"python": str(python), "version": identity["version"]}))
+    migrate, reason = runtime.migration_required(target)
+    expect(not migrate, "the earlier application requires a state migration", reason)
+    expect(runtime._collections_declared(target) == "none", "the supplied application declares general migration")
+    expect(runtime.child is None and runtime.standby is None, "candidate inspection started an application")
+    fence = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env()).collection_store_fence()
+    expect(fence.enrolled, "the compatible rollback retired the store fence")
+    print(json.dumps({"version": identity["version"], "python": str(python), "wheel_sha256": digest,
+                      "installed_record_hashes": len(identity["record_hashes"]), "fence": asdict(fence)}))
     return 0
 
 
@@ -2093,7 +2200,8 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(field_release_journey(journey))
         copied = asyncio.run(copy_and_adopt(journey))
         with journey.step("7. migrate the adopted copy and prove store-mode workflows"):
-            asyncio.run(migrate_copy(copied))
+            settled = asyncio.run(migrate_copy(copied))
+            journey.measurements["compatible_rollback"] = asyncio.run(compatible_rollback(copied, settled))
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
         capability_after = capability_file.read_bytes()
@@ -2133,6 +2241,7 @@ def main() -> int:
     parser.add_argument("--python", required=True, help="the installed wheel's python")
     parser.add_argument("--executable", required=True, help="the installed wheel's exomem")
     parser.add_argument("--older-python", default="", help="the actual unsupported installed reader for the launcher proof")
+    parser.add_argument("--compatible-python", default="", help="the earlier wheel installation for compatible SQLite rollback")
     parser.add_argument("--vault", required=True, help="a vault path for this journey; created by init")
     parser.add_argument("--work", required=True)
     parser.add_argument("--home", required=True)
@@ -2140,6 +2249,7 @@ def main() -> int:
     parser.add_argument("--issue-recipient-session", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--unsupported-launcher", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--snapshot-state", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--compatible-launcher", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.issue_recipient_session:
         return issue_recipient_session(args.issue_recipient_session)
@@ -2147,6 +2257,8 @@ def main() -> int:
         return inspect_unsupported_launcher(args)
     if args.snapshot_state:
         return inspect_snapshot_state(args.snapshot_state)
+    if args.compatible_launcher:
+        return inspect_compatible_launcher(args)
     return run(args)
 
 

@@ -655,15 +655,22 @@ RESTORED = "restored"
 _RESTORE_WHY = "the files of a migration changed after it published its store, so the store it superseded continues"
 
 
-def _changed_since_publication(root, intent, deadline=None):
+def _changed_since_publication(session, fence_client, intent, deadline=None):
     """The paths of the intent's collections whose files no longer match the basis they were imported from.
 
     A collection not checked by ``deadline`` counts as changed.
     """
-    with preflight.scanned(root, _scratch(root), [], deadline=deadline) as (audit, _blocked), \
-            legacy_import.presentation_context(root) as presentation:
+    root = session.root
+    with preflight.scanned(root, _scratch(root), [], deadline=deadline) as (audit, _blocked), ExitStack() as inputs:
         if audit is None:
             return sorted(entry["manifest_path"] for entry in intent["collections"])
+        opened, _ = connection._open_read_only(session.path, connection.BUSY_TIMEOUT_MS)
+        reader = inputs.enter_context(closing(opened))
+        reader.execute("BEGIN")
+        proof = (inputs.enter_context(_supersede_ownership(session, fence_client, intent, reader=reader))
+                 if intent["expected_marker"] is None and "base_head" not in intent
+                 else ownership.resolve(root, conn=reader, manager=session.manager))
+        presentation = inputs.enter_context(legacy_import.presentation_context(root, conn=reader, ownership_proof=proof))
         changed = []
         for entry in intent["collections"]:
             try:
@@ -883,11 +890,13 @@ def _abandoned(coordinator, reason, changed=()):
 
 
 @contextmanager
-def _supersede_ownership(session, fence_client, pending):
+def _supersede_ownership(session, fence_client, pending, *, reader=None):
     """Prove that the first import's entire namespace is its own pending file input."""
-    reader, _ = connection._open_read_only(session.path, connection.BUSY_TIMEOUT_MS)
-    with closing(reader):
-        reader.execute("BEGIN")
+    with ExitStack() as inputs:
+        if reader is None:
+            opened, _ = connection._open_read_only(session.path, connection.BUSY_TIMEOUT_MS)
+            reader = inputs.enter_context(closing(opened))
+            reader.execute("BEGIN")
         intent = authority.pending_create(reader)
         if (intent != pending or intent is None or intent["kind"] != authority.MIGRATE
                 or intent["expected_marker"] is not None or "base_head" in intent):
@@ -908,7 +917,7 @@ def _supersede_ownership(session, fence_client, pending):
             raise CollectionStoreError(takeover.BUSY, "the import's marker preimage changed")
         fence = fence_client.collection_store_fence()
         if not authority.first_import_fence_matches(intent, target, fence):
-            raise CollectionStoreError(takeover.BUSY, "the import's collection fence changed")
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the import's collection fence changed")
         sid, instance = (reader.execute("SELECT value FROM store_meta WHERE key=?", (key,)).fetchone()[0]
                          for key in (schema.META_STORE_ID, schema.META_INSTANCE_ID))
         binding = (str(session.path), sid, instance, declared, json.dumps(intent, sort_keys=True), status,
@@ -944,14 +953,16 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
         changed, supersedes, restored = [], None, None
         if pending is not None:
             with closing(connection.open_head_reader(session.path)) as reader:
-                admitted = authority.intent_status(root, reader, pending) == "marker_admitted"
+                status = authority.intent_status(root, reader, pending)
             # Until its marker is installed the files stay canonical, so every collection is
             # compared with the basis it was imported from: first without the lease, so a
             # refusal holds none, then again under it before any fence step or marker.
-            changed = [] if admitted else _changed_since_publication(root, pending, deadline)
+            changed = (_changed_since_publication(session, fence_client, pending, deadline)
+                       if status == "pending" else [])
             if not changed:
                 token = _hold_lease(session, manager, root, fenced=_fenced(session, fence_client))
-                changed = [] if admitted else _changed_since_publication(root, pending, deadline)
+                changed = (_changed_since_publication(session, fence_client, pending, deadline)
+                           if status == "pending" else [])
                 if not changed:
                     result = admission._resume_locked(session, fence_client, preparation_token=token)
                     with _migration_scope(root):
