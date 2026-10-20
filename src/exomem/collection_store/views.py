@@ -70,6 +70,13 @@ def unresolved_target(projection, source=None):
     return bool(descriptor.get("unresolved_target_provenance") or (source or {}).get("unresolved_target_provenance"))
 
 
+def may_have_reached_path(projection):
+    """Whether bytes of this view may be at its path: published, readied, carried, accepted or adopted."""
+    descriptor = json.loads(projection["install_json"] or "{}")
+    return (projection["published_sha256"] is not None or bool(target_pairs(projection, descriptor))
+            or bool(descriptor.get("accepted")) or unresolved_target(projection))
+
+
 @dataclass
 class _Publication:
     path: str

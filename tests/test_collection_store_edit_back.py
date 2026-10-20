@@ -100,6 +100,20 @@ def test_an_item_save_without_its_stamp_is_held_without_changing_the_record(stor
     assert txns(store, "view_edit") == []
 
 
+def test_a_drain_without_a_census_leaves_a_renamed_then_updated_view_pending(store):
+    """Defect: an installed view that the owner renamed and an agent then updated looks never installed
+    to a drain, which runs no census, so it recreates the old path the owner moved away from."""
+    receipt, old = appended(store)
+    old.rename(old.parent / "Manual.md")
+    store.update_record(CID, item_key=KEY, changes={"count": 2}, why="agent",
+                        expected_container_hash=store.current_guards(CID)[0],
+                        expected_item_version=receipt["after_item_hash"])
+    for _ in range(2):  # what the stop drain passes: one install pass and one confirming pass
+        store.reconcile_views(pending_only=True, missing_ready=lambda cid: False)
+    assert not old.exists()
+    assert store.connection.execute("SELECT state FROM projection_state WHERE kind='item'").fetchone() == ("pending",)
+
+
 def test_an_offline_cross_directory_move_keeps_the_filename_and_payload_version(store):
     """An offline rename must be found before the missing old view is recreated."""
     receipt, old = appended(store)
@@ -1163,6 +1177,25 @@ def test_an_unreleased_route_takes_no_view_edit(quick_service, monkeypatch, rele
     until(lambda: store_rows(root, "SELECT COUNT(*) FROM txns WHERE operation='view_edit'") == [(1,)])
     [(text,)] = store_rows(root, "SELECT manifest_text FROM collection_manifests ORDER BY manifest_version DESC LIMIT 1")
     assert "title: Renamed" in text
+
+
+def test_an_owner_edit_cannot_turn_an_empty_summary_collection_into_an_items_mode_one(quick_service, monkeypatch):
+    """Defect: under the edit-back release, an owner who removes view_mode from an empty summary
+    collection's manifest view turns it into an items-mode store collection; only the route refused."""
+    from test_collection_store_service import call
+    from test_collection_store_summary import summary_text
+
+    root, empty = quick_service.root, "88888888-8888-4888-8888-888888888888"
+    path = manifest_path().replace("Work", "Empty")
+    monkeypatch.setattr(capability, "RELEASED", frozenset({capability.RECORDS_SUMMARY_V1, VIEWS}))
+    call(root, "record_memory", action="create", manifest_path=path, why="empty",
+         manifest_text=summary_text(manifest_text().replace(CID, empty).replace("title: Work", "title: Empty")))
+    until(lambda: store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state!='current'") == [(0,)])
+    view = root / path
+    view.write_bytes(view.read_bytes().replace(b"view_mode: summary\n", b""))
+    until(lambda: store_rows(root, "SELECT COUNT(*) FROM held_candidates WHERE collection_id=?", (empty,)) == [(1,)])
+    assert store_rows(root, "SELECT view_mode FROM collections WHERE collection_id=?", (empty,)) == [("summary",)]
+    assert store_rows(root, "SELECT COUNT(*) FROM txns WHERE operation='view_edit'") == [(0,)]
 
 
 def test_edit_back_waits_for_its_release_on_a_migrated_collection(served, monkeypatch):

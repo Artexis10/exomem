@@ -180,15 +180,13 @@ def test_handoff_stops_before_the_next_view_when_an_install_uses_the_drain_share
         drain.setattr(time, "monotonic", lambda: monotonic() + offset[0])
         drain.setattr(views.PublicationBatch, "_install", exhaust_share)
         runtime.manager.close(deadline=time.monotonic() + 20)
-    # Released collection views also queue the history page, so the one install need not be an item view.
-    assert len(installed) == 1 and (runtime.root / installed[0]).exists()
-    assert all(not (runtime.root / path).exists() for path in paths if path not in installed)
+    assert installed == paths[:1]
+    assert (runtime.root / paths[0]).exists() and not (runtime.root / paths[1]).exists()
     released = runtime.manager.client.release_head
     assert runtime.manager.client.released.is_set() and released == runtime.sample_head()
     with closing(connection.open_reader(replica.replica_path(runtime.root))) as reader:
         assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
-        pending = {row[0] for row in reader.execute("SELECT path FROM projection_state WHERE state='pending'")}
-    assert {path for path in paths if path not in installed} <= pending
+        assert reader.execute("SELECT state FROM projection_state WHERE path=?", (paths[1],)).fetchone() == ("pending",)
     _resume_pending_views(runtime, paths, released)
 
 

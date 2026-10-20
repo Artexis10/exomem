@@ -316,8 +316,8 @@ def _manifest_change(writer, projection, frontmatter, body, found, edit_back):
         raise collections.CollectionError("RESERVED_RECORD_FIELD", "a system field of the view changed")
     from . import summary
 
-    if proposed.derived != manifest.derived or (proposed.view_mode != manifest.view_mode
-                                                and summary.populated(writer.connection, manifest.collection_id)):
+    if proposed.derived != manifest.derived or summary.mode_change_refusal(
+            writer.connection, manifest, proposed) is not None:
         return Classification(summary.MODE_CHANGE_UNSUPPORTED, found.stamp, found.base, found.current)
     return Classification(None, found.stamp, found.base, found.current, change={
         "manifest_text": text, "expected_manifest_hash": manifest.manifest_version.hash,

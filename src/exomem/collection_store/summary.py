@@ -81,6 +81,23 @@ def mode_change_refused(current: str, requested: str, *, reason: str | None = No
     )
 
 
+def mode_change_refusal(conn: sqlite3.Connection, current: collections.CollectionManifest,
+                        proposed: collections.CollectionManifest) -> collections.CollectionError | None:
+    """Why ``proposed`` cannot change ``current``'s view mode in place, or None when it can.
+
+    A summary collection stays one, because items mode stays in files (S1), and a populated
+    collection keeps its mode. Every revise path, a view edit included, asks this.
+    """
+    if proposed.view_mode == current.view_mode:
+        return None
+    if current.view_mode == SUMMARY:
+        return mode_change_refused(current.view_mode, proposed.view_mode,
+                                   reason=f"a summary collection cannot change to {proposed.view_mode} in place")
+    if populated(conn, current.collection_id):
+        return mode_change_refused(current.view_mode, proposed.view_mode)
+    return None
+
+
 def render_page(conn: sqlite3.Connection, manifest: collections.CollectionManifest,
                 view_stamp: Mapping[str, str | int]) -> str:
     """Render the overview page from the committed basis named in its stamp."""
