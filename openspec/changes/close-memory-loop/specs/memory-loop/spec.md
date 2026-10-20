@@ -404,7 +404,11 @@ Activation SHALL resolve anchors, apply task-conditioned roles and bounded typed
 Activation SHALL use the derived anchor signature vectors for optional semantic
 corroboration instead of unconditionally invoking ordinary full-vault hybrid
 recall. It SHALL NOT load full note-chunk or multimodal vector matrices on the
-activation path. Ordinary recall behaviour SHALL remain unchanged. One query
+activation path. It MAY read an already-resident note-chunk matrix, with no lock,
+no load, no wait and no catch-up, only to list related pages for an unresolved
+turn (see the context-activation requirement "An unresolved turn MAY list related
+pages where lexical and semantic evidence agree"). Ordinary recall behaviour SHALL
+remain unchanged. One query
 encode MAY use the resident activation encoder, identified by a recorded
 fingerprint, only under nonblocking model admission; activation SHALL NOT load a
 cold model or wait behind another model operation. Signature vectors made under

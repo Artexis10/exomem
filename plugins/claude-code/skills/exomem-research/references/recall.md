@@ -222,7 +222,18 @@ entry (`why: "episode"`) is the newest revision of one conversation's
 `index_warming`, `disabled`. Resolve by calling again with `anchor` set to the ref
 you mean. `roles`, `units`, `pointers` and `current_state` are empty on an
 abstained packet; `anchors` (partial, `retrieval_named`, competing candidates),
-`ambiguity` and `missing` may still be filled.
+`related`, `ambiguity` and `missing` may still be filled.
+
+**`related`.** An `unresolved` turn that named no page may list up to three pages
+under `related[]` (`path`, `title`, `projects`, `evidence: ["retrieval",
+"vector_band"]`): current pages the turn's words reach and whose stored text is
+also semantically close to it. They are listed, never loaded: nothing is served
+for them, so `read_memory` one if it bears on the turn. The list is for the owner
+only. `generation.related_evidence` says whether it ran: `ready`, or why not
+(`cold` or `space_mismatch` for the stored text, else the state that
+`generation.semantic_evidence` reports for a turn that was not encoded, such as
+`uncalibrated` or `audience_restricted`); a cut list adds `{"role": "related",
+"reason": "lane_truncated"}` to `missing`.
 
 **How an anchor was reached** (`generation.carried_by`, anchor `status`):
 - `agent_choice`, `status: "resolved"`: you named it with `anchor`.
