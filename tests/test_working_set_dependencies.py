@@ -157,8 +157,9 @@ def test_deleting_an_exact_dependency_page_leaves_its_claim_partial(material_vau
     assert packet["generation"]["correction_context"] == "partial"
 
 
+@pytest.mark.parametrize("reader", ["owner", "restricted"])
 def test_an_exact_dependency_through_a_shared_page_name_leaves_its_claim_partial(
-    material_vault: Path, owner,
+    material_vault: Path, owner, reader: str,
 ) -> None:
     root = material_vault
     claim = "## Claim\n- category: observation\n- id: limitation\n\n{}\n"
@@ -167,6 +168,16 @@ def test_an_exact_dependency_through_a_shared_page_name_leaves_its_claim_partial
     second = _create(root, "Neutral operating envelope",
                      claim.format("Operation needs a signed valve log."), note_type="pattern")
     assert first != second and Path(first).stem == Path(second).stem
+    if reader == "restricted":
+        from test_governance_egress import write_rule, write_scope
+        from test_working_set_egress import _reset_governance_state
+
+        hidden = root / "Knowledge Base/Notes/Private/seal-log.md"
+        hidden.parent.mkdir(parents=True, exist_ok=True)
+        hidden.write_text("---\ntype: pattern\n---\n\nA restricted maintenance log.\n")
+        write_scope(root, paths="Notes/Private/**")
+        write_rule(root, ceiling=0, audience="external")
+        _reset_governance_state(root)
     primary = _create(root, "Violet worksheet calibration", (
         "## Claim\n- category: observation\n- id: authorization\n"
         f"- relations: depends_on: [[{Path(first).stem}#limitation]]\n\n"
@@ -186,9 +197,19 @@ def test_an_exact_dependency_through_a_shared_page_name_leaves_its_claim_partial
     find.recall_resolver_snapshot(root, expected_checkpoint=freshness.live_recall_checkpoint(root, "vault"))
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(root).rebuild()
-    packet = commands.op_activate_context(
-        root, turn="In harbor-study, may violet worksheet calibration proceed?", max_chars=4000,
-    )
+    from test_governance_egress import _external
+
+    from exomem import unit_corrections
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal() if reader == "owner" else _external()):
+        visible = unit_corrections.reader_view(root)
+        if reader == "restricted":
+            assert visible is not None and visible(first) and visible(second)
+            assert not visible("Knowledge Base/Notes/Private/seal-log.md")
+        packet = commands.op_activate_context(
+            root, turn="In harbor-study, may violet worksheet calibration proceed?", max_chars=4000,
+        )
 
     assert primary_unit.unit_ref in {unit["ref"] for unit in packet["units"]}
     assert not candidates & {pointer["ref"] for pointer in packet["pointers"]}
@@ -398,7 +419,7 @@ def test_withheld_outgoing_targets_do_not_exhaust_the_admitted_pointer_allowance
     assert packet["generation"]["correction_context"] == "available"
 
 
-@pytest.mark.parametrize("target_state", ["withheld", "deleted"])
+@pytest.mark.parametrize("target_state", ["withheld", "ambiguous_withheld", "deleted"])
 def test_restricted_reader_cannot_tell_a_withheld_dependency_page_from_a_deleted_one(
     exact_relations, target_state: str,
 ) -> None:
@@ -415,8 +436,14 @@ def test_restricted_reader_cannot_tell_a_withheld_dependency_page_from_a_deleted
     envelope = "Knowledge Base/Notes/Patterns/withheld-envelope.md"
     _write(root, envelope, "---\ntype: pattern\n---\n\n"
            "## Claim\n- category: config\n- id: limit\n\nPrivate operating limit.\n")
+    target = f"{envelope.removesuffix('.md')}#limit"
+    if target_state == "ambiguous_withheld":
+        _write(root, "Knowledge Base/Notes/Patterns/legacy/withheld-envelope.md",
+               "---\ntype: pattern\n---\n\n"
+               "## Claim\n- category: config\n- id: limit\n\nEarlier operating limit.\n")
+        target = "withheld-envelope#limit"
     path = root / SOURCE
-    path.write_text(path.read_text().replace(f"{TARGET}#rich-1", f"{envelope.removesuffix('.md')}#limit"))
+    path.write_text(path.read_text().replace(f"{TARGET}#rich-1", target))
     if target_state == "deleted":
         (root / envelope).unlink()
     _govern(root)
