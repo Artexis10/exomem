@@ -55,7 +55,11 @@ def active_sidecar_name(vault_root: Path, *, nonblocking: bool = False) -> str |
     pointer = state_paths.vault_state_dir(vault_root) / ACTIVE_SIDECAR_POINTER
     try:
         info = os.stat(pointer, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
     except OSError:
+        if nonblocking:
+            raise
         return None
     if not stat.S_ISREG(info.st_mode) or info.st_size > _POINTER_LIMIT:
         return None
@@ -72,6 +76,8 @@ def active_sidecar_name(vault_root: Path, *, nonblocking: bool = False) -> str |
         with os.fdopen(fd, "rb") as handle:
             raw = handle.read(_POINTER_LIMIT + 1)
     except OSError:
+        if nonblocking:
+            raise
         return None
     text = raw.decode("utf-8", "replace").strip()
     name = text if SPACE_SIDECAR_RE.fullmatch(text) else None

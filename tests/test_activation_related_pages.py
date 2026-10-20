@@ -30,6 +30,7 @@ from exomem import (
     commands,
     embedding_index,
     embeddings,
+    index_paths,
     lexstore,
     readiness,
     recall_space,
@@ -433,3 +434,28 @@ def test_a_listing_does_not_recreate_a_sidecar_removed_during_its_read(
     _nothing_served(packet)
     _no_related_block(packet)
     assert packet["generation"]["related_evidence"] == "cold"
+
+
+def test_an_unreadable_cutover_pointer_does_not_revive_the_old_matrix(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable cutover must not make the retained legacy matrix serve again."""
+    _planted_vault(vault, monkeypatch, {"Brine ledger": (BODY, _toward_turn(1.0))})
+    legacy = index_paths.legacy_sidecar_path(vault)
+    pointer = legacy.parent / index_paths.ACTIVE_SIDECAR_POINTER
+    index_paths.publish_active_sidecar(vault, index_paths.space_sidecar_name("next space"))
+    open_file = index_paths.os.open
+
+    def deny_pointer(path, *args, **kwargs):
+        if Path(path) == pointer:
+            raise PermissionError("the serving pointer is temporarily unreadable")
+        return open_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(index_paths.os, "open", deny_pointer)
+
+    packet = _activate(vault)
+
+    _nothing_served(packet)
+    _no_related_block(packet)
+    assert packet["generation"]["related_evidence"] == "cold"
+    assert index_paths.sidecar_path(vault) == legacy

@@ -1557,7 +1557,14 @@ def peek_embedding_index(vault_root: Path) -> EmbeddingIndex | None:
     an optional reader gets no index rather than the old sidecar's resident matrix.
     """
     index = _INDEX_CACHE.get(str(Path(vault_root).resolve()))
-    if index is None or index.path != index_paths.sidecar_path(vault_root, nonblocking=True):
+    if index is None:
+        return None
+    try:
+        serving_path = index_paths.sidecar_path(vault_root, nonblocking=True)
+    except OSError:
+        # An unreadable pointer cannot prove that the retained sidecar still serves.
+        return None
+    if index.path != serving_path:
         return None
     return index
 
