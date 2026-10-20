@@ -2706,33 +2706,35 @@ def _records_routing_terms(state: Any) -> list[str]:
     return [str(getattr(state, "title", "") or ""), *page_tags, *unit_tags]
 
 
-@call_spans.timed("post_commit.observation_delta")
 def _observation_delta(
     vault_root: Path,
     state: Any,
     routing: Mapping[str, Any] | None,
 ) -> None:
     """Maintain claimed-observation state after a compiled write; fail open."""
-    if not getattr(state, "eligible_compiled", True):
-        return
-    try:
-        from . import due_state, memory_refs
+    with (
+        call_spans.meter(*call_spans.PROJECTION_WRITE_FIELDS) as measured,
+        call_spans.span("post_commit.observation_delta", measured),
+    ):
+        if not getattr(state, "eligible_compiled", True):
+            return
+        try:
+            from . import due_state, memory_refs
 
-        identity = str(getattr(state, "identity", "") or "")
-        due_state.apply_observation_write_delta(
-            vault_root,
-            path=str(getattr(state, "path", "") or ""),
-            observation_ref=memory_refs.memory_ref(identity) if identity else "",
-            terms=_records_routing_terms(state),
-            routing=routing,
-            observation_aliases=(str(getattr(state, "path", "") or ""),),
-            facets=_records_routing_facets(state),
-        )
-    except Exception:  # noqa: BLE001 -- observation advice never breaks a commit
-        log.debug("observation due-state delta failed (non-fatal)", exc_info=True)
+            identity = str(getattr(state, "identity", "") or "")
+            due_state.apply_observation_write_delta(
+                vault_root,
+                path=str(getattr(state, "path", "") or ""),
+                observation_ref=memory_refs.memory_ref(identity) if identity else "",
+                terms=_records_routing_terms(state),
+                routing=routing,
+                observation_aliases=(str(getattr(state, "path", "") or ""),),
+                facets=_records_routing_facets(state),
+            )
+        except Exception:  # noqa: BLE001 -- observation advice never breaks a commit
+            log.debug("observation due-state delta failed (non-fatal)", exc_info=True)
 
 
-@call_spans.timed("post_commit.due_state")
 def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
     """Update the due-state projection for one written page and return its block.
 
@@ -2760,16 +2762,20 @@ def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
     nothing. The vault rides along under a server-internal `_vault` key that the
     terminal reads for the emission key and never puts on the wire.
     """
-    try:
-        from . import due_state
+    with (
+        call_spans.meter(*call_spans.PROJECTION_WRITE_FIELDS) as measured,
+        call_spans.span("post_commit.due_state", measured),
+    ):
+        try:
+            from . import due_state
 
-        block = due_state.block_for_write(vault_root, rel_path)
-        if not block:
+            block = due_state.block_for_write(vault_root, rel_path)
+            if not block:
+                return None
+            return {**block, "_vault": str(vault_root)}
+        except Exception:  # noqa: BLE001 — a due-state count never breaks a commit
+            log.debug("due-state projection failed (non-fatal)", exc_info=True)
             return None
-        return {**block, "_vault": str(vault_root)}
-    except Exception:  # noqa: BLE001 — a due-state count never breaks a commit
-        log.debug("due-state projection failed (non-fatal)", exc_info=True)
-        return None
 
 
 @call_spans.timed("post_commit.capture_sweep")
