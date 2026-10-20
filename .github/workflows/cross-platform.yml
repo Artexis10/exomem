@@ -35,6 +35,8 @@ env:
   # The store-blind release the collection-store gate runs as an actual older
   # interpreter (tests/test_collection_store_s1_gate.py fails without it).
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
+  # The newest release one store schema back; move it to the next one with each schema bump.
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.127.5"
 
 jobs:
   suite:
@@ -72,15 +74,18 @@ jobs:
       # that dependency is itself a finding this lane exists to surface.
       - name: Verify lockfile is current
         run: uv lock --check
-      - name: Install the pinned older reader for the collection-store gate
+      - name: Install the pinned older readers for the collection-store gate
         timeout-minutes: 5
         shell: bash
         run: |
+          scripts=bin; python=python
+          if [[ "$RUNNER_OS" == "Windows" ]]; then scripts=Scripts; python=python.exe; fi
           uv venv "$RUNNER_TEMP/older-reader" --python 3.13
-          reader="$RUNNER_TEMP/older-reader/bin/python"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then reader="$RUNNER_TEMP/older-reader/Scripts/python.exe"; fi
-          uv pip install --python "$reader" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
-          echo "EXOMEM_TEST_OLDER_READER_PYTHON=$reader" >> "$GITHUB_ENV"
+          uv pip install --python "$RUNNER_TEMP/older-reader/$scripts/$python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
+          echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/$scripts/$python" >> "$GITHUB_ENV"
+          uv venv "$RUNNER_TEMP/previous-schema" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/previous-schema/$scripts/$python" "exomem==$EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION"
+          echo "EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON=$RUNNER_TEMP/previous-schema/$scripts/$python" >> "$GITHUB_ENV"
       # The latency gate is dropped here for two reasons. It asserts *scaling*,
       # which a shared runner cannot measure meaningfully, and this lane exists
       # to expose platform behaviour rather than performance -- it already has

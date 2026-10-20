@@ -550,7 +550,7 @@ Reverse export is whole-vault. A store-native collection or a file-mode bound vi
 ### 11. Backup, restore and hosted cells
 
 - **Consistent snapshot primitive.** `sqlite3.Connection.backup` into a staging file, `journal_mode=DELETE`, `PRAGMA integrity_check`, fsync, atomic rename. The vault replica (§1) uses it, and so do `exomem collections backup --to <file>` (and `--stdout` for `restic backup --stdin`) and portability export. The spike measures 77 ms at 10,450 rows (15.8 MB with history).
-- **restic and vault copies** back up the vault. The replica is a single consistent file, and no part of the live store is ever in the vault. The live store is **excluded entirely** from file-level backups: copying its main file without or with its WAL is not consistent. The existing restic timer runs `exomem collections backup --to <staging>` first and backs up that snapshot (§16 A9).
+- **restic and vault copies** back up the vault. The replica is a single consistent file, and no part of the live store is ever in the vault. The live store is **excluded entirely** from file-level backups: copying its main file without or with its WAL is not consistent. The supported deployment has no restic timer; an external backup that needs the store reads `exomem collections backup --stdout` (§16 A9).
 - **WAL checkpoint.** A passive checkpoint runs after the projector drains, and a truncating checkpoint runs on quiesce, so the WAL stays bounded.
 - **Restore.**
   - Check the snapshot's `integrity_check`, `schema_version`, and that its `store_id` matches or restore is explicit.
@@ -1404,7 +1404,7 @@ Earlier, §12 assumed uniformly released collections. Two changes fix that:
 
 "Exclude `-wal`/`-shm`" (§11) was wrong for a live WAL database: copying the main file alone is also inconsistent.
 - The live store is **excluded entirely** from file-level backups.
-- The existing restic timer runs `exomem collections backup --to <staging>` first and backs up that consistent snapshot, alongside the vault replica.
+- The supported deployment has no restic timer. An external backup takes `exomem collections backup --to <staging>` or `--stdout` for a consistent snapshot, alongside the vault replica.
 - The P1b.8 gate measures **replica sync churn**. A full replica is about 15.8 MB at 10,000 rows (spike), so publication is coalesced to at most one publish per 60 s under steady writes (and always at the §1 boundaries). The gate reports bytes per hour at 1, 10 and 60 writes per minute.
 
 **Measured churn, 2026-10-18 and 2026-10-19.** Four 300-second windows ran on one retained invented fixture of 10,000 Work rows, with a real in-process coordinator and released item, manifest and aggregate views. Three ran at source `1bf69cb51`; the 60-writes-per-minute rerun ran at `99f136bd8`, which includes #1892. Installed bytes count replica files replaced inside the window, not physical I/O or network. Publication attempts land about 60–65 s apart. Three windows had one busy attempt: it returned `retry_pending` (`COLLECTION_STORE_BUSY`) in about 1 ms, with no pending publication and an unchanged replica signature, so these rates count it as installing nothing, and its replacement waits for the next attempt. The probe marks those windows partial.

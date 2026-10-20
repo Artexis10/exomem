@@ -620,3 +620,51 @@ def test_verified_restore_requires_schema_13_before_any_local_store_admission(se
         with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
             connection.open_reader(source)
     assert not fresh_state.exists()
+
+
+@pytest.mark.parametrize("forged", [None, "store_id", "instance_id", "head_hash"])
+def test_ownership_trusts_no_store_chain_that_lacks_the_recorded_head(service, monkeypatch, forged):
+    """Defect: ownership trusts a negative from a store chain that does not hold the coordinator's recorded head."""
+    import uuid
+    from dataclasses import replace
+
+    from exomem.collection_store import ownership
+
+    root = service.root
+    sibling = root / "Knowledge Base/Records/Independent.md"
+    sibling.write_text("# Ordinary sibling\n\nOrdinary sibling body.\n")
+    note = root / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Independent\n\nIndependent note.\n")
+    meta = store_meta(root)
+    head = writer_lease.CollectionStoreHead(
+        meta[schema.META_STORE_ID], meta[schema.META_INSTANCE_ID], int(meta[schema.META_COMMIT_SEQ]),
+        meta[schema.META_STORE_HEAD_HASH])
+    if forged is not None:
+        head = replace(head, **{forged: "0" * 64 if forged == "head_hash" else str(uuid.uuid4())})
+    real = ownership._manager(root)
+
+    class Client:
+        # Only the coordinator's recorded head changes, as ownership reads it; the lease keeps the real client.
+        def __getattr__(self, name):
+            return getattr(real.client, name)
+
+        def status(self):
+            return replace(real.client.status(), collection_store_head=head)
+
+    class Manager:
+        client = Client()
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    read = lambda path: call(root, "read_memory", path=path.relative_to(root).as_posix())  # noqa: E731
+    # Scoped, so the service fixture's teardown sees the real coordinator head.
+    with monkeypatch.context() as patch:
+        patch.setattr(ownership, "_manager", lambda _root: Manager())
+        if forged is None:
+            assert "Ordinary sibling body." in read(sibling)["body"]
+        else:
+            with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+                read(sibling)
+        assert "Independent note." in read(note)["body"]

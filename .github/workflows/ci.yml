@@ -17,6 +17,8 @@ env:
   # The store-blind release the collection-store gate runs as an actual older
   # interpreter (tests/test_collection_store_s1_gate.py fails without it).
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
+  # The newest release one store schema back; move it to the next one with each schema bump.
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.127.5"
 
 jobs:
   timing-tests:
@@ -171,12 +173,15 @@ jobs:
           enable-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
-      - name: Install the pinned older reader for the collection-store gate
+      - name: Install the pinned older readers for the collection-store gate
         timeout-minutes: 5
         run: |
           uv venv "$RUNNER_TEMP/older-reader" --python 3.13
           uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
+          uv venv "$RUNNER_TEMP/previous-schema" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/previous-schema/bin/python" "exomem==$EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION"
+          echo "EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON=$RUNNER_TEMP/previous-schema/bin/python" >> "$GITHUB_ENV"
       - *prepare-duration-snapshot
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env: *core-test-env
