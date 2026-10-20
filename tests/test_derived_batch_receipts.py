@@ -1021,7 +1021,7 @@ def test_pending_components_schedule_on_server_start_without_new_write(
     monkeypatch.setattr(drain, "start", observe_start)
     monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
-    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _root, **_kwargs: None)
     monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
     monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
     activation = server_runtime.LocalRuntimeActivation(vault)
@@ -1092,7 +1092,7 @@ def test_local_runtime_starts_and_stops_derived_drain_before_watcher_work(
         "_start_file_watcher",
         lambda root: events.append(f"watcher:{root}"),
     )
-    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _root, **_kwargs: None)
     monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
     monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
     activation = server_runtime.LocalRuntimeActivation(vault)

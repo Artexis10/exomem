@@ -143,7 +143,8 @@ READY = "ready"
 
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
-_BUILDS: set[Path] = set()
+_BUILDS: dict[Path, threading.Thread] = {}
+_BUILD_SHUTDOWNS: dict[Path, threading.Event] = {}
 #: One inline-build lock per vault root. The managed path single-flights through
 #: `_BUILDS` and a background thread; the unmanaged path has no thread to join,
 #: so two concurrent cold reads would otherwise both walk the vault and the
@@ -834,6 +835,7 @@ def reset_caches_for_tests(*, packets_only: bool = False) -> None:
         if packets_only:
             return
         _BUILDS.clear()
+        _BUILD_SHUTDOWNS.clear()
         _REEMBED_SCHEDULED.clear()
         _INLINE_LOCKS.clear()
     working_set_index.reset_collection_manifests_for_tests()
@@ -2125,6 +2127,28 @@ def _managed() -> bool:
         return False
 
 
+def bind_shutdown(vault_root: Path, stop: threading.Event) -> None:
+    """Bind managed refresh producers to their activation's lifetime."""
+    with _CACHE_LOCK:
+        _BUILD_SHUTDOWNS[Path(vault_root).absolute()] = stop
+
+
+def stop_builds(vault_root: Path) -> None:
+    """Close managed scheduling before joining the last owned refresh."""
+    with _CACHE_LOCK:
+        stop = _BUILD_SHUTDOWNS.get(Path(vault_root).absolute())
+        if stop is not None:
+            stop.set()
+
+
+def join_builds(vault_root: Path) -> None:
+    """Wait for the owned refresh to leave native code and finish."""
+    with _CACHE_LOCK:
+        thread = _BUILDS.get(Path(vault_root).absolute())
+    if thread is not None and thread is not threading.current_thread():
+        thread.join()
+
+
 def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
     """Single-flight a cold or stale build away from the request thread.
 
@@ -2138,36 +2162,49 @@ def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
     enough.
     """
     root = Path(vault_root).absolute()
+    from . import foreground_priority, runtime_resources
+
     pending = _DEFERRED_BUILDS.get()
-    if pending is not None:
-        # Preserve the first dispatch's stamp, as the existing single-flight owner does.
-        pending.setdefault(root, freshness_stamp)
-        return
     with _CACHE_LOCK:
-        if root in _BUILDS:
+        stop = _BUILD_SHUTDOWNS.get(root)
+        if (stop is not None and stop.is_set()) or root in _BUILDS:
             return
-        _BUILDS.add(root)
+        if pending is not None:
+            # Preserve the first dispatch's stamp, as the existing single-flight owner does.
+            pending.setdefault(root, freshness_stamp)
+            return
 
     def _warm() -> None:
         try:
             # The one pass that may load a cold activation encoder: it runs off
             # the request thread, which never loads a model.
-            working_set_index.WorkingSetIndex(root).update(
-                freshness_stamp=freshness_stamp or None, load_encoder=True
-            )
+            with (
+                foreground_priority.cancellable(stop),
+                runtime_resources.model_work("bulk", cancel_event=stop),
+            ):
+                working_set_index.WorkingSetIndex(root).update(
+                    freshness_stamp=freshness_stamp or None, load_encoder=True
+                )
+        except foreground_priority.BulkCancelled:
+            pass
         except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
             log.warning("activation index background build failed", exc_info=True)
         finally:
             with _CACHE_LOCK:
-                _BUILDS.discard(root)
+                _BUILDS.pop(root, None)
 
     thread = threading.Thread(target=_warm, name="exomem-working-set-warm", daemon=True)
-    try:
-        thread.start()
-    except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
-        with _CACHE_LOCK:
-            _BUILDS.discard(root)
-        log.warning("activation index background build could not start", exc_info=True)
+    with _CACHE_LOCK:
+        # Register and start under the same lock so shutdown cannot join an unstarted thread.
+        stop = _BUILD_SHUTDOWNS.get(root)
+        if (stop is not None and stop.is_set()) or root in _BUILDS:
+            return
+        _BUILDS[root] = thread
+        try:
+            thread.start()
+        except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
+            _BUILDS.pop(root, None)
+            log.warning("activation index background build could not start", exc_info=True)
 
 
 def serve(

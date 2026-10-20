@@ -1015,6 +1015,110 @@ def test_a_scheduled_build_records_the_stamp_so_the_next_request_stops_asking(
     assert scheduled == []
 
 
+def test_stopping_a_refresh_finishes_its_forward_and_skips_the_next_batch(seeded, monkeypatch):
+    """A stopped refresh must neither start another forward nor publish partial vectors."""
+    import threading
+
+    import numpy as np
+
+    from exomem import embeddings, working_set_runtime
+
+    working_set_runtime.reset_caches_for_tests()
+    index = working_set_index.WorkingSetIndex(seeded)
+    index.rebuild(freshness_stamp="before")
+    generation = index.generation()
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    stop = threading.Event()
+    calls = []
+
+    class Model:
+        def encode(self, texts, **kwargs):
+            calls.append(texts)
+            entered.set()
+            assert release.wait(5)
+            finished.set()
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    model = Model()
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: "callback-space")
+    monkeypatch.setattr(embeddings, "get_activation_model", lambda: model)
+    monkeypatch.setattr(embeddings, "encode_batch_size", lambda _model: 1)
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(embeddings, "embed_activation_passages", lambda texts: embeddings._encode_in_turns(
+        model, texts, admission=nullcontext, execution=nullcontext,
+    ))
+    working_set_runtime.bind_shutdown(seeded, stop)
+    try:
+        working_set_runtime._schedule_build(seeded, freshness_stamp="after")
+        assert entered.wait(3)
+        working_set_runtime.stop_builds(seeded)
+        release.set()
+        working_set_runtime.join_builds(seeded)
+        assert finished.is_set()
+        assert len(calls) == 1
+        assert index.freshness_stamp() == "before"
+        assert index.generation() == generation
+        working_set_runtime._schedule_build(seeded, freshness_stamp="too-late")
+        working_set_runtime.join_builds(seeded)
+        assert len(calls) == 1
+    finally:
+        release.set()
+        working_set_runtime.stop_builds(seeded)
+        working_set_runtime.join_builds(seeded)
+        working_set_runtime.reset_caches_for_tests()
+
+
+def test_stop_while_queued_for_nonfair_execution_prevents_the_forward(monkeypatch):
+    """A queued refresh must recheck cancellation after another caller releases the model."""
+    import threading
+    from contextlib import contextmanager
+
+    import numpy as np
+
+    from exomem import cloud_cell, embeddings, foreground_priority, runtime_resources
+
+    monkeypatch.setattr(cloud_cell, "resource_policy", lambda: "legacy")
+    monkeypatch.setattr(embeddings, "encode_batch_size", lambda _model: 1)
+    gate = runtime_resources.ModelAdmissionGate(2)
+    waiting = threading.Event()
+    cancelled = threading.Event()
+    stop = threading.Event()
+    calls = []
+
+    class Model:
+        def encode(self, texts, **kwargs):
+            calls.extend(texts)
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    @contextmanager
+    def execution():
+        waiting.set()
+        with gate.execution():
+            yield
+
+    def refresh():
+        try:
+            with foreground_priority.cancellable(stop):
+                embeddings._encode_in_turns(Model(), ["queued signature"],
+                                            admission=gate.admission, execution=execution)
+        except foreground_priority.BulkCancelled:
+            cancelled.set()
+
+    worker = threading.Thread(target=refresh, daemon=True)
+    with gate.execution():
+        worker.start()
+        assert waiting.wait(2)
+        stop.set()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert cancelled.is_set()
+    assert calls == []
+
+
 def test_a_cold_scheduled_build_records_the_stamp_too(
     seeded: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

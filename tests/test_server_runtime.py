@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
+import textwrap
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +14,235 @@ from conftest import initialize_vault_state_offline
 
 from exomem import media_processing, readiness, server_runtime
 from exomem.governance import projection_runtime
+
+
+@pytest.mark.parametrize("cancel_shutdown", [False, True], ids=["normal", "cancel_shutdown"])
+def test_owned_model_callbacks_finish_before_a_clean_subprocess_exit(tmp_path, cancel_shutdown):
+    """Daemon inference callbacks must finish before lifecycle exit can tear Python down."""
+    code = textwrap.dedent("""\
+        import asyncio
+        import sys
+        import threading
+        from pathlib import Path
+        from types import SimpleNamespace
+        from exomem import recall_migration, server_runtime, warmup, working_set_index, working_set_runtime
+
+        root = Path(sys.argv[1])
+        cancel_shutdown = sys.argv[2] == "1"
+        root.mkdir()
+        activation = server_runtime.LocalRuntimeActivation(root, deferred=True)
+        working_set_runtime.bind_shutdown(root, activation._shutdown)
+        entered = {name: threading.Event() for name in ("warm", "recall", "refresh")}
+        release = threading.Event()
+        completed = set()
+
+        def model_callback(name):
+            entered[name].set()
+            assert release.wait(5), name
+            assert activation._shutdown.is_set()
+            completed.add(name)
+            return {}
+
+        warmup.warm_all = lambda root: model_callback("warm")
+        recall_migration.run = lambda root, stop: model_callback("recall")
+        working_set_index.WorkingSetIndex.update = lambda self, **kwargs: model_callback("refresh")
+
+        async def exercise():
+            lifetime = activation.lifespan()(SimpleNamespace())
+            await lifetime.__aenter__()
+            activation.retrieval_warmup = warmup.start_background(root, activation._shutdown)
+            activation.recall_reembed = recall_migration.start(root, activation._shutdown)
+            working_set_runtime._schedule_build(root)
+            for event in entered.values():
+                assert await asyncio.to_thread(event.wait, 3)
+            exiting = asyncio.create_task(lifetime.__aexit__(None, None, None))
+            while not activation._shutdown.is_set():
+                await asyncio.sleep(0.001)
+            await asyncio.sleep(0.02)
+            assert not exiting.done()
+            if cancel_shutdown:
+                assert exiting.cancel()
+                await asyncio.sleep(0.02)
+                assert not exiting.done()
+                assert exiting.cancel()
+                await asyncio.sleep(0.02)
+                assert not exiting.done()
+            release.set()
+            try:
+                await asyncio.wait_for(exiting, 3)
+            except asyncio.CancelledError:
+                assert cancel_shutdown
+            else:
+                assert not cancel_shutdown
+            assert completed == set(entered)
+            assert not activation.retrieval_warmup.is_alive()
+            assert not activation.recall_reembed.is_alive()
+            assert not any(t.name == "exomem-working-set-warm" for t in threading.enumerate())
+            working_set_runtime._schedule_build(root)
+            assert not any(t.name == "exomem-working-set-warm" for t in threading.enumerate())
+
+        try:
+            asyncio.run(exercise())
+        finally:
+            release.set()
+        print("all owned callbacks joined")
+        """)
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path / "worker"), "1" if cancel_shutdown else "0"],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "all owned callbacks joined" in result.stdout
+
+
+def test_final_join_recovers_a_timed_semantic_stop(tmp_path, monkeypatch):
+    """A timed stop is temporary when the final join proves the forward completed."""
+    from exomem import semantic_drain
+
+    activation = server_runtime.LocalRuntimeActivation(tmp_path, deferred=True)
+    owner = semantic_drain.SemanticDrain(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def forward():
+        entered.set()
+        assert release.wait(5)
+        finished.set()
+
+    owner._bulk_thread = threading.Thread(target=forward, daemon=True)
+    owner._bulk_thread.start()
+    activation.semantic_drain = owner
+    stop = owner.stop
+    monkeypatch.setattr(owner, "stop", lambda: stop(timeout=0))
+
+    async def exercise():
+        lifetime = activation.lifespan()(SimpleNamespace())
+        await lifetime.__aenter__()
+        assert entered.wait(1)
+        exiting = asyncio.create_task(lifetime.__aexit__(None, None, None))
+        assert await asyncio.to_thread(owner._stop.wait, 1)
+        await asyncio.sleep(0.02)
+        assert not exiting.done()
+        release.set()
+        await asyncio.wait_for(exiting, 2)
+        assert finished.is_set()
+        assert not owner._bulk_thread.is_alive()
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        owner.join()
+
+
+def test_stopped_warmup_finishes_its_forward_without_loading_the_next_model(tmp_path, monkeypatch):
+    """An owned warmup must leave the native callback before it acknowledges cancellation."""
+    from exomem import embeddings, recall_migration, semantic_contract, warmup
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    stop = threading.Event()
+    later_loads = []
+
+    class Model:
+        def encode(self, _texts):
+            entered.set()
+            assert release.wait(5)
+            finished.set()
+
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *_args: True)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: True)
+    monkeypatch.setattr(warmup, "warm_graph_handoff", lambda _root: {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(warmup, "prime_writer_resolver", lambda _root: None)
+    monkeypatch.setattr(semantic_contract, "warm_corpus_context", lambda _root: None)
+    monkeypatch.setattr(embeddings, "get_model", lambda: Model())
+    monkeypatch.setattr(recall_migration, "preload_serving_encoder",
+                        lambda _root: later_loads.append("serving") or False)
+    worker = warmup.start_background(tmp_path, stop)
+    try:
+        assert entered.wait(3)
+        stop.set()
+        assert worker.is_alive()
+        release.set()
+        worker.join(3)
+        assert finished.is_set()
+        assert not worker.is_alive()
+        assert later_loads == []
+        assert not readiness.is_warming()
+    finally:
+        stop.set()
+        release.set()
+        worker.join(3)
+        readiness.reset()
+
+
+def test_concurrent_warmup_cannot_replace_an_activations_owned_worker(tmp_path, monkeypatch):
+    """A later compute failure must retain this activation's warm, even if another one starts."""
+    from exomem import auto_quiet, mode, warmup
+
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    monkeypatch.delenv("EXOMEM_EAGER_BOOT", raising=False)
+    first = server_runtime.LocalRuntimeActivation(tmp_path / "first", deferred=True)
+    second = server_runtime.LocalRuntimeActivation(tmp_path / "second", deferred=True)
+    entered = threading.Event()
+    later_setup = threading.Event()
+    release_setup = threading.Event()
+    release_first = threading.Event()
+    workers = {}
+
+    def warm(root, stop=None):
+        worker = threading.Thread(target=release_first.wait if root == first.vault_root else lambda: None,
+                                  daemon=True)
+        workers[root] = worker
+        worker.start()
+        warmup._WARM_THREAD = worker
+        return worker
+
+    def config_watch():
+        if threading.current_thread().name == "first-setup":
+            entered.set()
+            assert release_setup.wait(3)
+            raise RuntimeError("optional setup failed")
+        later_setup.set()
+
+    monkeypatch.setattr(warmup, "start_background", warm)
+    monkeypatch.setattr(mode, "release_when_idle", lambda: False)
+    monkeypatch.setattr(mode, "start_config_watch", config_watch)
+    monkeypatch.setattr(auto_quiet, "start_if_enabled", lambda: None)
+    setup = threading.Thread(target=first._start_component,
+                             args=("retrieval", first._start_compute_runtime), name="first-setup")
+    setup.start()
+    try:
+        assert entered.wait(2)
+        second._start_compute_runtime(second.vault_root)
+        assert later_setup.is_set()
+        release_setup.set()
+        setup.join(2)
+        assert not setup.is_alive()
+        assert first.retrieval_warmup is workers[first.vault_root]
+        assert second.retrieval_warmup is workers[second.vault_root]
+
+        async def exercise():
+            lifetime = first.lifespan()(SimpleNamespace())
+            await lifetime.__aenter__()
+            exiting = asyncio.create_task(lifetime.__aexit__(None, None, None))
+            assert await asyncio.to_thread(first._shutdown.wait, 1)
+            await asyncio.sleep(0.02)
+            assert not exiting.done()
+            release_first.set()
+            await asyncio.wait_for(exiting, 2)
+            assert not workers[first.vault_root].is_alive()
+
+        asyncio.run(exercise())
+    finally:
+        release_setup.set()
+        release_first.set()
+        setup.join(3)
+        for worker in workers.values():
+            worker.join(3)
 
 
 def test_unavailable_projection_startup_keeps_owner_governance_reachable_and_content_closed(
@@ -26,7 +258,7 @@ def test_unavailable_projection_startup_keeps_owner_governance_reachable_and_con
     init_vault(vault)
     monkeypatch.setenv(authorization_custody.KEYRING_FILE_ENV, str(tmp_path / "missing-keyring"))
     monkeypatch.setattr(server_runtime, "_start_metrics_persistence", lambda: None)
-    monkeypatch.setattr(server_runtime, "_start_retrieval_runtime", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_retrieval_runtime", lambda _root, **_kwargs: None)
     monkeypatch.setattr(server_runtime, "_start_derived_drain", lambda _root: None)
     projection_runtime._clear_preactivated_runtimes_for_tests()
 
@@ -66,7 +298,7 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
         lambda _vault: SimpleNamespace(source_types=("session",)),
     )
     monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _vault: "")
-    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _vault: None)
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _vault, **_kwargs: None)
     monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: None)
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _vault: None)
 
@@ -96,7 +328,7 @@ def test_initialize_runtime_disables_usage_boost_and_relevance_check_in_cloud_mo
         lambda _vault: SimpleNamespace(source_types=("session",)),
     )
     monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _vault: "")
-    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _vault: None)
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _vault, **_kwargs: None)
     monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: None)
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _vault: None)
 
@@ -130,7 +362,7 @@ def test_initialize_runtime_does_not_start_workers_before_transport(
     monkeypatch.setattr(
         server_runtime,
         "_start_compute_runtime",
-        lambda root: events.append(f"compute:{root}"),
+        lambda root, **_kwargs: events.append(f"compute:{root}"),
     )
     monkeypatch.setattr(
         server_runtime,
@@ -221,7 +453,7 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
         def finish_startup_recovery(self) -> None:
             calls.append("watcher-recovery")
 
-    def start_compute(root) -> None:
+    def start_compute(root, **_kwargs) -> None:
         calls.append(f"compute:{root}")
         readiness.begin_warm()
         compute_started.set()
@@ -318,7 +550,7 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     monkeypatch.setattr(
         server_runtime,
         "_start_compute_runtime",
-        lambda _root: (
+        lambda _root, **_kwargs: (
             calls.append("compute"),
             managed_at_compute.append(readiness.runtime_managed()),
         ),
@@ -364,7 +596,7 @@ def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
     monkeypatch.setattr(
         server_runtime,
         "_start_compute_runtime",
-        lambda _root: managed_at_compute.append(readiness.runtime_managed()),
+        lambda _root, **_kwargs: managed_at_compute.append(readiness.runtime_managed()),
     )
     monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
     monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
@@ -390,7 +622,7 @@ def test_local_runtime_activation_waits_for_terminal_warm_after_catalog_failure(
     watcher_started = threading.Event()
     downstream_activated = threading.Event()
 
-    def start_compute(_root) -> None:
+    def start_compute(_root, **_kwargs) -> None:
         readiness.begin_warm()
         compute_started.set()
 
@@ -503,7 +735,7 @@ def test_local_runtime_activation_falls_back_without_liveness_probe(
     monkeypatch.setattr(
         server_runtime,
         "_start_compute_runtime",
-        lambda root: activated.set() if root == vault else None,
+        lambda root, **_kwargs: activated.set() if root == vault else None,
     )
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
     monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
@@ -536,7 +768,7 @@ def test_stdio_transport_activates_when_the_pipe_opens_not_on_the_fallback_timer
     monkeypatch.setattr(
         server_runtime,
         "_start_compute_runtime",
-        lambda root: activated.set() if root == vault else None,
+        lambda root, **_kwargs: activated.set() if root == vault else None,
     )
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
     monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
@@ -576,7 +808,7 @@ def test_local_runtime_lifespan_waits_for_inflight_activation_before_teardown(
     release = threading.Event()
     finished = threading.Event()
 
-    def start_compute(_root: Path) -> None:
+    def start_compute(_root: Path, **_kwargs) -> None:
         entered.set()
         assert release.wait(timeout=2.0)
         finished.set()
@@ -677,7 +909,7 @@ def test_local_runtime_lifespan_interrupts_a_stuck_admission_wait(
     compute_started = threading.Event()
     exited = threading.Event()
 
-    def start_compute(_root: Path) -> None:
+    def start_compute(_root: Path, **_kwargs) -> None:
         readiness.begin_warm()
         compute_started.set()
 
@@ -1024,7 +1256,7 @@ def _quiet_starters(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     )
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
     monkeypatch.setattr(
-        server_runtime, "_start_compute_runtime", lambda _root: calls.append("compute")
+        server_runtime, "_start_compute_runtime", lambda _root, **_kwargs: calls.append("compute")
     )
     monkeypatch.setattr(
         server_runtime, "_start_graph_drain", lambda _root: calls.append("graph")
@@ -1105,7 +1337,7 @@ def test_a_service_started_with_the_dreamer_off_starts_it_when_switched_on(
     monkeypatch.setattr(
         server_runtime,
         "_start_compute_runtime",
-        lambda _root: mode.start_config_watch(interval=0.05),
+        lambda _root, **_kwargs: mode.start_config_watch(interval=0.05),
     )
     try:
         activation = server_runtime.LocalRuntimeActivation(vault)
@@ -1254,7 +1486,7 @@ def test_stopping_background_workers_joins_the_vocabulary_watcher(
         "_start_media_worker",
         "_start_dreamer",
     ):
-        monkeypatch.setattr(server_runtime, starter, lambda _root: None)
+        monkeypatch.setattr(server_runtime, starter, lambda _root, **_kwargs: None)
     activation = server_runtime.LocalRuntimeActivation(tmp_path)
     monkeypatch.setattr(activation, "_start_recall_reembed", lambda _root: None)
 

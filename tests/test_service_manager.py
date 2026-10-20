@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -994,6 +995,45 @@ def test_a_failed_drain_discards_the_standby_before_resuming(tmp_path):
         assert result["ok"] is False
         assert runtime.events == ["inspect", "start-standby", "discard-standby"]
         assert ingress.events == ["pause", "drain", ("resume", None)]
+
+    asyncio.run(scenario())
+
+
+def test_an_owned_forward_over_the_stop_allowance_blocks_migration_and_promotion(tmp_path):
+    """A live callback must retain recovery state instead of allowing a replacement to own its state."""
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+        runtime.migration = (True, "descriptors_changed")
+        release = threading.Event()
+        worker = threading.Thread(target=lambda: release.wait(5), daemon=True)
+        worker.start()
+
+        async def stop(timeout):
+            runtime.events.append("stop")
+            await asyncio.wait_for(asyncio.to_thread(worker.join), min(timeout, 0.02))
+            runtime.pid = 0
+
+        runtime.stop = stop
+        try:
+            result = await manager.upgrade(target)
+            assert not result["ok"]
+            assert worker.is_alive()
+            assert "migrate" not in runtime.events
+            assert "promote" not in runtime.events
+            assert manager.phase == "recovery-required"
+            assert manager.records.pending()["worker_pid"] == runtime.pid == 100
+            assert manager.records.active() is None
+            assert ingress.events[-1] == "unavailable"
+            release.set()
+            await asyncio.to_thread(worker.join)
+            resumed = await manager.upgrade(None, resume=True)
+            assert resumed["ok"]
+            assert runtime.pid == 200
+            assert "migrate" in runtime.events and "start" in runtime.events
+            assert manager.records.pending() is None
+        finally:
+            release.set()
+            await asyncio.to_thread(worker.join)
 
     asyncio.run(scenario())
 
