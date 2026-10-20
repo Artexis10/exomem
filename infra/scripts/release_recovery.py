@@ -20,6 +20,7 @@ import tempfile
 import tomllib
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -348,9 +349,10 @@ def stage_cloud(tag: str, directory: Path) -> None:
         shutil.copyfile(source, directory / target)
 
 
-def upload_missing(tag: str, directory: Path) -> None:
+def upload_missing(tag: str, paths: Iterable[Path]) -> None:
+    """Upload caller-selected assets without replacing existing release bytes."""
     assets = {a["name"]: a for a in release_assets(tag)}
-    for path in sorted(directory.iterdir()):
+    for path in sorted(paths):
         if not path.is_file():
             continue
         if path.name in assets:
@@ -626,10 +628,7 @@ def finish_images(tag: str, images: dict, directory: Path) -> None:
     for name, (digest, files) in recovered.items():
         entry = images[name]
         repository = entry["ref"].rsplit(":", 1)[0]
-        with tempfile.TemporaryDirectory() as temporary:
-            for path in files:
-                shutil.copyfile(path, Path(temporary) / path.name)
-            upload_missing(tag, Path(temporary))
+        upload_missing(tag, files)
         for reference in entry["immutable_tags"]:
             if aliases[name][reference] is None:
                 run(
@@ -765,7 +764,17 @@ def main() -> None:
     elif args.command == "cloud":
         stage_cloud(args.tag, args.directory)
     elif args.command == "upload":
-        upload_missing(args.tag, args.directory)
+        package = project(args.tag)
+        cloud = cloud_files(args.tag)
+        upload_missing(
+            args.tag,
+            (
+                path
+                for path in args.directory.iterdir()
+                if distribution_kind(path.name, package["name"], package["version"])
+                or path.name in cloud
+            ),
+        )
     elif args.command == "pypi":
         package = project(args.tag)
         files = list(args.directory.iterdir())
