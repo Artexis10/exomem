@@ -507,7 +507,9 @@ disables the snapshotter thread) so counts survive a restart. Key metrics:
   contention: busy refusals by code, acquire-wait and hold histograms, and
   holds that exceeded the long-holder threshold.
 - `exomem_lease_ops_total{op,outcome}`, `exomem_coordinator_errors_total{code}` —
-  writer-lease coordination. A non-preferred replica also voluntarily releases
+  writer-lease coordination. An `acquire` with outcome `reused` is a collection-store
+  write nested in an operation that kept the operation's grant instead of
+  asking the coordinator again. A non-preferred replica also voluntarily releases
   an idle lease after `EXOMEM_WRITER_LEASE_IDLE_SECONDS` (default tracks the
   TTL: `max(60, TTL)`; `0` disables; preferred replicas never idle-release).
 - `exomem_idempotency_replays_total` — identical retries served from the

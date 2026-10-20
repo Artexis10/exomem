@@ -4360,6 +4360,8 @@ class LeaseManager:
         )
         self._fencing_token: int | None = None
         self._expires_at: float | None = None
+        # When the last acquire or renew reported `_expires_at`, on this host's monotonic clock.
+        self._granted_monotonic: float | None = None
         self._capture_queue = _FairCaptureQueue()
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -4488,10 +4490,18 @@ class LeaseManager:
             and not (self._store_publishing and exempt)
         )
 
+    def _require_store_admitted(self) -> None:
+        """With the lock held: raise COLLECTION_STORE_BUSY while a closure or handoff excludes this thread."""
+        if self._store_refused():
+            raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+
     def ensure_writer(self, *, cause: str = "mutation") -> LeaseRecord:
         with self._lock:
-            if self._store_refused():
-                raise OpError("COLLECTION_STORE_BUSY", "collection store handoff is in progress")
+            self._require_store_admitted()
+        return self._acquire_writer(cause=cause)
+
+    def _acquire_writer(self, *, cause: str = "mutation") -> LeaseRecord:
+        """Ask the coordinator for the grant; the caller has passed `_require_store_admitted`."""
         if not self.config.enabled:
             return LeaseRecord(self.config.replica_id, None, 0, True)
         assert self.client is not None
@@ -4546,7 +4556,7 @@ class LeaseManager:
                 self._file_store_acquisition = self._file_store_marker = None
             self._record_lease_op("acquire", "granted")
             self._fencing_token = record.fencing_token
-            self._expires_at = record.expires_at
+            self._note_grant(record.expires_at)
             self._store_released = False
             if self._collection_store is not None:
                 self._collection_store.record_acquisition(record)
@@ -4560,6 +4570,43 @@ class LeaseManager:
                 self._last_activity_monotonic = time.monotonic()
             self._log_lease_event("lease_acquired", cause=cause)
             return record
+
+    def _renew_interval_seconds(self) -> float:
+        """How often the lease renews, and so the margin a grant needs to outlast the next renewal."""
+        return max(1.0, self.config.ttl_seconds / 3)
+
+    def _note_grant(self, expires_at: float | None) -> None:
+        """With the lock held: record the expiry that an acquire or renew reported, and when it arrived."""
+        self._expires_at = expires_at
+        self._granted_monotonic = time.monotonic()
+
+    def _reusable_operation_grant(self) -> LeaseRecord | None:
+        """With the lock held: the grant this operation's outer guard holds, or None when the guard must acquire.
+
+        Only a collection-store write asks for this: its transaction revalidates the token with the
+        coordinator before it commits, and the coordinator revokes the holder and advances the token in
+        the same transaction as every fence change. A reuse never re-grants. When a condition fails,
+        the guard acquires as before, and that acquire can re-grant.
+        """
+        active = _ACTIVE_WRITE_FENCE.get()
+        if active is None or active[0] is not self:
+            return None
+        token = active[1]
+        if (
+            self._fencing_token is None
+            or token != self._fencing_token
+            or self._active_mutations <= 0
+            # Only a real acquire derives the file-store marker from the acquisition record.
+            or (self._serves_collection_store and self._collection_store is None)
+            or self._expires_at is None
+            or self._granted_monotonic is None
+            # Local grant age, not the coordinator's wall-clock expiry, so a skewed clock cannot widen the reuse.
+            or time.monotonic() - self._granted_monotonic
+            >= self.config.ttl_seconds - self._renew_interval_seconds()
+        ):
+            return None
+        self._record_lease_op("acquire", "reused")
+        return LeaseRecord(self.config.replica_id, self._expires_at, token, True)
 
     @contextmanager
     def consistency_guard(
@@ -4673,8 +4720,13 @@ class LeaseManager:
         attachment_now: int | None = None,
         session_open_admission: bool = False,
         activation_admission: bool = False,
+        reuse_operation_grant: bool = False,
     ) -> Iterator[VaultMutationCoordinator]:
-        """Hold the shared vault mutation boundary and revalidate writer authority."""
+        """Hold the shared vault mutation boundary and revalidate writer authority.
+
+        `reuse_operation_grant` lets a collection-store write keep the grant that its operation's
+        outer guard holds. Every other guard acquires.
+        """
         with self._mutation_boundary(
             vault_root,
             request_id=request_id,
@@ -4684,6 +4736,7 @@ class LeaseManager:
             attachment_now=attachment_now,
             session_open_admission=session_open_admission,
             activation_admission=activation_admission,
+            reuse_operation_grant=reuse_operation_grant,
             advance_generation=True,
         ) as mutation:
             yield mutation
@@ -4716,6 +4769,7 @@ class LeaseManager:
         attachment_now: int | None = None,
         session_open_admission: bool = False,
         activation_admission: bool = False,
+        reuse_operation_grant: bool = False,
         advance_generation: bool,
     ) -> Iterator[VaultMutationCoordinator]:
         """`mutation_guard`, which advances the commit generation, and `projection_guard`, which does not."""
@@ -4747,6 +4801,7 @@ class LeaseManager:
                         attachment_now=attachment_now,
                         session_open_admission=session_open_admission,
                         activation_admission=activation_admission,
+                        reuse_operation_grant=reuse_operation_grant,
                     ):
                         yield mutation
                 finally:
@@ -4802,6 +4857,7 @@ class LeaseManager:
         attachment_now: int | None = None,
         session_open_admission: bool = False,
         activation_admission: bool = False,
+        reuse_operation_grant: bool = False,
     ) -> Iterator[None]:
         """Revalidate writer authority without holding the vault mutation lock.
 
@@ -4849,7 +4905,10 @@ class LeaseManager:
                 ) from None
         if self.config.enabled or self._collection_store is not None:
             with self._lock:
-                lease = self.ensure_writer()
+                self._require_store_admitted()
+                lease = self._reusable_operation_grant() if reuse_operation_grant else None
+                if lease is None:
+                    lease = self._acquire_writer()
                 if self.config.enabled:
                     fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
                 if self._serves_collection_store and self._collection_store is None:
@@ -6388,7 +6447,7 @@ class LeaseManager:
                     self._raise_fenced(token)
                 if (due_only and self._last_renew_monotonic is not None
                         and time.monotonic() - self._last_renew_monotonic
-                        < max(1.0, self.config.ttl_seconds / 3)):
+                        < self._renew_interval_seconds()):
                     return
             head = self._collection_store.report_head(token)
             record = self.client.renew(
@@ -6403,7 +6462,7 @@ class LeaseManager:
                     self._fencing_token = None
                     self._expires_at = None
                     self._raise_fenced(token)
-                self._expires_at = record.expires_at
+                self._note_grant(record.expires_at)
                 self._last_renew_monotonic = time.monotonic()
                 self._record_lease_op("renew", "granted")
 
@@ -6659,7 +6718,7 @@ class LeaseManager:
             return True
 
     def _renew_loop(self) -> None:
-        interval = max(1.0, self.config.ttl_seconds / 3)
+        interval = self._renew_interval_seconds()
         while not self._stop.wait(interval):
             with self._lock:
                 token = self._fencing_token
@@ -6685,7 +6744,7 @@ class LeaseManager:
                     if self._fencing_token != token:
                         continue
                     if record.granted and record.holder == self.config.replica_id:
-                        self._expires_at = record.expires_at
+                        self._note_grant(record.expires_at)
                         self._last_renew_monotonic = time.monotonic()
                         self._record_lease_op("renew", "granted")
                     else:
@@ -6895,10 +6954,11 @@ def _bump_commit_generation(state_dir: Path, vault_or_cell: os.PathLike[str] | s
             current = int(path.read_text(encoding="utf-8").strip() or "0")
         except Exception:  # noqa: BLE001 - a fresh/corrupt counter restarts
             current = 0
-        # Replaced, never overwritten in place: a power cut must leave a whole
-        # counter, not an empty file that reads as a restart (design D9).
+        # Replaced atomically but not synced. A power loss may leave the counter older or empty
+        # (read as 0); that is safe because every validity stamp lives within one invocation, and
+        # the boundary serializes this bump with every in-boundary comparison.
         try:
-            durable_write.replace_text(path, str(current + 1))
+            durable_write.replace_text(path, str(current + 1), sync=False)
         except OSError:
             # A reader that holds the file past the rename's retry window
             # (Windows) must not stop the bump: a counter that stays put would

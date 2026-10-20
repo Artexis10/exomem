@@ -220,6 +220,9 @@ October 4 private runtime/create foundation: independent review approves current
   - Snapshot publication cost is reported in bytes per hour at 1, 10 and 60 writes per minute on a 10,000-row store, within the stated budget (A9). Cross-host transport measurement is deferred.
     Evidence, 2026-10-19 (`design.md` A9): publication attempts land about 60–65 s apart, and replacements inside a window at least 60 s apart, at 1, 10 and 60 writes per minute, so the coalescing budget holds. Each replacement installs the whole replica, about 27.5 MB, so steady writes cost about 1.6 GB per hour at every measured rate. Windows with fewer replacements had a busy `retry_pending` attempt, which left the replica signature unchanged, or an attempt phase that put only four attempts inside the 300-second window; they are marked partial.
   - Local handoff scenarios pass: routine idle-release re-acquisition never waits for another host, managed upgrade preserves committed rows, and explicit restore is writable. Cross-host handoff and adopt-local acceptance are deferred.
+    Idle-release evidence: `tests/test_collection_store_s1_gate.py::test_idle_release_reacquires_its_own_head_without_waiting` calls the lease manager's idle release on an admitted store against the real coordinator, then makes a guarded store write. The write commits under a new token with the same store instance. With `takeover.decide` treating this instance's recorded head as foreign, the test fails: the service re-adopts its own replica under a new instance. The restart case is `::test_restart_reacquires_its_own_head_without_waiting`.
+    Upgrade evidence: `::test_a_failed_migration_is_a_pending_takeover_that_hands_back_the_lease_and_retries` reads the row that the schema-10 release committed after the writer migrates the store to the current schema. `tests/test_collection_store_service.py::test_an_upgraded_service_migrates_its_fenced_store_from_the_previous_schema_and_stays_writable` covers the service handoff from the previous worker; its store has no rows before the upgrade.
+    Restore evidence: `::test_staged_restore_carries_the_replica_and_admits_the_c_vault` restores an exported vault, adopts its replica on fresh state, reads the committed row and commits a new write.
   - The reverse-export round trip is green.
 
 ## P2. Rendered views and edit-back
@@ -290,6 +293,17 @@ October 4 private runtime/create foundation: independent review approves current
   - Report the SQLite acknowledgement against the P1a.15 targets: store, item render and pending state ≤ 4 ms p95, end to end < 20 ms. Under the 2026-10-19 owner ruling these are measured targets, not release blockers. Report physical publication separately.
   - Healthy-writer publication lag for item, manifest and aggregate views is reported and bounded under the harness. Blocked publication remains visibly pending; no numeric lag maximum is assumed.
     Evidence, 2026-10-19 (`design.md` A9): at 60 writes per minute on 10,000 rows, all 297 item, manifest and aggregate views appeared 0.21–5.08 s after acknowledgement. The acknowledgement median reached 1.00 s and five of 300 slots were missed; that saturation is not attributed. The 1 and 10 writes-per-minute views appeared within 1.06 s.
+  - Views-tick cost with edit-back on (`design.md` §6 "Census slices"), isolated diagnostic, Linux/WSL, 2026-10-20. The fixture is the retained 10,000-row store. Its release set is `collections-migrate-v1`; the edit-back arms add `collection-views-v1`. Each run lasts 120 s. Before slices (main `9c6c18149`), every 16-path census window paid its own checkout, policy load and release checks. The time column sums the store thread's `StoreServer._views_tick` calls; it excludes the time the thread spends serving the writes:
+
+    | Arm | Runs | Time in views ticks per 120 s | Warm acknowledgement p50 / p95 |
+    | --- | ---: | ---: | ---: |
+    | 1 write/min, before slices | 1 | 59.72 s | one write |
+    | 1 write/min, with slices | 2 | 16.26 s, 16.97 s | one write |
+    | 60 writes/min, before slices | 1 | 112.7 s | 67.38 / 77.4 ms |
+    | 60 writes/min, with slices | 1 | 59.21 s | 61.42 / 72.1 ms |
+    | 60 writes/min, no views | 1 | 0.0 s | 60.99 / 66.1 ms |
+
+    "Warm" means writes dispatched 30 s or more into the window, 90 per arm. With slices, at rest, a complete census pass of 2,519 windows takes 6.0–6.2 s of the thread every 60 s; between passes, the thread runs one tick of about 8 ms per second. At 60 writes per minute, view publication (`reconcile_views`) takes 41.4 s of the 59.21 s. The no-views arm runs only `collections-migrate-v1`, which publishes no views, so its views ticks return at once and its item views stay pending; it is only an acknowledgement floor. The warm median with slices minus no views is +0.43 ms (bootstrap 95% interval −0.94 to 2.14), so no change. Before slices it was +6.39 ms (4.97 to 8.12). With slices, all 120 item views appeared a median 0.21 s, at most 1.2 s, after acknowledgement. In each of the six passes, the third window from the end took 0.81–0.99 s, so a request that arrives then waits for it; that cause is not diagnosed. Report SHA-256 prefixes: before `745eb10bae5884bb` (1/min) and `71b64ec2d55182c2` (60/min); with slices `16c9bf07e37afc76`, `f61cd984ac5bdbc7` (1/min) and `9ecd9641b091169c` (60/min); no views `cfa8ccb4375b46d8`.
 
 ## P3. Audit, history, and the GA gate
 
