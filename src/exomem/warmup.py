@@ -369,16 +369,23 @@ def warm_caches(
 
             from . import embeddings
 
-            if embeddings.clip_enabled():
+            if clip_index is not None:
                 q = np.full(
                     embeddings.CLIP_DIM,
                     1.0 / (embeddings.CLIP_DIM**0.5),
                     dtype=np.float32,
                 )
-                embeddings.get_clip_index(vault_root).search(q, k=1)
+                clip_index.search(q, k=1)
 
         _step("embedding_matrix", _warm_matrix)
-        _step("clip_matrix", _warm_clip)
+        from . import embeddings
+
+        try:
+            clip_index = embeddings.get_clip_index(vault_root) if embeddings.clip_enabled() else None
+            if clip_index is not None and clip_index.has_vectors():
+                _step("clip_matrix", _warm_clip)
+        except Exception:  # noqa: BLE001 - cache warm-up reports storage failures and continues.
+            log.warning("CLIP cache eligibility failed", exc_info=True)
     log.info("cache warm-up done: %s", durations)
     return durations
 
@@ -669,11 +676,18 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             log.info("reranker disabled (EXOMEM_DISABLE_RANKING); skipping preload")
             readiness.mark_ready("reranker")
 
-        if embeddings.clip_enabled():
-            log.info("preloading CLIP model %s", embeddings.CLIP_MODEL_NAME)
-            if _preload("model_clip", embeddings.get_clip_model, lambda m: m.encode(["warm"])):
-                log.info("CLIP model ready")
+        try:
+            clip_applicable = embeddings.clip_enabled() and embeddings.get_clip_index(vault_root).has_vectors()
+        except Exception:  # noqa: BLE001 - retain storage failure visibility without loading a model.
+            log.warning("CLIP preload eligibility failed", exc_info=True)
+        else:
+            if not clip_applicable:
                 readiness.mark_ready("clip")
+            else:
+                log.info("preloading CLIP model %s", embeddings.CLIP_MODEL_NAME)
+                if _preload("model_clip", embeddings.get_clip_model, lambda m: m.encode(["warm"])):
+                    log.info("CLIP model ready")
+                    readiness.mark_ready("clip")
 
     if carried:
         log.info("warm complete: %s carried_from_standby=%s", durations, sorted(carried))

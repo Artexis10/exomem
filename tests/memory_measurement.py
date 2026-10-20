@@ -17,9 +17,13 @@ def run_in_fresh_process(request, directory: Path) -> bool:
     if os.environ.get(_CHILD_NODE) == request.node.nodeid:
         return False
     report = directory / "memory-measurement.xml"
+    # Preserve parent settings; the inherited environment keeps its timeout precedence.
+    timeout_args = ["-o", f"timeout={request.config.getini('timeout')}"]
+    if (cli_timeout := request.config.getoption("timeout")) is not None:
+        timeout_args.append(f"--timeout={cli_timeout}")
     # Earlier tests can make an intern-table resize contaminate the traced peak.
     completed = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--junitxml", str(report),
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *timeout_args, "--junitxml", str(report),
          f"{request.node.path}::{request.node.name}"],
         capture_output=True,
         text=True,

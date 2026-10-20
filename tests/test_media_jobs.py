@@ -246,6 +246,52 @@ def test_malformed_oldest_result_is_quarantined_without_starving_later_result(va
     assert store.pending_result_count() == 1
 
 
+
+def test_legacy_result_migration_retains_hashes_and_nullable_versions(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    job = store.claim_next()
+    assert store.record_result(
+        job, kind="extraction", sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"text": "legacy retained computation", "engine": "test"},
+    )
+    [legacy] = store.pending_results()
+    connection = store._connect()
+    try:
+        with connection:
+            connection.execute("ALTER TABLE media_job_results DROP COLUMN sidecar_before_evidence_version")
+            connection.execute("ALTER TABLE media_job_results DROP COLUMN target_evidence_version")
+    finally:
+        connection.close()
+    [migrated] = media_jobs.MediaJobStore(vault).pending_results()
+    assert migrated.sidecar_before_hash == legacy.sidecar_before_hash
+    assert migrated.payload_hash == legacy.payload_hash
+    assert migrated.payload == legacy.payload
+    assert migrated.sidecar_before_evidence_version is None
+    assert migrated.target_evidence_version is None
+
+
+@pytest.mark.parametrize("column", ["sidecar_before_evidence_version", "target_evidence_version"])
+def test_invalid_stored_evidence_version_cannot_publish(vault: Path, column: str) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    job = store.claim_next()
+    assert store.record_result(
+        job, kind="extraction", sidecar_before_hash="a" * 64,
+        binary_identity={"stat": [1, 2, 3, 4, 5], "sha256": "b" * 64},
+        payload={"text": "invalid version", "engine": "test"},
+    )
+    connection = store._connect()
+    try:
+        with connection:
+            # These two names are the migration's fixed SQL columns, not data-defined vocabulary.
+            connection.execute(f"UPDATE media_job_results SET {column} = ?", ("invalid",))
+    finally:
+        connection.close()
+    assert store.pending_results() == []
+    assert store.pending_result_count() == 0
+
 def _rollback_incomplete_error(
     *,
     targets: tuple[str, ...] = ("Knowledge Base/Evidence/item.mp3.md",),

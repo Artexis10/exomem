@@ -981,6 +981,9 @@ def test_available_clip_lane_is_metric_labelled_without_optional_artifacts(
     )
 
     class FakeClipIndex:
+        def has_vectors(self):
+            return True
+
         def search(self, _query_vector, *, k: int, allowed_paths=None):
             return [(rel.removesuffix(".md"), None, 0.654321987)]
 

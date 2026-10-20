@@ -29,6 +29,8 @@ class PreparedQuery:
     identity: Any = None
     vector: Any = None
     error: Exception | None = None
+    deferred: bool = False
+    non_applicable_reason: str | None = None
 
     def encoded(self) -> tuple[Any, Any]:
         if self.error is not None:
@@ -50,7 +52,6 @@ class PreparedQueryInputs:
     serving: Any = None
     building: Any = None
     embeddings_deferred: bool = False
-    clip_deferred: bool = False
 
     def require_current_serving(self, vault_root: Path) -> None:
         """Keep prepared rankings out of a cache for another serving sidecar."""
@@ -59,6 +60,23 @@ class PreparedQueryInputs:
         path = getattr(self.serving, "path", None)
         if path is not None and path != index_paths.sidecar_path(vault_root):
             raise recall_space.VectorSpaceMismatch("serving sidecar changed after preparation")
+
+
+def _prepare_clip_query(vault_root: Path, query: str) -> PreparedQuery:
+    """Decide applicability before readiness or encoding, once per request."""
+    from . import embeddings, readiness
+
+    if not embeddings.clip_enabled() or not query.strip():
+        return PreparedQuery(non_applicable_reason="clip_disabled")
+    try:
+        index = embeddings.get_clip_index(vault_root)
+        if not index.has_vectors():
+            return PreparedQuery(index, non_applicable_reason="no_image_vectors")
+        if readiness.should_defer("clip"):
+            return PreparedQuery(index, deferred=True)
+        return PreparedQuery(index, vector=embeddings.embed_clip_text(query))
+    except Exception as error:  # noqa: BLE001 - the image lane reports the retained failure.
+        return PreparedQuery(error=error)
 
 
 def prepare_query_inputs(
@@ -120,14 +138,8 @@ def prepare_query_inputs(
             dense = prepared.page if page else prepared.unit
             if dense is not None and isinstance(dense.error, runtime_resources.ModelBusyError):
                 return prepared
-        if page and query.strip() and embeddings.clip_enabled():
-            prepared.clip_deferred = readiness.should_defer("clip")
-            if not prepared.clip_deferred:
-                try:
-                    index = embeddings.get_clip_index(vault_root)
-                    prepared.clip = PreparedQuery(index, vector=embeddings.embed_clip_text(query))
-                except Exception as error:  # noqa: BLE001 - replay inside the image lane.
-                    prepared.clip = PreparedQuery(error=error)
+        if page:
+            prepared.clip = _prepare_clip_query(vault_root, query)
     return prepared
 
 
@@ -544,10 +556,20 @@ def collect_candidates(
     clip_ranking: list[str] = []
     clip_score_by_path: dict[str, float] = {}
     clip_frame_ts_by_path: dict[str, float | None] = {}
-    if embeddings.clip_enabled() and query.strip() and (
-        readiness.should_defer("clip")
-        or (prepared_queries is not None and prepared_queries.clip_deferred)
-    ):
+    clip_input = (
+        prepared_queries.clip if prepared_queries is not None
+        else _prepare_clip_query(vault_root, query)
+    )
+    if clip_input is not None and clip_input.non_applicable_reason is not None:
+        if capture_trace:
+            lane_statuses["clip"] = {
+                "status": "non_applicable" if clip_input.non_applicable_reason == "no_image_vectors" else "disabled",
+                "reason": clip_input.non_applicable_reason,
+                "model": embeddings.CLIP_MODEL_NAME,
+            }
+        if timings is not None:
+            timings.skipped("clip")
+    elif clip_input is not None and clip_input.deferred:
         if capture_trace:
             lane_statuses["clip"] = {
                 "status": "warming",
@@ -558,18 +580,13 @@ def collect_candidates(
             timings.skipped("clip")
         if degraded_out is not None:
             degraded_out.append("clip")
-    elif embeddings.clip_enabled() and query.strip():
+    else:
         try:
             with _span(timings, "clip"):
-                if prepared_queries is not None:
-                    prepared = prepared_queries.clip
-                    if prepared is None:
-                        raise embeddings.ClipUnavailable("image query was not prepared")
-                    _identity, clip_qvec = prepared.encoded()
-                    clip_idx = prepared.index
-                else:
-                    clip_idx = embeddings.get_clip_index(vault_root)
-                    clip_qvec = embeddings.embed_clip_text(query)
+                if clip_input is None:
+                    raise embeddings.ClipUnavailable("image query was not prepared")
+                _identity, clip_qvec = clip_input.encoded()
+                clip_idx = clip_input.index
                 allowed_images = {
                     path.removesuffix(".md")
                     for path in semantic_paths
@@ -628,14 +645,6 @@ def collect_candidates(
                 failed_out.append("clip")
             if timings is not None:
                 timings.error("clip", e)
-    elif timings is not None:
-        timings.skipped("clip")
-    if capture_trace and "clip" not in lane_statuses:
-        lane_statuses["clip"] = {
-            "status": "disabled",
-            "reason": "clip_disabled",
-            "model": embeddings.CLIP_MODEL_NAME,
-        }
     bm25_ranking: list[str] = []
     bm25_score_by_path: dict[str, float] = {}
     keyword_ranking: list[str] = []

@@ -631,6 +631,8 @@ def _tool_result(response: Any) -> dict[str, Any]:
     body = response.json().get("result") or {}
     structured = body.get("structuredContent") or {}
     inner = structured.get("result", structured)
+    if isinstance(inner, list):
+        return {"hits": inner}
     return inner if isinstance(inner, dict) else {}
 
 

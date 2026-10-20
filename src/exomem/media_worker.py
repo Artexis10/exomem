@@ -41,6 +41,7 @@ from . import (
     media_engines,
     media_jobs,
     preserve,
+    provenance,
     recall_policy,
     runtime_resources,
     scene_frames,
@@ -62,6 +63,7 @@ from .media_jobs import (
 )
 from .vault import (
     MISSING_CONTENT_HASH,
+    ContentHashMismatchError,
     DeferredGraphCompletion,
     PathGuardError,
     PlannedWrite,
@@ -248,6 +250,20 @@ def _content_digest(path: Path) -> str | None:
 
 def _target_digest(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _evidence_version_or_none(content: str) -> str | None:
+    try:
+        return provenance.evidence_version(content)
+    except ValueError:
+        # Invalid metadata retains exact-byte protection; two invalid versions never match.
+        return None
+
+
+def _sidecar_input_matches(content: str, expected_hash: str, expected_version: str | None) -> bool:
+    return content_hash(content) == expected_hash or (
+        expected_version is not None and _evidence_version_or_none(content) == expected_version
+    )
 
 
 def _sidecar_is_pending(path: Path) -> bool:
@@ -520,6 +536,7 @@ class MediaWorker:
         ):
             return _ProcessOutcome(_COMPLETE)
         expected_sidecar = guard.expected_content_hash
+        expected_evidence_version = _evidence_version_or_none(claimed_content)
         expected_binary = _binary_identity(job.binary_path)
         if expected_sidecar is None or expected_binary is None:
             log.warning("extraction skip %s: input identity unavailable", job.binary_path.name)
@@ -528,6 +545,7 @@ class MediaWorker:
             committed = self._block_compute_runtime_failure(
                 job,
                 expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
                 expected_binary=expected_binary,
                 error=self._asr_runtime_failure,
             )
@@ -548,6 +566,7 @@ class MediaWorker:
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
                 expected_binary=expected_binary,
                 state=BLOCKED,
                 error=error,
@@ -560,6 +579,7 @@ class MediaWorker:
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
                 expected_binary=expected_binary,
                 state=BLOCKED,
                 error=error,
@@ -574,6 +594,7 @@ class MediaWorker:
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
                 expected_binary=expected_binary,
                 state=BLOCKED,
                 error=error,
@@ -595,6 +616,7 @@ class MediaWorker:
             committed = self._block_compute_runtime_failure(
                 job,
                 expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
                 expected_binary=expected_binary,
                 error=error,
             )
@@ -605,6 +627,7 @@ class MediaWorker:
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
                 expected_binary=expected_binary,
                 state=FAILED,
                 error=error,
@@ -623,6 +646,7 @@ class MediaWorker:
                 committed = self._commit_sidecar_extraction(
                     job,
                     expected_sidecar=expected_sidecar,
+                    expected_evidence_version=expected_evidence_version,
                     expected_binary=expected_binary,
                     text=text,
                     engine=result.engine,
@@ -636,16 +660,25 @@ class MediaWorker:
                 return _ProcessOutcome(BLOCKED, error)
             if committed:
                 break
+            try:
+                latest, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+            except (OSError, UnicodeError, PathGuardError):
+                break
             if (
-                _content_digest(job.sidecar_path) != expected_sidecar
-                or _binary_identity(job.binary_path) != expected_binary
+                _binary_identity(job.binary_path) != expected_binary
+                or not _sidecar_input_matches(latest, expected_sidecar, expected_evidence_version)
             ):
                 break
             if commit_attempt < 2:
                 time.sleep(0.02)
         if not committed:
             stale_parts: list[str] = []
-            sidecar_changed = _content_digest(job.sidecar_path) != expected_sidecar
+            try:
+                latest, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+            except (OSError, UnicodeError, PathGuardError):
+                sidecar_changed = True
+            else:
+                sidecar_changed = not _sidecar_input_matches(latest, expected_sidecar, expected_evidence_version)
             binary_changed = _binary_identity(job.binary_path) != expected_binary
             if sidecar_changed:
                 stale_parts.append("sidecar content changed")
@@ -658,6 +691,7 @@ class MediaWorker:
                         job,
                         kind="pending",
                         sidecar_before_hash=expected_sidecar,
+                        sidecar_before_evidence_version=expected_evidence_version,
                         binary_identity=_result_binary_identity(current_identity),
                         payload={
                             "error": "media identity changed",
@@ -666,12 +700,18 @@ class MediaWorker:
                     ):
                         return _ProcessOutcome(_HANDOFF)
                 if self._store is None:
-                    preserve.update_sidecar_processing_pending(
-                        self._vault_root,
-                        job.sidecar_path,
-                        attempts=max(1, job.attempts),
-                        expected_hash=expected_sidecar,
-                    )
+                    current_identity = _binary_identity(job.binary_path)
+                    if current_identity is not None:
+                        self._commit_processing_failure(
+                            job,
+                            expected_sidecar=expected_sidecar,
+                            expected_evidence_version=expected_evidence_version,
+                            expected_binary=current_identity,
+                            state=media_jobs.PENDING,
+                            error="media identity changed",
+                            next_action="wait for media reconciliation",
+                            presented_pending=True,
+                        )
             detail = ", ".join(stale_parts) or "commit precondition changed"
             return _ProcessOutcome(_STALE, f"stale extraction: {detail}")
         log.info(
@@ -693,6 +733,7 @@ class MediaWorker:
         job: _Job,
         *,
         expected_sidecar: str,
+        expected_evidence_version: str | None = None,
         expected_binary: tuple[tuple[int, int, int, int, int], str | None],
         error: str,
     ) -> bool:
@@ -700,6 +741,7 @@ class MediaWorker:
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
                 expected_binary=expected_binary,
                 state=BLOCKED,
                 error=error,
@@ -714,13 +756,18 @@ class MediaWorker:
         """Repair blocked compute presentation without constructing an ASR model."""
         if job.state != BLOCKED or not media_jobs.is_compute_runtime_error(job.last_error):
             return False
-        expected_sidecar = _content_digest(job.sidecar_path)
+        try:
+            content, guard = read_guarded_text(self._vault_root, job.sidecar_path)
+        except (OSError, UnicodeError, PathGuardError):
+            return False
+        expected_sidecar = guard.expected_content_hash
         expected_binary = _binary_identity(job.binary_path)
         if expected_sidecar is None or expected_binary is None:
             return False
         return self._block_compute_runtime_failure(
             job,
             expected_sidecar=expected_sidecar,
+            expected_evidence_version=_evidence_version_or_none(content),
             expected_binary=expected_binary,
             error=str(job.last_error),
         )
@@ -918,6 +965,7 @@ class MediaWorker:
         job: _Job,
         *,
         expected_sidecar: str,
+        expected_evidence_version: str | None = None,
         expected_binary: tuple[tuple[int, int, int, int, int], str | None],
         text: str,
         engine: str,
@@ -929,6 +977,7 @@ class MediaWorker:
                 job,
                 kind="extraction",
                 sidecar_before_hash=expected_sidecar,
+                sidecar_before_evidence_version=expected_evidence_version,
                 binary_identity=_result_binary_identity(expected_binary),
                 payload={
                     "text": preserve._cap_extracted_text(text),
@@ -937,8 +986,6 @@ class MediaWorker:
                     "speaker_verification": speaker_verification or "unavailable",
                 },
             )
-        token: DeferredGraphCompletion | None = None
-        receipts: list[deferred_index.DeferredReceipt] = []
         with get_manager().mutation_guard(
             self._vault_root,
             operation="background_media_extraction_commit",
@@ -947,52 +994,46 @@ class MediaWorker:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return False
             try:
-                current_content = job.sidecar_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
-                current_content = ""
+                before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
+            except (OSError, UnicodeError, PathGuardError):
+                return False
             from . import media_processing
 
-            current_sidecar = _content_digest(job.sidecar_path)
-            current_binary = _binary_identity(job.binary_path)
-            if current_sidecar != expected_sidecar or current_binary != expected_binary:
-                log.warning(
-                    "extraction result stale for %s; newer canonical input preserved",
-                    job.sidecar_path.name,
-                )
-                return False
-            if media_processing.has_completed_transcript(
-                current_content, media_type=job.media_type
+            if (
+                _binary_identity(job.binary_path) != expected_binary
+                or not _sidecar_input_matches(before, expected_sidecar, expected_evidence_version)
             ):
-                log.info(
-                    "completed transcript appeared before commit for %s; preserving it",
-                    job.sidecar_path.name,
-                )
+                log.warning("extraction result stale for %s; newer canonical input preserved", job.sidecar_path.name)
                 return False
-            if preserve._has_ambiguous_legacy_preserved_notes(current_content):
-                raise preserve.PreserveError(
-                    code="AMBIGUOUS_SIDECAR_BOUNDARY",
-                    missing=[],
-                    reason="unmarked nonempty preserved notes have no machine-owned boundary",
-                )
-            receipts = deferred_index.add_full_receipts(
-                self._vault_root,
-                [job.sidecar_path.relative_to(self._vault_root).as_posix()],
-            )
-            handoff = preserve.update_sidecar_extraction(
-                self._vault_root,
-                job.sidecar_path,
+            if media_processing.has_completed_transcript(before, media_type=job.media_type):
+                return False
+            target = preserve.render_sidecar_extraction(
+                before,
                 text=text,
                 engine=engine,
                 speakers=speakers,
                 speaker_verification=speaker_verification,
                 attempts=max(1, job.attempts),
-                defer_index_fanout=True,
-                defer_graph_completion=True,
             )
+            receipts = deferred_index.add_full_receipts(
+                self._vault_root,
+                [job.sidecar_path.relative_to(self._vault_root).as_posix()],
+            )
+            try:
+                handoff = preserve.commit_media_sidecar_writes(
+                    self._vault_root,
+                    (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
+                    post_commit_fanout=False,
+                    defer_graph_completion=True,
+                )
+            except ContentHashMismatchError:
+                return False
+            except PathGuardError as error:
+                if error.code != "PATH_GUARD_CONTENT":
+                    raise
+                return False
             assert isinstance(handoff, DeferredGraphCompletion)
-            token = handoff
-        assert token is not None
-        self._complete_deferred_graph_completion(token, receipts)
+        self._complete_deferred_graph_completion(handoff, receipts)
         return True
 
     def _commit_processing_failure(
@@ -1000,6 +1041,7 @@ class MediaWorker:
         job: _Job,
         *,
         expected_sidecar: str,
+        expected_evidence_version: str | None = None,
         expected_binary: tuple[tuple[int, int, int, int, int], str | None],
         state: str,
         error: str,
@@ -1009,11 +1051,7 @@ class MediaWorker:
         blocked_context: str | None = None,
         presented_pending: bool = False,
     ) -> bool:
-        """Record a blocked or failed job and show it on its sidecar.
-
-        `presented_pending` shows the sidecar as pending with no error: the media
-        waits by itself, and nothing about it is for the tenant to act on.
-        """
+        """Retain a failure and publish it against the same validated snapshot."""
         if self._store is not None:
             payload: dict[str, object] = {
                 "error": error,
@@ -1026,79 +1064,69 @@ class MediaWorker:
                 job,
                 kind="failure",
                 sidecar_before_hash=expected_sidecar,
+                sidecar_before_evidence_version=expected_evidence_version,
                 binary_identity=_result_binary_identity(expected_binary),
                 payload=payload,
                 terminal_state=state,
                 blocked_reason=blocked_reason,
                 blocked_context=blocked_context,
             )
-        token: DeferredGraphCompletion | None = None
-        receipts: list[deferred_index.DeferredReceipt] = []
-        with get_manager().mutation_guard(
-            self._vault_root,
-            operation="background_media_failure_commit",
-            holder_kind="background",
-        ):
-            if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                return False
-            current_sidecar = _content_digest(job.sidecar_path)
-            current_binary = _binary_identity(job.binary_path)
-            if current_sidecar != expected_sidecar or current_binary != expected_binary:
-                log.warning(
-                    "processing failure stale for %s; newer canonical input preserved",
-                    job.sidecar_path.name,
-                )
-                return False
-            try:
-                current_content, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
-            except (OSError, UnicodeError, PathGuardError):
-                current_content = ""
-            from . import media_processing
-
-            if media_processing.has_completed_transcript(
-                current_content, media_type=job.media_type
-            ):
-                log.info(
-                    "completed transcript appeared before failure commit for %s; preserving it",
-                    job.sidecar_path.name,
-                )
-                return False
-            receipts = deferred_index.add_full_receipts(
+        for _attempt in range(3):
+            with get_manager().mutation_guard(
                 self._vault_root,
-                [job.sidecar_path.relative_to(self._vault_root).as_posix()],
-            )
-            if presented_pending:
-                handoff = preserve.commit_media_sidecar_writes(
+                operation="background_media_failure_commit",
+                holder_kind="background",
+            ):
+                if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                    return False
+                try:
+                    before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
+                except (OSError, UnicodeError, PathGuardError):
+                    return False
+                from . import media_processing
+
+                if (
+                    _binary_identity(job.binary_path) != expected_binary
+                    or not _sidecar_input_matches(before, expected_sidecar, expected_evidence_version)
+                ):
+                    log.warning("processing failure stale for %s; newer canonical input preserved", job.sidecar_path.name)
+                    return False
+                if media_processing.has_completed_transcript(before, media_type=job.media_type):
+                    return False
+                if presented_pending:
+                    target = preserve.render_sidecar_processing_pending(
+                        before, attempts=max(1, job.attempts), next_action=next_action
+                    )
+                else:
+                    target = preserve.render_sidecar_processing_failure(
+                        before,
+                        state=state,
+                        attempts=max(1, job.attempts),
+                        error=error,
+                        retryable=retryable,
+                        next_action=next_action,
+                    )
+                receipts = deferred_index.add_full_receipts(
                     self._vault_root,
-                    (
-                        PlannedWrite(
-                            job.sidecar_path,
-                            preserve.render_sidecar_processing_pending(
-                                current_content, attempts=max(1, job.attempts), next_action=next_action
-                            ),
-                            expected_hash=content_hash(current_content),
-                        ),
-                    ),
-                    post_commit_fanout=False,
-                    defer_graph_completion=True,
+                    [job.sidecar_path.relative_to(self._vault_root).as_posix()],
                 )
-            else:
-                handoff = preserve.update_sidecar_processing_failure(
-                    self._vault_root,
-                    job.sidecar_path,
-                    state=state,
-                    attempts=max(1, job.attempts),
-                    error=error,
-                    retryable=retryable,
-                    next_action=next_action,
-                    defer_index_fanout=True,
-                    defer_graph_completion=True,
-                )
-            assert isinstance(handoff, DeferredGraphCompletion)
-            token = handoff
-        assert token is not None
-        self._complete_deferred_graph_completion(token, receipts)
-        return True
+                try:
+                    handoff = preserve.commit_media_sidecar_writes(
+                        self._vault_root,
+                        (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
+                        post_commit_fanout=False,
+                        defer_graph_completion=True,
+                    )
+                except ContentHashMismatchError:
+                    continue
+                except PathGuardError as conflict:
+                    if conflict.code != "PATH_GUARD_CONTENT":
+                        raise
+                    continue
+                assert isinstance(handoff, DeferredGraphCompletion)
+            self._complete_deferred_graph_completion(handoff, receipts)
+            return True
+        return False
 
     def _complete_deferred_graph_completion(
         self,
@@ -1602,19 +1630,25 @@ class MediaWorker:
             self._store.discard_result(result)
             return
         current_binary = _binary_identity(job.binary_path)
-        current_sidecar = _content_digest(job.sidecar_path)
+        try:
+            current_content, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+        except (OSError, UnicodeError, PathGuardError):
+            self._store.terminalize_result(
+                result, state=media_jobs.FAILED, error="stale media result: sidecar content changed"
+            )
+            return
+        current_sidecar = content_hash(current_content)
+        binary_changed = (
+            current_binary is None
+            or _result_binary_identity(current_binary) != result.binary_identity
+        )
         prepared_target = (
             result.target_hash is not None
             and result.target_size is not None
             and result.receipt_revision is not None
-            and current_sidecar == result.target_hash
+            and _sidecar_input_matches(current_content, result.target_hash, result.target_evidence_version)
         )
         if prepared_target:
-            try:
-                if job.sidecar_path.stat().st_size != result.target_size:
-                    return
-            except OSError:
-                return
             receipt = deferred_index.DeferredReceipt(
                 job.sidecar_path.relative_to(self._vault_root).as_posix(),
                 result.receipt_revision,
@@ -1662,6 +1696,7 @@ class MediaWorker:
                 self._vault_root, [receipt]
             )
             pending_target = _sidecar_is_pending(job.sidecar_path)
+            current_binary = _binary_identity(job.binary_path)
             binary_changed = (
                 current_binary is None
                 or _result_binary_identity(current_binary) != result.binary_identity
@@ -1678,18 +1713,25 @@ class MediaWorker:
                 keep_ocr=pending_target,
             )
             return
-        if current_sidecar != result.sidecar_before_hash:
-            from . import media_processing
-
-            try:
-                current_content = job.sidecar_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
+        if binary_changed:
+            input_matches = _sidecar_input_matches(
+                current_content, result.sidecar_before_hash, result.sidecar_before_evidence_version
+            )
+            if current_binary is not None and input_matches:
+                self._publish_pending_for_changed_binary(result, expected_sidecar=current_sidecar)
+            else:
                 self._store.terminalize_result(
                     result,
                     state=media_jobs.FAILED,
-                    error="stale media result: sidecar content changed",
+                    error="stale media result: binary identity changed" if input_matches
+                    else "stale media result: sidecar content changed",
                 )
-                return
+            return
+        if not _sidecar_input_matches(
+            current_content, result.sidecar_before_hash, result.sidecar_before_evidence_version
+        ):
+            from . import media_processing
+
             if media_processing.has_completed_transcript(
                 current_content, media_type=job.media_type
             ):
@@ -1702,21 +1744,6 @@ class MediaWorker:
                     error="stale media result: sidecar content changed",
                 )
             return
-        if (
-            current_binary is None
-            or _result_binary_identity(current_binary) != result.binary_identity
-        ):
-            if current_binary is not None:
-                self._publish_pending_for_changed_binary(
-                    result, expected_sidecar=current_sidecar
-                )
-            else:
-                self._store.terminalize_result(
-                    result,
-                    state=media_jobs.FAILED,
-                    error="stale media result: binary identity changed",
-                )
-            return
         terminal_error: str | None = None
         terminal_state = media_jobs.BLOCKED
         with get_manager().mutation_guard(
@@ -1724,10 +1751,12 @@ class MediaWorker:
             operation="background_media_parent_publication",
             holder_kind="background",
         ):
-            before, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
-            if _content_digest(job.sidecar_path) != result.sidecar_before_hash:
+            if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return
+            before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
             if _result_binary_identity(_binary_identity(job.binary_path) or ((-1,) * 5, None)) != result.binary_identity:
+                return
+            if not _sidecar_input_matches(before, result.sidecar_before_hash, result.sidecar_before_evidence_version):
                 return
             try:
                 if result.kind == "extraction":
@@ -1769,6 +1798,7 @@ class MediaWorker:
                 if not self._store.persist_prepared_result(
                     result,
                     target_hash=_target_digest(target),
+                    target_evidence_version=_evidence_version_or_none(target),
                     target_size=len(target.encode("utf-8")),
                     receipt_revision=receipt.revision,
                 ):
@@ -1776,7 +1806,7 @@ class MediaWorker:
                     return
                 handoff = preserve.commit_media_sidecar_writes(
                     self._vault_root,
-                    (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before)),),
+                    (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
                     post_commit_fanout=False,
                     defer_graph_completion=True,
                     publication_intents_out=publication_intents,
@@ -1814,10 +1844,10 @@ class MediaWorker:
             holder_kind="background",
         ):
             try:
-                before, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+                before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
             except (OSError, UnicodeError, PathGuardError):
                 return False
-            if _content_digest(job.sidecar_path) != expected_sidecar:
+            if content_hash(before) != expected_sidecar:
                 return False
             target = preserve.render_sidecar_processing_failure(
                 before,
@@ -1832,6 +1862,7 @@ class MediaWorker:
             if not self._store.persist_prepared_result(
                 result,
                 target_hash=_target_digest(target),
+                target_evidence_version=_evidence_version_or_none(target),
                 target_size=len(target.encode("utf-8")),
                 receipt_revision=receipt.revision,
             ):
@@ -1839,7 +1870,7 @@ class MediaWorker:
                 return False
             handoff = preserve.commit_media_sidecar_writes(
                 self._vault_root,
-                (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before)),),
+                (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
                 post_commit_fanout=False,
                 defer_graph_completion=True,
                 publication_intents_out=publication_intents,

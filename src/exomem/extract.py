@@ -1053,13 +1053,15 @@ def _ocr_png(source: Path) -> str:
 
 
 def _ocr_image(path: Path) -> ExtractResult:
-    try:
-        from PIL import Image
-    except ImportError as e:
-        raise ExtractionUnavailable(f"Pillow not installed: {e}") from e
+    from . import image_codecs
+
     with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
         source = Path(tmp) / "page.png"
-        with Image.open(path) as img:
+        try:
+            image = image_codecs.open_image(path)
+        except ImportError as error:
+            raise ExtractionUnavailable(str(error)) from error
+        with image as img:
             _save_png_for_ocr(img, source)
         # The decoded image is closed before Tesseract starts: each process has its own
         # VmData limit, so holding both would let one job take two budgets of the cell.

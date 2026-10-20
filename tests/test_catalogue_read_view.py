@@ -868,7 +868,12 @@ def test_prepared_image_failure_keeps_its_existing_outcome(
         calls.append("encode")
         raise failure
 
-    monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: object())
+    class ImageIndex:
+        def has_vectors(self):
+            assert lexstore._admitted_catalog_view(vault) is None
+            return True
+
+    monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: ImageIndex())
     monkeypatch.setattr(embeddings, "embed_clip_text", encode)
     failed: list[str] = []
     if busy:

@@ -11,6 +11,11 @@ Media extraction makes uploaded files searchable. The Cloud image carries two en
 
 Plain text, email and calendar files need no engine and are always read. Image vectors (CLIP) and speech are not in the Cloud image.
 
+HEIC images use the maintained Pillow decoder shared by OCR and personal image embeddings.
+The Cloud image gate includes a real HEIC sample with known text and runs without networking.
+The decoder stays inside the existing media worker and its resource limits.
+The measurements below predate HEIC support; they do not qualify an owner-sized HEIC backlog.
+
 ## Check disk space before backfill
 
 Enabling an engine can process the existing media backlog. Memory brakes do not reserve disk space.
@@ -148,6 +153,18 @@ Every operation shows memory-blocked and engine-waiting work only as pending. Th
 
 All three use this cell's queue, memory brakes and engine selection. A file whose engine is off waits, and no operation runs it on an engine the cell does not select. A retry never returns over-budget work (see Job states). A new OCR pack or OCR fix leaves completed text unchanged, and no operation re-extracts it. A cell serves the tool only from the first image release that includes it, so roll that image before you tell a tenant about it.
 
+## Concurrent sidecar updates
+
+A backlink added during extraction no longer invalidates computed output.
+The worker uses the existing evidence version, which binds the body and typed metadata except `ingested_into`.
+It renders against the latest validated sidecar and preserves that sidecar's backlinks.
+A full-byte publication guard still refuses a concurrent edit.
+Body changes, meaningful metadata changes and binary replacement keep their existing invalidation behavior.
+
+The result ledger retains separate input and target evidence versions for crash recovery.
+Old rows without those versions keep exact-byte protection.
+This changes neither completed OCR text nor the existing explicit retry and resource rules.
+
 ## OCR languages
 
 OCR first detects each image's script with Tesseract's OSD model. It then reads the image with the installed script models for that script and the installed language packs written in it. Each pack's script comes from the pack's own unicharset, so no code lists languages. A Japanese page reads with both a horizontal and a vertical pass, and OCR keeps the pass with the higher word confidence.
@@ -174,7 +191,11 @@ The stage installs the `media-cpu` extra at the versions in `uv.lock`. The media
 
 ## HEIC photos
 
-The Cloud image does not decode HEIC. HEIC carries HEVC video frames. The HEVC patent pools (Access Advance, Via LA) grant no royalty-free licence for decoding in a commercial server-side service. The available Python decoders also bundle LGPL `libheif` and `libde265`, and `pillow-heif` adds the GPL `x265` encoder. Add HEIC only after a licence decision. Personal installs are unchanged.
+The `media-cpu` and `embeddings` extras share the pinned `pillow-heif` decoder through `image-codecs`.
+The decoder registers only when a HEIC image opens, with one decoding thread.
+OCR still requires the selected OCR engine; image embeddings keep their existing switch.
+Distributed packages retain upstream notices and corresponding-source links under `exomem/_licenses/pillow-heif-1.8.1/`.
+Those software licence terms do not establish patent clearance.
 
 ## Notes for a new engine
 
