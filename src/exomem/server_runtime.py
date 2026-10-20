@@ -8,6 +8,7 @@ small composition root.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -521,6 +522,61 @@ class LocalRuntimeActivation:
         if callable(finish):
             finish()
 
+    async def _finish_shutdown(self) -> None:
+        """Finish the tracked shutdown before process teardown."""
+        with self._lock:
+            self._shutdown.set()
+            timer = self._timer
+            self._timer = None
+            thread = self._thread
+        if timer is not None:
+            timer.cancel()
+        shutdown_error = None
+        try:
+            await anyio.to_thread.run_sync(self._stop_background_workers)
+        except RuntimeError as error:
+            shutdown_error = error
+        if thread is not None and thread is not threading.current_thread():
+            await anyio.to_thread.run_sync(thread.join)
+        # A starter may have assigned its worker after the first stop.
+        try:
+            await anyio.to_thread.run_sync(self._stop_background_workers)
+        except RuntimeError as error:
+            shutdown_error = error
+        # The supervisor owns the outer deadline; Python cannot tear down
+        # while a daemon still owns a native forward or its model handle.
+        await anyio.to_thread.run_sync(self._join_native_workers)
+        # Recheck the stopped owners after the final join: a timed stop
+        # that subsequently finished is no longer a shutdown failure.
+        try:
+            await anyio.to_thread.run_sync(self._stop_background_workers)
+        except RuntimeError as error:
+            shutdown_error = error
+        else:
+            shutdown_error = None
+        # Activation may have started the watcher after the stop above;
+        # it saw the stop event already set, so this join is short.
+        self._vocabulary_stop.set()
+        await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
+        from . import graph_sync
+
+        if not self._deferred:
+            self.graph_cleanup_attempted = True
+            drained = await anyio.to_thread.run_sync(
+                lambda: graph_sync.drain_active_rebuilds(timeout=5.0)
+            )
+            if not drained:
+                shutdown_error = RuntimeError("graph rebuilds are still running during shutdown")
+        # A discarded standby must not leave the catalogue it built
+        # behind; a no-op for any worker that is not an unpromoted one.
+        # Off the loop: it may wait, bounded, for a build to stop, and
+        # shielded so a cancelled shutdown still finishes the removal.
+        from . import service_standby
+
+        await anyio.to_thread.run_sync(service_standby.discard)
+        if shutdown_error is not None:
+            raise shutdown_error
+
     def lifespan(self):
         """Arm a fallback for clients that never call the liveness endpoint."""
         from fastmcp.server.lifespan import lifespan
@@ -537,58 +593,21 @@ class LocalRuntimeActivation:
                 yield {}
             finally:
                 with anyio.CancelScope(shield=True):
-                    with self._lock:
-                        self._shutdown.set()
-                        timer = self._timer
-                        self._timer = None
-                        thread = self._thread
-                    if timer is not None:
-                        timer.cancel()
-                    shutdown_error = None
-                    try:
-                        await anyio.to_thread.run_sync(self._stop_background_workers)
-                    except RuntimeError as error:
-                        shutdown_error = error
-                    if thread is not None and thread is not threading.current_thread():
-                        await anyio.to_thread.run_sync(thread.join)
-                    # A starter may have assigned its worker after the first stop.
-                    try:
-                        await anyio.to_thread.run_sync(self._stop_background_workers)
-                    except RuntimeError as error:
-                        shutdown_error = error
-                    # The supervisor owns the outer deadline; Python cannot tear down
-                    # while a daemon still owns a native forward or its model handle.
-                    await anyio.to_thread.run_sync(self._join_native_workers)
-                    # Recheck the stopped owners after the final join: a timed stop
-                    # that subsequently finished is no longer a shutdown failure.
-                    try:
-                        await anyio.to_thread.run_sync(self._stop_background_workers)
-                    except RuntimeError as error:
-                        shutdown_error = error
-                    else:
-                        shutdown_error = None
-                    # Activation may have started the watcher after the stop above;
-                    # it saw the stop event already set, so this join is short.
-                    self._vocabulary_stop.set()
-                    await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
-                    from . import graph_sync
-
-                    if not self._deferred:
-                        self.graph_cleanup_attempted = True
-                        drained = await anyio.to_thread.run_sync(
-                            lambda: graph_sync.drain_active_rebuilds(timeout=5.0)
-                        )
-                        if not drained:
-                            shutdown_error = RuntimeError("graph rebuilds are still running during shutdown")
-                    # A discarded standby must not leave the catalogue it built
-                    # behind; a no-op for any worker that is not an unpromoted one.
-                    # Off the loop: it may wait, bounded, for a build to stop, and
-                    # shielded so a cancelled shutdown still finishes the removal.
-                    from . import service_standby
-
-                    await anyio.to_thread.run_sync(service_standby.discard)
-                    if shutdown_error is not None:
-                        raise shutdown_error
+                    # Retain cleanup through repeated parent cancellation until owned workers finish.
+                    cleanup = asyncio.create_task(self._finish_shutdown())
+                    cancellation = None
+                    while True:
+                        try:
+                            await asyncio.shield(cleanup)
+                            break
+                        except asyncio.CancelledError as error:
+                            if cancellation is None:
+                                cancellation = error
+                            if cleanup.done():
+                                cleanup.result()
+                                break
+                    if cancellation is not None:
+                        raise cancellation
 
         return _lifespan
 

@@ -16,7 +16,8 @@ from exomem import media_processing, readiness, server_runtime
 from exomem.governance import projection_runtime
 
 
-def test_owned_model_callbacks_finish_before_a_clean_subprocess_exit(tmp_path):
+@pytest.mark.parametrize("cancel_shutdown", [False, True], ids=["normal", "cancel_shutdown"])
+def test_owned_model_callbacks_finish_before_a_clean_subprocess_exit(tmp_path, cancel_shutdown):
     """Daemon inference callbacks must finish before lifecycle exit can tear Python down."""
     code = textwrap.dedent("""\
         import asyncio
@@ -27,6 +28,7 @@ def test_owned_model_callbacks_finish_before_a_clean_subprocess_exit(tmp_path):
         from exomem import recall_migration, server_runtime, warmup, working_set_index, working_set_runtime
 
         root = Path(sys.argv[1])
+        cancel_shutdown = sys.argv[2] == "1"
         root.mkdir()
         activation = server_runtime.LocalRuntimeActivation(root, deferred=True)
         working_set_runtime.bind_shutdown(root, activation._shutdown)
@@ -58,8 +60,20 @@ def test_owned_model_callbacks_finish_before_a_clean_subprocess_exit(tmp_path):
                 await asyncio.sleep(0.001)
             await asyncio.sleep(0.02)
             assert not exiting.done()
+            if cancel_shutdown:
+                assert exiting.cancel()
+                await asyncio.sleep(0.02)
+                assert not exiting.done()
+                assert exiting.cancel()
+                await asyncio.sleep(0.02)
+                assert not exiting.done()
             release.set()
-            await asyncio.wait_for(exiting, 3)
+            try:
+                await asyncio.wait_for(exiting, 3)
+            except asyncio.CancelledError:
+                assert cancel_shutdown
+            else:
+                assert not cancel_shutdown
             assert completed == set(entered)
             assert not activation.retrieval_warmup.is_alive()
             assert not activation.recall_reembed.is_alive()
@@ -73,7 +87,7 @@ def test_owned_model_callbacks_finish_before_a_clean_subprocess_exit(tmp_path):
             release.set()
         print("all owned callbacks joined")
         """)
-    result = subprocess.run([sys.executable, "-c", code, str(tmp_path / "worker")],
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path / "worker"), "1" if cancel_shutdown else "0"],
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
     assert "all owned callbacks joined" in result.stdout
