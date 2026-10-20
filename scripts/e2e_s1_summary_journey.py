@@ -1873,10 +1873,21 @@ async def store_mode_writes(journey: Journey, service: Session, summary_before: 
         expect((NATIVE_RECORDS_KEY, "Native row corrected", "partial") in state["records"],
                "the store-mode update is not in the Records query", state)
         expect(state["summary"] == summary_before, "store-mode writes changed the summary collection's answer")
-        operations = [operation for operation, _ in state["records history"]]
-        expect(operations[:3] == ["revise", "update", "append"]
-               and state["records transitions"][3:] == legacy_transitions,
-               "history lacks the native entries or exact imported events", state)
+        expected = [revised["audit_correlation"], updated["audit_correlation"], appended["audit_correlation"],
+                    *legacy_transitions]
+        history = {}
+
+        async def history_published() -> bool:
+            nonlocal history
+            history = await service.records(action="query", collection=records, view="completed-sessions",
+                                            include_agent_history=True)
+            return [event["transition_id"] for event in history["agent_history"]["events"]] == expected
+
+        # Egress releases an event's path only after its asynchronous view publishes.
+        try:
+            await until(history_published, within=EDIT_BACK_WINDOW, what="the native and exact imported history")
+        except RuntimeError:
+            expect(False, "history lacks the native entries or exact imported events", history)
 
     with journey.step("7. Planning in store mode: one update"):
         item = "b4596ce9-10fd-4856-a26e-89d8be72b0db"
