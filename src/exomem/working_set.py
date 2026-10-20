@@ -1245,7 +1245,6 @@ def run_lanes(
                     status_basis=status_basis,
                     parent_reads=parent_reads,
                     request_segment=request_segment,
-                    timings=timings,
                 )
                 result = result._replace(items=_reader_admitted(result.items, visible))
                 if extra and standing_pages:
@@ -1474,7 +1473,6 @@ def _lane(
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
     request_segment: str = "turn",
-    timings: Any = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1495,7 +1493,6 @@ def _lane(
             parent_reads=parent_reads,
             anchors=anchors,
             analysis=analysis,
-            timings=timings,
         )
     if role.lane == "material" and registry is not None:
         return _material_lane(
@@ -1539,7 +1536,6 @@ def _units_lane(
     parent_reads: UnitParentReads | None = None,
     anchors: Sequence[Any] = (),
     analysis: Any = None,
-    timings: Any = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
@@ -1598,6 +1594,9 @@ def _units_lane(
         # A finite post-disclosure cap can reveal withheld rows through omissions.
         # Keep the established reader view until selection can filter before that cap.
         return baseline._replace(task_status="unsupported")
+    # A complete lane with at most one candidate has no selection to improve.
+    if not baseline.truncated and len(baseline.items) < 2:
+        return baseline
     budget = request_budget.current()
     if budget is not None and not budget.can_afford(request_budget.TASK_UNITS_RESERVE_SECONDS):
         budget.note_skipped("working_set.task_units")
@@ -1606,7 +1605,8 @@ def _units_lane(
     from .governance import egress
 
     try:
-        with _span(timings, "working_set.task_units"):
+        # Task detail stays in the ledger; the packet's lane timing stays flat.
+        with call_spans.span("recall.working_set.task_units"):
             result = lexstore.get_store(vault_root).search_semantic_units_result(
                 [], UNIT_LANE_LIMIT + 1, tuple(sorted(role.categories)), (), "kb",
                 snapshot.for_scope("kb"),
