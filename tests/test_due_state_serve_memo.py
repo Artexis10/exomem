@@ -399,3 +399,18 @@ def test_an_expired_build_whose_verdict_was_revoked_is_never_served(
     # Rebuilt inline under the new verdict; the expired rows never left the memo.
     assert [row["ref"] for row in served] == ["exomem://memory/2"]
     assert len(calls) == 2
+
+
+def test_a_build_past_its_stale_limit_is_rebuilt_inline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The limit bounds how far the inputs no key covers can lag behind a serve."""
+    _persist(tmp_path)
+    calls = _spy(monkeypatch)
+    now = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
+    due_state.served_entries(tmp_path, now=now, principal=_principal())
+    monkeypatch.setattr(due_state, "_SERVE_CACHE_TTL_SECONDS", 0.0)
+    monkeypatch.setattr(due_state, "_SERVE_CACHE_STALE_SECONDS", 0.0)
+    served = due_state.served_entries(tmp_path, now=now, principal=_principal())
+    assert [row["ref"] for row in served] == ["exomem://memory/2"]
+    assert len(calls) == 2

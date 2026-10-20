@@ -1466,15 +1466,20 @@ def reconcile(
     return payload
 
 
+def _sync_due_state_warm() -> bool:
+    """Whether the suite asked for due-state background work to run inline."""
+    return os.environ.get("EXOMEM_SYNC_DUE_STATE_WARM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _schedule_reconcile(
     vault_root: Path, *, today: dt.date
 ) -> dict[str, Any] | None:
     """Start one fail-soft projection rebuild without delaying the caller."""
-    if os.environ.get("EXOMEM_SYNC_DUE_STATE_WARM", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }:
+    if _sync_due_state_warm():
         # The pytest suite creates hundreds of disposable vaults and then tears
         # them down immediately. Let those tests preserve deterministic carrier
         # assertions without leaving daemon workers racing tmpdir cleanup; the
@@ -2819,7 +2824,8 @@ def served_entries(
     `_SERVE_CACHE_TTL_SECONDS`. A build older than that, but younger than
     `_SERVE_CACHE_STALE_SECONDS`, is still served after the same live
     re-checks, and one background rebuild per key replaces it
-    (`_schedule_served_refresh`), so a periodic reader never pays the build.
+    (`_schedule_served_refresh`), so a reader that returns within that age does
+    not pay the build.
 
     What the build reads live, a hit re-checks live, at the cost the profile
     showed to be milliseconds against the build's seconds: the release plane
@@ -2996,9 +3002,9 @@ def _schedule_served_refresh(
         _SERVE_REFRESHING.add(key)
 
     def _run(wait: bool) -> None:
-        from . import foreground_activity
-
         try:
+            from . import foreground_activity
+
             if wait:
                 # Build after the call that noticed the expiry, not beside it:
                 # the build's CPU would contend with that call for the GIL.
@@ -3012,18 +3018,9 @@ def _schedule_served_refresh(
                 principal_module.request_scope(bound) if bound is not None
                 else nullcontext()
             ), foreground_activity.background_scope(vault_root):
-                projection_token, payload, review_token = _served_identity(vault_root)
-                stored = None
-                if projection_token is not None and review_token is not None:
-                    _rows, stored = _build_served(
-                        vault_root, (*key[:-2], projection_token, review_token),
-                        today=today, now=now or dt.datetime.now(dt.UTC),
-                        principal=principal, purpose=purpose, payload=payload,
-                        built=time.monotonic(),
-                    )
-            if stored != key:
-                with _SERVE_LOCK:
-                    _SERVE_CACHE.pop(key, None)
+                _refresh_served(
+                    vault_root, key, today=today, now=now, principal=principal, purpose=purpose
+                )
         except Exception:  # noqa: BLE001
             # Dropping the expired build sends the next read to an inline build,
             # which is the behaviour this refresh replaced.
@@ -3034,8 +3031,7 @@ def _schedule_served_refresh(
             with _SERVE_LOCK:
                 _SERVE_REFRESHING.discard(key)
 
-    if os.environ.get("EXOMEM_SYNC_DUE_STATE_WARM", "").strip().lower() in {"1", "true", "yes"}:
-        # The suite's synchronous seam, as `_schedule_reconcile` reads it.
+    if _sync_due_state_warm():
         _run(wait=False)
         return
     try:
@@ -3046,6 +3042,35 @@ def _schedule_served_refresh(
         with _SERVE_LOCK:
             _SERVE_REFRESHING.discard(key)
         log.warning("could not start the due-state serve refresh for %s", vault_root, exc_info=True)
+
+
+@canonical_read
+def _refresh_served(
+    vault_root: Path,
+    key: tuple[Any, ...],
+    *,
+    today: dt.date,
+    now: dt.datetime | None,
+    principal: Any,
+    purpose: str | None,
+) -> None:
+    """Replace one expired served build, or drop it when its inputs changed.
+
+    `@canonical_read`, as `served_entries` is: the build resolves collection
+    ownership once for the whole result instead of once per path.
+    """
+    projection_token, payload, review_token = _served_identity(vault_root)
+    stored = None
+    if projection_token is not None and review_token is not None:
+        _rows, stored = _build_served(
+            vault_root, (*key[:-2], projection_token, review_token),
+            today=today, now=now or dt.datetime.now(dt.UTC),
+            principal=principal, purpose=purpose, payload=payload,
+            built=time.monotonic(),
+        )
+    if stored != key:
+        with _SERVE_LOCK:
+            _SERVE_CACHE.pop(key, None)
 
 
 def _served_content_token(vault_root: Path) -> str | None:
