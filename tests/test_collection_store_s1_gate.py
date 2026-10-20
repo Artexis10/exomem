@@ -447,6 +447,18 @@ def test_restart_reacquires_its_own_head_without_waiting(abc, tmp_path):
     assert meta[schema.META_INSTANCE_ID] == instance
 
 
+def test_idle_release_reacquires_its_own_head_without_waiting(abc):
+    """Defect: a running service that idle-released waits on or refuses its own recorded head."""
+    instance = abc.meta()[schema.META_INSTANCE_ID]
+    token = abc.manager._fencing_token
+    abc.manager._last_activity_monotonic -= abc.manager.config.idle_release_seconds + 1
+    assert abc.manager._maybe_idle_release(token)
+    assert abc.write_c(LATER, "After idle release")["outcome"] == "committed"
+    assert abc.manager._fencing_token not in (None, token)
+    assert abc.read_c() == ["After idle release", "Canonical"]
+    assert abc.meta()[schema.META_INSTANCE_ID] == instance
+
+
 def _restart_and_publish(found):
     result = _restart(found)
     found.release()

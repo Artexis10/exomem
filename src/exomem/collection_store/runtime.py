@@ -767,6 +767,9 @@ DERIVED_RETRY_SECONDS = 2.0
 BACKFILL_BATCH_ROWS = 128
 #: Paths per pending-view publication window: one collection's summary pages at their bounds.
 VIEW_BATCH_PATHS = 16
+#: Longest run of edit-back windows in one checkout: it bounds how long that checkout's admission
+#: is reused and how long a publication waits for an idle instant.
+VIEW_SLICE_SECONDS = 0.05
 # Bound watcher metadata independently of collection size; overflow requests a later census.
 _VIEW_CHANGE_CAPACITY = 1024
 #: How often it retries a vault whose store it could not open.
@@ -1442,11 +1445,11 @@ class StoreServer:
                 # A rebuild is one bulk pass across its steps: before the next one it waits while
                 # another request runs (``foreground_priority``), holding no boundary and no store
                 # checkout, so a handoff or a publication never waits on it. A store request ends
-                # the wait (``call``), and the step then ends after one batch (``_derived_aside``).
+                # the wait (``call``), and the step then ends after one batch (``_aside``).
                 with foreground_priority.bulk(budget=rebuild):
                     foreground_priority.yield_to_foreground()
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                outcome = derived_rows.step(self.root, writer, aside=self._derived_aside)
+                outcome = derived_rows.step(self.root, writer, aside=self._aside)
                 self._derived_handle = writer.handle
         except Exception:  # noqa: BLE001 - a refused step leaves the rebuild for a later tick
             logger.warning("derived collection rows could not advance; retrying later", exc_info=True)
@@ -1459,14 +1462,17 @@ class StoreServer:
         return {"advanced": 0.0, "done": 0.0, "stopped": DERIVED_RETRY_SECONDS,
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
-    def _derived_aside(self):
-        """Whether a rebuild step ends after its batch, which only releases the boundary sooner.
+    def _aside(self):
+        """Whether background work ends after its current batch or window, which only frees the store sooner.
 
-        A store request is queued, a writer waits for the boundary, or another request runs. The
+        A derived rebuild step and a views tick's run of edit-back windows both ask it. It is
+        true when a store request is queued, a lease handoff drains the store's borrowers, a writer
+        waits for the boundary, or another request runs. The
         waiter count is checked on its own: a request that awaits bulk work releases every pass,
         so ``foreground_elsewhere`` is then false, however many writers wait.
         """
-        return (bool(self._requests) or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
+        return (bool(self._requests) or self.manager._store_handoff
+                or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
                 or foreground_priority.foreground_elsewhere())
 
     def _views_tick(self):
@@ -1483,8 +1489,10 @@ class StoreServer:
         view installed by one pass is confirmed current by the next, so two passes follow
         each maintenance wake; views still pending then, which cannot publish yet, wait for
         the next wake or the retry interval. Import status polling preserves these passes
-        and retry deadlines. Watcher notifications force exact-path reads. Between requests,
-        every edit-back or census turn uses one bounded window.
+        and retry deadlines. Watcher notifications force exact-path reads. Every edit-back or
+        census turn uses one bounded window. While no request waits (``_aside``), one checkout
+        runs further windows for up to ``VIEW_SLICE_SECONDS``, so a census pays its checkout,
+        policy and release checks once per slice, not once per window.
         """
         from ..governance import principal
         from . import capability, edit_back
@@ -1514,14 +1522,25 @@ class StoreServer:
                     owned = self._edit_back.notify(writer, paths)
                     self._edit_back.hints(writer, [change for change in changes
                                                   if change[0] not in owned or change[1] is not None or change[2]], dirty)
-                    wait = self._edit_back.run(writer, now=time.monotonic(), mutate=lambda method, *args, **kwargs:
-                                               _mutate(self.root, method, *args, **kwargs),
-                                               limit=VIEW_BATCH_PATHS)
+
+                    def mutate(method, *args, **kwargs):
+                        return _mutate(self.root, method, *args, **kwargs)
+
+                    started = time.monotonic()
+                    wait = self._edit_back.run(writer, now=started, mutate=mutate, limit=VIEW_BATCH_PATHS)
                     self._edit_handle = self.runtime._handle
-                with self._condition:
-                    for change in changes:
-                        if self._view_changes.get(change) is True:
-                            del self._view_changes[change]
+                    with self._condition:
+                        for change in changes:
+                            if self._view_changes.get(change) is True:
+                                del self._view_changes[change]
+                    # The census holds these hints now, so a later window's failure must not return them.
+                    changes, dirty = [], False
+                    # Each window still proves ownership and authorizes its own writes; only the
+                    # checkout's admission is shared, and a waiting request ends the slice.
+                    while (wait <= 0 and not self._aside() and not self._stopping()
+                           and time.monotonic() - started < VIEW_SLICE_SECONDS):
+                        wait = self._edit_back.run(writer, now=time.monotonic(), mutate=mutate,
+                                                   limit=VIEW_BATCH_PATHS)
             except Exception:  # noqa: BLE001 - an edit that cannot be classified now is read again later
                 logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
                 wait = IMPORT_RETRY_SECONDS
