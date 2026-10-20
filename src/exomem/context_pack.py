@@ -32,7 +32,7 @@ import re
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import (
     contradiction_stance,
@@ -644,9 +644,19 @@ def _published_chunks_if_current(vault_root: Path, page: ParsedPage) -> list[str
     return chunks
 
 
+class _Tension(NamedTuple):
+    """What `_tension_pairs` measured, and what it could not."""
+
+    pairs: list[dict]
+    dropped: int
+    embeddings_available: bool
+    uncovered: int
+    matrix_loading: bool
+
+
 def _tension_pairs(
     vault_root: Path, packed_pages: list[ParsedPage], max_tension: int
-) -> tuple[list[dict], int, bool, int, bool]:
+) -> _Tension:
     """Tension pairs AMONG the packed notes: authored `contradicts` edges first, then
     proximity pairs whose pairwise cosine lands in the contradiction band. The proximity
     half reads the packed pages' stored vectors from the embedding sidecar and encodes
@@ -657,11 +667,11 @@ def _tension_pairs(
     band is off, so no proximity tension can be measured regardless of the sidecar.
     Asserted pairs are independent of it and are surfaced either way.
 
-    The fourth value counts packed pages that had no exact rows while others did (their
+    `uncovered` counts packed pages that had no exact rows while others did (their
     embedding not yet landed, or the page moved since): they contributed no proximity
     pair this time, and the caller reports that rather than leaving it silent.
 
-    The fifth is True when a managed service's corpus matrix was still loading,
+    `matrix_loading` is True when a managed service's corpus matrix was still loading,
     so no proximity pair could be read; the caller reports that too.
 
     A pair that is both authored and in band appears once, as asserted."""
@@ -728,7 +738,7 @@ def _tension_pairs(
     pairs = asserted + proximity
     shown = pairs[:max_tension] if max_tension > 0 else pairs
     dropped = len(pairs) - len(shown)
-    return shown, dropped, embeddings_available, uncovered, matrix_loading
+    return _Tension(shown, dropped, embeddings_available, uncovered, matrix_loading)
 
 
 # ----------------------------- assembly -----------------------------
@@ -1049,10 +1059,10 @@ def assemble_pack(
 
     with find_module._span(timings, "pack.tension"):
         superseded = _supersession_edges(packed_pages)
-        tension, t_dropped, embeddings_available, uncovered, matrix_loading = _tension_pairs(
-            vault_root, packed_pages, max_tension
-        )
-    if matrix_loading:
+        measured = _tension_pairs(vault_root, packed_pages, max_tension)
+    tension, t_dropped = measured.pairs, measured.dropped
+    embeddings_available, uncovered = measured.embeddings_available, measured.uncovered
+    if measured.matrix_loading:
         truncation.append(
             "the embedding matrix is still loading; no proximity pair computed"
         )

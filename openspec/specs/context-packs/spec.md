@@ -113,7 +113,8 @@ notes. When the embedding sidecar is unavailable (embeddings disabled or
 unimportable), `embeddings_available` SHALL be `false` and no proximity pair SHALL be
 surfaced, while asserted pairs and `superseded` edges (which need no embeddings) SHALL
 still be surfaced. In an activated managed runtime, pack assembly SHALL read proximity
-pairs only from a resident corpus matrix and SHALL NOT load it on the request thread.
+pairs only from a resident corpus matrix that is current, or that the bounded catch-up
+makes current, and SHALL NOT load it on the request thread.
 While the background load runs, `embeddings_available` SHALL be `false`, no proximity
 pair SHALL be surfaced, and `truncation` SHALL say that the embedding matrix is still
 loading.

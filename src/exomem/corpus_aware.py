@@ -1086,6 +1086,8 @@ def pairwise_best_cosine_from_sidecar(
     contributes no pairs and is absent from the returned covered set, and is
     never encoded here. Returns `({}, set())` when embeddings are disabled or
     the sidecar is unavailable, the same no-op contract as the encoding sweep.
+    In a managed runtime it raises `recall_space.CorpusMatrixCold` while the
+    corpus matrix loads in the background, and the pack reports that.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}, set()
