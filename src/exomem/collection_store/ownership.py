@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .. import collection_profiles, held_fs, state_migration, state_paths, vault
 from .. import structured_collections as collections
-from . import authority, connection, schema, tokens
+from . import authority, connection, legacy_originals, schema, tokens
 
 
 def unavailable():
@@ -105,7 +105,7 @@ def declarations(root, conn, *, generation=1):
 
 
 def _canonical(root, conn, placement, recorded, *, private=False, restored=None, manager=None):
-    meta = dict(conn.execute("SELECT key,value FROM store_meta"))
+    meta = legacy_originals.metadata(conn)
     sid, instance = meta[schema.META_STORE_ID], meta[schema.META_INSTANCE_ID]
     intent = authority.pending_create(conn)
     active = False
@@ -236,7 +236,7 @@ def resolve(root, *, conn=None, private=False, path=None, manager=None):
                 with _checked_collection_replica_structure(root, source_path=source) as verified:
                     reader = verified.connection
                     # Only the existing verifier's private snapshot reaches this restore admission assessment.
-                    metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
+                    metadata = legacy_originals.metadata(reader)
                     return _canonical(root, reader, placement, recorded, restored=metadata, manager=manager)
             if recorded or authority.read_marker(root) is not None:
                 raise unavailable()

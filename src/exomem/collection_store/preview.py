@@ -345,6 +345,10 @@ def dispatch(
         return False, None
     writer._require_operation_context()
     writer._facade_profile = profile
+    if action == "validate":
+        if args.get("collection") is None:
+            return False, None
+        return True, writer.validate_revision(args["collection"], manifest_text=args["manifest_text"])
     # Records inspection is generic in file mode; only its mutations require
     # the Records profile. Planning inspection retains its profile guard.
     if action == "inspect" and profile == "records":

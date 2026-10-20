@@ -34,6 +34,7 @@ from . import (
     connection,
     handoff_state,
     legacy_import,
+    legacy_originals,
     owner,
     ownership,
     preflight,
@@ -538,7 +539,7 @@ def _require_current_coordinator(runtime, fence_client, marker, staging, superse
                                        "the coordinator already fences a store for this vault, which has no marker")
         return fence
     admission._require_fence(fence, marker)
-    meta = dict(staging.execute("SELECT key,value FROM store_meta"))
+    meta = legacy_originals.metadata(staging)
     if schema.META_REPLICA_DIVERGENCE in meta:
         raise CollectionStoreError(takeover.DIVERGED, "this store records unresolved divergence; "
                                    "run adopt-local, then migrate")
@@ -795,7 +796,7 @@ def _restore(session, manager, fence_client, raw, changed=()):
                 # Prevents dropping a write the restore cannot prove is only this migration's
                 # import; a false refusal leaves the owner the manual repair of the files.
                 raise _unproven(changed)
-            meta = dict(base.execute("SELECT key,value FROM store_meta"))
+            meta = legacy_originals.metadata(base)
             if schema.META_REPLICA_DIVERGENCE in meta or schema.META_VIEW_DIVERGED in meta:
                 raise CollectionStoreError(takeover.DIVERGED, "the store this migration superseded records "
                                            "unresolved divergence; run adopt-local, then migrate")

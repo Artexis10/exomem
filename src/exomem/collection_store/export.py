@@ -38,6 +38,7 @@ from . import (
     derived_rows,
     history,
     legacy_import,
+    legacy_originals,
     log_view,
     owner,
     ownership,
@@ -253,6 +254,11 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
                 if path not in held and sha is not None}
             targets = {manifest_path: rendered["manifest"], **dict(rendered["sources"]), **dict(rendered["held"]),
                        **dict.fromkeys(resolved)}
+        elif imported is not None:
+            # Projection stamping changes bytes, never the unwritten collection's rollback promise.
+            targets = {manifest_path: text.encode("utf-8"), **legacy_originals.export_sources(root, conn, cid),
+                       **{path: raw for path, raw in conn.execute(
+                           "SELECT view_path,held_bytes FROM held_candidates WHERE collection_id=?", (cid,))}}
         # File mode cannot reconstruct history's per-effect release decisions; retire only registered exact bytes.
         retired = {path: None if (data := _read(root, path)) is None else _sha(data)
                    for (path,) in conn.execute("SELECT path FROM projection_state WHERE collection_id=? AND kind='history'",
@@ -268,12 +274,12 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
             if edited:
                 blocker = _blocker(VIEW_EDITED, "these views changed since the store published them: "
                                    + ", ".join(edited) + "; restore their bytes before exporting")
-    except (collections.CollectionError, legacy_import.LegacyProofError, ValueError) as error:
+    except (collections.CollectionError, CollectionStoreError, ValueError) as error:
         code = getattr(error, "code", type(error).__name__)
         blocker = _blocker(OVER_BOUND if code == _LOG_BOUND else UNREPRESENTABLE, f"{code}: {error}")
     if blocker is not None:
         return {**row, "status": "blocked", "blocker": blocker}, None
-    if rendered is None and not resolved:
+    if rendered is None and not targets:
         return {**row, "status": "unwritten"}, None
     basis = sorted((path, None if (data := _read(root, path)) is None else _sha(data),
                     None if target is None else _sha(target)) for path, target in targets.items())
@@ -587,6 +593,8 @@ def _require_reads_as_served(root, conn, intent, work):
                     audit.get("discontinuity", {}).get("checkpoint_transition") != _transition(intent["plan_id"], cid)):
                 raise CollectionStoreError(UNVERIFIED, f"{entry['manifest_path']} reads audit {audit['status']} "
                                            "without the export's checkpoint")
+        elif cid in work and any(_read(root, path) != raw for path, raw in work[cid]["targets"].items()):
+            raise CollectionStoreError(UNVERIFIED, "an unwritten collection differs from its imported bytes")
         verified.append({"collection_id": cid, "path": entry["manifest_path"],
                          "status": "written" if cid in work and work[cid]["checkpoint"] else "unwritten", "audit": audit["status"]})
     return verified

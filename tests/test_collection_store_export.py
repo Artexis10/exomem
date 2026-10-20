@@ -7,12 +7,16 @@ stopped. File mode must then read each collection as the store served it.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import multiprocessing
 import os
 import shutil
+import sqlite3
 import uuid
 from contextlib import closing, suppress
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from test_collection_store_migration import (
@@ -43,7 +47,15 @@ from test_collection_store_service import DAILY, Service, _until, call
 from exomem import __main__ as cli
 from exomem import record_formats, records, state_migration, state_paths, writer_lease
 from exomem.cli_ops import OpError
-from exomem.collection_store import authority, capability, chain, connection, export, replica
+from exomem.collection_store import (
+    authority,
+    capability,
+    chain,
+    connection,
+    export,
+    replica,
+    schema,
+)
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance.principal import library_scope
 
@@ -94,6 +106,129 @@ def preview_id(root, capsys):
     previewed = printed(capsys)
     assert previewed["verdict"] == "exportable", previewed
     return previewed["plan_id"]
+
+
+def test_an_unwritten_collection_exports_exact_originals_after_view_stamping(env, capsys, monkeypatch):  # noqa: F811
+    """First publication must not destroy byte-exact rollback of imported, untouched files."""
+    root = env
+    legacy_vault(root)
+    original = root / "Knowledge Base/Records/Work/Items/Original.md"
+    original.write_bytes(original.read_bytes().replace(b"title: One", b'title: "One"').replace(b"\n", b"\r\n"))
+    manifest = root / WORK
+    manifest.write_bytes(manifest.read_bytes().replace(b"\n", b"\r\n"))
+    before = vault_bytes(root)
+    selected = MIGRATED[LEDGER_ID]
+    reference = call(root, "record_memory", action="query", collection=selected, include_agent_history=True)
+    transitions = {event["transition_id"] for event in reference["agent_history"]["events"]}
+    assert transitions
+    assert migrate(root, "apply") == 0 and printed(capsys)["status"] == "marker_admitted"
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {
+        capability.COLLECTION_VIEWS_V1, capability.RECORDS_SUMMARY_V1})
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        paths = [selected, *(path for path, in reader.execute("SELECT view_path FROM items WHERE collection_id=?",
+                                                            (LEDGER_ID,)))]
+    service = start_service(root)
+    try:
+        _until(lambda: all(b"exomem_view:" in (root / path).read_bytes() for path in paths))
+        queried = call(root, "record_memory", action="query", collection=selected, include_agent_history=True)
+        assert queried["source_versions"]
+        assert {event["transition_id"] for event in queried["agent_history"]["events"]} == transitions
+    finally:
+        service.stop()
+    plan_id = preview_id(root, capsys)
+    assert run_export(root, "--plan-id", plan_id, "--why", "return untouched collections to files") == 0
+    applied = printed(capsys)
+    assert all(row["status"] == "unwritten" for row in applied["collections"])
+    assert {path: digest for path, digest in vault_bytes(root).items() if path in before} == before
+
+
+def test_a_legacy_view_moved_before_first_stamp_keeps_its_path_and_accepts_an_owner_edit(env, capsys, monkeypatch):  # noqa: F811
+    """Startup must bind an untouched legacy rename before publishing or adopting a later edit."""
+    root = env
+    legacy_vault(root)
+    assert migrate(root, "apply") == 0 and printed(capsys)["status"] == "marker_admitted"
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        original = reader.execute("SELECT view_path FROM items WHERE collection_id=? AND item_key=?", (CID, KEY)).fetchone()[0]
+    source = root / original
+    destination = source.with_name("Renamed.md")
+    source.rename(destination)
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {
+        capability.COLLECTION_VIEWS_V1, capability.RECORDS_SUMMARY_V1})
+    service = start_service(root)
+    try:
+        _until(lambda: b"exomem_view:" in destination.read_bytes())
+        assert not source.exists()
+        queried = call(root, "record_memory", action="query", collection=WORK)
+        assert any(entry["path"] == destination.relative_to(root).as_posix() for entry in queried["source_versions"])
+        service.stop()
+        original_text = destination.read_text()
+        edited = original_text.replace("count: 3", "count: 5")
+        assert edited != original_text
+        destination.write_text(edited)
+        service = start_service(root)
+        _until(lambda: call(root, "record_memory", action="query", collection=WORK)["rows"][0]["count"] == 5)
+        assert call(root, "record_memory", action="inspect", collection=WORK)["projection"]["held_view_corrections"] == 0
+        assert not source.exists()
+    finally:
+        service.stop()
+
+
+def _crash_before_original_replica(environment, database, released):
+    """Die after durable local backfill, before publication copies it to the vault."""
+    os.environ.clear()
+    os.environ.update(environment)
+    capability.RELEASED = released
+    publish = replica.publish_replica
+
+    def cut(*args, **kwargs):
+        if kwargs.get("force"):
+            os._exit(73)
+        return publish(*args, **kwargs)
+
+    replica.publish_replica = cut
+    with coordinator(database), library_scope():
+        start_service(Path(environment["EXOMEM_VAULT_PATH"]))
+    raise AssertionError("the publication cut was not reached")
+
+
+def test_a_backfill_interrupted_before_replication_retries_before_stamping_originals(env, capsys, monkeypatch, tmp_path):  # noqa: F811
+    """A same-head retry must copy archived originals before publication destroys their only file copy."""
+    root = legacy_vault(env)
+    before = vault_bytes(root)
+    assert migrate(root, "apply") == 0 and printed(capsys)["status"] == "marker_admitted"
+    # Older schema-13 imports have the same business chain without the additive original-byte metadata.
+    replica_path = replica.replica_path(root)
+    for path in (replica_path, connection.store_path(root)):
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute("DELETE FROM store_meta WHERE key LIKE 'legacy-original:%'")
+    with closing(sqlite3.connect(connection.store_path(root))) as conn, conn:
+        conn.execute("UPDATE store_meta SET value=? WHERE key=?",
+                     (hashlib.sha256(replica_path.read_bytes()).hexdigest(), schema.META_LAST_PUBLISHED_REPLICA_SHA256))
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {
+        capability.COLLECTION_VIEWS_V1, capability.RECORDS_SUMMARY_V1})
+    child = multiprocessing.get_context("spawn").Process(target=_crash_before_original_replica,
+        args=(dict(os.environ), tmp_path / "coordinator.sqlite", capability.RELEASED))
+    try:
+        child.start()
+        child.join(30)
+        assert child.exitcode == 73
+    finally:
+        if child.is_alive():
+            child.terminate()
+            child.join(10)
+    wait_out_the_lease()
+    assert {path: digest for path, digest in vault_bytes(root).items() if path in before} == before
+    service = start_service(root)
+    try:
+        _until(lambda: b"exomem_view:" in (root / WORK).read_bytes())
+        with closing(connection.open_reader(replica_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM store_meta WHERE key LIKE 'legacy-original:%'").fetchone()[0] > 0
+    finally:
+        service.stop()
+    plan_id = preview_id(root, capsys)
+    assert run_export(root, "--plan-id", plan_id, "--why", "restore imported bytes after an interrupted upgrade") == 0
+    assert all(row["status"] == "unwritten" for row in printed(capsys)["collections"])
+    assert {path: digest for path, digest in vault_bytes(root).items() if path in before} == before
 
 
 def canonical_rows(root):

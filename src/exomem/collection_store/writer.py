@@ -1256,6 +1256,8 @@ class CollectionWriter:
 
     def reconcile_detached_candidate(self, facts, *, census):
         """Recheck one completed sweep's candidate, then hold it or record one metadata-only move."""
+        from . import legacy_originals
+
         path, cid = facts["path"], facts["collection_id"]
         vault._safe_guard_target(path)
         with held_fs.acquire(self.root).require() as fs, fs.parent(str(Path(path).parent)).require() as parent:
@@ -1290,6 +1292,10 @@ class CollectionWriter:
             current = bool(item is not None and projection is not None and stamp is not None
                            and stamp["s"] == identity["store_id"] and stamp["i"] in lineage
                            and stamp["v"] == item["row_version"] and stamp["h"] == item["payload_hash"][:12])
+            legacy = None if projection is None or stamp is not None else legacy_originals.view_basis(
+                self.connection, projection)
+            legacy_exact = legacy is not None and legacy[0] == facts["digest"]
+            current = current or legacy_exact
             if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
                 code = edit_back.FOREIGN
             elif item is not None and not current:
@@ -1307,7 +1313,12 @@ class CollectionWriter:
                 "AND json_extract(stamp,'$.s')=? AND json_extract(stamp,'$.i')=? "
                 "AND json_extract(stamp,'$.v')=? AND json_extract(stamp,'$.h')=? LIMIT 2",
                 (cid, facts["item_key"], *(stamp[name] for name in ("s", "i", "v", "h")))
-            ).fetchall()) if current else 0
+            ).fetchall()) if current and stamp is not None else 0
+            if legacy_exact:
+                duplicate = len(census.db.execute(
+                    "SELECT path FROM temp.candidates WHERE cid=? AND item_key=? AND conflict=0 "
+                    "AND json_type(stamp)='null' AND digest=? LIMIT 2",
+                    (cid, facts["item_key"], facts["digest"])).fetchall())
             old_guard = None
             if not outside and current and duplicate == 1 and not sync_providers.is_conflict_copy(self.root, Path(path).name):
                 try:
@@ -1329,8 +1340,11 @@ class CollectionWriter:
                     raise held_fs.HeldFsError("INPUT_CHANGED", "moved candidate changed")
                 self._recheck_guard(old_guard)
                 self._recheck_guard(guard)
-                if not exact:
+                if not exact and not legacy_exact:
                     self._hold_detached(manifest, path, raw, edit_back.CONFLICT, item=item)
+                if legacy_exact and not legacy[1]:
+                    legacy_originals.put(self.connection, cid, "item", facts["item_key"], projection["path"], raw,
+                                         legacy_originals.checkpoint(self.connection, cid))
                 arguments = {"old_path": projection["path"], "path": path, "generation": row["generation"],
                              "version": item["row_version"], "digest": facts["digest"]}
                 request = hashlib.sha256(b"exomem-view-move:v1\0" + _json(arguments).encode()).hexdigest()
@@ -1769,10 +1783,18 @@ class CollectionWriter:
         """
         with self._mutation(reconcile=True):
             for observation in observations:
+                from .legacy_originals import view_basis
+
                 row = self.connection.execute(
                     "SELECT published_sha256,state FROM projection_state WHERE path=?", (observation.path,)
                 ).fetchone()
                 if row is None or row[0] != observation.digest or row[1] == "pending":
+                    continue
+                basis = view_basis(self.connection, observation.projection)
+                if basis is not None and basis == (observation.digest, True):
+                    # Admission already copied the originals; normal publication now stamps the imported view.
+                    self._execute("UPDATE projection_state SET stat_identity=?,state='pending' WHERE path=?",
+                                  (observation.stat, observation.path))
                     continue
                 if row[1] == "held":
                     self._resolve_in_place(observation.path,
@@ -3184,6 +3206,68 @@ class CollectionWriter:
             self._insert_txn(txn, receipt)
         return receipt
 
+    def _prepare_revision(self, current, declared, manifest_text):
+        """Validate the canonical proposal for both preflight and a guarded revision."""
+        proposed = collections.parse_manifest_bytes(
+            self.root, current.path, manifest_text.encode()
+        )
+        if (
+            proposed.collection_id,
+            proposed.semantic_profile,
+            proposed.storage,
+            proposed.schema.version,
+            proposed.schema.natural_key,
+        ) != (
+            current.collection_id,
+            current.semantic_profile,
+            current.storage,
+            current.schema.version,
+            current.schema.natural_key,
+        ):
+            raise collections.CollectionError(
+                "IMMUTABLE_COLLECTION_REPRESENTATION",
+                "revision cannot migrate collection representation",
+            )
+        # A populated collection never changes view mode in place; refuse
+        # before any manifest, mapping, file, guard or cursor work.
+        if proposed.derived != current.derived:
+            raise derived_rows.conversion_refused(current.derived)
+        if current.derived and summary.populated(self.connection, current.collection_id):
+            refused = derived_rows.field_change_refused(current, proposed)
+            if refused is not None:
+                raise refused
+        mode_change = proposed.view_mode != current.view_mode
+        refused = summary.mode_change_refusal(self.connection, current, proposed)
+        if refused is not None:
+            raise refused
+        records._refuse_excluded_manifest_fields(proposed)
+        if proposed.view_diagnostics:
+            diagnostic = proposed.view_diagnostics[0]
+            raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+        record_formats.validate_storage_contract(proposed)
+        if declared.kind == "intended":
+            planning.require_planning_profile(proposed)
+        plans = {
+            key: self._validate(proposed, declared, key, values, operation="revise", validate_graph=False)
+            for key, values in typed_storage.collection_values(self.connection, current.collection_id)
+        }
+        for name in declared.validators:
+            types.named_validator(name).validate(proposed, plans, write=None)
+        metadata = governance.manifest_metadata(manifest_text)
+        row_metadata = {key: governance.row_metadata(proposed.schema, values, metadata)
+                        for key, values in plans.items()}
+        return proposed, mode_change, plans, metadata, row_metadata
+
+    def validate_revision(self, collection, *, manifest_text):
+        """Return current guards for a valid proposal without writer admission or side effects."""
+        with self.read_snapshot(mutation=True):
+            row, current, declared = self._collection(collection)
+            proposed, _mode, _plans, _metadata, _rows = self._prepare_revision(current, declared, manifest_text)
+            return {"valid": True,
+                    "lifecycle_guards": {"expected_manifest_hash": current.manifest_version.hash,
+                                         "expected_container_hash": self._container(row)},
+                    "normalized_contract": records._normalized_manifest_contract(proposed)}
+
     def revise_collection(
         self,
         collection,
@@ -3212,58 +3296,11 @@ class CollectionWriter:
             row, current, declared = self._collection(collection)
             records._expect_hash(expected_manifest_hash, current.manifest_version.hash, "manifest")
             records._expect_hash(expected_container_hash, self._container(row), "container")
-            proposed = collections.parse_manifest_bytes(
-                self.root, current.path, manifest_text.encode()
-            )
-            if (
-                proposed.collection_id,
-                proposed.semantic_profile,
-                proposed.storage,
-                proposed.schema.version,
-                proposed.schema.natural_key,
-            ) != (
-                current.collection_id,
-                current.semantic_profile,
-                current.storage,
-                current.schema.version,
-                current.schema.natural_key,
-            ):
-                raise collections.CollectionError(
-                    "IMMUTABLE_COLLECTION_REPRESENTATION",
-                    "revision cannot migrate collection representation",
-                )
-            # A populated collection never changes view mode in place; refuse
-            # before any manifest, mapping, file, guard or cursor work.
-            if proposed.derived != current.derived:
-                raise derived_rows.conversion_refused(current.derived)
-            if current.derived and summary.populated(self.connection, current.collection_id):
-                refused = derived_rows.field_change_refused(current, proposed)
-                if refused is not None:
-                    raise refused
-            mode_change = proposed.view_mode != current.view_mode
-            refused = summary.mode_change_refusal(self.connection, current, proposed)
-            if refused is not None:
-                raise refused
-            records._refuse_excluded_manifest_fields(proposed)
-            if proposed.view_diagnostics:
-                diagnostic = proposed.view_diagnostics[0]
-                raise collections.CollectionError(diagnostic.code, diagnostic.reason)
-            record_formats.validate_storage_contract(proposed)
-            if declared.kind == "intended":
-                planning.require_planning_profile(proposed)
-            plans = {
-                key: self._validate(proposed, declared, key, values, operation="revise", validate_graph=False)
-                for key, values in typed_storage.collection_values(self.connection, current.collection_id)
-            }
-            for name in declared.validators:
-                types.named_validator(name).validate(proposed, plans, write=None)
-            metadata = governance.manifest_metadata(manifest_text)
-            row_metadata = {key: governance.row_metadata(proposed.schema, values, metadata)
-                            for key, values in plans.items()}
-            retired_pages = summary.page_paths(current) if mode_change else ()
+            proposed, mode_change, plans, metadata, row_metadata = self._prepare_revision(
+                current, declared, manifest_text)
             # Unchanged row inputs and governance retain their immutable original manifest's render proof.
             # Capture before replacing governance; held views lack that original-manifest chain.
-            self._preflight_views([current.path, *retired_pages, *(path for key, path, before in self.connection.execute(
+            self._preflight_views([current.path, *(path for key, path, before in self.connection.execute(
                 "SELECT item_key,view_path,governance_json FROM items "
                 "WHERE collection_id=? AND view_path IS NOT NULL", (current.collection_id,),
             ) if row_metadata[key] != before), *(path for (path,) in self.connection.execute(
@@ -3284,8 +3321,6 @@ class CollectionWriter:
                         current.collection_id, proposed.schema.fields, limit=1,
                         encoding=typed_storage.TYPED_V2) != "ready":
                     raise RuntimeError("an empty collection publishes its typed layout at once")
-                for path in retired_pages:
-                    self._publication.retire(self._publication.captured[path])
             self._pending_summary(proposed, txn["generation_after"])
             self._execute(
                 "UPDATE collections SET manifest_version = ?, audit_reader_version = 2 WHERE collection_id = ?",

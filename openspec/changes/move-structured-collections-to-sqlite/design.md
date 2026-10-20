@@ -1242,6 +1242,14 @@ Each log block carries the same stamp as an HTML comment (`<!-- exomem-view s=โ€
 
 Only imported legacy files may be unstamped. The first re-render stamps them. Log views are diffed block by block with the same rules per block.
 
+**First publication and exact rollback.** Migration retains exact item and log source bytes in versioned, namespaced `store_meta` records. The temporary import-material proof covers those bytes. Immutable manifest versions and held-byte rows already retain their originals. Each archive record binds to the collection, item identity, import checkpoint and source digest. Control metadata reads omit archive payloads; SQLite snapshots still copy the complete database.
+
+After admission, the serving census queues matching imported item, manifest and log views for their first stamped render. Imported bytes remain the published baseline until normal publication confirms the canonical target. An offline rename still requires a completed census, one matching identity, the original digest and the existing path guards. The archive follows immutable item identity; it never grants egress authority to unstamped bytes.
+
+An older admitted import captures only source bytes that still match its import proof. Admission verifies that the replica carries those originals before stamping. A same-head backfill forces the existing copy-and-swap path when needed; interrupted admission checks again. Missing original bytes remain unresolved rather than becoming reconstructed or fabricated originals.
+
+Automatic stamping creates no native mutation. Reverse export restores exact originals for a collection with no native mutations, even after its views were stamped. A governed `view_move` remains a native mutation and keeps the existing export checkpoint rules. Archive records remain in snapshots and export tombstones. A supported undo release must retain archive-aware export; schema-13 compatibility alone does not prove a safe undo.
+
 #### A3. Cross-host freshness uses a coordinator-recorded store head
 
 Earlier, ยง1 checked freshness against the synced replica only. Idle release after 60 s (`writer_lease.py:1726-1731`) makes handoffs routine, so a new holder could write on a replica that sync had not yet caught up, forking the store. The rule "local head appears in replica" was also undefined: `txn_id` integers collide across forks, and the hash chain is per collection.

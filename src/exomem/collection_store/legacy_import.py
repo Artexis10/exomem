@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import held_fs, planning, record_formats, records, vault
 from .. import structured_collections as collections
-from . import authority, chain, governance, log_view, summary, tokens, types
+from . import authority, chain, governance, legacy_originals, log_view, summary, tokens, types
 from .connection import CollectionStoreError
 from .connection import checked_sql as checked_sql
 from .legacy import LegacyAuditProof, LegacyAuditSpool
@@ -432,7 +432,7 @@ def _insert_envelope(conn, txn_id, envelope, original, receipt=None):
 
 
 # This version describes the temporary normalized import and its proof, not canonical receipts.
-MATERIAL_VERSION = 1
+MATERIAL_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,9 +445,10 @@ class LegacyMaterial:
     held: tuple
     projections: tuple
     envelopes: tuple
+    originals: tuple
 
     def digest(self, check=lambda: None):
-        digest = hashlib.sha256(b"exomem.legacy-material:v1\0")
+        digest = hashlib.sha256(b"exomem.legacy-material:v2\0")
 
         def frame(value):
             check()
@@ -469,6 +470,9 @@ class LegacyMaterial:
             frame(len(entries))
             for entry in entries:
                 frame(entry)
+        frame(len(self.originals))
+        for kind, identity, path, raw in self.originals:
+            frame((kind, identity, path, raw.hex()))
         check()
         return digest.hexdigest()
 
@@ -536,9 +540,12 @@ def _materialize(captured, envelopes, check):
                            _json(records._encode_held_value(list(held.diagnostics))), held.path, held.held_at,
                            held_meta, _sha(entry.original_bytes)))
         projections.append((held.path, "held", 1, _sha(entry.original_bytes), None))
+    # The source kinds are fixed by projection_state.kind, not registry vocabulary.
+    originals = tuple(sorted((kind, key if kind == "item" else "source", path, sources[path])
+                             for path, kind, _version, _digest, key in projections if kind in ("item", "log")))
     return LegacyMaterial(manifest.collection_id, captured.collection_basis, collection, current_manifest,
                           tuple(items), tuple(sorted(held_items)),
-                          tuple(sorted(projections)), tuple(envelopes))
+                          tuple(sorted(projections)), tuple(envelopes), originals)
 
 
 def assemble(conn, material, check):
@@ -583,6 +590,10 @@ def assemble(conn, material, check):
         check()
         _insert_envelope(conn, first + index, json.loads(receipt), original, receipt)
     envelope = json.loads(material.envelopes[-1][0])
+    for kind, identity, path, raw in material.originals:
+        check()
+        legacy_originals.put(conn, cid, kind, identity, path, raw,
+                             (envelope["transition_id"], _event_hash(envelope)))
     return LegacyImportResult(cid, len(material.items), len(material.envelopes) - 1, checkpoint,
                               envelope["transition_id"], _event_hash(envelope), material.digest(check))
 
@@ -669,8 +680,14 @@ def retained_material(conn, entry, *, check):
         if item[5:] != ("current", None, None, None, None):
             return None
         projections.append(item[:5])
+    try:
+        originals = legacy_originals.material(conn, cid)
+    except CollectionStoreError:
+        return None
+    if originals is None:
+        return None
     material = LegacyMaterial(cid, entry["basis"], row, manifests[0], tuple(items), tuple(held),
-                              tuple(projections), tuple(envelopes))
+                              tuple(projections), tuple(envelopes), originals)
     if (material.digest(check) != entry["material_digest"] or len(items) != entry["rows"]
             or len(envelopes) != entry["legacy_events"] + 1 or row[6] != previous):
         return None

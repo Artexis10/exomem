@@ -524,6 +524,42 @@ def test_public_facade_create_append_replay_update_and_refusals(paired, profile)
 
 
 @pytest.mark.parametrize("profile", ["records", "planning"])
+def test_validate_preserves_state_and_returns_guards_for_a_revision(paired, profile):
+    """A validate-then-revise agent flow must work in either storage mode without a validation write."""
+    invoke, roots, handle = paired
+    paired_create(paired, profile)
+    path = manifest_path(profile)
+    before = [invoke(mode, profile, "inspect", collection=path)["lifecycle_guards"] for mode in (0, 1)]
+    files = [(root / path).read_bytes() if (root / path).exists() else None for root in roots]
+    events = list(handle.connection.execute("SELECT transition_id,event_hash FROM txns ORDER BY txn_id"))
+    proposed = manifest_text(profile).replace("title: Work", "title: Revised")
+
+    validated = [invoke(mode, profile, "validate", collection=path, manifest_text=proposed) for mode in (0, 1)]
+
+    assert all(result["valid"] is True for result in validated)
+    assert validated[0]["normalized_contract"] == validated[1]["normalized_contract"]
+    assert [result["lifecycle_guards"] for result in validated] == before
+    assert [(root / path).read_bytes() if (root / path).exists() else None for root in roots] == files
+    assert list(handle.connection.execute("SELECT transition_id,event_hash FROM txns ORDER BY txn_id")) == events
+    assert [invoke(mode, profile, "inspect", collection=path)["lifecycle_guards"] for mode in (0, 1)] == before
+    revised = [invoke(mode, profile, "revise", collection=path, manifest_text=proposed,
+                      why="apply the validated revision", **validated[mode]["lifecycle_guards"]) for mode in (0, 1)]
+    same_wire(*revised)
+
+
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_validate_refuses_an_identity_change_in_both_storage_modes(paired, profile):
+    """Preflight must not approve a representation change that a guarded revision refuses."""
+    invoke, _roots, _handle = paired
+    paired_create(paired, profile)
+    proposed = manifest_text(profile).replace(CID, OTHER)
+    for mode in (0, 1):
+        with pytest.raises(OpError) as caught:
+            invoke(mode, profile, "validate", collection=manifest_path(profile), manifest_text=proposed)
+        assert caught.value.code == "IMMUTABLE_COLLECTION_REPRESENTATION"
+
+
+@pytest.mark.parametrize("profile", ["records", "planning"])
 def test_revision_hash_parity_obeys_the_ruled_normalization(paired, profile):
     from exomem import record_governance
     from exomem.collection_store.preview import preview_store

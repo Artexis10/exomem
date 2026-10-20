@@ -570,6 +570,25 @@ Partial export SHALL retain history projection bindings so resume can accept alr
 - **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
 - **AND** file mode reads every collection as the store served it
 
+#### Scenario: First publication preserves exact reverse export
+- **WHEN** the admitted service first renders imported item, manifest and log views
+- **THEN** it stamps only source bytes that match the import proof, after their originals reach the verified replica
+- **AND** the imported history and source versions become readable through the unchanged governance checks
+- **AND** reverse export of a collection with no native mutations restores its exact pre-migration bytes
+- **AND** automatic stamping adds no native mutation or export checkpoint
+
+#### Scenario: Older imports preserve originals before first publication
+- **GIVEN** an admitted import predates the original-byte archive
+- **WHEN** its unchanged source bytes are captured at the same business head
+- **THEN** admission verifies a replica copy containing that archive before stamping, including after interruption
+- **AND** changed or missing source bytes cannot become replacement originals
+
+#### Scenario: An imported view moves before its first stamp
+- **WHEN** an owner moves an untouched imported item before the service first stamps it
+- **THEN** the completed census binds its identity and exact import digest to the new path before publication
+- **AND** the service records one governed move, preserves the filename and never recreates the old path
+- **AND** a later edit of the stamped view follows the ordinary governed update path
+
 #### Scenario: Reverse export retires history before its policy owner leaves
 - **GIVEN** a migrated collection has generated history with reasons and item links
 - **WHEN** the owner applies reverse export

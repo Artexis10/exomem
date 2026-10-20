@@ -1691,7 +1691,7 @@ MOVED_RECORDS_ROW = {
     "movements": [{"movement": "Row", "band": "red", "repetitions": "10"},
                   {"movement": "Press", "band": "blue", "repetitions": "8"}],
 }
-#: A row appended after the move; its item view is the file an owner then edits.
+#: A row appended and corrected after migration.
 NATIVE_RECORDS_ROW = {"occurred_on": "2026-08-06", "title": "Native row", "status": "partial"}
 NATIVE_RECORDS_KEY = "5a1f6c0e-3d2b-4b7a-9c18-2e4d7f6a8b90"
 #: The wire fields that say how a collection is stored, not what it holds. The store hashes its own
@@ -1753,6 +1753,7 @@ async def store_state(journey: Journey, service: Session) -> dict[str, Any]:
         "records": sorted((row["record_id"], row["title"], row["status"]) for row in rows["rows"]),
         "records title": inspected["contract"]["title"],
         "records history": [(event["operation"], event["item_key"]) for event in history["agent_history"]["events"]],
+        "records transitions": [event["transition_id"] for event in history["agent_history"]["events"]],
         "planning": sorted((row["plan_id"], row["priority"]) for row in plan["rows"]),
         "summary": summary,
     }
@@ -1765,9 +1766,13 @@ async def migrate_copy(copied: Journey) -> None:
     records, planning = copied.file_collections["records"], copied.file_collections["planning"]
     async with copied.service("before-migration") as service:
         with copied.step("7. file-mode references for A, B and the summary query"):
-            await service.mutate("record_memory", action="append", collection=records, item=MOVED_RECORDS_ROW,
-                                 why="file Records row with nested movements")
+            migrated = await service.mutate("record_memory", action="append", collection=records, item=MOVED_RECORDS_ROW,
+                                           why="file Records row with nested movements")
             references = await file_answers(copied, service)
+            history = await service.records(action="query", collection=records, view="completed-sessions",
+                                            include_agent_history=True)
+            legacy_transitions = [event["transition_id"] for event in history["agent_history"]["events"]]
+            expect(len(legacy_transitions) == 4, "the file reference lacks the create and three appends", history)
             summary_before, _ = await paged(service, DAILY, "groups", 30)
     digests = file_digests(copied)
     routed_before = marker_entries(copied)
@@ -1802,15 +1807,15 @@ async def migrate_copy(copied: Journey) -> None:
 
     async with copied.service("migrated") as service:
         await same_answers(copied, service, references, summary_before)
-        appended = await store_mode_writes(copied, service, summary_before)
-    with copied.step("7. owner edits the appended item's view while the service is stopped"):
-        view = copied.vault / appended["path"]
+        imported = await store_mode_writes(copied, service, summary_before, migrated, legacy_transitions)
+    with copied.step("7. owner edits a migrated item's view while the service is stopped"):
+        view = copied.vault / imported["path"]
         text = view.read_text(encoding="utf-8")
-        edited = text.replace("status: partial", "status: aborted", 1)
+        edited = text.replace(f"status: {MOVED_RECORDS_ROW['status']}", "status: aborted", 1)
         expect(edited != text, "the item view has no status line to edit", text)
         view.write_text(edited, encoding="utf-8")
     async with copied.service("view-edited") as service:
-        settled = await view_edit_adopted(copied, service, appended)
+        settled = await view_edit_adopted(copied, service, imported, legacy_transitions)
     async with copied.service("restarted") as service:
         with copied.step("7. a further restart keeps every committed change"):
             expect(await store_state(copied, service) == settled,
@@ -1830,9 +1835,10 @@ async def same_answers(journey: Journey, service: Session, references: dict[str,
         expect(summary == summary_before, "the summary collection answers differently after the move")
 
 
-async def store_mode_writes(journey: Journey, service: Session, summary_before: list) -> dict[str, Any]:
+async def store_mode_writes(journey: Journey, service: Session, summary_before: list,
+                            migrated: dict[str, Any], legacy_transitions: list[str]) -> dict[str, Any]:
     """Guarded Records append, update and manifest revise, a Planning update, and the history that
-    shows them. Returns the appended item's key and its view path."""
+    shows them. Returns a migrated item's key and its stamped view path."""
     records, planning = journey.file_collections["records"], journey.file_collections["planning"]
     with journey.step("7. Records in store mode: guarded append, update and manifest revise"):
         guards = (await service.records(action="inspect", collection=records))["lifecycle_guards"]
@@ -1851,26 +1857,26 @@ async def store_mode_writes(journey: Journey, service: Session, summary_before: 
             changes={"title": "Native row corrected"}, expected_container_hash=rows["snapshot"],
             expected_item_version=row["item_version"], why="Records correction written in store mode")
         expect(updated["operation"] == "update", "the store-mode update did not commit", updated)
-        # The store has no `validate` action; `inspect` returns the lifecycle guards a revise needs.
         inspected = await service.records(action="inspect", collection=records)
         title = inspected["contract"]["title"]
         manifest = (journey.vault / records).read_text(encoding="utf-8")
         expect(f"title: {title}\n" in manifest, "the migrated manifest does not hold the contract title", title)
+        proposal = manifest.replace(f"title: {title}\n", f"title: {title} (revised)\n", 1)
+        validated = await service.records(action="validate", collection=records, manifest_text=proposal)
+        expect(validated["valid"] is True, "the store-mode revision did not validate", validated)
         revised = await service.mutate(
             "record_memory", action="revise", collection=records,
-            manifest_text=manifest.replace(f"title: {title}\n", f"title: {title} (revised)\n", 1),
-            **inspected["lifecycle_guards"], why="manifest revised in store mode")
+            manifest_text=proposal, **validated["lifecycle_guards"], why="manifest revised in store mode")
         expect(revised["operation"] == "revise", "the store-mode manifest revise did not commit", revised)
         state = await store_state(journey, service)
         expect(state["records title"] == f"{title} (revised)", "the revised manifest is not what inspect reports", state)
         expect((NATIVE_RECORDS_KEY, "Native row corrected", "partial") in state["records"],
                "the store-mode update is not in the Records query", state)
         expect(state["summary"] == summary_before, "store-mode writes changed the summary collection's answer")
-        # Newest first. The migrated rows' own events name item files that still hold file-mode
-        # bytes, so the terminal path filter withholds them; the baseline `create` names the folder.
         operations = [operation for operation, _ in state["records history"]]
-        expect(operations[:3] == ["revise", "update", "append"] and operations[-1] == "create",
-               "history lacks the native entries or the imported baseline", state["records history"])
+        expect(operations[:3] == ["revise", "update", "append"]
+               and state["records transitions"][3:] == legacy_transitions,
+               "history lacks the native entries or exact imported events", state)
 
     with journey.step("7. Planning in store mode: one update"):
         item = "b4596ce9-10fd-4856-a26e-89d8be72b0db"
@@ -1891,21 +1897,30 @@ async def store_mode_writes(journey: Journey, service: Session, summary_before: 
             return view.is_file() and "title: Native row corrected" in view.read_text(encoding="utf-8")
 
         await until(written, within=EDIT_BACK_WINDOW, what="the appended item's view file with its update")
-    return {"key": NATIVE_RECORDS_KEY, "path": path}
+    with journey.step("7. the migrated item's view receives its first stamp"):
+        (migrated_path,) = migrated["affected_paths"]
+
+        async def stamped() -> bool:
+            return "exomem_view:" in (journey.vault / migrated_path).read_text(encoding="utf-8")
+
+        await until(stamped, within=EDIT_BACK_WINDOW, what="the migrated item's stamped view")
+    return {"key": migrated["item_key"], "path": migrated_path, "title": MOVED_RECORDS_ROW["title"]}
 
 
-async def view_edit_adopted(journey: Journey, service: Session, appended: dict[str, Any]) -> dict[str, Any]:
+async def view_edit_adopted(journey: Journey, service: Session, imported: dict[str, Any],
+                           legacy_transitions: list[str]) -> dict[str, Any]:
     """The owner's edit of the view file becomes a governed update after the start census."""
     records = journey.file_collections["records"]
     with journey.step("7. the start census adopts the owner's view edit as a governed update"):
         async def adopted() -> dict[str, Any] | None:
             state = await store_state(journey, service)
-            return state if (appended["key"], "Native row corrected", "aborted") in state["records"] else None
+            return state if (imported["key"], imported["title"], "aborted") in state["records"] else None
 
         state = await until(adopted, within=EDIT_BACK_WINDOW, what="the owner's view edit as a governed update")
         operations = [operation for operation, _ in state["records history"]]
-        expect(operations[:4] == ["update", "revise", "update", "append"] and operations[-1] == "create",
-               "history does not show the adopted edit after the native entries", state["records history"])
+        expect(operations[:4] == ["update", "revise", "update", "append"]
+               and state["records transitions"][4:] == legacy_transitions,
+               "history does not show the adopted edit and exact imported events", state)
         held = (await service.records(action="inspect", collection=records))["projection"]
         expect(held["held_view_corrections"] == 0, "the owner's edit was held instead of applied", held)
     return state

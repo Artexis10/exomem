@@ -86,6 +86,15 @@ The service turns valid item or declaration edits into governed transitions.
 Invalid or stale edits become held corrections. History pages are read-only;
 the service replaces edits to those pages with their canonical render.
 
+After migration, the service stamps imported views through normal publication.
+Migration itself leaves their files unchanged. `validate` checks a proposed
+declaration without saving it and returns the current guards for `revise`.
+
+Reverse export restores exact imported bytes for collections without native
+mutations, including after automatic stamping. A governed file move counts as
+a native mutation. Keep an archive-aware release for rollback; support for
+the same SQLite schema alone does not guarantee exact reverse export.
+
 Each collection has `_history.md` with its newest 200 released transitions.
 Numbered pages under `_history/` hold older transitions in groups of 500,
 newest first within each page. Pages contain operations, reasons and item links,
