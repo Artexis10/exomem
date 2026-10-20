@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import sqlite3
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -207,6 +207,36 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
         raise unavailable()
     return Proof((placement, sid, instance, None if fence is None else (fence.enrolled, fence.generation),
                   declared, transition), marker, frozenset(admitted))
+
+
+@contextmanager
+def read_snapshot(root):
+    """Keep canonical data and its production ownership proof in the same read-only snapshot."""
+    root = Path(root).resolve()
+    with ExitStack() as stack:
+        manager = _manager(root)
+        stack.enter_context(manager.consistency_guard(root, operation="collection_ownership_read"))
+        try:
+            placement, recorded = enrollment(root)
+            path = connection.store_path(root)
+            placement = (*placement, str(path.resolve()))
+            restored = None
+            if path.exists():
+                reader = stack.enter_context(connection.reader_snapshot(path))
+            else:
+                from ..vault_portability import _checked_collection_replica_structure
+                from . import replica
+
+                verified = stack.enter_context(_checked_collection_replica_structure(
+                    root, source_path=replica.replica_path(root)
+                ))
+                reader = verified.connection
+                restored = legacy_originals.metadata(reader)
+            proof = _canonical(root, reader, placement, recorded, restored=restored, manager=manager)
+        except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError,
+                collections.CollectionError, connection.CollectionStoreError, held_fs.HeldFsError, RuntimeError):
+            raise unavailable() from None
+        yield reader, proof
 
 
 def resolve(root, *, conn=None, private=False, path=None, manager=None):

@@ -15,6 +15,19 @@ Cross-host takeover, replica transport, fleet custody and divergent-host reconci
 - **WHEN** the hosting node captures a consistent store snapshot for backup or portability
 - **THEN** that snapshot is a restorable artifact, not a second query server or proof of cross-host writer takeover
 
+### Requirement: GA application rollback retains SQLite authority
+
+Before GA activation, release evidence SHALL identify and qualify an earlier application artifact. It SHALL support the admitted store schema and preserve original-file archives. Qualification SHALL prove admission, reads, writes, restart and archive preservation against a migrated disposable vault. Application rollback SHALL retain SQLite authority and SHALL NOT retire the store fence or select file authority.
+
+Whole-vault reverse export SHALL remain a separate downgrade operation with its existing eligibility rules. Selective reversal of newly migrated collections SHALL remain outside this contract.
+
+#### Scenario: Application rollback supports a mixed migrated store
+- **GIVEN** a store contains both store-native collections and collections imported from files
+- **WHEN** the qualified earlier application replaces the GA application
+- **THEN** both kinds of collection remain readable and writable in SQLite after restart
+- **AND** original-file archives remain intact
+- **AND** the store fence remains enrolled
+
 ### Requirement: Admitted canonical state determines collection ownership
 
 Collection ownership SHALL derive from the complete admitted local store: collections, their current manifests and the existing transition intent. The proof SHALL validate the complete set before principal filtering or discovery limits. Missing manifests, invalid declarations, overlapping regions or unresolved bindings SHALL NOT produce a partial set that permits file fallback. No second durable ownership catalog SHALL be added.

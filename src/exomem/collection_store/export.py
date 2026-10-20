@@ -46,6 +46,7 @@ from . import (
     schema,
     takeover,
     typed_storage,
+    views,
 )
 from .connection import CollectionStoreError
 
@@ -125,12 +126,15 @@ class _Rendered:
 def _render_items(root, conn, manifest, cid):
     """Every item file of a markdown-items collection, unstamped, each proved to parse back to its row."""
     files = []
-    for row_id, key, body, natural, view_path in conn.execute(
-            "SELECT row_id,item_key,body,natural_key,view_path FROM items WHERE collection_id=? ORDER BY row_id",
-            (cid,)):
-        values = typed_storage.item_values(conn, row_id)
-        legacy_import._prove_round_trip(_Rendered(root, manifest), key, values, body, natural)
-        files.append((view_path, record_formats.render_markdown_item(manifest, values, key, body).encode("utf-8")))
+    with views.presentation_resolver(conn, root, manifest) as resolver:
+        for row_id, key, body, natural, view_path in conn.execute(
+                "SELECT row_id,item_key,body,natural_key,view_path FROM items WHERE collection_id=? ORDER BY row_id",
+                (cid,)):
+            values = typed_storage.item_values(conn, row_id)
+            rendered = legacy_import._prove_round_trip(
+                _Rendered(root, manifest), key, values, body, natural, resolve_relationship=resolver
+            )
+            files.append((view_path, rendered.encode("utf-8")))
     return files
 
 
@@ -142,7 +146,7 @@ def _render_log(root, conn, manifest, cid, frame_json):
     blocks = log_view.rows(conn, manifest)
     data = log_view.render(manifest, log_view.load(frame_json, manifest), blocks).encode("utf-8")
     parsed = record_formats.MarkdownLogAdapter(Path(root), manifest).read_bytes(data).records
-    if [(record.identity.key, collections.normalize_item_values(manifest.schema, record.values))
+    if [(record.identity.key, record.values)
             for record in parsed] != [(row["item_key"], row["values"]) for row in blocks]:
         legacy_import._refuse("b", "the rendered log does not parse back to the store's rows")
     return [(manifest.storage.source, data)]
@@ -578,7 +582,7 @@ def _require_reads_as_served(root, conn, intent, work):
                   in conn.execute("SELECT row_id,item_key,body,payload_hash FROM items WHERE collection_id=?", (cid,))}
         found = {record.identity.key: record for record in snapshot.records}
         if set(found) != set(stored) or any(record.ambiguous for record in snapshot.records) or any(
-                stored[key] != (collections.normalize_item_values(manifest.schema, record.values),
+                stored[key] != (record.values,
                                 legacy_import._body(manifest, stored[key][0], record.body),
                                 records._payload_hash(manifest, key, record.values, record.body))
                 for key, record in found.items()):

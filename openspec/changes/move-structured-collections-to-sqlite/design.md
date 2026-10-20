@@ -538,6 +538,8 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
 
 **Reversal**
 
+GA application rollback retains SQLite authority. Before activation, qualify an earlier application artifact that supports the admitted schema and preserves original-file archives. Prove its admission, reads, writes, restart and archive preservation against a migrated disposable vault. Pin the rollback artifact and its maintained installation route in release evidence. Restoring that application does not retire the store fence or return collections to files.
+
 Reverse export is whole-vault. A store-native collection or a file-mode bound violation blocks the entire export and leaves authority unchanged. Partial export remains outside this contract. This restriction concerns downgrades; forward migration and snapshot backups retain their existing paths.
 
 - **Before the first store write:** set the mode back to `files`. The files and their legacy chains were never touched.

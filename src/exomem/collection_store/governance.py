@@ -822,7 +822,8 @@ class ReleaseCache:
 class OperationAuthorization:
     """One policy/time/access/authority snapshot, with grants grouped by subject."""
 
-    def __init__(self, root: Path, conn: sqlite3.Connection, *, mutation: bool, cache=None) -> None:
+    def __init__(self, root: Path, conn: sqlite3.Connection, *, mutation: bool, cache=None,
+                 ownership_proof=None) -> None:
         self.root, self.conn, self.mutation = root, conn, mutation
         self.cache = cache or ReleaseCache(conn)
         self.policy = policy.load(root)
@@ -836,6 +837,9 @@ class OperationAuthorization:
         self.grants = {}
         self.catalogs = {}
         self.file_decisions = {}
+        self._presentation_wikilinks = None
+        # A verified base proof excludes unpublished file imports in a migration snapshot.
+        self._ownership_proof = ownership_proof
         self.points = {}
         self.summary_memo = {}
         self.grants_loaded = False
@@ -1487,12 +1491,18 @@ class OperationAuthorization:
             [(subject.row_id, subject.basis.version) for subject in allowed if isinstance(subject.row_id, int)],
         ]).encode()).hexdigest()
 
-    def projection_subjects(self, path: str) -> tuple[CanonicalSubject, ...] | None:
-        """None is an ordinary file; an empty tuple is an unbound owned path."""
+    def projection_ownership(self):
+        """Use the caller's verified base namespace when rendering unpublished staging."""
         from . import ownership
         from .preview import production_bound
 
-        proof = ownership.current(self.root, conn=self.conn, private=not production_bound(self.root))
+        return self._ownership_proof if self._ownership_proof is not None else ownership.current(
+            self.root, conn=self.conn, private=not production_bound(self.root)
+        )
+
+    def projection_subjects(self, path: str) -> tuple[CanonicalSubject, ...] | None:
+        """None is an ordinary file; an empty tuple is an unbound owned path."""
+        proof = self.projection_ownership()
         entry = proof.owner(self.root, path)
         if entry is None:
             return None
@@ -1594,7 +1604,7 @@ class OperationAuthorization:
                 manifest = manifest_for(projection["collection_id"])
                 _version, rendered = views.render_view(
                     self.conn, views.store_identity(self.conn), projection, manifest,
-                    root=self.root, cache=self.cache,
+                    root=self.root, cache=self.cache, operation=self,
                 )
                 if content != rendered.encode("utf-8"):
                     return Decision(0)

@@ -285,7 +285,7 @@ def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
         donor_reader, basis, donor_check = None, None, lambda: None
         if donor is not None:
             database = stack.enter_context(filesystem.file(parent, _STAGING).require())
-            donor_reader = stack.enter_context(closing(connection.open_reader(donor / _STAGING)))
+            donor_reader = stack.enter_context(connection.reader_snapshot(donor / _STAGING))
             basis = _read_basis(donor_reader)
             if basis is None or not _usable(basis) or authority.pending_create(donor_reader) is not None:
                 basis = None
@@ -322,14 +322,18 @@ def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
                 _write_basis(staging, {"version": 2, "live": live, "collections": {}})
                 staging.execute("COMMIT")
                 context = preflight.import_context(_ACTOR)
-                with preflight.scanned(root, _scratch(root), pending, deadline=deadline) as (audit, blocked):
+                with preflight.scanned(root, _scratch(root), pending, deadline=deadline) as (audit, blocked), \
+                        legacy_import.presentation_context(root, conn=staging, ownership_proof=ownership_proof,
+                                                           manifests=pending) as presentation:
                     if audit is None:
                         rows.extend(blocked)
                     else:
                         for manifest in pending:
                             check()
                             try:
-                                captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit)
+                                captured = legacy_import.capture_legacy_collection(
+                                    root, manifest.path, audit=audit, presentation_operation=presentation
+                                )
                             except preflight._REFUSALS as error:
                                 rows.append(preflight._row(manifest.path, manifest, status="blocked", blocker=preflight._blocker(error)))
                                 continue
@@ -439,20 +443,24 @@ def _carried(root, directory, *, supersede=False, deadline=None, verified=None, 
             cid: entry["manifest_path"] for cid, entry in recorded.items()}:
         return None, SET_CHANGED, []
     changed = []
-    with preflight.scanned(root, _scratch(root), pending, deadline=deadline) as (audit, blocked):
+    with preflight.scanned(root, _scratch(root), pending, deadline=deadline) as (audit, blocked), \
+            connection.reader_snapshot(path) as donor_reader, \
+            legacy_import.presentation_context(root, conn=donor_reader, ownership_proof=ownership_proof,
+                                               manifests=pending) as presentation:
         if audit is None:
             return None, AUDIT_UNREADABLE, []
         for manifest in pending:
             _check_deadline(deadline)
             try:
-                captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit)
+                captured = legacy_import.capture_legacy_collection(
+                    root, manifest.path, audit=audit, presentation_operation=presentation
+                )
             except (TimeoutError, *preflight._REFUSALS):
                 changed.append(manifest.path)
                 continue
             entry = recorded[manifest.collection_id]
             try:
-                with closing(connection.open_reader(path)) as donor_reader, legacy_import.checked_sql(
-                        donor_reader, lambda: _check_deadline(deadline)):
+                with legacy_import.checked_sql(donor_reader, lambda: _check_deadline(deadline)):
                     material = legacy_import.retained_material(donor_reader, entry, check=lambda: _check_deadline(deadline))
             except (ValueError, TypeError, KeyError, sqlite3.DatabaseError):
                 material = None
@@ -652,13 +660,16 @@ def _changed_since_publication(root, intent, deadline=None):
 
     A collection not checked by ``deadline`` counts as changed.
     """
-    with preflight.scanned(root, _scratch(root), [], deadline=deadline) as (audit, _blocked):
+    with preflight.scanned(root, _scratch(root), [], deadline=deadline) as (audit, _blocked), \
+            legacy_import.presentation_context(root) as presentation:
         if audit is None:
             return sorted(entry["manifest_path"] for entry in intent["collections"])
         changed = []
         for entry in intent["collections"]:
             try:
-                captured = legacy_import.capture_legacy_collection(root, entry["manifest_path"], audit=audit)
+                captured = legacy_import.capture_legacy_collection(
+                    root, entry["manifest_path"], audit=audit, presentation_operation=presentation
+                )
             except (TimeoutError, *preflight._REFUSALS):
                 changed.append(entry["manifest_path"])
                 continue

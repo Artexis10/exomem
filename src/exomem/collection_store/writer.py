@@ -964,7 +964,8 @@ class CollectionWriter:
     def _render_view(self, projection, manifest):
         """Render indexed canonical rows using a context prepared before the filesystem phase."""
         return views.render_view(self.connection, self._publication.identity, projection, manifest, root=self.root,
-                                 cache=self.handle.release_cache)
+                                 cache=self.handle.release_cache, operation=self._operation,
+                                 observe_read=self._recheck_guard)
 
     def _register_view_input(self, projection, raw, token, slot, *, source=None):
         """Classify bytes found at a view path (``slot`` "offline") or displaced by an install.
@@ -3092,10 +3093,14 @@ class CollectionWriter:
                         "SELECT COALESCE(pending_sha256, published_sha256) FROM projection_state WHERE path = ?",
                         (before["view_path"],),
                     ).fetchone()
-                    rendered = record_formats.render_markdown_item(
-                        manifest, final, key, final_body,
-                        view_stamp=views.stamp(self._publication.identity, before["row_version"], before["payload_hash"]),
-                    )
+                    with views.presentation_resolver(
+                        self.connection, self.root, manifest, operation=self._operation,
+                        observe_read=self._recheck_guard,
+                    ) as resolver:
+                        rendered = record_formats.render_markdown_item(
+                            manifest, final, key, final_body, resolve_relationship=resolver,
+                            view_stamp=views.stamp(self._publication.identity, before["row_version"], before["payload_hash"]),
+                        )
                     if projection and projection[0] == hashlib.sha256(rendered.encode()).hexdigest():
                         raise collections.CollectionError(
                             "NOOP_RECORD_PRESENTATION", "managed presentation is already current"

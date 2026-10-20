@@ -240,6 +240,30 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
     return disclosed
 
 
+@canonical_read(projection=True, unavailable=lambda: (True, None))
+def presentation_label(vault_root, path):
+    """Resolve store-owned relationship labels through the existing canonical read route."""
+    writer = bound_writer(vault_root)
+    if writer is None:
+        return False, None
+    from . import views
+
+    return views.presentation_label(writer._operation, path)
+
+
+def presentation_wikilinks(vault_root):
+    """Use a bound canonical namespace; offline migration supplies its own verified snapshot."""
+    from .. import vault
+
+    writer = bound_writer(vault_root)
+    if writer is not None:
+        with writer.read_snapshot():
+            from . import views
+
+            return views.presentation_wikilinks(writer._operation)
+    return vault.WikilinkResolver(Path(vault_root))
+
+
 def projection_decision(vault_root, path, *, policy, audience, purpose,
                         authorization_context, content=None):
     """Join the bound operation; None alone permits ordinary file authority."""
