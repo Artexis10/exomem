@@ -687,7 +687,7 @@ def test_reused_counts_only_the_page_s_own_rows_on_both_spans(live) -> None:
         call_spans.MCP_CALL_TOKEN.reset(handle)
 
     fields = spans["index.embeddings.reuse"]["fields"]
-    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
         "texts": 3, "reused": 1, "recalled": 1,
     }
 

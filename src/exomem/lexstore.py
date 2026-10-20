@@ -3934,33 +3934,38 @@ class LexicalStore:
         conn: sqlite3.Connection | None = None
         try:
             conn = self._connect()
-            conn.execute("BEGIN")
-            identity = catalog_semantic_identity(self.vault_root)
-            if not self._schema_is_current(conn) or self._meta_catalog_identity(conn) != identity:
-                return None
-            checkpoints: dict[str, object] = {}
-            for scope in freshness_module.SCOPES:
-                checkpoint = self._meta_checkpoint(conn, scope)
+            with call_spans.span("lexical.proof"):
+                conn.execute("BEGIN")
+                identity = catalog_semantic_identity(self.vault_root)
                 if (
-                    checkpoint is None or checkpoint.triple is None
-                    or not _checkpoint_policy_current(self.vault_root, checkpoint)
+                    not self._schema_is_current(conn)
+                    or self._meta_catalog_identity(conn) != identity
                 ):
                     return None
-                live = freshness_module.live_recall_checkpoint(self.vault_root, scope)
-                # Local lineage can differ while the stored inputs are identical.
-                checkpoints[scope] = (
-                    live
-                    if live is not None and _checkpoint_state(live) == _checkpoint_state(checkpoint)
-                    else checkpoint
-                )
-            if (
-                catalog_semantic_identity(self.vault_root) != identity
-                or any(
-                    not _checkpoint_policy_current(self.vault_root, checkpoint)
-                    for checkpoint in checkpoints.values()
-                )
-            ):
-                return None
+                checkpoints: dict[str, object] = {}
+                for scope in freshness_module.SCOPES:
+                    checkpoint = self._meta_checkpoint(conn, scope)
+                    if (
+                        checkpoint is None or checkpoint.triple is None
+                        or not _checkpoint_policy_current(self.vault_root, checkpoint)
+                    ):
+                        return None
+                    live = freshness_module.live_recall_checkpoint(self.vault_root, scope)
+                    # Local lineage can differ while the stored inputs are identical.
+                    checkpoints[scope] = (
+                        live
+                        if live is not None
+                        and _checkpoint_state(live) == _checkpoint_state(checkpoint)
+                        else checkpoint
+                    )
+                if (
+                    catalog_semantic_identity(self.vault_root) != identity
+                    or any(
+                        not _checkpoint_policy_current(self.vault_root, checkpoint)
+                        for checkpoint in checkpoints.values()
+                    )
+                ):
+                    return None
             view = _CatalogReadView(self, conn, MappingProxyType(checkpoints), identity)
             conn = None  # The selection scope now owns rollback and close.
             return view
@@ -4021,12 +4026,18 @@ class LexicalStore:
             in {"lexical-store", "lexical-rebuild", "lexical-quarantine"}
             else None
         )
-        with reserved_paths._subsystem_authority_scope("lexstore"):
-            with reserved_paths._identity_coordination_scope(
-                self.vault_root,
-                descriptor_ids=descriptor_ids,
-            ):
-                return self._connect_owned(path)
+        # Spans split a slow read connect into the guard, the open and the owner
+        # identity work; a catalogue read opens two of these.
+        with call_spans.span("lexical.connect"):
+            with reserved_paths._subsystem_authority_scope("lexstore"):
+                with call_spans.entered(
+                    "lexical.connect.guard",
+                    reserved_paths._identity_coordination_scope(
+                        self.vault_root,
+                        descriptor_ids=descriptor_ids,
+                    ),
+                ):
+                    return self._connect_owned(path)
 
     def _connect_owned(
         self,
@@ -4062,25 +4073,27 @@ class LexicalStore:
         publish: bool,
     ) -> sqlite3.Connection:
         target.parent.mkdir(parents=True, exist_ok=True)
-        conn = _sqlite_connect_owned(target)
-        try:
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA synchronous=NORMAL")
-        except BaseException:
-            # A corrupt/NOTADB main can fail during connection policy setup.
-            # Close the handle before propagating so fatal whole-set recovery can
-            # quarantine the main/WAL/SHM on Windows instead of leaking a file
-            # handle that makes every replacement retry fail forever.
-            conn.close()
-            raise
+        with call_spans.span("lexical.connect.sqlite"):
+            conn = _sqlite_connect_owned(target)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA synchronous=NORMAL")
+            except BaseException:
+                # A corrupt/NOTADB main can fail during connection policy setup.
+                # Close the handle before propagating so fatal whole-set recovery can
+                # quarantine the main/WAL/SHM on Windows instead of leaking a file
+                # handle that makes every replacement retry fail forever.
+                conn.close()
+                raise
         if publish and target == self.path:
             try:
-                reserved_paths._publish_sqlite_owner_family(
-                    self.vault_root,
-                    target,
-                    "lexical-store",
-                    conn,
-                )
+                with call_spans.span("lexical.connect.owner_family"):
+                    reserved_paths._publish_sqlite_owner_family(
+                        self.vault_root,
+                        target,
+                        "lexical-store",
+                        conn,
+                    )
             except BaseException:
                 conn.close()
                 raise
@@ -8903,22 +8916,25 @@ class LexicalStore:
             return None
         try:
             with self._query_connection() as conn:
-                if not conn.in_transaction:
-                    conn.execute("BEGIN")
-                if not self._schema_is_current(conn) or _checkpoint_state(
-                    self._meta_checkpoint(conn, scope)
-                ) != _checkpoint_state(checkpoint):
-                    return None
-                if (
-                    not _checkpoint_policy_current(self.vault_root, checkpoint)
-                    or self._meta_catalog_identity(conn)
-                    != catalog_semantic_identity(self.vault_root)
-                ):
+                with call_spans.span("lexical.proof"):
+                    if not conn.in_transaction:
+                        conn.execute("BEGIN")
+                    current = (
+                        self._schema_is_current(conn)
+                        and _checkpoint_state(self._meta_checkpoint(conn, scope))
+                        == _checkpoint_state(checkpoint)
+                        and _checkpoint_policy_current(self.vault_root, checkpoint)
+                        and self._meta_catalog_identity(conn)
+                        == catalog_semantic_identity(self.vault_root)
+                    )
+                if not current:
                     return None
                 col = "in_vault" if scope == "vault" else "in_kb"
-                rows = conn.execute(
-                    f"SELECT path, title FROM pages WHERE {col} = 1 ORDER BY path"
-                ).fetchall()
+                with call_spans.span("lexical.resolver_entries", {}) as measured:
+                    rows = conn.execute(
+                        f"SELECT path, title FROM pages WHERE {col} = 1 ORDER BY path"
+                    ).fetchall()
+                    measured["rows"] = len(rows)
                 return [(str(path), title) for path, title in rows]
         except sqlite3.Error as error:
             self._catalog_readiness_error(error, backend_name)
@@ -8974,14 +8990,16 @@ class LexicalStore:
         view = _admitted_catalog_view(self.vault_root)
         if view is not None:
             try:
-                readiness = self._view_readiness(view, scope, recall_checkpoint)
+                with call_spans.span("lexical.readiness"):
+                    readiness = self._view_readiness(view, scope, recall_checkpoint)
                 if not readiness.complete:
                     # Only metadata disagrees (view, checkpoint, policy, schema or
                     # identity); the worker's catch-up must prove the catalogue
                     # exactly current, or the full pass runs.
                     _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
                     return CatalogQueryResult(None, readiness)
-                return CatalogQueryResult(query_fn(view.connection), readiness)
+                with call_spans.span("lexical.query"):
+                    return CatalogQueryResult(query_fn(view.connection), readiness)
             except RegistryError:
                 return CatalogQueryResult(
                     None, CatalogReadiness("definitions_unavailable", False, backend())
@@ -8990,34 +9008,37 @@ class LexicalStore:
                 return CatalogQueryResult(None, self._catalog_readiness_error(error, backend()))
         if recall_checkpoint is None:
             recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
-        readiness = (
-            self.catalog_readiness(scope, freshness, allow_delta=allow_delta)
-            if recall_checkpoint is None
-            else self.catalog_readiness(
-                scope, freshness, recall_checkpoint=recall_checkpoint, allow_delta=allow_delta
+        with call_spans.span("lexical.readiness"):
+            readiness = (
+                self.catalog_readiness(scope, freshness, allow_delta=allow_delta)
+                if recall_checkpoint is None
+                else self.catalog_readiness(
+                    scope, freshness, recall_checkpoint=recall_checkpoint, allow_delta=allow_delta
+                )
             )
-        )
         if not readiness.complete:
             return CatalogQueryResult(None, readiness)
         try:
             conn = self._connect()
             try:
-                # BEGIN + the first read establish one snapshot before any row is
-                # returned; the whole validate-then-query runs inside it.
-                conn.execute("BEGIN")
-                stored = self._meta_checkpoint(conn, scope)
-                target = (
-                    recall_checkpoint
-                    if recall_checkpoint is not None
-                    else freshness_module.recall_checkpoint(self.vault_root, scope)
-                )
-                if (
-                    _checkpoint_state(stored) != _checkpoint_state(target)
-                    or not _checkpoint_policy_current(self.vault_root, target)
-                    or not self._schema_is_current(conn)
-                    or self._meta_catalog_identity(conn)
-                    != catalog_semantic_identity(self.vault_root)
-                ):
+                with call_spans.span("lexical.proof"):
+                    # BEGIN + the first read establish one snapshot before any row is
+                    # returned; the whole validate-then-query runs inside it.
+                    conn.execute("BEGIN")
+                    stored = self._meta_checkpoint(conn, scope)
+                    target = (
+                        recall_checkpoint
+                        if recall_checkpoint is not None
+                        else freshness_module.recall_checkpoint(self.vault_root, scope)
+                    )
+                    current = (
+                        _checkpoint_state(stored) == _checkpoint_state(target)
+                        and _checkpoint_policy_current(self.vault_root, target)
+                        and self._schema_is_current(conn)
+                        and self._meta_catalog_identity(conn)
+                        == catalog_semantic_identity(self.vault_root)
+                    )
+                if not current:
                     # The pinned snapshot no longer matches the readiness proof — a
                     # publication landed between the verdict and this transaction.
                     # Defer rather than serve an unvalidated (possibly regressed)
@@ -9028,7 +9049,8 @@ class LexicalStore:
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
-                return CatalogQueryResult(query_fn(conn), readiness)
+                with call_spans.span("lexical.query"):
+                    return CatalogQueryResult(query_fn(conn), readiness)
             finally:
                 conn.close()
         except RegistryError:

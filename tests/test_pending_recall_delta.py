@@ -2117,8 +2117,8 @@ def test_reference_read_reports_which_pending_proof_refused_it(
     fields = spans["read.resolve_identifier"]["fields"]
     assert fields["pending_custody_unknown"] == int(damaged_custody)
     assert fields["pending_identity_unknown"] == int(not damaged_custody)
-    assert set(fields) == {
-        "pending_custody_unknown", "pending_identity_unknown", "thread_cpu_us",
+    assert set(fields) - call_spans.CPU_FIELDS == {
+        "pending_custody_unknown", "pending_identity_unknown",
     }
     assert all(isinstance(value, int) for value in fields.values())
 

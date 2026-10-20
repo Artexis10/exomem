@@ -168,7 +168,7 @@ def test_c1_concurrent_cold_callers_cause_exactly_one_build(
     assert len(wait_spans) == CALLERS - 1
     for row in build_spans + wait_spans:
         assert row["count"] == 1 and row["ms"] >= 0
-        assert set(row["fields"]) == {"thread_cpu_us"}
+        assert set(row["fields"]) == call_spans.CPU_FIELDS
 
 
 def test_c2_generation_bump_rejects_the_stale_catalogue_and_rebuild_catches_the_alias(

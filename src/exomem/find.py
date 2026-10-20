@@ -726,14 +726,17 @@ class FreshnessSnapshot:
                     _set_recall_projection_timing_outcome(self._timings, "admitted")
                     return
                 require_live = self._require_live_recall and not stale
-                projection_live = freshness.recall_is_live(self._root, scope)
-                checkpoint = (
-                    freshness.live_recall_checkpoint(self._root, scope)
-                    if require_live
-                    else freshness.recall_checkpoint(self._root, scope)
-                    if projection_live
-                    else None
-                )
+                # Ledger-only child spans: they name which branch a slow
+                # projection took without changing the public timings shape.
+                with call_spans.span("recall.projection.checkpoint"):
+                    projection_live = freshness.recall_is_live(self._root, scope)
+                    checkpoint = (
+                        freshness.live_recall_checkpoint(self._root, scope)
+                        if require_live
+                        else freshness.recall_checkpoint(self._root, scope)
+                        if projection_live
+                        else None
+                    )
                 if checkpoint is None and require_live:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection is not live for scope={scope!r}"
@@ -767,20 +770,26 @@ class FreshnessSnapshot:
                             return
 
                 if require_live:
-                    checkpoint, entries = freshness.recall_projection_snapshot(
-                        self._root,
-                        scope,
-                        allow_fallback=False,
-                    )
+                    with call_spans.span("recall.projection.snapshot", {}) as measured:
+                        checkpoint, entries = freshness.recall_projection_snapshot(
+                            self._root,
+                            scope,
+                            allow_fallback=False,
+                        )
+                        measured["rows"] = len(entries)
                 elif projection_live and freshness.recall_is_live(self._root, scope):
-                    checkpoint, entries = freshness.recall_projection_snapshot(
-                        self._root,
-                        scope,
-                    )
+                    with call_spans.span("recall.projection.snapshot", {}) as measured:
+                        checkpoint, entries = freshness.recall_projection_snapshot(
+                            self._root,
+                            scope,
+                        )
+                        measured["rows"] = len(entries)
                 else:
-                    checkpoint, entries, scope_triple = freshness.recall_projection_scope_snapshot(
-                        self._root, scope
-                    )
+                    with call_spans.span("recall.projection.scope_walk", {}) as measured:
+                        checkpoint, entries, scope_triple = (
+                            freshness.recall_projection_scope_snapshot(self._root, scope)
+                        )
+                        measured["rows"] = len(entries)
                     if scope == "vault":
                         self._vault = scope_triple
                     else:
@@ -790,13 +799,14 @@ class FreshnessSnapshot:
                         f"maintained recall projection advanced for scope={scope!r}"
                     )
                 paths: set[str] = set()
-                for raw_path in entries:
-                    try:
-                        paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
-                    except (OSError, ValueError):
-                        # Registry identities outside the literal vault spelling are
-                        # never valid semantic-search parents; fail closed.
-                        continue
+                with call_spans.span("recall.projection.relativize"):
+                    for raw_path in entries:
+                        try:
+                            paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
+                        except (OSError, ValueError):
+                            # Registry identities outside the literal vault spelling are
+                            # never valid semantic-search parents; fail closed.
+                            continue
                 projected = frozenset(paths)
                 self._recall[scope] = checkpoint
                 self._recall_paths[scope] = projected

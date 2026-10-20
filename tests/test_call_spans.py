@@ -103,6 +103,19 @@ def test_span_distinguishes_thread_cpu_from_elapsed_wait(token, monkeypatch) -> 
 
 
 
+def test_span_separates_other_threads_cpu_from_its_own(token, monkeypatch) -> None:
+    """Wall far above thread CPU is contention when other threads burned the CPU."""
+    thread_ticks = iter((1_000_000, 1_500_000))
+    process_ticks = iter((10_000_000, 18_000_000))
+    monkeypatch.setattr(time, "thread_time_ns", lambda: next(thread_ticks))
+    monkeypatch.setattr(time, "process_time_ns", lambda: next(process_ticks))
+    with call_spans.span("phase.contended"):
+        pass
+
+    row = call_spans.pop_call_spans(token)[0]
+    assert (row["fields"]["thread_cpu_us"], row["fields"]["process_cpu_us"]) == (500, 8000)
+
+
 def test_recall_stages_record_cpu_and_counts_when_a_stage_refuses(token, monkeypatch) -> None:
     """Slow or refused recall keeps CPU separate from wall time and caller counts."""
     from exomem.find_types import FindTimings
@@ -118,7 +131,9 @@ def test_recall_stages_record_cpu_and_counts_when_a_stage_refuses(token, monkeyp
     row = call_spans.pop_call_spans(token)[0]
     assert row["name"] == "recall.semantic.search"
     assert row["count"] == 2
-    assert row["fields"] == {"candidates": 6, "thread_cpu_us": 4000}
+    assert {key: value for key, value in row["fields"].items() if key != call_spans.PROCESS_CPU_US} == {
+        "candidates": 6, "thread_cpu_us": 4000,
+    }
     assert measured == {"candidates": 3}
     # CPU is private ledger metadata; public wall-time attribution keeps its shape.
     assert set(timings.as_dict()["stages"]["semantic.search"]) == {"ms", "source", "calls"}

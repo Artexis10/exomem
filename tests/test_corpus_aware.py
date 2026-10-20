@@ -664,7 +664,7 @@ def test_sweep_span_counts_the_unique_texts_it_actually_encoded(
     fresh_chunk = f"Span probe\n\n{fresh}"
     assert counting_encoder == [fresh_chunk]
     fields = spans["advisory.best_cosine"]["fields"]
-    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
         "texts": 1,
         "chars": len(fresh_chunk),
         "reused": len(_REUSE_PARAGRAPHS),
@@ -781,7 +781,7 @@ def test_sweep_reused_counts_only_published_rows_and_recalled_the_hand_off(
 
     assert counting_encoder == []
     fields = spans["advisory.best_cosine"]["fields"]
-    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
         "texts": 0,
         "chars": 0,
         "reused": len(_REUSE_PARAGRAPHS),

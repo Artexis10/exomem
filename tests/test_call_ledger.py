@@ -719,6 +719,9 @@ def test_nested_recall_stages_reach_the_ledger(
     monkeypatch.setattr(
         embeddings, "rerank_pairs", lambda _query, passages: [0.0] * len(passages)
     )
+    # The row keeps its slowest spans; in a fixture vault every span is fast,
+    # so which ones survive the cap is timing noise, not what this checks.
+    monkeypatch.setattr(call_ledger, "_MAX_SPANS", 256)
 
     async def leaf(_context):
         return commands.op_ask_memory(
@@ -1434,3 +1437,56 @@ def test_a_gateway_actor_is_independent_of_the_handshake_and_absent_without_head
 
     monkeypatch.setattr(dependencies, "get_http_headers", unavailable)
     assert command_surface.mcp_caller_identity()["app_id"] is None
+
+
+
+def test_a_recall_row_splits_its_catalogue_waits(
+    ledger_dir: Path, vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalogue read that waits seconds on little thread CPU has to say where.
+
+    On 2026-10-19 a three-row catalogue read took 2-5 s at under 0.7 s of
+    thread CPU; the connect, the proof and the query were one number. Process
+    CPU beside thread CPU tells contention from a blocking wait.
+    """
+    from exomem import commands
+
+    warm_managed_cell(vault)
+    # A slow child outranks fast spans under the row cap; here all are fast.
+    monkeypatch.setattr(call_ledger, "_MAX_SPANS", 256)
+
+    async def leaf(_context):
+        return commands.op_ask_memory(vault, query="metabolism", limit=5)
+
+    _drive("ask_memory", {"query": "metabolism", "limit": 5}, leaf)
+
+    spans = {span["name"]: span for span in _rows(ledger_dir)[-1]["spans"]}
+    for name in (
+        "lexical.connect",
+        "lexical.connect.guard",
+        "lexical.connect.sqlite",
+        "lexical.connect.owner_family",
+        "lexical.readiness",
+        "lexical.proof",
+        "lexical.query",
+        "lexical.resolver_entries",
+    ):
+        assert name in spans, (name, sorted(spans))
+        assert isinstance(spans[name]["fields"]["process_cpu_us"], int), name
+    assert spans["lexical.resolver_entries"]["fields"]["rows"] > 0
+
+
+def test_a_span_with_every_field_slot_used_keeps_both_cpu_readings(
+    ledger_dir: Path,
+) -> None:
+    """The working-set lanes fill all four field slots; CPU must not be clipped."""
+    from exomem import call_spans
+
+    async def leaf(_context):
+        with call_spans.span("derived.full", {"a": 1, "b": 2, "c": 3, "d": 4}):
+            pass
+        return {"ok": True}
+
+    _drive("remember", {"content": "x"}, leaf)
+    fields = {span["name"]: span for span in _rows(ledger_dir)[-1]["spans"]}["derived.full"]["fields"]
+    assert set(fields) == {"a", "b", "c", "d", "thread_cpu_us", "process_cpu_us"}

@@ -1448,7 +1448,7 @@ def test_nested_adoption_payload_gates_every_existing_artifact_kind_once(
     assert measured["fields"]["index_calls"] == 1
     assert measured["fields"]["thread_cpu_us"] >= 0
     assert measured["fields"]["thread_cpu_calls"] == 1
-    assert set(measured["fields"]) == {"index_calls", "thread_cpu_us", "thread_cpu_calls"}
+    assert set(measured["fields"]) - call_spans.CPU_FIELDS == {"index_calls", "thread_cpu_calls"}
 
 
 def test_nested_adoption_payload_gates_artifact_references_in_mapping_keys(

@@ -591,8 +591,8 @@ def _clip_span_fields(fields: object) -> dict[str, int]:
         return {}
     shaped: dict[str, int] = {}
     for key in sorted(str(name) for name in fields):
-        measurements = len(shaped) - int(call_spans.THREAD_CPU_US in shaped)
-        if key != call_spans.THREAD_CPU_US and measurements >= _MAX_SPAN_FIELDS:
+        measurements = len(shaped.keys() - call_spans.CPU_FIELDS)
+        if key not in call_spans.CPU_FIELDS and measurements >= _MAX_SPAN_FIELDS:
             continue
         if not _SPAN_FIELD_KEY.match(key):
             continue

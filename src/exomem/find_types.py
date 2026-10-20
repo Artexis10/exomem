@@ -716,14 +716,13 @@ class FindTimings:
         parent = stack[-1] if stack else None
         stack.append(name)
         t0 = time.perf_counter()
-        cpu_started = time.thread_time_ns() if call_spans.MCP_CALL_TOKEN.get() is not None else None
+        cpu = call_spans.cpu_started()
         try:
             yield
         finally:
             t1 = time.perf_counter()
             ledger_fields = (
-                {**(measured or {}), call_spans.THREAD_CPU_US: (time.thread_time_ns() - cpu_started) // 1000}
-                if cpu_started is not None else measured
+                {**(measured or {}), **call_spans.cpu_fields(cpu)} if cpu is not None else measured
             )
             if stack and stack[-1] == name:
                 stack.pop()

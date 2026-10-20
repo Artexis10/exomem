@@ -307,7 +307,7 @@ def test_remember_reuses_its_preflight_relation_review_while_the_stamp_is_curren
 
     assert (vault / result["path"]).is_file()
     fields = spans["commit.relation_review_prepare"]["fields"]
-    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
         "reused": 1,
     }
 
