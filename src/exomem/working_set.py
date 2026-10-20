@@ -31,7 +31,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from . import (
     activation_conventions,
@@ -343,6 +343,8 @@ class LaneItem:
     request_anchors: frozenset[str] = frozenset()
     #: Parsed authored relations stay private until their exact targets pass admission.
     relations: tuple[Mapping[str, Any], ...] = ()
+    #: Categorical task matches follow standing knowledge and lifecycle ordering.
+    task_order: int = UNIT_LANE_LIMIT
 
 
 class LaneResult(NamedTuple):
@@ -356,6 +358,9 @@ class LaneResult(NamedTuple):
 
     items: tuple[LaneItem, ...]
     truncated: bool = False
+    # Closed retrieval outcomes, not knowledge vocabulary.
+    task_status: Literal["unavailable", "unsupported", "budget"] | None = None
+    task_truncated: bool = False
 
 
 def clamp_budget(value: object) -> int:
@@ -602,6 +607,7 @@ def build_packet(
             0 if item.level == "unit" else 1,
             # Within a role, current material ranks before history.
             _lifecycle_rank(item.lifecycle, path=item.path or None, status_basis=status_basis),
+            item.task_order,
             -_date_rank(item.updated),
             # Most units author no time of their own; their page's time orders
             # them rather than their ref's spelling.
@@ -1239,6 +1245,7 @@ def run_lanes(
                     status_basis=status_basis,
                     parent_reads=parent_reads,
                     request_segment=request_segment,
+                    timings=timings,
                 )
                 result = result._replace(items=_reader_admitted(result.items, visible))
                 if extra and standing_pages:
@@ -1254,6 +1261,10 @@ def run_lanes(
             missing.append({"role": role_id, "reason": "no_material"})
         if result.truncated:
             missing.append({"role": role_id, "reason": "lane_truncated"})
+        if result.task_status is not None:
+            missing.append({"role": role_id, "reason": f"task_lookup_{result.task_status}"})
+        if result.task_truncated:
+            missing.append({"role": role_id, "reason": "task_candidates_truncated"})
         items.extend(result.items)
     return tuple(items), tuple(dict(entry) for entry in missing)
 
@@ -1269,7 +1280,7 @@ def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> 
             kept[item.path] = kept.get(item.path, 0) + 1
             item = replace(item, provenance={**item.provenance, "standing": True})
         items.append(item)
-    return LaneResult(tuple(items), result.truncated)
+    return result._replace(items=tuple(items))
 
 
 def _conclusion_pages(
@@ -1463,16 +1474,13 @@ def _lane(
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
     request_segment: str = "turn",
+    timings: Any = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
-    Categorical lanes do not consume the turn text. The explicit material lane
-    alone ranks otherwise unowned knowledge within the admitted context.
-    Selection already happened — the anchors and
-    the role are what the turn produced — and re-ranking a lane by resemblance to
-    the turn would reintroduce the failure the compiler exists to fix: a vague
-    turn scoring the wrong material highly. The neighbourhood and the category set
-    are the selectors, and they are categorical.
+    Role selection and category ownership remain categorical. A units role may
+    supplement its baseline with task matches inside the same admitted context;
+    the material lane selects knowledge that no categorical role owns.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if role.lane == "units":
@@ -1485,6 +1493,9 @@ def _lane(
             visible=visible,
             status_basis=status_basis,
             parent_reads=parent_reads,
+            anchors=anchors,
+            analysis=analysis,
+            timings=timings,
         )
     if role.lane == "material" and registry is not None:
         return _material_lane(
@@ -1526,6 +1537,9 @@ def _units_lane(
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
+    anchors: Sequence[Any] = (),
+    analysis: Any = None,
+    timings: Any = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
@@ -1576,7 +1590,87 @@ def _units_lane(
     )
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
-    return LaneResult(_unit_items(role, hits, parent_reads=parent_reads), truncated)
+    baseline = LaneResult(_unit_items(role, hits, parent_reads=parent_reads), truncated)
+    query_units, _ignored = _task_query(anchors, analysis)
+    if not query_units:
+        return baseline
+    if _restricted(visible):
+        # A finite post-disclosure cap can reveal withheld rows through omissions.
+        # Keep the established reader view until selection can filter before that cap.
+        return baseline._replace(task_status="unsupported")
+    budget = request_budget.current()
+    if budget is not None and not budget.can_afford(request_budget.TASK_UNITS_RESERVE_SECONDS):
+        budget.note_skipped("working_set.task_units")
+        return baseline._replace(task_status="budget")
+    from . import lexstore, working_set_runtime
+    from .governance import egress
+
+    try:
+        with _span(timings, "working_set.task_units"):
+            result = lexstore.get_store(vault_root).search_semantic_units_result(
+                [], UNIT_LANE_LIMIT + 1, tuple(sorted(role.categories)), (), "kb",
+                snapshot.for_scope("kb"),
+                allowed_parent_paths=set(neighbourhood),
+                query_units=query_units, term_budget=working_set_runtime.material_term_budget(),
+                recall_checkpoint=snapshot.recall_checkpoint("kb"), allow_delta=False,
+            )
+            if not result.readiness.complete:
+                return baseline._replace(task_status="unavailable")
+            candidates = list(result.value or ())
+            task_truncated = len(candidates) > UNIT_LANE_LIMIT
+            candidates = candidates[:UNIT_LANE_LIMIT]
+            task_order: dict[str, int] = {}
+            existing = {item.ref for item in baseline.items}
+            added = []
+            for rank, candidate in enumerate(candidates):
+                task_order.setdefault(candidate.unit_ref, rank)
+                if candidate.unit_ref not in existing:
+                    added.append(candidate)
+                    existing.add(candidate.unit_ref)
+            stale: list[str] = []
+            records = find_module._hydrate_indexed_unit_records(
+                vault_root, added, plan=plan, stale_out=stale, parent_reads=parent_reads,
+            )
+            if stale:
+                return baseline._replace(task_status="unavailable")
+            task_hits = [
+                find_module._semantic_unit_hit(
+                    page, unit, bm25_rank=task_order[candidate.unit_ref],
+                    bm25_score=candidate.lexical_score,
+                )
+                for candidate in added if candidate.unit_ref in records
+                for page, unit, _order in (records[candidate.unit_ref],)
+            ]
+            if admit is not None:
+                task_hits = [hit for hit in task_hits if admit(hit.parent_path, hit)]
+            combined = (*baseline.items, *_unit_items(role, task_hits, parent_reads=parent_reads))
+            return baseline._replace(
+                items=tuple(replace(item, task_order=task_order.get(item.ref, UNIT_LANE_LIMIT))
+                            for item in combined),
+                task_truncated=task_truncated,
+            )
+    except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
+        raise
+    except Exception:  # noqa: BLE001 - optional task lookup cannot discard the baseline
+        log.debug("categorical task lookup failed", exc_info=True)
+        return baseline._replace(task_status="unavailable")
+
+
+def _task_query(anchors: Sequence[Any], analysis: Any) -> tuple[list[Any], frozenset[str]]:
+    """Reuse bounded material terms without counting resolved names as task terms."""
+    from . import bm25, working_set_runtime
+
+    if analysis is None or getattr(analysis, "referential", False):
+        return [], frozenset()
+    ignored = frozenset(working_set_runtime.content_stems(" ".join(
+        name for anchor in anchors
+        for name in (anchor.title, *getattr(anchor, "exact_alias_phrases", ()))
+    )))
+    return [
+        unit for unit in bm25.token_units(
+            working_set_runtime.content_words(str(analysis.text)), query=True,
+        ) if not set(unit.stems) <= ignored
+    ], ignored
 
 
 def _restricted(visible: Callable[[str], bool] | None) -> bool:
@@ -1680,15 +1774,7 @@ def _material_lane(
 
     if not neighbourhood or analysis is None or getattr(analysis, "referential", False):
         return LaneResult(())
-    ignored = set(working_set_runtime.content_stems(" ".join(
-        name for anchor in anchors
-        for name in (anchor.title, *getattr(anchor, "exact_alias_phrases", ()))
-    )))
-    query_units = [
-        unit for unit in bm25.token_units(
-            working_set_runtime.content_words(str(analysis.text)), query=True,
-        ) if not set(unit.stems) <= ignored
-    ]
+    query_units, ignored = _task_query(anchors, analysis)
     if not query_units:
         return LaneResult(())
     snapshot = freshness_snapshot or find.FreshnessSnapshot(Path(vault_root))

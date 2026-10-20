@@ -38,7 +38,9 @@ The shipped registry SHALL place `contact` after active plans and before `materi
 Material SHALL precede methods and default for entity, project, hub and transient
 carried-page contexts, with no shipped cues.
 It SHALL share the six-role ceiling and existing owner-override rules. A recency-only
-context SHALL NOT select it. Existing categorical lanes SHALL remain unchanged.
+context SHALL NOT select it. Categorical role selection and ownership SHALL remain
+unchanged. Candidate selection within a selected units role SHALL follow the
+task-aware categorical context requirement while preserving standing precedence.
 
 #### Scenario: Owner narrowing remains effective
 - **WHEN** an owner narrows material defaults to an empty set

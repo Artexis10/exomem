@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 10141c544ecedc4a81f6b48c9ee854b03a96d201b3b453812c0b1610de0977d5
+  skill_contract: 0d23c50d8751e79c26e99bbe70bc7adfcdf460c8ba88dd7bde037f50d2190af0
   version: "0.32.0"
 ---
 
@@ -185,6 +185,14 @@ only resolved entities; report partial identities and disambiguate instead of gu
 Keep each fact attached to the subject that its source identifies. Qualify uncertain
 links between records and entities; historical activity alone proves neither current
 readiness nor a required procedure.
+
+Activation and deep packs select bounded context. Their `roles`, `missing` and
+`budget` fields describe retrieval limits, not everything known about the task.
+Follow a selected pointer when its source can answer the remaining question.
+For a complete directory, read the page; a unit read supplies only that unit and
+bounded context. Reconcile newer supported outcomes with older advice before
+repeating an action. Judge whether the answer uses the source, not just whether
+the tool returned it.
 
 ## Before writing
 

@@ -225,7 +225,7 @@ SHALL retain their literal identity; the server SHALL NOT infer a category mappi
 - **WHEN** an admitted project has an older relevant unit in an otherwise unowned category
   and newer unrelated units
 - **THEN** material can carry the relevant unit with its authored category and provenance,
-  without ranking standing role lanes by the turn or serving out-of-context knowledge
+  without displacing protected standing knowledge or serving out-of-context knowledge
 
 #### Scenario: A scoped owner mapping cannot be bypassed
 - **WHEN** an owner role uses an accepted category alias for one project, and another
@@ -1045,3 +1045,95 @@ that check, the lane SHALL decline immediately without changing ordinary recall.
 - **WHEN** a writer prevents the resident matrix's publication from being verified
 - **THEN** the related listing reports `cold` immediately and serves nothing,
   while ordinary recall retains its existing behaviour
+
+### Requirement: Task-aware categorical context
+For each selected units role of an unrestricted reader, activation SHALL retain categorical baseline context
+and retrieve task-matched candidates through the maintained ready catalogue.
+Effective category and admitted-parent predicates SHALL apply before its candidate
+window. An older current candidate SHALL NOT be excluded merely because a bounded
+recency prefix filled first.
+
+The compiler SHALL preserve standing and lifecycle precedence, then use task-match
+order before recency within that role. It SHALL preserve role ownership, registry
+priority, contact intent, owner narrowing, packet limits and the material reserve.
+A vague or name-only turn SHALL retain baseline behaviour. Matching SHALL create
+no identity evidence and SHALL NOT establish semantic truth.
+
+Supplemental lookup SHALL return at most 201 candidates per role, including a
+sentinel, without refill. Added hydration SHALL cover only new unit identities.
+The union SHALL retain at most 200 baseline and 200 task hits before final ordering.
+These limits SHALL NOT be described as bounds on SQL posting work or wall time.
+The request SHALL perform no corpus scan, foreground repair or model acquisition.
+It SHALL skip supplemental work unless its measured cost and mandatory completion
+headroom fit. A restricted reader SHALL retain baseline selection without this
+supplement, with a request-derived unsupported reason before extra content inspection.
+An unavailable supplemental task lookup SHALL preserve usable baseline context
+with an honest partial result, rather than introduce a new refusal.
+
+#### Scenario: An older requested constraint survives a crowded project
+- **WHEN** a resolved project's selected constraint role contains an older current
+  requested fact and newer unrelated constraints
+- **THEN** task matching can select the requested fact before recency-only filler,
+  preserving its qualifications and a usable unit or read pointer
+- **AND** ordinary recall retains its existing result for the same fact
+
+#### Scenario: Task candidates precede the recency window
+- **WHEN** a current matching unit lies beyond the baseline recency prefix inside
+  the admitted role and context
+- **THEN** the bounded task lookup can retrieve it before the merged candidate cut
+- **AND** no request expands into a corpus scan
+
+#### Scenario: Stable context and category ownership remain protected
+- **WHEN** a task match competes with standing knowledge or an unselected contact role
+- **THEN** standing and lifecycle precedence remain effective
+- **AND** task matching does not select the unrequested contact role or bypass its categories
+
+#### Scenario: A name-only turn retains its baseline
+- **WHEN** the turn names a resolved subject without other task terms
+- **THEN** categorical baseline selection remains unchanged and no task lookup is required
+
+### Requirement: Retrieval coverage supports ordinary investigation
+Activation SHALL reuse `roles`, `missing` and `budget` for typed retrieval diagnostics,
+including unavailable, unsupported and budget-skipped supplemental stages. Existing
+reasons SHALL retain omitted-role, candidate-limit and packet-budget distinctions.
+Diagnostics SHALL describe bounded retrieval, never complete task or corpus knowledge.
+They SHALL expose no new neighbourhood paths or counts.
+Content-dependent diagnostics SHALL derive only from released material.
+
+Maintained agent instructions and supported hooks SHALL explain ordinary use of
+focused `ask_memory`, optional deep packs and `read_memory` for remaining gaps.
+They SHALL distinguish a selected pointer from source content that the agent has read.
+They SHALL support complete-directory use and reconciliation of newer outcomes
+against older advice, without a fixed call quota or a new human approval gate.
+Default selection SHALL require no new client argument. Task-refresh support SHALL
+be claimed only for a client whose actual input and delivered context are verified.
+
+#### Scenario: A bounded packet does not claim absence
+- **WHEN** activation omits a role or exhausts a candidate or character window
+- **THEN** its coverage identifies that limit and permits targeted follow-up
+- **AND** neither the packet nor guidance equates the limit with absent knowledge
+
+#### Scenario: Optional work cannot afford completion
+- **WHEN** the remaining request budget cannot cover measured supplemental cost and mandatory completion
+- **THEN** activation skips the supplement and retains categorical baseline selection
+- **AND** its diagnostics name the skipped task stage without claiming a completed lookup
+
+#### Scenario: A restricted reader retains baseline selection
+- **WHEN** a reader requires unit disclosure filtering
+- **THEN** activation skips the supplemental task lookup before inspecting extra content
+- **AND** its unsupported reason depends only on the request, preserving withheld-equals-absent behaviour
+
+#### Scenario: A full directory request follows its source
+- **WHEN** a task requires a directory and activation supplies only selected units or a pointer
+- **THEN** the ordinary agent can read the relevant source and use its applicable contents
+- **AND** source delivery and answer completeness are evaluated separately
+
+#### Scenario: A newer outcome closes an older action
+- **WHEN** retrieved sources contain an older action and a newer supported completion of that action
+- **THEN** ordinary answer preparation reconciles the sources before repeating the action
+- **AND** retrieval success alone does not count as successful answer use
+
+#### Scenario: A client lacks task-refresh inputs
+- **WHEN** the actual client does not offer the richer activation arguments
+- **THEN** raw-turn activation and ordinary targeted recall remain usable
+- **AND** source signature or generated schema checks alone do not establish client parity

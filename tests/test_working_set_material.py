@@ -585,3 +585,85 @@ def test_a_name_only_turn_keeps_every_default_lens_of_a_broad_project(
     for role in ("preferences", "constraints", "recent_change"):
         served = [u for u in packet["units"] if u["role"] == role]
         assert len(served) == working_set.MAX_ITEMS_PER_ROLE
+
+
+def test_a_requested_constraint_survives_newer_unrelated_default_context(
+    material_vault: Path, crowded_project: str,
+):
+    # The same reachable fact used to lose both text and pointer in an owned category.
+    path = material_vault / crowded_project
+    path.write_text(path.read_text().replace("[observation]", "[constraint]"))
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+
+    packet = commands.op_activate_context(material_vault, turn="harbor-study quarry relay handoff")
+
+    assert any(unit["provenance"]["path"] == crowded_project for unit in packet["units"])
+    assert packet["budget"]["used_chars"] <= 4000
+    recall = commands.op_ask_memory(material_vault, query="quarry relay handoff",
+        mode="keyword", graph=False, rerank=False, result_level="unit", detail="full", limit=5)
+    assert "quarry relay handoff" in str(recall)
+
+
+def test_task_lookup_reaches_a_constraint_beyond_the_recency_prefix(material_vault: Path):
+    # A task lookup over the already cut baseline would still miss this older fact.
+    _note(material_vault, "recent-stock", "\n".join(
+        f"- [constraint] Keep numbered crate {i} under cover. ^crate-{i}"
+        for i in range(working_set.UNIT_LANE_LIMIT + 2)
+    ), updated="2026-10-01")
+    target = _note(material_vault, "relay-rule",
+        "- [constraint] The quarry relay handoff waits for the second tide reading. ^relay",
+        updated="2025-03-01")
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+
+    packet = commands.op_activate_context(material_vault, turn="harbor-study quarry relay handoff")
+
+    assert any(unit["provenance"]["path"] == target for unit in packet["units"])
+    assert {"role": "constraints", "reason": "lane_truncated"} in packet["missing"]
+
+
+def test_a_failed_optional_task_lookup_preserves_baseline_and_can_recover(
+    material_vault: Path, crowded_project: str, monkeypatch,
+):
+    # An optional catalogue failure must neither erase the packet nor freeze in its cache.
+    path = material_vault / crowded_project
+    path.write_text(path.read_text().replace("[observation]", "[constraint]"))
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+    original = lexstore.LexicalStore.search_semantic_units_result
+
+    def unavailable(self, *args, **kwargs):
+        if kwargs.get("query_units") is not None and args[2]:
+            return lexstore.CatalogQueryResult(None,
+                lexstore.CatalogReadiness("transient_failure", False, "sqlite"))
+        return original(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lexstore.LexicalStore, "search_semantic_units_result", unavailable)
+        partial = commands.op_activate_context(material_vault, turn="harbor-study quarry relay handoff")
+    recovered = commands.op_activate_context(material_vault, turn="harbor-study quarry relay handoff")
+
+    assert not partial["abstained"] and partial["units"]
+    assert {"role": "constraints", "reason": "task_lookup_unavailable"} in partial["missing"]
+    assert any(unit["provenance"]["path"] == crowded_project for unit in recovered["units"])
+
+
+def test_a_short_budget_keeps_baseline_instead_of_starting_task_matching(
+    material_vault: Path, crowded_project: str, monkeypatch,
+):
+    # A request can afford ordinary completion while lacking the optional task reserve.
+    from exomem import request_budget
+
+    monkeypatch.setattr(request_budget.RequestBudget, "remaining", lambda self: 2.5)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=2.5))
+    try:
+        packet = commands.op_activate_context(material_vault, turn="harbor-study quarry relay handoff")
+    finally:
+        request_budget.reset_current(token)
+
+    assert not packet["abstained"] and packet["units"]
+    assert {"role": "constraints", "reason": "task_lookup_budget"} in packet["missing"]
