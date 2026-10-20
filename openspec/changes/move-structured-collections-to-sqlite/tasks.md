@@ -272,6 +272,17 @@ October 4 private runtime/create foundation: independent review approves current
   - Report the SQLite acknowledgement against the P1a.15 targets: store, item render and pending state ≤ 4 ms p95, end to end < 20 ms. Under the 2026-10-19 owner ruling these are measured targets, not release blockers. Report physical publication separately.
   - Healthy-writer publication lag for item, manifest and aggregate views is reported and bounded under the harness. Blocked publication remains visibly pending; no numeric lag maximum is assumed.
     Evidence, 2026-10-19 (`design.md` A9): at 60 writes per minute on 10,000 rows, all 297 item, manifest and aggregate views appeared 0.21–5.08 s after acknowledgement. The acknowledgement median reached 1.00 s and five of 300 slots were missed; that saturation is not attributed. The 1 and 10 writes-per-minute views appeared within 1.06 s.
+  - Serving-thread cost with edit-back on (`design.md` §6 "Census slices"), isolated diagnostic, Linux/WSL, 2026-10-20. The fixture is the retained 10,000-row store, with `collection-views-v1` patched into `RELEASED`; each run lasts 120 s. Before slices (main `9c6c18149`), every 16-path census window paid its own checkout, policy load and release checks:
+
+    | Arm | Runs | Serving-thread busy per 120 s | Warm acknowledgement p50 / p95 |
+    | --- | ---: | ---: | ---: |
+    | 1 write/min, before slices | 1 | 59.72 s | one write |
+    | 1 write/min, with slices | 2 | 16.26 s, 16.97 s | one write |
+    | 60 writes/min, before slices | 1 | 112.7 s | 67.38 / 77.4 ms |
+    | 60 writes/min, with slices | 1 | 59.21 s | 61.42 / 72.1 ms |
+    | 60 writes/min, edit-back off | 1 | 0.0 s | 60.99 / 66.1 ms |
+
+    "Warm" means writes dispatched 30 s or more into the window, 90 per arm. With slices, at rest, a complete census pass of 2,519 windows takes 6.0–6.2 s of the thread every 60 s; between passes, the thread runs one tick of about 8 ms per second. At 60 writes per minute, view publication (`reconcile_views`) takes 41.4 s of the 59.21 s. The edit-back-off arm publishes none of these item views, which stay pending; it is only an acknowledgement floor. The warm median with slices minus edit-back off is +0.43 ms (bootstrap 95% interval −0.94 to 2.14), so no change. Before slices it was +6.39 ms (4.97 to 8.12). With slices, all 120 item views appeared a median 0.21 s, at most 1.2 s, after acknowledgement. In each of the six passes, the third window from the end took 0.81–0.99 s, so a request that arrives then waits for it; that cause is not diagnosed. Report SHA-256 prefixes: before `745eb10bae5884bb` (1/min) and `71b64ec2d55182c2` (60/min); with slices `16c9bf07e37afc76`, `f61cd984ac5bdbc7` (1/min) and `9ecd9641b091169c` (60/min); edit-back off `cfa8ccb4375b46d8`.
 
 ## P3. Audit, history, and the GA gate
 
