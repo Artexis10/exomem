@@ -548,6 +548,30 @@ def test_a_two_letter_shared_term_never_earns_rare_term() -> None:
     assert candidates == ()
 
 
+def test_a_number_from_a_clock_time_never_earns_rare_term() -> None:
+    """A turn about a departure time is not a reference to a crate whose
+    title happens to hold the same number."""
+    row = _term_row("brindlecove-crate.md", "Brindlecove 30 L crate",
+                    terms=("brindlecove", "30", "crate"))
+    analysis = resolve_module.analyze_turn("should i set off at 08:30 or 09:00")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"30": 1}
+    )
+
+    assert candidates == ()
+
+
+def test_a_short_model_number_with_a_letter_still_earns_rare_term() -> None:
+    row = _term_row("q3-dosing-pump.md", "Q3 dosing pump", terms=("q3", "dosing", "pump"))
+    analysis = resolve_module.analyze_turn("is the q3 in stock")
+    candidates = resolve_module.candidates_for(
+        analysis, (row,), term_anchor_counts={"q3": 1}
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].evidence == frozenset({"rare_term"})
+
+
 def test_a_three_letter_shared_term_still_earns_rare_term() -> None:
     """The floor is exactly three characters: a genuinely short NAME still leads."""
     row = _term_row("hob-service-log.md", "Hob Service Log", terms=("hob", "service"))
