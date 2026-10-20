@@ -64,7 +64,6 @@ def historical_store(tmp_path, monkeypatch):
     (root / "Knowledge Base").mkdir(parents=True)
     path = tmp_path / "historical.sqlite"
     with monkeypatch.context() as old:
-        old.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
         previous_release(old)
         with connection.open_writer(path, lease_check=lambda: True) as handle, library_scope():
             writer = CollectionWriter(root, handle)
@@ -79,10 +78,9 @@ def historical_store(tmp_path, monkeypatch):
     return path, root, row_id, layout, before
 
 
-def test_schema10_upgrade_binds_exact_history_and_preserves_source_spine(historical_store, monkeypatch):
+def test_schema10_upgrade_binds_exact_history_and_preserves_source_spine(historical_store):
     """The new column must bind existing typed payloads without minting or rewriting versions."""
     path, root, row_id, layout, before = historical_store
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     with connection.open_writer(path, lease_check=lambda: True) as handle, library_scope():
         conn = handle.connection
         assert schema.schema_version(conn) == schema.SCHEMA_VERSION

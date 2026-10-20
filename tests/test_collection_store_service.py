@@ -155,7 +155,6 @@ def _served_vault(tmp_path, monkeypatch):
     """A/B in files and the service's environment, before the owner enrols summary C."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(OPERATOR, raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
@@ -241,7 +240,6 @@ def test_first_offline_collection_creation_preserves_trashed_declarations(tmp_pa
     """A recoverable declaration in trash cannot block enrollment of a new store."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     (root / "Knowledge Base/_Schema").mkdir(parents=True)
     (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")
@@ -271,7 +269,6 @@ def test_an_offline_create_after_a_retire_enrols_the_next_fence_generation(tmp_p
     because its first create cuts from generation 0 and refuses the retired generation."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     (root / "Knowledge Base/_Schema").mkdir(parents=True)
     (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")

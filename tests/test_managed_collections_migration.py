@@ -95,7 +95,6 @@ def coordinator_url(tmp_path):
 def service(tmp_path, monkeypatch, coordinator_url):
     """A managed service's environment: its vault, state root and writer lease, and no operator credential."""
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(OPERATOR, raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)

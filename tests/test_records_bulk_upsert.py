@@ -90,7 +90,7 @@ def _with_sources_field(vault_root: Path) -> None:
 
 
 @pytest.fixture
-def vault_root(tmp_path: Path, request, monkeypatch):
+def vault_root(tmp_path: Path, request):
     _evidence(tmp_path, EVIDENCE, EVIDENCE_B)
     if getattr(request, "param", "files") == "files":
         setup_ledger_collection(tmp_path)
@@ -99,7 +99,6 @@ def vault_root(tmp_path: Path, request, monkeypatch):
         from exomem.collection_store import connection
         from exomem.collection_store.preview import preview_store
 
-        monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
         with connection.open_writer(tmp_path.with_suffix(".sqlite"), lease_check=lambda: True) as handle, library_scope():
             with preview_store(tmp_path, handle) as writer:
                 writer.create_collection(LEDGER_COLLECTION_PATH, LEDGER_MANIFEST_TEXT, why="capture")

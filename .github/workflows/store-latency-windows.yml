@@ -29,7 +29,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           uv run --frozen --python 3.13 python scripts/measure-records-append-latency.py
-          --sizes 1000,10000 --appends 30 --storage store-preview --phase-probes
+          --sizes 1000,10000 --appends 30 --storage store --phase-probes
           --out store-latency-windows.json
       # The file path refuses collections over 2,000 items; --lift-caps measures it past that.
       - name: Measure file-mode latency at the same sizes

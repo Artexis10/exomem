@@ -182,7 +182,6 @@ def env(tmp_path, monkeypatch):
     assert Path(connection.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1] / "src")
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(OPERATOR, raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)

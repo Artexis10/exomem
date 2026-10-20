@@ -1,7 +1,7 @@
 """Vault-bound lifetime for admitted collection stores.
 
 Admission comes only from a trusted producer session (``admission``) that holds
-custody, fence and takeover authority; the preview flag supplies none. Release
+custody, fence and takeover authority. Release
 capabilities control serving; compatibility gates supported launchers.
 """
 

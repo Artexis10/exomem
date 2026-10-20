@@ -197,7 +197,7 @@ def test_snapshot_pins_one_wal_boundary_and_releases_reader_before_yield(
         thread.join(10)
 
 
-def test_indexed_native_snapshot_retains_exact_current_values_and_correction_history(genesis, monkeypatch):
+def test_indexed_native_snapshot_retains_exact_current_values_and_correction_history(genesis):
     """Copied native indexes must validate before import recovery can publish their store."""
     from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
 
@@ -207,7 +207,6 @@ def test_indexed_native_snapshot_retains_exact_current_values_and_correction_his
 
     root, stage, writer = genesis
     (root / "Knowledge Base").mkdir()
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     declaration = manifest_text().replace("count: {type: integer}", "count: {type: number}")
     declaration = declaration.replace(
         "\n---", "\nindexes:\n  by_count:\n    keys: [{field: count}]\n---"

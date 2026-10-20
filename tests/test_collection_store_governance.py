@@ -1125,7 +1125,6 @@ def test_hidden_row_allocation_cannot_change_limited_collection_observations(tmp
     from exomem.collection_store import connection
     from exomem.collection_store.writer import CollectionWriter
 
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     observations = []
     for hidden_position in (None, "before", "after"):
         root = tmp_path / str(hidden_position)

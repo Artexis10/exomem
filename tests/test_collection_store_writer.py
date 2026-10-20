@@ -67,8 +67,7 @@ def manifest_path(profile="records"):
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
+def store(tmp_path):
     from exomem.collection_store.writer import CollectionWriter
 
     root = tmp_path / "vault"

@@ -22,7 +22,7 @@ at a temp tree and disables embedding models and background watchers. It binds
 the supported local-owner library scope for that invented vault; an omitted
 caller identity would otherwise strip the public inspection response.
 
-``--storage store-preview`` exercises the dark store through the same public
+``--storage store`` exercises the collection store through the same public
 commands and vault-scoped lease. It times durable SQLite acknowledgement;
 item-view publication runs later, and the final inspection reports pending views.
 It does not lift file-mode caps or measure background publication latency.
@@ -303,8 +303,6 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
     vault = tmp / "vault"
     (vault / "Knowledge Base").mkdir(parents=True)
     os.environ["EXOMEM_VAULT_PATH"] = str(vault)
-    if args.storage == "store-preview":
-        os.environ["EXOMEM_COLLECTION_STORE_PREVIEW"] = "1"
     sys.path.insert(0, str(REPO / "src"))
 
     from exomem import (
@@ -345,7 +343,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
     manifest_file = vault / COLLECTION
     started = time.perf_counter()
     handle = None
-    if args.storage == "store-preview":
+    if args.storage == "store":
         from exomem.collection_store import connection as store_connection
         from exomem.collection_store.preview import preview_store
 
@@ -974,7 +972,7 @@ def main() -> int:
     parser.add_argument("--sizes", default="10,100,1000")
     parser.add_argument("--appends", type=int, default=30)
     parser.add_argument("--out", default="records-append-latency.json")
-    parser.add_argument("--storage", choices=("files", "store-preview"), default="files")
+    parser.add_argument("--storage", choices=("files", "store"), default="files")
     parser.add_argument("--phase-probes", action="store_true",
                         help="add store-only 10%% ref-withheld and bulk-500 diagnostics")
     parser.add_argument(
@@ -986,10 +984,10 @@ def main() -> int:
     parser.add_argument("--size", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--work-dir", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.phase_probes and (args.storage != "store-preview" or any(
+    if args.phase_probes and (args.storage != "store" or any(
         size < 10 or size % 10 for size in ([args.size] if args.child else map(int, args.sizes.split(",")))
     )):
-        parser.error("--phase-probes requires store-preview and sizes divisible by 10 (at least 10)")
+        parser.error("--phase-probes requires --storage store and sizes divisible by 10 (at least 10)")
     if args.child:
         print("RESULT-JSON:" + json.dumps(_child(args)))
         return 0

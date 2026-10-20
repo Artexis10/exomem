@@ -31,7 +31,6 @@ def producer(tmp_path, monkeypatch):
     from exomem.writer_lease import LeaseConfig, LeaseCoordinatorClient, LeaseManager
 
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     app = create_app(database=tmp_path / "coordinator.sqlite", bearer_token="lease", operator_token="isolated")
     with closing(TestClient(app)) as transport:
         def urlopen(request, timeout):

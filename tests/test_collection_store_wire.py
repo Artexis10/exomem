@@ -63,7 +63,6 @@ def paired(tmp_path, monkeypatch):
     from exomem.collection_store.preview import preview_store
     from exomem.governance.principal import library_scope
 
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
     monkeypatch.setattr("exomem.records._due_state_carrier", lambda *a, **kw: None)
     roots = [tmp_path / "files", tmp_path / "store"]
