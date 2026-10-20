@@ -556,6 +556,45 @@ def test_query_projection_rebuilds_each_rendered_format_from_typed_result(
         assert projected["rendered"].startswith("# collection_id: ")
 
 
+def test_query_projection_keeps_valid_long_fields_within_the_response_bound(
+    tmp_path: Path,
+) -> None:
+    manifest = collections.load_manifest(tmp_path, setup_ledger_collection(tmp_path))
+    item_key = "ac8f550a-fef4-4d1c-b251-57b356cb81bc"
+    values = ledger_item(exact_text="x" * (17 * 1024))
+    (tmp_path / manifest.storage.source / "entry.md").write_text(
+        record_formats.render_markdown_item(manifest, values, item_key), encoding="utf-8"
+    )
+
+    result = record_formats.query_collection(tmp_path, manifest)
+    projected = record_governance.project_query_result(result, manifest)
+
+    assert projected["rows"][0]["exact_text"] == values["exact_text"]
+    assert json.loads(projected["rendered"])["rows"] == result.rows
+
+
+def test_query_projection_withholds_a_rebuilt_response_over_the_producer_bound(
+    tmp_path: Path,
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    result = record_formats.query_collection(tmp_path, manifest, limit=1)
+    rows = [
+        {**result.rows[0], "record_id": key, "provider": "x" * (40 * 1024)}
+        for key in (
+            "ac8f550a-fef4-4d1c-b251-57b356cb81bc",
+            "d88bfd68-bf3e-4bfb-9f47-acb54cb8a240",
+        )
+    ]
+
+    projected = record_governance.project_query_result(
+        replace(result, rows=rows, returned=2, total_matched=2, truncated=False, continuation=None),
+        manifest,
+    )
+
+    assert projected == {"withheld": True, "reason": "invalid_record_query"}
+
+
 def test_query_projection_withholds_forged_query_system_source_and_aggregate_fields(
     tmp_path: Path,
 ) -> None:

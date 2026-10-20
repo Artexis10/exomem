@@ -1588,7 +1588,7 @@ def checked_collection_replica(
     ``ancestor_witness`` proves an old copy only against a validated replacement.
     It grants no destination writer authority.
     """
-    from .collection_store import authority, connection, replica, schema, takeover
+    from .collection_store import authority, connection, legacy_originals, replica, schema, takeover
 
     raw_marker = authority.read_marker(vault_root)
     source_path = replica.replica_path(vault_root) if source_path is None else Path(source_path)
@@ -1598,7 +1598,7 @@ def checked_collection_replica(
     marker = None if raw_marker is None else authority.parse_marker(vault_root, raw_marker)
     with _checked_collection_replica_structure(vault_root, source_path=source_path, check=check) as verified:
         reader = verified.connection
-        metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
+        metadata = legacy_originals.metadata(reader)
         if marker is not None and metadata[schema.META_STORE_ID] != marker["store_id"]:
             _fail("INVALID_ARCHIVE", "collection replica belongs to another store")
         intent = authority.pending_create(reader)

@@ -20,7 +20,7 @@ import uuid
 from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 
-from . import chain, connection, custody, replica, schema, snapshot, typed_storage
+from . import chain, connection, custody, legacy_originals, replica, schema, snapshot, typed_storage
 from .connection import CollectionStoreError
 
 #: The recorded head was not read: no coordinator is configured for this process.
@@ -159,7 +159,7 @@ def adopt_local_preview(vault_root, *, recorded=UNKNOWN) -> dict:
     directory = replica.replica_path(root).parent
     with closing(connection.open_reader(path)) as local:
         local.execute("BEGIN")
-        meta = dict(local.execute("SELECT key,value FROM store_meta"))
+        meta = legacy_originals.metadata(local)
         head = _head(meta)
         lineage = {entry["instance_id"] for entry in json.loads(meta[schema.META_LINEAGE])}
         raw = meta.get(schema.META_REPLICA_DIVERGENCE)
@@ -204,7 +204,7 @@ def adopt_replica_preview(vault_root, *, recorded=UNKNOWN) -> dict:
     with checked_collection_replica(root) as verified:
         if verified is None:
             raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "the vault replica is incomplete or invalid")
-        meta = dict(verified.connection.execute("SELECT key,value FROM store_meta"))
+        meta = legacy_originals.metadata(verified.connection)
         digest = verified.source_sha256
         head = _head(meta)
     recorded_view = recorded if recorded in (UNKNOWN, None) else {
@@ -226,7 +226,7 @@ def record_fork(conn, preview: dict, *, why: str, token: int):
     new tenure republishes. The old tenure's interrupted publication intent is dropped;
     adopt-local removes its workspace.
     """
-    meta = dict(conn.execute("SELECT key,value FROM store_meta"))
+    meta = legacy_originals.metadata(conn)
     local = preview["fork_point"]["local"]
     instance = str(uuid.uuid4())
     lineage = [*json.loads(meta[schema.META_LINEAGE]), {
@@ -280,7 +280,7 @@ def reconcile_plan(vault_root, local) -> tuple[dict, list[dict]]:
     its file stays unreconciled until the owner acknowledges the skipped changes.
     """
     root = Path(vault_root).resolve()
-    meta = dict(local.execute("SELECT key,value FROM store_meta"))
+    meta = legacy_originals.metadata(local)
     done = set(json.loads(meta.get(schema.META_RECONCILED_FOREIGN) or "[]"))
     sources, skipped, latest = [], [], {}
     scratch = connection.store_path(root).parent

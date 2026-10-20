@@ -1300,11 +1300,14 @@ def _publication_authority(session, token):
 
 
 def _publish_current_epoch(session, writer, token):
+    from . import legacy_originals
+
     manager = session.manager
     deadline = time.monotonic() + 30
     check = _publication_authority(session, token)
     if not _publication_custody(session, token):
         return replica.PublicationResult("custody_unverified", reason=session.custody_reason)
+    legacy_originals.backfill(writer, lambda: session.require(token))
     pending = replica.recover_replica(session.root, writer.handle, authority_check=check, deadline=deadline)
     if pending.status != "published" and (pending.reason is not None or writer.connection.execute(
         "SELECT 1 FROM store_meta WHERE key=?", (schema.META_PENDING_REPLICA_PUBLICATION,),
@@ -1313,7 +1316,10 @@ def _publish_current_epoch(session, writer, token):
     with writer.handle.transaction() as conn:
         conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (schema.META_LEASE_EPOCH, str(token)))
         conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (authority.MARKER_REQUIRED, "1"))
-    published = replica.publish_replica(session.root, writer.handle, authority_check=check, deadline=deadline)
+    # A same-head archive backfill must survive loss of the live store before views replace its sources.
+    force = legacy_originals.needs_replica_copy(session.root, writer.connection)
+    published = replica.publish_replica(session.root, writer.handle, authority_check=check, deadline=deadline,
+                                       **({"force": True} if force else {}))
     if published.status == "published":
         if chain.verify_store_chain(writer.connection) != (published.commit_seq, published.head_hash):
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "publication did not reach current head")

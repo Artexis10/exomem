@@ -85,8 +85,8 @@ def mode_change_refusal(conn: sqlite3.Connection, current: collections.Collectio
                         proposed: collections.CollectionManifest) -> collections.CollectionError | None:
     """Why ``proposed`` cannot change ``current``'s view mode in place, or None when it can.
 
-    A summary collection stays one, because items mode stays in files (S1), and a populated
-    collection keeps its mode. Every revise path, a view edit included, asks this.
+    A summary collection stays one, and a populated collection keeps its mode.
+    Every revise path, a view edit included, asks this.
     """
     if proposed.view_mode == current.view_mode:
         return None

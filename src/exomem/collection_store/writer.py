@@ -964,7 +964,8 @@ class CollectionWriter:
     def _render_view(self, projection, manifest):
         """Render indexed canonical rows using a context prepared before the filesystem phase."""
         return views.render_view(self.connection, self._publication.identity, projection, manifest, root=self.root,
-                                 cache=self.handle.release_cache)
+                                 cache=self.handle.release_cache, operation=self._operation,
+                                 observe_read=self._recheck_guard)
 
     def _register_view_input(self, projection, raw, token, slot, *, source=None):
         """Classify bytes found at a view path (``slot`` "offline") or displaced by an install.
@@ -1256,6 +1257,8 @@ class CollectionWriter:
 
     def reconcile_detached_candidate(self, facts, *, census):
         """Recheck one completed sweep's candidate, then hold it or record one metadata-only move."""
+        from . import legacy_originals
+
         path, cid = facts["path"], facts["collection_id"]
         vault._safe_guard_target(path)
         with held_fs.acquire(self.root).require() as fs, fs.parent(str(Path(path).parent)).require() as parent:
@@ -1290,6 +1293,10 @@ class CollectionWriter:
             current = bool(item is not None and projection is not None and stamp is not None
                            and stamp["s"] == identity["store_id"] and stamp["i"] in lineage
                            and stamp["v"] == item["row_version"] and stamp["h"] == item["payload_hash"][:12])
+            legacy = None if projection is None or stamp is not None else legacy_originals.view_basis(
+                self.connection, projection)
+            legacy_exact = legacy is not None and legacy[0] == facts["digest"]
+            current = current or legacy_exact
             if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
                 code = edit_back.FOREIGN
             elif item is not None and not current:
@@ -1307,7 +1314,12 @@ class CollectionWriter:
                 "AND json_extract(stamp,'$.s')=? AND json_extract(stamp,'$.i')=? "
                 "AND json_extract(stamp,'$.v')=? AND json_extract(stamp,'$.h')=? LIMIT 2",
                 (cid, facts["item_key"], *(stamp[name] for name in ("s", "i", "v", "h")))
-            ).fetchall()) if current else 0
+            ).fetchall()) if current and stamp is not None else 0
+            if legacy_exact:
+                duplicate = len(census.db.execute(
+                    "SELECT path FROM temp.candidates WHERE cid=? AND item_key=? AND conflict=0 "
+                    "AND json_type(stamp)='null' LIMIT 2",
+                    (cid, facts["item_key"])).fetchall())
             old_guard = None
             if not outside and current and duplicate == 1 and not sync_providers.is_conflict_copy(self.root, Path(path).name):
                 try:
@@ -1329,8 +1341,11 @@ class CollectionWriter:
                     raise held_fs.HeldFsError("INPUT_CHANGED", "moved candidate changed")
                 self._recheck_guard(old_guard)
                 self._recheck_guard(guard)
-                if not exact:
+                if not exact and not legacy_exact:
                     self._hold_detached(manifest, path, raw, edit_back.CONFLICT, item=item)
+                if legacy_exact and not legacy[1]:
+                    legacy_originals.put(self.connection, cid, "item", facts["item_key"], projection["path"], raw,
+                                         legacy_originals.checkpoint(self.connection, cid))
                 arguments = {"old_path": projection["path"], "path": path, "generation": row["generation"],
                              "version": item["row_version"], "digest": facts["digest"]}
                 request = hashlib.sha256(b"exomem-view-move:v1\0" + _json(arguments).encode()).hexdigest()
@@ -1769,10 +1784,18 @@ class CollectionWriter:
         """
         with self._mutation(reconcile=True):
             for observation in observations:
+                from .legacy_originals import view_basis
+
                 row = self.connection.execute(
                     "SELECT published_sha256,state FROM projection_state WHERE path=?", (observation.path,)
                 ).fetchone()
                 if row is None or row[0] != observation.digest or row[1] == "pending":
+                    continue
+                basis = view_basis(self.connection, observation.projection)
+                if basis is not None and basis == (observation.digest, True):
+                    # Admission already copied the originals; normal publication now stamps the imported view.
+                    self._execute("UPDATE projection_state SET stat_identity=?,state='pending' WHERE path=?",
+                                  (observation.stat, observation.path))
                     continue
                 if row[1] == "held":
                     self._resolve_in_place(observation.path,
@@ -3070,10 +3093,14 @@ class CollectionWriter:
                         "SELECT COALESCE(pending_sha256, published_sha256) FROM projection_state WHERE path = ?",
                         (before["view_path"],),
                     ).fetchone()
-                    rendered = record_formats.render_markdown_item(
-                        manifest, final, key, final_body,
-                        view_stamp=views.stamp(self._publication.identity, before["row_version"], before["payload_hash"]),
-                    )
+                    with views.presentation_resolver(
+                        self.connection, self.root, manifest, operation=self._operation,
+                        observe_read=self._recheck_guard,
+                    ) as resolver:
+                        rendered = record_formats.render_markdown_item(
+                            manifest, final, key, final_body, resolve_relationship=resolver,
+                            view_stamp=views.stamp(self._publication.identity, before["row_version"], before["payload_hash"]),
+                        )
                     if projection and projection[0] == hashlib.sha256(rendered.encode()).hexdigest():
                         raise collections.CollectionError(
                             "NOOP_RECORD_PRESENTATION", "managed presentation is already current"

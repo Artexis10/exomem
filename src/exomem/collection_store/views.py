@@ -240,7 +240,8 @@ class PublicationBatch:
                     self.source_manifests[key] = self.writer._collection_manifest(current)[0]
                 manifest = self.source_manifests[key]
             version, text = render_view(conn, self.identity, projection, manifest, root=self.writer.root,
-                                        cache=self.writer.handle.release_cache)
+                                        cache=self.writer.handle.release_cache, operation=self.writer._operation,
+                                       observe_read=self.writer._recheck_guard)
             digest = _digest(text.encode())
         context = {"path": projection["path"], "collection_id": cid, "kind": projection["kind"],
                 "row_id": projection.get("row_id"), "row_version": version,
@@ -933,7 +934,96 @@ def manifest_view(text: str, view_stamp: Mapping[str, str | int]) -> str:
     )
 
 
-def render_view(conn, identity, projection, manifest, *, root=None, cache=None):
+def presentation_wikilinks(operation, *, fresh=False):
+    """Overlay the owned namespace on ordinary files within this operation's SQL snapshot."""
+    cached = operation._presentation_wikilinks
+    if not fresh and cached is not None and cached[0] == operation.conn.total_changes:
+        return cached[1]
+    resolver = vault.WikilinkResolver(operation.root)
+    proof = operation.projection_ownership()
+    deleted = [path + ".md" for path in resolver.full_paths
+               if proof.owner(operation.root, path + ".md") is not None]
+    paths = operation.conn.execute(
+        "SELECT path FROM projection_state UNION SELECT view_path FROM items WHERE view_path IS NOT NULL "
+        "UNION SELECT manifest_path FROM collections"
+    ).fetchall()
+    entries = []
+    for (path,) in paths:
+        handled, label = presentation_label(operation, path)
+        if handled:
+            entries.append((path, label))
+    resolver.on_entries_changed(entries, deleted)
+    operation._presentation_wikilinks = (operation.conn.total_changes, resolver)
+    return resolver
+
+
+def presentation_label(operation, path):
+    """An owned target takes its title from canonical data, never its physical projection."""
+    subjects = operation.projection_subjects(path)
+    if subjects is None:
+        return False, None
+    if not subjects or not operation.allows_file(path):
+        return True, None
+    conn = operation.conn
+    manifest = operation.field_manifest(subjects[0].collection_id)
+    item = conn.execute(
+        "SELECT row_id,body FROM items WHERE collection_id=? AND view_path=?",
+        (manifest.collection_id, path),
+    ).fetchone()
+    if item is not None:
+        return True, record_formats.item_display_title(
+            manifest, typed_storage.item_values(conn, item[0]), item[1], path
+        )
+    if path == manifest.path:
+        text = conn.execute(
+            "SELECT m.manifest_text FROM collection_manifests m JOIN collections c "
+            "ON c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version "
+            "WHERE c.collection_id=?", (manifest.collection_id,),
+        ).fetchone()[0]
+    else:
+        cursor = conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
+        row = cursor.fetchone()
+        if row is None:
+            return True, None
+        projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
+        if projection["kind"] == "item":
+            return True, None
+        _, text = render_view(conn, store_identity(conn), projection, manifest,
+                              root=operation.root, cache=operation.cache, operation=operation)
+    frontmatter, body, _ = vault.parse_frontmatter(text, strict=True)
+    return True, vault.resolve_display_title(frontmatter, body, path)
+
+
+@contextmanager
+def presentation_resolver(conn, root, manifest, *, operation=None, observe_read=None, cache=None):
+    """Use one canonical snapshot and authorization pass for a batch of item labels."""
+    if manifest.item_presentation is None or not manifest.item_presentation.relationships:
+        yield None
+        return
+    owned = operation is None
+    operation = operation or governance.OperationAuthorization(root, conn, mutation=False, cache=cache)
+
+    def lookup_item(key):
+        row = conn.execute(
+            "SELECT row_id,view_path,body FROM items WHERE collection_id=? AND item_key=?",
+            (manifest.collection_id, key),
+        ).fetchone()
+        return (row[1], typed_storage.item_values(conn, row[0]), row[2]) if row else None
+
+    try:
+        yield record_formats.presentation_relationship_resolver(
+            root, manifest, None, authorize_path=operation.allows_file,
+            lookup_item=lookup_item, lookup_path=lambda path: presentation_label(operation, path),
+            observe_read=observe_read,
+            wikilink_resolver=lambda: presentation_wikilinks(operation),
+        )
+    finally:
+        if owned:
+            operation.close()
+
+
+def render_view(conn, identity, projection, manifest, *, root=None, cache=None,
+                operation=None, observe_read=None):
     """Render an indexed canonical reference; the caller owns its read snapshot and context."""
     if projection["kind"] == "history":
         from .history import render_page
@@ -944,13 +1034,16 @@ def render_view(conn, identity, projection, manifest, *, root=None, cache=None):
             "SELECT row_version,payload_hash,item_key,body FROM items WHERE row_id=?",
             (projection["row_id"],),
         ).fetchone()
-        return version, record_formats.render_markdown_item(
-            manifest,
-            typed_storage.item_values(conn, projection["row_id"]),
-            key,
-            body,
-            view_stamp=stamp(identity, version, payload),
-        )
+        with presentation_resolver(conn, root, manifest, operation=operation,
+                                   observe_read=observe_read, cache=cache) as resolver:
+            return version, record_formats.render_markdown_item(
+                manifest,
+                typed_storage.item_values(conn, projection["row_id"]),
+                key,
+                body,
+                view_stamp=stamp(identity, version, payload),
+                resolve_relationship=resolver,
+            )
     if projection["kind"] == "manifest":
         version, text, payload = conn.execute(
             "SELECT m.manifest_version,m.manifest_text,m.manifest_hash FROM collection_manifests m JOIN collections c "
