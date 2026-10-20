@@ -24,7 +24,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import reserved_paths, semantic_index, semantic_writes, source_taxonomy, working_set_heat
+from . import (
+    call_spans,
+    reserved_paths,
+    semantic_index,
+    semantic_writes,
+    source_taxonomy,
+    working_set_heat,
+)
 from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
@@ -791,17 +798,19 @@ def move_file(
                 vault_root, new_rel, leaf_policy="absent"
             )
             def run_preflight() -> semantic_writes.MovePreflight:
-                return semantic_writes.preflight_move(
-                    vault_root,
-                    old_path=old_rel,
-                    new_path=new_rel,
-                    source=source,
-                    moved_source=moved_source,
-                    source_guard=source_guard,
-                    destination_guard=destination_guard,
-                    rewrites=writes,
-                    content_transform=content_transform,
-                )
+                call_spans.measure(call_spans.MOVE_PREFLIGHTS)
+                with call_spans.measure_ms(call_spans.MOVE_PREFLIGHT_MS):
+                    return semantic_writes.preflight_move(
+                        vault_root,
+                        old_path=old_rel,
+                        new_path=new_rel,
+                        source=source,
+                        moved_source=moved_source,
+                        source_guard=source_guard,
+                        destination_guard=destination_guard,
+                        rewrites=writes,
+                        content_transform=content_transform,
+                    )
 
             preflight = run_preflight()
             while visible is not None:
