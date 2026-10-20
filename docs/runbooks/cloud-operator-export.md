@@ -181,10 +181,19 @@ the restore completes.
 
 The selected backup can contain canonical collection commits ahead of its
 published replica. Prepare the replica before mounting scratch read-only.
-Use the reviewed runtime image and original vault placement, `/data/vault`.
+`IMAGE` records the runtime image used by the restore Job.
+Set `EXPORT_IMAGE` to a qualified digest that contains
+`exomem.cloud_operator_portability` and its `archive_members` helper.
+Use `EXPORT_IMAGE` for both scratch Pods; the source image can predate these
+helpers. Both Pods operate only on the restored scratch volume.
+Use the original vault placement, `/data/vault`.
 The adapter derives the state directory beneath the runtime account's home
 and verifies its migration manifest. It never scans for a database or changes
 the original database, WAL, marker, instance or coordinator fence.
+
+Preparation preserves the source database schema and validates a migrated
+private copy. Starting a newer server on scratch can migrate the restored
+store; run only the preparer and archive commands below.
 
 Set `PREPARE_TIMEOUT_SECONDS` to the positive bound approved for this export.
 The bound controls this operation; it is not a measured performance promise.
@@ -196,7 +205,9 @@ process environment or try alternative directories.
 
 ```bash
 : "${PREPARE_TIMEOUT_SECONDS:?positive preparation bound required}"
-kubectl -n "$SCRATCH" run vault-prepare --image="$IMAGE" --restart=Never --overrides='{"spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":10001,"runAsGroup":10001,"fsGroup":10001,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"vault-prepare","image":"'"$IMAGE"'","command":["python3","-m","exomem.cloud_operator_portability","--vault","/data/vault","--host-root","/data/host","--original-vault","/data/vault","--timeout-seconds","'"$PREPARE_TIMEOUT_SECONDS"'"],"resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"name":"data","mountPath":"/data"},{"name":"temporary","mountPath":"/tmp"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"cell-data"}},{"name":"temporary","emptyDir":{}}]}}'
+: "${EXPORT_IMAGE:?qualified export runtime digest required}"
+[[ "$EXPORT_IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || exit 1
+kubectl -n "$SCRATCH" run vault-prepare --image="$EXPORT_IMAGE" --restart=Never --overrides='{"spec":{"automountServiceAccountToken":false,"securityContext":{"runAsNonRoot":true,"runAsUser":10001,"runAsGroup":10001,"fsGroup":10001,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"vault-prepare","image":"'"$EXPORT_IMAGE"'","command":["python3","-m","exomem.cloud_operator_portability","--vault","/data/vault","--host-root","/data/host","--original-vault","/data/vault","--timeout-seconds","'"$PREPARE_TIMEOUT_SECONDS"'"],"resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"name":"data","mountPath":"/data"},{"name":"temporary","mountPath":"/tmp"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"cell-data"}},{"name":"temporary","emptyDir":{}}]}}'
 ```
 
 2. Wait for preparation; expect `Succeeded` and a content-free JSON receipt.
@@ -248,7 +259,7 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: archive
-      image: ${IMAGE}
+      image: ${EXPORT_IMAGE}
       imagePullPolicy: IfNotPresent
       command: [python3, -c, 'import time; time.sleep(3600)']
       resources:
@@ -384,7 +395,7 @@ If an earlier step fails, retain scratch for bounded diagnosis. For an
 abandoned export, record that no artifact was handed off, then perform the
 same identity-checked, exact-name cleanup; never target the source namespace
 or a broad label selector. Record authorization, tenant/cell, snapshot ID/time,
-the recipients file's fingerprint, scratch name, image digest, ciphertext
+the recipients file's fingerprint, scratch name, restore and export image digests, ciphertext
 digest/size and the tenant's verification and cleanup outcome, without
 recording credentials or vault content.
 
