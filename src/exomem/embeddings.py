@@ -1550,6 +1550,25 @@ def vector_backend_active(vault_root: Path) -> bool:
         conn.close()
 
 
+def peek_embedding_index(vault_root: Path) -> EmbeddingIndex | None:
+    """Read an existing serving index without locking, creating or promoting one.
+
+    A pointer cutover can precede the normal registry handoff. Until that handoff,
+    an optional reader gets no index rather than the old sidecar's resident matrix.
+    """
+    index = _INDEX_CACHE.get(str(Path(vault_root).resolve()))
+    if index is None:
+        return None
+    try:
+        serving_path = index_paths.sidecar_path(vault_root, nonblocking=True)
+    except OSError:
+        # An unreadable pointer cannot prove that the retained sidecar still serves.
+        return None
+    if index.path != serving_path:
+        return None
+    return index
+
+
 def get_embedding_index(vault_root: Path, *, path: Path | None = None) -> EmbeddingIndex:
     """Return the process-shared `EmbeddingIndex` for this vault.
 

@@ -1830,6 +1830,28 @@ def test_an_ordinary_unresolved_menu_still_offers_anchor() -> None:
     assert "read_memory" not in block.splitlines()[-1], block
 
 
+def test_related_pages_render_as_a_list_the_agent_can_read_not_as_served_material() -> None:
+    """An unresolved packet with no worded candidate used to inject nothing.
+    Pages the service listed as related are shown by path and title alone,
+    under a line that says they were not loaded."""
+    packet = _unresolved_packet([])
+    packet["related"] = [
+        {
+            "path": "Knowledge Base/Notes/Brine ledger.md",
+            "title": "Brine ledger",
+            "projects": ["orchard"],
+            "evidence": ["retrieval", "vector_band"],
+        }
+    ]
+
+    lines = hook._format_working_set_block(packet, 4000).splitlines()
+
+    assert lines[1] == "- related: Brine ledger [Knowledge Base/Notes/Brine ledger.md]"
+    assert lines[-1] == hook._WORKING_SET_RELATED_LINE
+    assert "(not loaded)" in lines[-1]
+    assert "orchard" not in "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- #
 # Cooldowns in working-set mode (close-memory-loop D2, orchestrator ruling):
 # the client-wide cooldown gates the bare reminder only, never a packet fetch;

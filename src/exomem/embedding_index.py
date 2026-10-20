@@ -1576,13 +1576,15 @@ class EmbeddingIndex:
                 loaded = self._full_load_locked()
                 return loaded.metadata, loaded.matrix
 
-    def _serve_resident(self, policy_identity: tuple[str, str]) -> _EmbCache | None:
+    def _serve_resident(
+        self, policy_identity: tuple[str, str], *, nonblocking: bool = False
+    ) -> _EmbCache | None:
         """The cache when it serves the current publication, read without the lock."""
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         c = self._cache
         served = (
-            sidecar_store.try_serve_cached(c, self.path)
+            sidecar_store.try_serve_cached(c, self.path, nonblocking=nonblocking)
             if c is not None and c.recall_policy_identity == policy_identity
             else None
         )
@@ -1590,6 +1592,22 @@ class EmbeddingIndex:
             self._hits += 1
             return served
         return None
+
+    def resident_matrix(self) -> _EmbCache | None:
+        """The matrix cache when it already serves the current publication, else None.
+
+        For a reader that must not wait and must not start work, such as
+        activation: no lock, no load, no background load and no catch-up. A
+        cold, stale or disk-scored matrix is None, and the caller reports
+        that rather than asking for more.
+        """
+        if not self.path.exists() or cloud_cell.resource_policy() == "service-v1":
+            return None
+        from . import recall_policy
+
+        return self._serve_resident(
+            recall_policy.recall_policy_identity(self.vault_root), nonblocking=True
+        )
 
     def require_resident_matrix(self) -> _EmbCache | None:
         """The matrix that serves now, or a background load and a raise.

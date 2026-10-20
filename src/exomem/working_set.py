@@ -305,6 +305,8 @@ PACKET_BLOCKS = (
     # with what was recently worked on, before anything this turn resolved.
     "recent_context",
     "anchors",
+    # Only on an abstained packet that listed related pages, and only then.
+    "related",
     "roles",
     "units",
     "pointers",
@@ -920,6 +922,7 @@ def abstained_packet(
     missing: Sequence[Mapping[str, Any]] = (),
     recent_context: Sequence[Mapping[str, Any]] = (),
     conversation_inferred: bool = False,
+    related: Sequence[Mapping[str, Any]] = (),
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """The packet with no ANSWER in it — but still with working continuity.
@@ -949,7 +952,7 @@ def abstained_packet(
             status_basis=status_basis,
         )
     recent_entries, used = _budgeted_recent(recent_context, limit)
-    return {
+    packet: dict[str, Any] = {
         "recent_context": recent_entries,
         "anchors": _listed_anchors(anchors),
         "roles": [],
@@ -967,6 +970,11 @@ def abstained_packet(
         "abstained": True,
         "abstention": {"reason": reason},
     }
+    if related:
+        # Present only when the related-page listing found pages, so every other
+        # abstained packet keeps the shape it always had.
+        packet["related"] = [dict(entry) for entry in related]
+    return packet
 
 
 def _budgeted_recent(
@@ -2130,9 +2138,11 @@ def band_audience_allowed(vault_root: Path) -> bool:
 
 def signature_evidence(
     index: working_set_index.WorkingSetIndex, turn: str
-) -> tuple[dict[str, bool], str]:
+) -> tuple[dict[str, bool], str, Any]:
     """Optional semantic corroboration over anchors, never the recall corpus:
-    `vector_band` per anchor, and the state of the lane.
+    `vector_band` per anchor, the state of the lane, and the turn vector it
+    encoded (None when it encoded none), for a reader of the same turn that
+    must not encode it again.
 
     An unavailable scorer removes one evidence kind, not the structural
     resolver or its release guard. It cannot justify a cached negative result.
@@ -2145,37 +2155,38 @@ def signature_evidence(
     another encoder are `absent`.
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return {}, "disabled"
+        return {}, "disabled", None
     # Before any vector is read or any turn encoded: a caller the band could
     # tell about a withheld anchor gets none of it.
     if not band_audience_allowed(index.vault_root):
-        return {}, "audience_restricted"
+        return {}, "audience_restricted", None
     try:
         from . import embeddings, ranking_config, readiness, runtime_resources
 
         if readiness.should_defer("embeddings"):
-            return {}, "warming"
+            return {}, "warming", None
         if index.vector_fingerprint() is None:
-            return {}, "absent"
+            return {}, "absent", None
         fingerprint = embeddings.activation_fingerprint()
         if fingerprint is None:
-            return {}, "unavailable"
+            return {}, "unavailable", None
         ids, matrix = index.vector_matrix(fingerprint)
         if matrix is None:
-            return {}, "absent"
+            return {}, "absent", None
         config = ranking_config.DEFAULT_RANKING
         if len(ids) < int(config.working_set_semantic_min_population):
-            return {}, "uncalibrated"
+            return {}, "uncalibrated", None
         try:
             query_vector = embeddings.embed_activation_query_if_loaded(turn)
         except runtime_resources.ModelBusyError:
-            return {}, "busy"
+            return {}, "busy", None
         if query_vector is None:
-            return {}, "unavailable"
-        return working_set_resolve.matrix_bands(ids, matrix, query_vector, config)
+            return {}, "unavailable", None
+        bands, state = working_set_resolve.matrix_bands(ids, matrix, query_vector, config)
+        return bands, state, query_vector
     except Exception:  # noqa: BLE001 - optional scorer failure is explicit
         log.debug("activation signature evidence unavailable", exc_info=True)
-        return {}, "unavailable"
+        return {}, "unavailable", None
 
 
 # --------------------------------------------------------------------------- #
@@ -2695,10 +2706,12 @@ def _title_named_anchors(
     index: working_set_index.WorkingSetIndex | None = None,
     exclude: frozenset[str] = frozenset(),
     query_context=None,
-) -> tuple[dict[str, Any], ...]:
+) -> tuple[tuple[dict[str, Any], ...], tuple[tuple[str, float], ...] | None]:
     """The pages an unresolved turn names by their title in ordinary words,
     as `retrieval_named` anchor entries, for an abstention the carry named
-    nothing in (`working_set_runtime.title_named_pages`).
+    nothing in (`working_set_runtime.title_listing`), and that query's ranked
+    rows (`None` when it did not answer), so the related-page listing reads
+    the same rows instead of asking again.
 
     Listed, never served: the packet stays `unresolved` with no unit, pointer
     or current state for them, and the token names none of them. Evidence is
@@ -2714,7 +2727,7 @@ def _title_named_anchors(
     if budget_exhausted(
         "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
-        return ()
+        return (), None
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -2723,7 +2736,7 @@ def _title_named_anchors(
             recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot lists nothing
             log.debug("activation title listing freshness unavailable", exc_info=True)
-            return ()
+            return (), None
     with (
         _span(timings, "working_set.carry"),
         call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
@@ -2731,7 +2744,7 @@ def _title_named_anchors(
     ):
         from . import working_set_runtime
 
-        hits, state = working_set_runtime.title_named_pages(
+        listing = working_set_runtime.title_listing(
             vault_root,
             turn,
             freshness=freshness,
@@ -2740,18 +2753,21 @@ def _title_named_anchors(
             status_basis=status_basis or lifecycle_statuses.Basis(vault_root),
             query_context=query_context,
         )
-    if state != "available":
-        return ()
-    named = tuple(hit for hit in _visible_hits(hits, visible) if hit[0] not in exclude)[
+    if listing.state != "available":
+        return (), None
+    named = tuple(hit for hit in _visible_hits(listing.named, visible) if hit[0] not in exclude)[
         :RETRIEVAL_CARRY_MAX_DOMAINS
     ]
-    return tuple(
-        {
-            **entry,
-            "evidence": ["lexical_overlap", "retrieval"],
-            "projects": _page_projects(vault_root, str(entry["path"])),
-        }
-        for entry in _named_anchors(vault_root, named, index=index)
+    return (
+        tuple(
+            {
+                **entry,
+                "evidence": ["lexical_overlap", "retrieval"],
+                "projects": _page_projects(vault_root, str(entry["path"])),
+            }
+            for entry in _named_anchors(vault_root, named, index=index)
+        ),
+        listing.window,
     )
 
 
@@ -2793,6 +2809,113 @@ def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -
         log.debug("activation carry title lookup failed", exc_info=True)
         return ""
     return titles.get(path, "")
+
+
+def related_pages(
+    vault_root: Path,
+    *,
+    window: Sequence[tuple[str, float]] | None,
+    turn_vector: Any,
+    semantic_state: str,
+    visible: Callable[[str], bool] | None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    index: working_set_index.WorkingSetIndex | None = None,
+    timings: Any = None,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...], str]:
+    """`(entries, missing, state)` for the related-page listing of a turn that
+    resolved nothing and that no carry or title listing named anything in.
+
+    A page is listed when two independent readings agree on it: it is a
+    current row of the title query's `window` (the lexical reading), and one of
+    its stored recall chunks clears the corpus-relative band over every chunk
+    of the resident matrix against the turn vector the anchor lane already
+    encoded (the semantic reading, `working_set_resolve.semantic_band`
+    unchanged). Listed, never served: the caller adds no unit, anchor or ref.
+
+    Owner only, decided before any similarity is computed, since the band's
+    population counts pages a reader may not see. Reads only what is resident:
+    it loads no matrix, starts no load, waits for nothing and encodes nothing.
+    `state` is `generation.related_evidence`: `ready` when it ran (listed or
+    not), `cold` for no resident matrix, `space_mismatch` for a matrix made
+    by another encoder, `uncalibrated` for a chunk population with no chance
+    level, `unavailable` for a missing reading or a fault, and
+    `audience_restricted`; when the turn was not encoded, the anchor lane's own
+    state (`semantic_state`) says why.
+    """
+    if visible is not None or not band_audience_allowed(vault_root):
+        return (), (), "audience_restricted"
+    if turn_vector is None:
+        # "ready" without a vector is not a state the lane can be in, so it is a fault.
+        return (), (), semantic_state if semantic_state != "ready" else "unavailable"
+    if window is None or budget_exhausted("working_set.related"):
+        return (), (), "unavailable"
+    try:
+        with _span(timings, "working_set.related"):
+            import numpy as np
+
+            from . import embeddings, ranking_config
+
+            embedding_index = embeddings.peek_embedding_index(vault_root)
+            if embedding_index is None:
+                return (), (), "cold"
+            resident = embedding_index.resident_matrix()
+            if resident is None:
+                return (), (), "cold"
+            identity = embedding_index.identity
+            fingerprint = embeddings.activation_fingerprint()
+            query = np.asarray(turn_vector, dtype=np.float32).reshape(-1)
+            norm = float(np.linalg.norm(query))
+            if (
+                identity is None
+                or fingerprint is None
+                or identity.fingerprint != fingerprint
+                or resident.matrix.ndim != 2
+                or query.shape[0] != resident.matrix.shape[1]
+            ):
+                return (), (), "space_mismatch"
+            if norm == 0.0:
+                return (), (), "unavailable"
+            similarities = resident.matrix @ (query / norm)
+            config = ranking_config.DEFAULT_RANKING
+            cleared = working_set_resolve.semantic_band(
+                similarities,
+                alpha=float(config.working_set_semantic_alpha),
+                min_population=int(config.working_set_semantic_min_population),
+            )
+            if cleared is None:
+                return (), (), "uncalibrated"
+            # Only the cleared rows are mapped to pages, never the whole matrix.
+            rank = {path: position for position, (path, _score) in enumerate(window)}
+            best: dict[str, float] = {}
+            for row in cleared:
+                path = resident.metadata[row][0]
+                if path in rank:
+                    best[path] = max(float(similarities[row]), best.get(path, float("-inf")))
+            # Similarity orders; it is never shown. Ties fall to the lexical rank.
+            listed: list[str] = []
+            for path in sorted(best, key=lambda page: (-best[page], rank[page], page)):
+                if _is_current_page(vault_root, path, status_basis=status_basis):
+                    listed.append(path)
+                if len(listed) > RETRIEVAL_CARRY_MAX_DOMAINS:
+                    break
+            entries = tuple(
+                {
+                    "path": path,
+                    "title": _page_title(vault_root, path) or _indexed_title(index, path) or path,
+                    "projects": _page_projects(vault_root, path),
+                    "evidence": ["retrieval", "vector_band"],
+                }
+                for path in listed[:RETRIEVAL_CARRY_MAX_DOMAINS]
+            )
+            truncated = len(listed) > RETRIEVAL_CARRY_MAX_DOMAINS
+            return (
+                entries,
+                ({"role": "related", "reason": "lane_truncated"},) if truncated else (),
+                "ready",
+            )
+    except Exception:  # noqa: BLE001 - an additive listing reports its fault and lists nothing
+        log.debug("activation related-page listing unavailable", exc_info=True)
+        return (), (), "unavailable"
 
 
 def _carry_roles(
@@ -3849,9 +3972,9 @@ def _compile_packet(
         raise BudgetExhausted("working_set.semantic")
     with _span(timings, "working_set.semantic"):
         if anchor and not task_refresh:
-            bands, semantic_state = {}, "agent_choice"
+            bands, semantic_state, turn_vector = {}, "agent_choice", None
         else:
-            bands, semantic_state = signature_evidence(index, turn)
+            bands, semantic_state, turn_vector = signature_evidence(index, turn)
     generation["semantic_evidence"] = semantic_state
 
     row_lexicons = None
@@ -4557,7 +4680,7 @@ def _compile_packet(
         # agent to pick; nothing is served from it and the turn stays
         # `unresolved`.
         listed = tuple(anchor.as_dict() for anchor in resolution.anchors)
-        titled = (
+        titled, title_window = (
             _title_named_anchors(
                 root,
                 turn=turn,
@@ -4573,18 +4696,42 @@ def _compile_packet(
                 query_context=query_context,
             )
             if carry_named_nothing
-            else ()
+            else ((), None)
         )
+        # A turn that abstains with nothing listed may still list pages two
+        # independent readings agree on (`related_pages`). Nothing is served.
+        related: tuple[dict[str, Any], ...] = ()
+        related_missing: tuple[dict[str, Any], ...] = ()
+        if (
+            not anchor
+            and not analysis.referential
+            and carry_named_nothing
+            and not resolution.anchors
+            and not titled
+            and analysis.content_words
+        ):
+            related, related_missing, generation["related_evidence"] = related_pages(
+                root,
+                window=title_window,
+                turn_vector=turn_vector,
+                semantic_state=semantic_state,
+                visible=visible,
+                status_basis=status_basis,
+                index=index,
+                timings=timings,
+            )
         return abstained_packet(
             reason=resolution.status,
             max_chars=limit,
             generation=generation,
             anchors=(*listed, *titled),
             ambiguity=resolution.ambiguity,
-            missing=({"role": "anchors", "reason": "lane_truncated"},)
-            if resolution.truncated
-            else (),
+            missing=(
+                *(({"role": "anchors", "reason": "lane_truncated"},) if resolution.truncated else ()),
+                *related_missing,
+            ),
             recent_context=recent,
+            related=related,
             status_basis=status_basis,
         )
 

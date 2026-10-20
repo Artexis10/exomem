@@ -174,7 +174,7 @@ def _packet_publications(packet: Any) -> set[str] | None:
         return None
     paths: set[str] = set()
     # These are packet schema blocks, not customer-defined roles or meanings.
-    for block in ("anchors", "recent_context", "current_state", "units"):
+    for block in ("anchors", "related", "recent_context", "current_state", "units"):
         entries = packet.get(block, [])
         if not isinstance(entries, list):
             return None
@@ -3589,6 +3589,22 @@ def guard_working_set(
     ]
     _note_removal("anchors", len(original_anchors), len(guarded["anchors"]))
 
+    # Related pages are anchor-shaped and listed for the owner alone, so a
+    # restricted reader's packet has none; this guard is the second line, for a
+    # packet that reaches one anyway.
+    original_related = [
+        item for item in guarded.get("related") or () if isinstance(item, Mapping)
+    ]
+    if original_related:
+        guarded["related"] = [
+            entry
+            for entry in (
+                _guarded_anchor(item, frozen, decisions, invalid_refs) for item in original_related
+            )
+            if entry is not None
+        ]
+        _note_removal("related", len(original_related), len(guarded["related"]))
+
     original_recent = [
         item for item in guarded.get("recent_context") or () if isinstance(item, Mapping)
     ]
@@ -4173,6 +4189,7 @@ def _working_set_paths(
     for section in (
         "recent_context",
         "anchors",
+        "related",
         "units",
         "pointers",
         "current_state",

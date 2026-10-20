@@ -165,7 +165,7 @@ def test_a_matrix_served_by_catch_up_counts_as_used(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(idx, "_load_all_rows", _load_once)
     idx.all_vectors()
     assert idx.cache_status()["hits"] == 1
-    monkeypatch.setattr(sidecar_store, "try_serve_cached", lambda _c, _path: None)
+    monkeypatch.setattr(sidecar_store, "try_serve_cached", lambda _c, _path, **_kwargs: None)
     monkeypatch.setattr(
         idx,
         "_catch_up_cache",
