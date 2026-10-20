@@ -537,6 +537,12 @@ It SHALL apply existing pointer, context and disclosure limits without automatic
 - **AND** a reader from whom nothing is withheld gets a partial correction context when the target page no longer exists or its page name matches several pages
 - **AND** a reader denied any page gets the same packet for a withheld or a deleted target page as for a claim without that relation
 
+#### Scenario: Visible page-name ambiguity remains incomplete for a restricted reader
+- **WHEN** a selected claim names an exact dependency through a name shared by several pages visible to the reader
+- **THEN** the compiler reports a partial correction context and emits no substitute pointer
+- **AND** restrictions on other pages do not suppress that partial outcome
+- **AND** hidden namesakes produce the same packet as their absence
+
 ### Requirement: A Planning item anchor reports its item page
 Each active Planning item's `plan` anchor SHALL report the item's own canonical page as
 its ref, and the active-plans lane SHALL spell the item by that ref, so a turn that
