@@ -380,8 +380,10 @@ items they covered (`paths` on the `index.*` components, `texts`/`chars` on
 `advisory.overlap_groups`). The key is absent on a span that measured only time,
 so nothing about an existing row changes.
 
-During MCP calls every span also carries `thread_cpu_us` and `process_cpu_us`,
-including spans that raise. `thread_cpu_us` measures CPU on the executing thread.
+During MCP calls, spans opened with `call_spans.span` and recall stage spans
+also carry `thread_cpu_us` and `process_cpu_us`, including spans that raise.
+Spans recorded directly, such as `egress.artifact_gate` and
+`lexical.publication_wait`, carry them only when their caller measured them. `thread_cpu_us` measures CPU on the executing thread.
 `process_cpu_us` measures CPU of the whole process over the same interval; it
 does not name the thread that used it, and it can read slightly below
 `thread_cpu_us`. Wall time far above both clocks is a wait on a lock, I/O,
