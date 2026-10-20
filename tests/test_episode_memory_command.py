@@ -380,8 +380,8 @@ def test_a_revision_that_changed_after_it_was_read_loses_and_is_re_read(
     interleaved: list[dict] = []
     armed = [True]
 
-    def read_then_interleave(vault_root, key, audience):
-        observed = real(vault_root, key, audience)
+    def read_then_interleave(vault_root, key, audience, **kwargs):
+        observed = real(vault_root, key, audience, **kwargs)
         if armed[0]:
             armed[0] = False
             interleaved.append(_record(vault, summary="A concurrent account."))
@@ -1095,6 +1095,8 @@ def test_direct_heat_failure_does_not_turn_committed_episode_into_retryable_erro
 def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import call_ledger, call_spans
+
     real = episode_recovery.EpisodeInputOwner.bind_committed_input
     calls = {"n": 0}
 
@@ -1105,9 +1107,15 @@ def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
         return real(self, key, path=path, reference=reference, about=about)
 
     monkeypatch.setattr(episode_recovery.EpisodeInputOwner, "bind_committed_input", failing_once)
-    with request_scope(owner_principal(surface="mcp")):
-        first = _record(vault)
-        retried = _record(vault)
+    token = "episode-unbound-journal-retry"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            first = _record(vault)
+            retried = _record(vault)
+    finally:
+        spans = call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
 
     assert first["ledger"] == "unbound"
     assert first["revision"] is None
@@ -1115,6 +1123,20 @@ def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     assert retried["ledger"] == "bound"
     assert retried["revision"] == 1
     assert len(_episodes(vault)) == 1
+    row = call_ledger.build_row(
+        sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id=token,
+        tool="episode_memory", outcome="ok", duration_ms=None, access="write", spans=spans,
+    )
+    phases = {span["name"]: span for span in row["spans"]}
+    # Failed binding and an idempotent Source retry must both remain attributable.
+    for name in ("episode.guard_entry", "episode.write", "episode.revisions", "episode.journal_bind"):
+        assert phases[name]["count"] == 2
+    assert {
+        name: value for name, value in phases["episode.revisions"]["fields"].items()
+        if name not in call_spans.CPU_FIELDS
+    } == {
+        "listed_files": 1, "matched_files": 1, "failed_reads": 0, "live_revisions": 1,
+    }
 
 
 def test_a_full_episode_ledger_says_so_and_a_retry_does_not_rebind_or_duplicate(
