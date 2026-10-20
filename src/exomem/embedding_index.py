@@ -1591,6 +1591,29 @@ class EmbeddingIndex:
             return served
         return None
 
+    def resident_matrix(self) -> _EmbCache | None:
+        """The matrix cache when it already serves the current publication, else None.
+
+        For a reader that must not wait and must not start work, such as
+        activation: no lock, no load, no background load and no catch-up. A
+        cold, stale or disk-scored matrix is None, and the caller reports
+        that rather than asking for more.
+        """
+        if not self.path.exists() or cloud_cell.resource_policy() == "service-v1":
+            return None
+        from . import recall_policy
+
+        return self._serve_resident(recall_policy.recall_policy_identity(self.vault_root))
+
+    def resident_token(self) -> tuple[int, int, int] | None:
+        """The write token of the matrix held now, read with no I/O, for a cache key.
+
+        It moves when the held matrix is replaced, patched or dropped. Whether
+        that matrix still serves the sidecar is `resident_matrix`'s question.
+        """
+        held = self._cache
+        return None if held is None else (held.epoch, held.generation, held.instance)
+
     def require_resident_matrix(self) -> _EmbCache | None:
         """The matrix that serves now, or a background load and a raise.
 

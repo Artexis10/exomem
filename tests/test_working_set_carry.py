@@ -2594,7 +2594,7 @@ def test_possessive_band_demotion_retires_affected_ambiguity(
     lexstore.ensure_fresh(carry_vault)
     working_set_index.WorkingSetIndex(carry_vault).rebuild()
     monkeypatch.setattr(working_set, "signature_evidence",
-        lambda *_: ({SLED_ANCHOR: True, second: True}, "ready"))
+        lambda *_: ({SLED_ANCHOR: True, second: True}, "ready", None))
     packet = working_set.compile_packet(carry_vault,
         turn="Explain the sled's calibration.", max_chars=4000)
     assert _statuses(packet)[SLED_ANCHOR] == _statuses(packet)[second] == "partial"
@@ -2763,7 +2763,7 @@ def _band_on_the_sled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Semantic evidence as a real encoder would give it: the sled anchor
     clears the band, so a rare word of its name plus the band resolves it."""
     monkeypatch.setattr(
-        working_set, "signature_evidence", lambda _index, _turn: ({SLED_ANCHOR: True}, "ready")
+        working_set, "signature_evidence", lambda _index, _turn: ({SLED_ANCHOR: True}, "ready", None)
     )
 
 

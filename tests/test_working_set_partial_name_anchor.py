@@ -283,7 +283,7 @@ def test_a_semantic_band_cannot_yield_to_a_dependent_surname_carry(
     _entity(workshop_vault, PERSON, "Nora Hedge", IDENTITY, person=True)
     _entity(workshop_vault, PROJECT, "Kelvane Rollout", "The rollout calendar uses two waves.")
     _reindex(workshop_vault)
-    monkeypatch.setattr(working_set, "signature_evidence", lambda *_: ({PROJECT: True}, "ready"))
+    monkeypatch.setattr(working_set, "signature_evidence", lambda *_: ({PROJECT: True}, "ready", None))
     independent = working_set_runtime.lexical_hits_without
     surname_checks: list[frozenset[str]] = []
 
@@ -468,7 +468,7 @@ def test_prior_entity_fragment_does_not_hide_its_band_dependency(
     _entity(carry_vault, entity, "Copper Hedge", "The original supplier")
     _reindex(carry_vault)
     monkeypatch.setattr(working_set, "signature_evidence",
-        lambda _index, _turn: ({entity: True}, "ready"))
+        lambda _index, _turn: ({entity: True}, "ready", None))
 
     packet = commands.op_activate_context(carry_vault,
         turn="What did we decide about the quillon vantry window for the hedge?",

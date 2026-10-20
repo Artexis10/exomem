@@ -55,7 +55,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import (
     activation_conventions,
@@ -1869,6 +1869,17 @@ def carry_candidates(
     return tuple(sorted(merged.items(), key=lambda item: (-item[1], item[0]))), state
 
 
+class TitleListing(NamedTuple):
+    """What one bounded title query answered: `window`, its ranked rows with
+    raw material and navigation already excluded, and `named`, the current
+    pages among them whose title the turn names. `state` is the readiness
+    status; `window` and `named` are empty unless it is `available`."""
+
+    window: tuple[tuple[str, float], ...]
+    named: tuple[tuple[str, float], ...]
+    state: str
+
+
 def title_named_pages(
     vault_root: Path,
     turn: str,
@@ -1879,8 +1890,31 @@ def title_named_pages(
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
 ) -> tuple[tuple[tuple[str, float], ...], str]:
+    """`title_listing`'s named pages and its readiness status."""
+    listing = title_listing(
+        vault_root,
+        turn,
+        freshness=freshness,
+        recall_checkpoint=recall_checkpoint,
+        visible=visible,
+        status_basis=status_basis,
+        query_context=query_context,
+    )
+    return listing.named, listing.state
+
+
+def title_listing(
+    vault_root: Path,
+    turn: str,
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
+) -> TitleListing:
     """Current pages whose TITLE the turn names in ordinary words, in rank
-    order. Returns `(hits, readiness status)`.
+    order, with the ranked rows of the query they were read from.
 
     For a turn the carry named nothing in: "the smooth chain cleaning" names
     the page titled "Smooth chain cleaning", although none of those words is
@@ -1902,6 +1936,9 @@ def title_named_pages(
     owner and a restricted reader alike. The corpus-size floor does not
     apply: it exists because rarity cannot be measured in a small vault, and
     nothing here measures rarity.
+
+    `window` is those rows as ranked, before the naming and lifecycle tests:
+    a caller that lists a page from it checks that the page is current.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import lexstore
@@ -1917,7 +1954,7 @@ def title_named_pages(
         sentences = _positioned_units(turn)
         units = bm25_module.token_units(turn, query=True)
         if len({unit for unit in units}) < 2:
-            return (), "available"
+            return TitleListing((), (), "available")
         # Reuse request admission only after this snapshot proves its generation.
         corpus = lexstore.carry_term_statistics(
             vault_root,
@@ -1930,7 +1967,7 @@ def title_named_pages(
             query_context=query_context,
         )
         if not corpus.readiness.complete:
-            return (), corpus.readiness.status
+            return TitleListing((), (), corpus.readiness.status)
         _frequencies, corpus_pages, _paths, _admitted = corpus.value
         result = lexstore.search_bm25_result(
             vault_root,
@@ -1950,17 +1987,21 @@ def title_named_pages(
             query_context=query_context,
         )
         if not result.readiness.complete:
-            return (), result.readiness.status
-        return (
+            return TitleListing((), (), result.readiness.status)
+        window = tuple(
+            (str(path), float(score))
+            for path, score in (result.value or ())
+            if not _is_raw_material(str(path)) and not _is_navigation_page(str(path))
+        )
+        return TitleListing(
+            window,
             tuple(
-                (str(path), float(score))
-                for path, score in (result.value or ())
-                if not _is_raw_material(str(path))
-                and not _is_navigation_page(str(path))
+                (path, score)
+                for path, score in window
                 # Naming first: each test reads the page, and most rows are
                 # not named, so the lifecycle read is paid only by those that are.
-                and _names_title(sentences, working_set._page_title(vault_root, str(path)))
-                and working_set._is_current_page(vault_root, str(path), status_basis=status_basis)
+                if _names_title(sentences, working_set._page_title(vault_root, path))
+                and working_set._is_current_page(vault_root, path, status_basis=status_basis)
             ),
             "available",
         )
@@ -1968,7 +2009,7 @@ def title_named_pages(
         raise egress.ReaderViewUnavailable("status classification is unavailable") from error
     except Exception:  # noqa: BLE001 - a listing is additive; it lists nothing, never raises
         log.debug("activation title listing unavailable", exc_info=True)
-        return (), "unavailable"
+        return TitleListing((), (), "unavailable")
 
 
 def _names_title(
@@ -2269,6 +2310,10 @@ def serve(
         lexical_state,
         index.token(),
         working_set.band_audience_allowed(root),
+        # The related-page listing reads the resident chunk matrix, so a packet
+        # compiled against one matrix is never served after it is replaced,
+        # patched or dropped.
+        _resident_matrix_token(root),
     )
     # A reader other than the owner resolves anchors over its own view
     # (`working_set_resolve.audience_view`), so its packet is neither served
@@ -2367,11 +2412,11 @@ def serve(
         # would go on saying `index_stale` after the catalogue caught up.
         packet["generation"]["index_stale"] = True
         return packet
-    if packet["generation"].get("semantic_evidence") in {
-        "warming",
-        "busy",
-        "unavailable",
-    } or lexical_state not in {"available", "not_requested", "agent_choice"}:
+    if (
+        packet["generation"].get("semantic_evidence") in _TRANSIENT_SEMANTIC_STATES
+        or packet["generation"].get("related_evidence") in _TRANSIENT_SEMANTIC_STATES
+        or lexical_state not in {"available", "not_requested", "agent_choice"}
+    ):
         return packet
     # A lane can recover without changing the vault or its catalogue token.
     # Retain this request's coverage, but never cache a transient lookup failure.
@@ -2385,6 +2430,23 @@ def serve(
         while len(_PACKET_CACHE) > CACHE_SIZE:
             _PACKET_CACHE.popitem(last=False)
     return packet
+
+
+#: States of an optional semantic reading that can recover without the vault,
+#: the catalogue or a matrix changing, so a packet carrying one is never stored.
+_TRANSIENT_SEMANTIC_STATES = frozenset({"warming", "busy", "unavailable"})
+
+
+def _resident_matrix_token(root: Path) -> tuple[int, int, int] | None:
+    """The write token of the resident chunk matrix, or None when none is held.
+
+    Read with no I/O and no load, and not at all while embeddings are off.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    from . import embeddings
+
+    return embeddings.get_embedding_index(root).resident_token()
 
 
 def _key_text(freshness_key: Any) -> str:
