@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.132.5](https://github.com/Artexis10/exomem/compare/v0.132.4...v0.132.5) (2026-10-20)
+
+
+### Bug Fixes
+
+* **collection-store:** preserve originals for compatible application rollback ([#1959](https://github.com/Artexis10/exomem/issues/1959)) ([1474f9a](https://github.com/Artexis10/exomem/commit/1474f9a3a7f4e3cc5d8cb8aa1058fb76a993dbea))
+
+
+### Performance
+
+* **file-ops:** measure semantic move preflight ([#1957](https://github.com/Artexis10/exomem/issues/1957)) ([744e65a](https://github.com/Artexis10/exomem/commit/744e65a553905625457a61718b8079268c9fbf4b))
+
 ## [0.132.4](https://github.com/Artexis10/exomem/compare/v0.132.3...v0.132.4) (2026-10-20)
 
 

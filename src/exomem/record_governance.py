@@ -2113,7 +2113,7 @@ def _json_value(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -
     if type(value) is float:
         return value == value and value not in {float("inf"), float("-inf")}
     if type(value) is str:
-        return len(value.encode("utf-8")) <= 16 * 1024
+        return len(value.encode("utf-8")) <= query_data.MAX_RESPONSE_BYTES
     if isinstance(value, list):
         return all(_json_value(item, depth=depth + 1, nodes=nodes) for item in value)
     if isinstance(value, Mapping):
@@ -2460,6 +2460,9 @@ def project_query_result(
     try:
         rendered = record_formats.render_query_result(typed, output_format=output_format)
     except (collections.CollectionError, TypeError, ValueError):
+        return _withheld_query()
+    # Rebuilt output shares the producer's response bound, including valid long fields.
+    if len(rendered.encode("utf-8")) > query_data.MAX_RESPONSE_BYTES:
         return _withheld_query()
     payload = _RecordEnvelope(
         {

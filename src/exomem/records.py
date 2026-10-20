@@ -5402,6 +5402,9 @@ def _semantic_body(
 ) -> str:
     """Ignore one valid renderer span when comparing append retries."""
     shared = manifest is not None and manifest.item_presentation is not None
+    if manifest is not None and not shared and manifest.record_presentation is None:
+        # Without its recipe, an old renderer span is unowned body text.
+        return body
     try:
         span = (
             record_formats._item_presentation_span(body)

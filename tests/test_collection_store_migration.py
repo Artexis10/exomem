@@ -76,7 +76,7 @@ def _append_log(root, lines):
     log.write_text(log.read_text() + "".join(line + "\n" for line in lines))
 
 
-def legacy_vault(root):
+def legacy_vault(root, *, relationships=False):
     """A file-mode vault as P1b.1 generates them: every shape the migration must carry."""
     init_vault(root)
     ledger(root)  # Records items, filename recipe, real writer history: an `ok` chain
@@ -85,11 +85,22 @@ def legacy_vault(root):
     # Records items with a held file and a `gap` chain: its last event names another manifest.
     work = root / WORK
     work.parent.mkdir(parents=True)
-    work.write_text(manifest_text("records"))
+    text = manifest_text("records")
+    values = {"title": "One", "count": 3}
+    if relationships:
+        text = text.replace("item_schema:\n", "item_presentation:\n  version: 1\n  title: title\n"
+                            "  relationships: [related]\nitem_schema:\n").replace(
+            "    count: {type: integer}\n", "    count: {type: integer}\n    related: {type: link, link_kind: memory}\n")
+        target = root / "Knowledge Base/Notes/Reference.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# Reference label\n")
+        values["related"] = "[[Reference]]"
+    work.write_text(text)
     manifest = collections.load_manifest(root, work)
     (work.parent / "Items").mkdir()
     (work.parent / "Items/Original.md").write_text(
-        record_formats.render_markdown_item(manifest, {"title": "One", "count": 3}, KEY, "Authored body\n"))
+        record_formats.render_markdown_item(manifest, values, KEY, "Authored body\n",
+            resolve_relationship=record_formats.presentation_relationship_resolver(root, manifest, None)))
     _held(work, 1, {"action": "append", "item": {"title": "Held"}})
     work.write_text(record_formats.render_manifest_audit_head(
         work.read_text(), f"{3:024x}", semantic_profile="records", reader_version=1))
@@ -259,10 +270,10 @@ def test_a_failed_proof_leaves_no_store_marker_or_fence_and_names_the_collection
     before = vault_bytes(root)
     original = legacy_import._prove_round_trip
 
-    def drift(captured, *args):
+    def drift(captured, *args, **kwargs):
         if captured.manifest.collection_id == LEDGER_ID:
             legacy_import._refuse("b", "render/parse values, body, identity or natural key differ")
-        return original(captured, *args)
+        return original(captured, *args, **kwargs)
 
     monkeypatch.setattr(legacy_import, "_prove_round_trip", drift)
     assert migrate(root, "apply") == 1
@@ -463,13 +474,16 @@ def foreign_evidence(root):
     return sorted(sha256(path) for path in (root / "Knowledge Base/_Collections").glob(".foreign-*"))
 
 
-@pytest.mark.parametrize("cut", ["before-install", "after-install", "after-fence-cas", "after-publication"])
+@pytest.mark.parametrize("cut,relationships", [
+    ("before-install", False), ("after-install", False), ("after-fence-cas", False),
+    ("after-publication", False), ("after-install", True),
+])
 def test_a_file_changed_outside_the_lease_after_the_fence_cut_supersedes_the_unadmitted_store(
-        env, capsys, tmp_path, cut):
+        env, capsys, tmp_path, cut, relationships):
     """A cutover that admits an import whose files changed after the fence cut, which no writer inside
     the lease could have made, or that stays refused until the owner restores the files by hand; or a
     supersede cut at any step that does not converge, or drops the superseded store's replica."""
-    root = legacy_vault(env)
+    root = legacy_vault(env, relationships=relationships)
     crash_apply(tmp_path, "before-marker")
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         superseded = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
@@ -570,7 +584,7 @@ def test_staging_whose_basis_lacks_a_field_is_rebuilt(env, capsys):
     assert (applied["status"], applied["rebuilt_because"]) == ("marker_admitted", migration.NO_BASIS)
 
 
-def write_from_another_state_dir(monkeypatch, tmp_path, module, name, title):
+def write_from_another_state_dir(monkeypatch, tmp_path, module, name, title, *, root):
     """Make ``module.name`` let one writer that keeps its lease state elsewhere append to Work once.
 
     Such a writer (a system service beside a user shell) does not share the owner's
@@ -588,7 +602,7 @@ def write_from_another_state_dir(monkeypatch, tmp_path, module, name, title):
                 with library_scope(), pytest.MonkeyPatch.context() as shell:
                     shell.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "other-lease-state"))
                     try:
-                        written.append(append_to_work(args[0], title))
+                        written.append(append_to_work(root, title))
                     except Exception as error:  # noqa: BLE001 - the test thread re-raises the writer's error
                         errors.append(error)
 
@@ -610,7 +624,7 @@ def test_a_write_from_outside_the_owner_boundary_during_staging_reaches_the_stor
     root = legacy_vault(env)
     assert migrate(root, "prepare", operator=False) == 0
     capsys.readouterr()
-    written = write_from_another_state_dir(monkeypatch, tmp_path, migration, "_carried", "Written during staging")
+    written = write_from_another_state_dir(monkeypatch, tmp_path, migration, "_carried", "Written during staging", root=root)
     assert migrate(root, "apply") == 0
     applied = printed(capsys)
     assert (applied["status"], applied["rebuilt_because"], applied["changed"]) == (
@@ -628,7 +642,7 @@ def test_a_write_from_outside_the_owner_boundary_before_a_resume_reaches_the_sto
     root = legacy_vault(env)
     crash_apply(tmp_path, "before-fence")
     written = write_from_another_state_dir(monkeypatch, tmp_path, migration, "_changed_since_publication",
-                                           "Written before the resume")
+                                           "Written before the resume", root=root)
     assert migrate(root, "apply") == 0
     assert printed(capsys)["status"] == "marker_admitted"
     service = start_service(root)
@@ -983,10 +997,10 @@ def test_a_failed_proof_on_an_s1_vault_reports_it_and_leaves_the_store_marker_an
         head = chain.verify_store_chain(reader)
     original = legacy_import._prove_round_trip
 
-    def drift(captured, *args):
+    def drift(captured, *args, **kwargs):
         if captured.manifest.collection_id == LEDGER_ID:
             legacy_import._refuse("b", "render/parse values, body, identity or natural key differ")
-        return original(captured, *args)
+        return original(captured, *args, **kwargs)
 
     monkeypatch.setattr(legacy_import, "_prove_round_trip", drift)
     assert migrate(root, "apply") == 1
@@ -1175,10 +1189,10 @@ def test_an_s1_restore_cut_before_its_fork_finishes_on_the_next_apply(s1, capsys
 
 def refuse_ledger_round_trip(original):
     """The import proof as it fails for one collection whose rendered rows do not parse back."""
-    def drift(captured, *args):
+    def drift(captured, *args, **kwargs):
         if captured.manifest.collection_id == LEDGER_ID:
             legacy_import._refuse("b", "render/parse values, body, identity or natural key differ")
-        return original(captured, *args)
+        return original(captured, *args, **kwargs)
     return drift
 
 

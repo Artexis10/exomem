@@ -16,9 +16,9 @@ from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import held_fs, record_formats, records, vault
 from exomem import structured_collections as collections
-from exomem.collection_store import chain, legacy, legacy_import, schema
+from exomem.collection_store import chain, export, legacy, legacy_import, ownership, runtime, schema, views
 from exomem.collection_store.connection import CollectionStoreError, _writer_engine
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import library_scope, request_scope
 
 CONTEXT = legacy_import.ImportContext("migration-test", "2026-10-02T10:00:00Z", "attempt-one")
 
@@ -40,12 +40,14 @@ def _items(tmp_path, *, profile="records", text=None, values=None, body="Authore
 
 
 @contextmanager
-def _capture(tmp_path, root, path):
+def _capture(tmp_path, root, path, *, presentation_operation=None):
     stage = tmp_path / "stage"
     stage.mkdir(exist_ok=True, mode=0o700)
     with legacy.LegacyAuditSpool(stage, deadline=time.monotonic() + 60) as audit:
         audit.scan(root)
-        yield audit, legacy_import.capture_legacy_collection(root, path, audit=audit)
+        yield audit, legacy_import.capture_legacy_collection(
+            root, path, audit=audit, presentation_operation=presentation_operation
+        )
 
 
 @contextmanager
@@ -425,6 +427,188 @@ def test_managed_presentation_imports_under_the_file_mode_payload_identity(tmp_p
             records._payload_hash(captured.manifest, KEY, record.values, record.body),
         )
         assert (path.parent / "Items/Original.md").read_bytes() == before
+
+
+@pytest.mark.parametrize("presented", [False, True])
+def test_import_preserves_temporal_spelling_and_the_legacy_payload_identity(tmp_path, presented):
+    text = manifest_text().replace(
+        "    count: {type: integer}\n",
+        "    count: {type: integer}\n"
+        "    day: {type: date}\n"
+        "    at: {type: datetime}\n"
+        "    later: {type: datetime}\n",
+    )
+    if presented:
+        text = text.replace(
+            "item_schema:\n",
+            "item_presentation:\n  version: 1\n  title: title\n  summary: [day, at, later]\nitem_schema:\n",
+        )
+    values = {"title": "One", "day": "20261002", "at": "2026-10-02T10:00:00Z",
+              "later": "2026-10-02T12:00:00+0200"}
+    root, path = _items(tmp_path, text=text, values=values)
+    item = path.parent / "Items/Original.md"
+    before = item.read_bytes()
+
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
+        with conn:
+            conn.execute("BEGIN")
+            legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        (record,) = captured.snapshot.records
+        stored, body, payload = conn.execute(
+            "SELECT values_json,body,payload_hash FROM items WHERE item_key=?", (KEY,)
+        ).fetchone()
+        assert json.loads(stored) == values == record.values
+        assert body == records._semantic_body(record.body, captured.manifest, values)
+        assert payload == records._payload_hash(captured.manifest, KEY, values, record.body)
+        assert item.read_bytes() == before
+
+
+@pytest.mark.parametrize("title_field", ["title", "caption"])
+def test_relationships_import_render_and_export_from_canonical_items_without_recursion(tmp_path, title_field):
+    text = manifest_text().replace(
+        "item_schema:\n",
+        f"item_presentation:\n  version: 1\n  title: {title_field}\n  relationships: [related]\nitem_schema:\n",
+    ).replace(
+        "    count: {type: integer}\n",
+        "    related: {type: link, link_kind: record}\n    caption: {type: string}\n",
+    )
+    root, path = _items(tmp_path, text=text)
+    manifest = collections.load_manifest(root, path)
+    target_key = "22222222-2222-4222-8222-222222222222"
+    path_key = "33333333-3333-4333-8333-333333333333"
+    alias_key = "44444444-4444-4444-8444-444444444444"
+    target_path = manifest.storage.source + "/Target.md"
+    for key, filename, values in (
+        (KEY, "Source.md", {"title": "Source", "related": f"exomem://record/{CID}/{target_key}"}),
+        (target_key, "Target.md", {"title": "Canonical target", "related": f"exomem://record/{CID}/{KEY}"}),
+        (path_key, "Path.md", {"title": "Path", "related": f"[[{target_path}]]"}),
+        (alias_key, "Alias.md", {"title": "Alias", "related": "[[Canonical target]]"}),
+    ):
+        (path.parent / "Items" / filename).write_text(record_formats.render_markdown_item(
+            manifest, values, key, "Authored body\n",
+            resolve_relationship=lambda kind, raw: (target_path, "Fixture label"),
+        ))
+    originals = {p: p.read_bytes() for p in (path.parent / "Items").iterdir()}
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn, library_scope():
+        with conn:
+            conn.execute("BEGIN")
+            legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        assert all(p.read_bytes() == raw for p, raw in originals.items())
+        (root / target_path).write_text("---\ntitle: Unadopted private edit\n---\n")
+        for key in (KEY, path_key, alias_key):
+            row_id = conn.execute("SELECT row_id FROM items WHERE item_key=?", (key,)).fetchone()[0]
+            _, rendered = views.render_view(conn, views.store_identity(conn),
+                {"kind": "item", "row_id": row_id}, manifest, root=root)
+            assert f"[[{target_path[:-3]}|Canonical target]]" in rendered
+            assert "Unadopted private edit" not in rendered
+        rendered_export = dict(export._render_items(root, conn, manifest, CID))
+        assert all(b"Unadopted private edit" not in raw for raw in rendered_export.values())
+        (root / target_path).unlink()
+        for key in (KEY, path_key, alias_key):
+            row_id = conn.execute("SELECT row_id FROM items WHERE item_key=?", (key,)).fetchone()[0]
+            _, rendered = views.render_view(conn, views.store_identity(conn),
+                {"kind": "item", "row_id": row_id}, manifest, root=root)
+            assert f"[[{target_path[:-3]}|Canonical target]]" in rendered
+
+
+@pytest.mark.parametrize("change", ["target-edit", "new-ambiguity"])
+def test_relationship_capture_rejects_changed_targets_and_resolution(tmp_path, change):
+    text = manifest_text().replace(
+        "item_schema:\n",
+        "item_presentation:\n  version: 1\n  title: title\n  relationships: [related]\nitem_schema:\n",
+    ).replace("    count: {type: integer}\n", "    related: {type: link, link_kind: memory}\n")
+    root, path = _items(tmp_path, text=text)
+    target = root / "Knowledge Base/Notes/Target.md"
+    target.parent.mkdir()
+    target.write_text("# Original label\n")
+    manifest = collections.load_manifest(root, path)
+    (path.parent / "Items/Source.md").write_text(record_formats.render_markdown_item(
+        manifest, {"title": "Source", "related": "[[Target]]"}, KEY,
+        resolve_relationship=lambda kind, raw: (target.relative_to(root).as_posix(), "Original label"),
+    ))
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
+        if change == "target-edit":
+            target.write_text("# Changed label\n")
+        else:
+            other = root / "Knowledge Base/Other/Target.md"
+            other.parent.mkdir()
+            other.write_text("# Other label\n")
+        with pytest.raises(CollectionStoreError, match="COLLECTION_LEGACY_IMPORT_SOURCE_CHANGED"):
+            with conn:
+                conn.execute("BEGIN")
+                legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        assert conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0] == 0
+
+
+def test_offline_mixed_capture_uses_the_verified_base_without_admitting_staged_file_rows(tmp_path, store):
+    root = store.root
+    store.create_collection(manifest_path(), manifest_text(), why="create base", scaffold=False)
+    first = store.append_record(CID, item={"title": "Canonical base"}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    base = ownership.current(root, conn=store.connection, private=True)
+    incoming = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    text = manifest_text().replace(CID, incoming).replace(
+        "item_schema:\n",
+        "item_presentation:\n  version: 1\n  title: title\n  relationships: [related]\nitem_schema:\n",
+    ).replace("    count: {type: integer}\n", "    related: {type: link, link_kind: record}\n")
+    path = root / "Knowledge Base/Records/Incoming/_collection.md"
+    store.create_collection(str(path.relative_to(root)), text, why="stage another collection", scaffold=False)
+    store.append_record(incoming, item={"title": "Unpublished shadow"}, item_key=KEY, why="stage item")
+    store.reconcile_views()
+    manifest = collections.load_manifest(root, path)
+    source = root / manifest.storage.source
+    for old in source.glob("*.md"):
+        old.unlink()
+    own_ref = f"exomem://record/{incoming}/{KEY}"
+    for key, filename, values in (
+        (KEY, "Target.md", {"title": "File target"}),
+        ("22222222-2222-4222-8222-222222222222", "Own.md", {"title": "Own", "related": own_ref}),
+        ("33333333-3333-4333-8333-333333333333", "Base.md", {"title": "Base", "related": "[[Canonical base]]"}),
+    ):
+        (source / filename).write_text(record_formats.render_markdown_item(
+            manifest, values, key, resolve_relationship=lambda kind, raw: ("Knowledge Base/Notes/Target.md", "Fixture")
+        ))
+    (root / first["affected_paths"][0]).write_text("---\ntitle: Unadopted private edit\n---\n")
+    assert not runtime.served(root)
+    with legacy_import.presentation_context(root, conn=store.connection, ownership_proof=base) as operation, \
+            _capture(tmp_path, root, path, presentation_operation=operation) as (audit, captured), \
+            _connection() as conn:
+        resolutions = {(kind, raw): result for kind, raw, result in captured.presentation_resolutions}
+        assert resolutions[("record", own_ref)][1] == "File target"
+        assert resolutions[("record", "[[Canonical base]]")][1] == "Canonical base"
+        conn.execute("BEGIN")
+        legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        assert json.loads(conn.execute("SELECT values_json FROM items WHERE item_key=?", (KEY,)).fetchone()[0]) == {
+            "title": "File target"
+        }
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- exomem-record-presentation:v1 digest=sha256:" + "0" * 64 + " -->\n"
+        "Old rendering\n<!-- /exomem-record-presentation -->",
+        "<!-- exomem-item-presentation:v1 recipe=sha256:" + "0" * 64
+        + " item=sha256:" + "1" * 64 + " -->\nOld rendering\n<!-- /exomem-item-presentation:v1 -->",
+    ],
+    ids=["legacy", "shared"],
+)
+def test_import_preserves_presentation_text_without_its_recipe(tmp_path, marker):
+    # A removed recipe must neither crash import nor grant ownership of an old body span.
+    body = marker + "\n\n\nAuthored body\n"
+    root, path = _items(tmp_path, values={"title": "One"}, body=body)
+    item = path.parent / "Items/Original.md"
+    before = item.read_bytes()
+    expected_body = vault.parse_frontmatter(before.decode(), strict=True)[1]
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
+        with conn:
+            conn.execute("BEGIN")
+            legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        (record,) = captured.snapshot.records
+        assert conn.execute("SELECT body,payload_hash FROM items WHERE item_key=?", (KEY,)).fetchone() == (
+            expected_body, records._payload_hash(captured.manifest, KEY, record.values, record.body),
+        )
+        assert item.read_bytes() == before
 
 
 @pytest.mark.parametrize("change", ["manifest", "item", "held-add"])

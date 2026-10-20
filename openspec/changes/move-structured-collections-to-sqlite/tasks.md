@@ -361,6 +361,7 @@ Deliver the canonical reader, history projection and SQLite acknowledgement boun
   - `records-release-acceptance`: installed-wheel proof and disposable live MCP evidence for both built-ins in store mode;
   - current local and Cloud tool schemas keep their supported compatibility, and `minimum_records_reader_version` remains 2;
   - a dry-run migration of a disposable copy of a real-sized vault with every proof check green;
+  - an earlier application artifact qualified for the admitted schema, SQLite reads and writes, restart, and original-file archive preservation;
   - P1b.3c, the owner step that supersedes an unadmitted migration store whose fence is already cut;
   - P1b.4a, the owner step that abandons an export that cannot finish.
 

@@ -5,7 +5,7 @@
   "profile": "product-cloud",
   "resource": "https://exomem.substratesystems.io/mcp",
   "files": {
-    "claude/.claude-plugin/plugin.json": "271dfa4d148de7d0efe70ae3bba975d737a427e4496f6f54c260e5bbb999006c",
+    "claude/.claude-plugin/plugin.json": "c3c4573c6488a8bf27fa8532dbec03c5d3c2270862ee707b9774ff61f531f3ac",
     "claude/.mcp.json": "2cb290a4dcb2c7391aead34040e295a61aeb4d42924c111bcef1fbe77139a37e",
     "claude/LICENSE": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
     "claude/README.md": "61bc99de7b28dc6139609975142d8c5f8516c22f522948713b5dbab9967b169d",

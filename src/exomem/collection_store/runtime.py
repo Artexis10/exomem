@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .. import foreground_priority, state_paths
-from . import connection, replica, schema
+from . import connection, legacy_originals, replica, schema
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ def _replica_carries_live_head(path):
     """Whether the replica this store last published carries its committed head."""
     with closing(connection.open_reader(path)) as reader:
         reader.execute("BEGIN")
-        meta = dict(reader.execute("SELECT key,value FROM store_meta"))
+        meta = legacy_originals.metadata(reader)
     sequence, head = int(meta[schema.META_COMMIT_SEQ]), meta.get(schema.META_STORE_HEAD_HASH)
     published = json.loads(meta.get(schema.META_PUBLISHED_REPLICA_HEAD) or "null")
     if published is not None:
@@ -457,7 +457,7 @@ class CollectionStoreRuntime:
         # migrates the schema once this head lets the lease manager acquire for the store.
         with closing(connection.open_head_reader(self.path)) as reader:
             reader.execute("BEGIN")
-            metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
+            metadata = legacy_originals.metadata(reader)
             head = CollectionStoreHead(
                 metadata[schema.META_STORE_ID], metadata[schema.META_INSTANCE_ID],
                 int(metadata[schema.META_COMMIT_SEQ]), metadata.get(schema.META_STORE_HEAD_HASH),

@@ -14,7 +14,16 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from . import cell_init, held_fs, reserved_paths, state_migration, state_paths, vault_portability
-from .collection_store import authority, chain, connection, ownership, replica, schema, snapshot
+from .collection_store import (
+    authority,
+    chain,
+    connection,
+    legacy_originals,
+    ownership,
+    replica,
+    schema,
+    snapshot,
+)
 
 
 def archive_members(vault: Path) -> list[Path]:
@@ -167,7 +176,7 @@ def prepare_export(
         ) as artifact:
             with vault_portability.checked_collection_replica(vault, source_path=artifact.path, check=check) as verified:
                 canonical = verified.connection
-                canonical_meta = dict(canonical.execute("SELECT key,value FROM store_meta"))
+                canonical_meta = legacy_originals.metadata(canonical)
                 if previous is not None:
                     ownership_marker = (ownership.declarations(vault, canonical)[0] if raw_marker is None
                                         else authority.parse_marker(vault, raw_marker))
@@ -178,7 +187,7 @@ def prepare_export(
                     ) as old_verified:
                         old = old_verified.connection
                         authority.require_projection_ownership(old, ownership_marker, root=vault)
-                        old_meta = dict(old.execute("SELECT key,value FROM store_meta"))
+                        old_meta = legacy_originals.metadata(old)
                         relation = chain.head_relation(canonical, int(old_meta[schema.META_COMMIT_SEQ]),
                                                        old_meta.get(schema.META_STORE_HEAD_HASH))
                         old_lineage = json.loads(old_meta[schema.META_LINEAGE])

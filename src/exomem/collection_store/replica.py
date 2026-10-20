@@ -18,7 +18,7 @@ from pathlib import Path
 from .. import held_fs, reserved_paths
 from ..cli_ops import OpError
 from ..kbdir import kb_dirname
-from . import authority, connection, schema, snapshot, tokens
+from . import authority, connection, legacy_originals, schema, snapshot, tokens
 
 _OWNER = "collection_store.replica"
 _DESCRIPTOR = "collection-replica"
@@ -64,7 +64,7 @@ class _Verification:
 
 
 def _metadata(writer: connection.WriterConnection) -> dict[str, str]:
-    return dict(writer.connection.execute("SELECT key,value FROM store_meta"))
+    return legacy_originals.metadata(writer.connection)
 
 
 def _head(metadata: dict[str, str]) -> dict:
@@ -98,7 +98,7 @@ def file_writer_marker(root, acquired=None):
         return None
     with closing(connection.open_ownership_reader(connection.store_path(root))) as reader:
         reader.execute("BEGIN")
-        metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
+        metadata = legacy_originals.metadata(reader)
         head = CollectionStoreHead.from_json(_head(metadata))
         tail = reader.execute(
             "SELECT commit_seq,store_head_hash FROM txns ORDER BY commit_seq DESC LIMIT 1"
@@ -741,7 +741,7 @@ class _Publisher:
                                     raise _Retry("private copy differs from the ready intent")
                                 reader, _ = connection._open_read_only(private / leaf, 50)
                                 try:
-                                    metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
+                                    metadata = legacy_originals.metadata(reader)
                                 finally:
                                     reader.close()
                                 with filesystem.file(parent, leaf).require() as current:
@@ -808,7 +808,7 @@ class _Publisher:
         return (_intent_digest(metadata) == metadata.get(_INTENT)
                 and metadata.get(_EPOCH) == metadata.get(schema.META_LEASE_EPOCH))
 
-    def run(self, stage_new):
+    def run(self, stage_new, *, force=False):
         """Orderly publication: settle, then copy and swap the head known at entry, all under the boundary.
 
         It copies at a published head too when the intent or lease epoch changed since that copy.
@@ -817,9 +817,9 @@ class _Publisher:
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
-            if head == requested and self.carries_metadata() or not stage_new:
+            if (not force and head == requested and self.carries_metadata()) or not stage_new:
                 return self.current(digest, head)
-            while head is None or head["commit_seq"] < requested["commit_seq"] or not self.carries_metadata():
+            while force or head is None or head["commit_seq"] < requested["commit_seq"] or not self.carries_metadata():
                 pending = self.begin()
                 with ExitStack() as staging:
                     artifact = staging.enter_context(snapshot.staged_snapshot(
@@ -831,6 +831,7 @@ class _Publisher:
                         cleanup=False,
                     ))
                     head = self.install(pending, artifact, staging.close)
+                    force = head is None
             return PublicationResult("published", head["commit_seq"], head["head_hash"])
 
     def prepare(self):
@@ -955,6 +956,7 @@ def publish_replica(
     authority_check: Callable[[], bool],
     deadline: float,
     cancelled: Callable[[], bool] | None = None,
+    force: bool = False,
 ) -> PublicationResult:
     """Resolve pending work, then flush the committed head known at entry.
 
@@ -967,7 +969,7 @@ def publish_replica(
     opened by SQLite for writing; this foundation proves no live sync configuration.
     The vault's ordinary Knowledge Base directory must already exist.
     """
-    return _run(vault_root, writer, authority_check, deadline, cancelled, stage_new=True)
+    return _run(vault_root, writer, authority_check, deadline, cancelled, stage_new=True, force=force)
 
 
 def recover_replica(
@@ -1125,12 +1127,12 @@ def _alone(root, deadline):
         serial.lock.release()
 
 
-def _run(root, writer, authority_check, deadline, cancelled, *, stage_new):
+def _run(root, writer, authority_check, deadline, cancelled, *, stage_new, force=False):
     publisher = _publisher(root, writer, authority_check, deadline, cancelled)
 
     def attempt():
         with _alone(publisher.root, deadline):
-            return publisher.run(stage_new)
+            return publisher.run(stage_new, force=force)
 
     return _outcome(writer, attempt)
 

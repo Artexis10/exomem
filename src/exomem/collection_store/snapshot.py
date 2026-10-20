@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, reserved_paths
-from . import authority, connection, schema, tokens
+from . import authority, connection, legacy_originals, schema, tokens
 
 _PREFIX = ".exomem-collection-snapshot-"
 _TOKEN = re.compile(r"[0-9a-f]{32}", re.ASCII)
@@ -106,7 +106,7 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None], *,
         if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise ValueError("foreign key check failed")
         check()
-        metadata = dict(conn.execute("SELECT key,value FROM store_meta"))
+        metadata = legacy_originals.metadata(conn)
         if schema.schema_version(conn) != (schema.SCHEMA_VERSION if version is None else version):
             raise ValueError("unsupported schema")
         _uuid(metadata[schema.META_STORE_ID])
@@ -294,7 +294,7 @@ def staged_store_snapshot(
                     with closing(source):
                         check()
                         source.execute("BEGIN")
-                        source.execute("SELECT key,value FROM store_meta").fetchall()
+                        source.execute("SELECT key FROM store_meta LIMIT 1").fetchone()
                         check()
                         source.backup(
                             destination,
