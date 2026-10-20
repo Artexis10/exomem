@@ -1999,6 +1999,7 @@ class EmbeddingIndex:
         *,
         admits: Callable[[str], bool],
         encoded_for: Any = _UNSPECIFIED_SPACE,
+        defer_cold_load: bool = False,
     ) -> list[list[tuple[str, int, float]]]:
         """Top-k eligible chunk rows for each query row: `(file_path, chunk_idx, score)`.
 
@@ -2020,6 +2021,9 @@ class EmbeddingIndex:
         been considered. Scores agree with `search` to the BLAS kernel wobble
         the #951 note measured, and a non-finite score sorts last exactly as
         `search`'s guarded selection leaves it.
+
+        `defer_cold_load` behaves as in `search`: a cold matrix starts the one
+        background load and raises `recall_space.CorpusMatrixCold`.
         """
         if cloud_cell.resource_policy() == "service-v1":
             # An advisory may be inline in a save or receipt-owned background
@@ -2034,7 +2038,10 @@ class EmbeddingIndex:
                     [(path, chunk, score) for path, chunk, _text, score in hits]
                     for hits in self._disk_score(query_vecs, k, admits=admits, encoded_for=encoded_for)
                 ]
-        metadata, matrix = self.all_vectors()
+        resident = self.require_resident_matrix() if defer_cold_load else None
+        metadata, matrix = (
+            (resident.metadata, resident.matrix) if resident is not None else self.all_vectors()
+        )
         queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, matrix.shape[1])
         if not len(queries):
             return []
