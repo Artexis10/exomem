@@ -1466,11 +1466,13 @@ class StoreServer:
         """Whether background work ends after its current batch or window, which only frees the store sooner.
 
         A derived rebuild step and a views tick's run of edit-back windows both ask it. It is
-        true when a store request is queued, a writer waits for the boundary, or another request runs. The
+        true when a store request is queued, a lease handoff drains the store's borrowers, a writer
+        waits for the boundary, or another request runs. The
         waiter count is checked on its own: a request that awaits bulk work releases every pass,
         so ``foreground_elsewhere`` is then false, however many writers wait.
         """
-        return (bool(self._requests) or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
+        return (bool(self._requests) or self.manager._store_handoff
+                or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
                 or foreground_priority.foreground_elsewhere())
 
     def _views_tick(self):
