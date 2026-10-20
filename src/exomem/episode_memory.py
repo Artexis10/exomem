@@ -111,7 +111,9 @@ def _folder(vault_root: Path) -> Path:
     return kb_root(vault_root) / source_taxonomy.SOURCES_ROOT / source_taxonomy.EPISODE_PATH_LABEL
 
 
-def _revisions(vault_root: Path, key: str, audience: str) -> list[_Revision]:
+def _revisions(
+    vault_root: Path, key: str, audience: str, *, diagnostics: dict[str, int] | None = None
+) -> list[_Revision]:
     """This audience's recap pages of this episode, oldest first, from ONE
     listing of one folder.
 
@@ -126,12 +128,18 @@ def _revisions(vault_root: Path, key: str, audience: str) -> list[_Revision]:
         with os.scandir(folder) as entries:
             names = [entry.name for entry in entries if entry.is_file()]
     except FileNotFoundError:
+        if diagnostics is not None:
+            diagnostics.update(listed_files=0, matched_files=0, failed_reads=0)
         return []
+    if diagnostics is not None:
+        diagnostics["listed_files"] = len(names)
     matched = sorted(
         (parts[1], name)
         for name in names
         if (parts := episode_capture.filename_parts(name)) is not None and parts[0] == group
     )
+    if diagnostics is not None:
+        diagnostics.update(matched_files=len(matched), failed_reads=0)
     revisions: list[_Revision] = []
     for order, name in matched:
         path = folder / name
@@ -139,6 +147,8 @@ def _revisions(vault_root: Path, key: str, audience: str) -> list[_Revision]:
             text, _guard = read_guarded_text(vault_root, path)
             frontmatter, _body, _raw = parse_frontmatter(text)
         except (OSError, UnicodeDecodeError, ValueError):
+            if diagnostics is not None:
+                diagnostics["failed_reads"] += 1
             continue
         if frontmatter.get("episode") == key:
             revisions.append(
@@ -160,6 +170,7 @@ def _source(revision_path: str, frontmatter: dict[str, Any]) -> dict[str, str]:
     }
 
 
+@call_spans.timed("episode.write")
 def _write(
     vault_root: Path,
     source_schema: Any,
@@ -177,8 +188,12 @@ def _write(
     the listing is then read again and the write retried once.
     """
     for attempt in range(2):
-        revisions = _revisions(vault_root, recap.key, audience)
-        live = [item for item in revisions if item.live]
+        # These four fixed counts measure revision discovery, never page content.
+        revision_counts: dict[str, int] = {}
+        with call_spans.span("episode.revisions", revision_counts):
+            revisions = _revisions(vault_root, recap.key, audience, diagnostics=revision_counts)
+            live = [item for item in revisions if item.live]
+            revision_counts["live_revisions"] = len(live)
         if live and live[-1].frontmatter.get("episode_digest") == recap.digest:
             return _source(live[-1].path, live[-1].frontmatter), True
         # Never before the newest revision on disk, whatever the clock says.
@@ -307,7 +322,7 @@ def record(
                 )
                 if request_id is not None else nullcontext()
             )
-            with guard:
+            with call_spans.entered("episode.guard_entry", guard):
                 if preparation is not None and not preparation.current(vault_root, diagnostics=diagnostics):
                     continue
                 about_skipped = 0
@@ -331,9 +346,10 @@ def record(
                 revision: int | None
                 ledger_warnings: list[str] = []
                 try:
-                    bound = owner.bind_committed_input(
-                        recap.key, path=source["path"], reference=source["ref"], about=recap.about
-                    )
+                    with call_spans.span("episode.journal_bind"):
+                        bound = owner.bind_committed_input(
+                            recap.key, path=source["path"], reference=source["ref"], about=recap.about
+                        )
                 except (EpisodeError, curation.CurationError, OSError) as error:
                     if getattr(error, "code", None) == "EPISODE_OWNER_UNRESOLVED":
                         raise
