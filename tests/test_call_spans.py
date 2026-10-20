@@ -229,7 +229,7 @@ def test_a_public_move_attributes_preflight_to_its_existing_command_span(vault, 
             command, vault, operation="move", old_path=old_path, new_path=new_path,
         )
 
-    assert result["new_path"] == new_path
+    assert result["status"] == "committed"
     assert not (vault / old_path).exists()
     assert (vault / new_path).exists()
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
