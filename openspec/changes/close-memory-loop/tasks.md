@@ -243,6 +243,8 @@ The accepted 2026-10-05 refinement adds the following work to the episode slice;
 - [ ] 9.4 After authorized merges and complete required evidence, synchronize canonical specs and archive with OpenSpec; verify strict validation before/after, preserve later requirements and retire only clean pushed inactive task worktrees.
   Before this archive or that of `promote-referents-without-nudges`, whichever comes second refreshes its `delegation-envelope` MODIFIED block ("Hard authority ceilings bound every action class") from the canonical text, so neither drops the other's scenarios.
 
+- [ ] 9.10 Prevent numeric-only carry from incidental clock components while preserving complete numeric titles, concurrent text domains and alphanumeric names. Reuse bounded title qualification and admitted occurrence contacts; verify the public activation regression, existing carry/resolver/audience/lifecycle/work controls, independent review, containing release and installed outcome. This later repair follows a completed source batch and needs its own rollout.
+
 ## 10. Follow-on: cross-client live activity after the existing compiler tranches
 
 These tasks are deferred behind the existing compiler, client acceptance, adaptation and dreamer work. They do not gate delivery of those tranches or hosted launch. Track their implementation honestly before eventual umbrella closure; this roadmap entry is not live enablement.
