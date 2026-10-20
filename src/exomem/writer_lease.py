@@ -852,6 +852,11 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
     try:
         from . import derived_receipts
 
+        boundary_held = (
+            active_manager()
+            ._mutation_coordinator_for(session.vault_root)
+            .current_thread_holds_boundary()
+        )
         for batch in affected:
             batch.handoff_outcome = None
             batch.handoff_error = None
@@ -878,15 +883,20 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
                     raise RuntimeError(
                         "derived receipt did not prove the committed generation"
                     )
+                # Fresh proof and existing custody share the outer hold. The
+                # direct fallback still publishes because its proof released it.
                 where["stage"] = "pending_visibility"
-                with call_spans.span("derived.pending_visibility"):
-                    published = derived_receipts.publish_pending_visibility(
-                        session.vault_root,
-                        receipt,
-                        publisher=_PENDING_VISIBILITY_PUBLISHER,
-                    )
-                if not published:
-                    raise RuntimeError("pending visibility publication was not proven")
+                if not boundary_held or not derived_receipts.pending_visibility_complete(
+                    session.vault_root, receipt
+                ):
+                    with call_spans.span("derived.pending_visibility"):
+                        published = derived_receipts.publish_pending_visibility(
+                            session.vault_root,
+                            receipt,
+                            publisher=_PENDING_VISIBILITY_PUBLISHER,
+                        )
+                    if not published:
+                        raise RuntimeError("pending visibility publication was not proven")
                 where["stage"] = "signal"
                 derived_receipts.signal_components(session.vault_root, receipt)
             batch.handoff_outcome = proof.outcome
@@ -7378,10 +7388,15 @@ def invoke_command(
     #
     # `BaseException`, not `Exception`: a "terminal" filter that a Cancelled or
     # a SystemExit walks straight past is not terminal.
+    # Command names are fixed by the command schema; other commands keep their meter.
+    body_meter = (
+        call_spans.meter(call_spans.MOVE_PREFLIGHT_MS, call_spans.MOVE_PREFLIGHTS)
+        if command.name == "manage_memory_file" else nullcontext()
+    )
     if not read_only:
         try:
             # The same fixed phase labels as the read-only path below.
-            with call_spans.span("command.body"):
+            with body_meter as measured, call_spans.span("command.body", measured):
                 result = _invoke()
             with call_spans.span("command.terminal_filter"):
                 return postfilter(command.name, result, injected[0])
@@ -7400,7 +7415,7 @@ def invoke_command(
             disclosure_boundary(injected[0], command.name) as collector:
         try:
             # Fixed phase labels carry timing only, never caller or vault data.
-            with call_spans.span("command.body"):
+            with body_meter as measured, call_spans.span("command.body", measured):
                 result = _invoke()
             with call_spans.span("command.terminal_filter"):
                 result = postfilter(command.name, result, injected[0])

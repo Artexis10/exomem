@@ -38,6 +38,34 @@ def test_pypi_retry_keeps_matching_bytes_and_rejects_conflicting_immutable_file(
         recovery.missing_distributions([wheel], [row])
 
 
+def test_upload_publishes_release_assets_without_build_metadata(tmp_path, monkeypatch):
+    """Build metadata in the distribution directory must never become a release asset."""
+    cloud_names = ("sample-claude.zip", "sample-openai.zip", "sample-release.json")
+    expected = {
+        name: name.encode()
+        for name in ("sample-1.2.3-py3-none-any.whl", "sample-1.2.3.tar.gz", *cloud_names)
+    }
+    for name, data in {**expected, ".gitignore": b"*", "unrelated.txt": b"build metadata"}.items():
+        (tmp_path / name).write_bytes(data)
+    monkeypatch.setattr(recovery, "project", lambda tag: {"name": "sample", "version": "1.2.3"})
+    monkeypatch.setattr(recovery, "cloud_files", lambda tag: dict.fromkeys(cloud_names))
+    monkeypatch.setattr(recovery, "release_assets", lambda tag: [])
+    monkeypatch.setattr(
+        "sys.argv", ["release-recovery", "upload", "--tag", "v1.2.3", "--directory", str(tmp_path)]
+    )
+    uploaded = {}
+
+    def upload(*args):
+        assert args[:4] == ("gh", "release", "upload", "v1.2.3")
+        path = Path(args[4])
+        uploaded[path.name] = path.read_bytes()
+        return ""
+
+    monkeypatch.setattr(recovery, "run", upload)
+    recovery.main()
+    assert uploaded == expected
+
+
 def test_partial_release_receipts_can_be_completed_from_original_artifact(tmp_path):
     release = tmp_path / "release"
     artifact = tmp_path / "artifact"
@@ -76,17 +104,14 @@ def test_recovered_image_without_version_tag_finishes_each_tag_without_building(
     tags = {commit_tag: digest}
     monkeypatch.setattr(recovery, "image_digest", lambda ref: tags.get(ref))
     uploaded = {}
-    monkeypatch.setattr(
-        recovery,
-        "upload_missing",
-        lambda tag, directory: uploaded.update(
-            {p.name: p.read_bytes() for p in directory.iterdir()}
-        ),
-    )
 
     def command(*args):
         if args[0] == "git":
             return commit
+        if args[:4] == ("gh", "release", "upload", "v1.2.3"):
+            path = Path(args[4])
+            uploaded[path.name] = path.read_bytes()
+            return ""
         if args[:4] == ("docker", "buildx", "imagetools", "create"):
             assert args[-1] == repository + "@" + digest
             assert "--prefer-index=false" in args

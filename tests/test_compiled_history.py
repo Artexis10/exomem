@@ -24,6 +24,7 @@ from exomem import (
     compiled_history,
     registry_history,
     semantic_index,
+    semantic_language_registry,
     semantic_writes,
     vault,
     vocabulary_auxiliaries,
@@ -736,6 +737,34 @@ def test_prior_revision_stays_readable_when_page_definitions_become_unreadable(
     assert revision["prior"]["unit_status"] == "found"
     other = compiled_history.read(tmp_path, path=PAGE)["revisions"][0]
     assert other["prior"]["source"] == revision["prior"]["source"]
+
+
+def test_a_prior_unit_reports_unavailable_after_registry_bytes_become_unreadable(
+    tmp_path: Path, owner
+) -> None:
+    source = _page_source("## Custom section\n- [rule] First wording. ^stable")
+    _write_page(tmp_path, source=source)
+    overlay = semantic_language_registry.registry_path(tmp_path)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        json.dumps(semantic_language_registry.empty_proposal()), encoding="utf-8"
+    )
+    unit = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
+    _correct(tmp_path, "Second wording.", "A correction.")
+    original = commands.op_read_memory(
+        tmp_path, path=PAGE, unit_ref=unit.unit_ref, include_history=True
+    )
+    assert original["revision_history"]["revisions"][0]["prior"]["unit_status"] == "found"
+
+    overlay.write_bytes(b"\xff")
+
+    result = commands.op_read_memory(
+        tmp_path, path=PAGE, unit_ref=unit.unit_ref, include_history=True
+    )
+    revision, = result["revision_history"]["revisions"]
+    assert revision["prior"]["source"] == source
+    assert revision["prior"]["unit_status"] == "unavailable"
+    assert revision["prior"]["unit"] is None
 
 
 def test_history_is_unreadable_once_the_page_is_deleted(tmp_path: Path, owner) -> None:

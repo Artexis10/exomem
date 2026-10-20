@@ -14,7 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from . import deferred_index, mode, process_memory, runtime_resources
+from . import deferred_index, foreground_priority, mode, process_memory, runtime_resources
 
 log = logging.getLogger(__name__)
 SCAN_LIMIT = 64
@@ -332,7 +332,10 @@ class SemanticDrain:
         with self._lock:
             self._proofs.pop(receipt.rel_path, None)
         try:
-            with runtime_resources.model_work(work_class, cancel_event=self._stop):
+            with (
+                foreground_priority.cancellable(self._stop),
+                runtime_resources.model_work(work_class, cancel_event=self._stop),
+            ):
                 result = embeddings.upsert_after_write_status(
                     self.root, [self.root / receipt.rel_path], defer_during_warm=False,
                 )
@@ -355,6 +358,8 @@ class SemanticDrain:
                 "embedding_input_unavailable": "input_unavailable",
                 "embedding_input_drifted": "input_changed",
             }.get(result.code, "embedding_failed")
+        except foreground_priority.BulkCancelled:
+            return
         except Exception:  # noqa: BLE001 - stable code, durable exact receipt
             code = "embedding_failed"
         if not self._stop.is_set():
@@ -371,6 +376,22 @@ class SemanticDrain:
                 thread.join(timeout=max(0.0, deadline - time.monotonic()))
         if self._alive():
             raise RuntimeError("semantic drain is still running during shutdown")
+        self._forget()
+
+    def join(self) -> None:
+        """Finish already-stopped native work before interpreter teardown."""
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        # The dispatcher can assign a bulk worker until the dispatcher exits.
+        thread = self._bulk_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        if self._alive():
+            raise RuntimeError("semantic drain is still running during shutdown")
+        self._forget()
+
+    def _forget(self) -> None:
         with _LOCK:
             if _ACTIVE.get(_key(self.root)) is self:
                 _ACTIVE.pop(_key(self.root), None)

@@ -92,8 +92,8 @@ declaration without saving it and returns the current guards for `revise`.
 
 Reverse export restores exact imported bytes for collections without native
 mutations, including after automatic stamping. A governed file move counts as
-a native mutation. Keep an archive-aware release for rollback; support for
-the same SQLite schema alone does not guarantee exact reverse export.
+a native mutation. Keep a qualified archive-aware release for application rollback.
+Returning to file authority uses whole-vault export and its eligibility rules.
 
 Each collection has `_history.md` with its newest 200 released transitions.
 Numbered pages under `_history/` hold older transitions in groups of 500,

@@ -135,3 +135,12 @@ def test_unrepresentable_timestamp_does_not_break_page_or_recap_binding(vault: P
     assert "evidence_version" not in result
     assert committed["ledger"] == "digest_only"
     assert committed["recovery"] == "unavailable"
+
+
+@pytest.mark.parametrize("scalar", ["!!timestamp invalid", "!!bool invalid"])
+def test_invalid_explicit_scalar_has_the_binding_failure_contract(scalar: str) -> None:
+    """Malformed typed scalars cannot escape as parser implementation exceptions."""
+    from exomem.provenance import evidence_version
+
+    with pytest.raises(ValueError, match="EVIDENCE_VERSION_INVALID"):
+        evidence_version(f"---\ncapture: {scalar}\n---\n\nRetained evidence.\n")

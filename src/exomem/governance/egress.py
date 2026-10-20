@@ -6634,7 +6634,9 @@ class _ArtifactReferenceGate:
         self.census = artifact_census.ArtifactCensus.empty()
         self.tombstone_paths: dict[str, list[str]] = {}
         self.tombstone_literals = artifact_census.LiteralAliases()
-        self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
+        # One gate pass shares one lifecycle view, as the release walk does.
+        with call_spans.span("egress.artifact_gate.tombstones"):
+            self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
         self._ungoverned: bool | None = None
         self._indexed = False
         self._index_entered = False
@@ -6651,7 +6653,8 @@ class _ArtifactReferenceGate:
             return
         self._indexed = True
         if not self._policy_empty() or self.tombstones:
-            self._index()
+            with call_spans.span("egress.artifact_gate.index"):
+                self._index()
 
     def _index(self) -> None:
         self._index_entered = True
@@ -6687,7 +6690,7 @@ class _ArtifactReferenceGate:
     def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...] | None:
         self._ensure_index()
         token, wikilink = self._unwrap(value)
-        if lifecycle.is_tombstoned(self.vault_root, token):
+        if lifecycle.is_tombstoned_in(self.tombstones, token):
             return (token,)
         lowered = token.casefold()
         if lowered.startswith(memory_refs.REF_PREFIX):
@@ -6734,7 +6737,7 @@ class _ArtifactReferenceGate:
         return ()
 
     def _permits(self, rel_path: str) -> bool:
-        if lifecycle.is_tombstoned(self.vault_root, rel_path):
+        if lifecycle.is_tombstoned_in(self.tombstones, rel_path):
             self.verdicts[rel_path] = False
             return False
         if not content_permits(self.vault_root, rel_path, self.who):
@@ -6755,6 +6758,7 @@ class _ArtifactReferenceGate:
                 grants_hash=self.grants_hash,
                 authorization_session=self.who.authorization_session_id,
                 authorization_context=self.who.verified_authorization_session,
+                tombstones=self.tombstones,
             )
             allowed = decision is not None and decision.level >= RELEASE_FLOOR
             _outcome_for_decision(

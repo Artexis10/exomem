@@ -32,6 +32,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import foreground_priority, runtime_resources
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -216,6 +217,7 @@ def _adopt_graph_snapshot(vault_root: Path, durations: dict[str, float]) -> bool
 
 def _run_step(durations: dict[str, float], name: str, fn) -> None:
     """Run one warm-up step and record its duration; warm-up must never raise."""
+    foreground_priority.check_cancelled()
     t0 = time.perf_counter()
     try:
         fn()
@@ -336,6 +338,7 @@ def warm_caches(
         if not kb.is_dir():
             return
         for p in find._walk_md(kb):
+            foreground_priority.check_cancelled()
             if not recall_policy.is_recall_candidate(vault_root, p):
                 continue
             find._CACHE.get(p, vault_root)
@@ -369,16 +372,23 @@ def warm_caches(
 
             from . import embeddings
 
-            if embeddings.clip_enabled():
+            if clip_index is not None:
                 q = np.full(
                     embeddings.CLIP_DIM,
                     1.0 / (embeddings.CLIP_DIM**0.5),
                     dtype=np.float32,
                 )
-                embeddings.get_clip_index(vault_root).search(q, k=1)
+                clip_index.search(q, k=1)
 
         _step("embedding_matrix", _warm_matrix)
-        _step("clip_matrix", _warm_clip)
+        from . import embeddings
+
+        try:
+            clip_index = embeddings.get_clip_index(vault_root) if embeddings.clip_enabled() else None
+            if clip_index is not None and clip_index.has_vectors():
+                _step("clip_matrix", _warm_clip)
+        except Exception:  # noqa: BLE001 - cache warm-up reports storage failures and continues.
+            log.warning("CLIP cache eligibility failed", exc_info=True)
     log.info("cache warm-up done: %s", durations)
     return durations
 
@@ -422,6 +432,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     # cold start reads an empty set and runs all of it.
     carried = service_standby.carried_warm_components()
     durations["carried_from_standby"] = float(len(carried))
+    foreground_priority.check_cancelled()
     try:
         catalog_ready = warm_retrieval_catalog(vault_root)
         if catalog_ready and not managed_catalog:
@@ -433,6 +444,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - catalog_started) * 1000.0,
             1,
         )
+    foreground_priority.check_cancelled()
     try:
         # Unconditional, and first. Adoption is what lets a replacement worker's
         # first governed write stay incremental, so nothing that merely makes
@@ -471,6 +483,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # adoption that declined or never ran satisfies as much as one that
         # succeeded.
         readiness.mark_ready("graph_handoff")
+    foreground_priority.check_cancelled()
     semantic_started = time.perf_counter()
     try:
         if "semantic_corpus" in carried:
@@ -525,6 +538,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     readiness.finish_required_warm()
 
     def _model_step(name: str, fn) -> bool:
+        foreground_priority.check_cancelled()
         t0 = time.perf_counter()
         try:
             fn()
@@ -547,6 +561,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         box: dict = {}
         if not _model_step(step, lambda: box.update(m=loader())):
             return False
+        foreground_priority.check_cancelled()
         try:
             warm(box["m"])
         except Exception:  # noqa: BLE001 — a warm-encode is a latency nicety, never a gate
@@ -557,6 +572,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         from . import index_sync
 
         for item in items:
+            foreground_priority.check_cancelled()
             item_vault, paths, *receipt_payload = item
             receipts = receipt_payload[0] if receipt_payload else None
             try:
@@ -669,11 +685,18 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             log.info("reranker disabled (EXOMEM_DISABLE_RANKING); skipping preload")
             readiness.mark_ready("reranker")
 
-        if embeddings.clip_enabled():
-            log.info("preloading CLIP model %s", embeddings.CLIP_MODEL_NAME)
-            if _preload("model_clip", embeddings.get_clip_model, lambda m: m.encode(["warm"])):
-                log.info("CLIP model ready")
+        try:
+            clip_applicable = embeddings.clip_enabled() and embeddings.get_clip_index(vault_root).has_vectors()
+        except Exception:  # noqa: BLE001 - retain storage failure visibility without loading a model.
+            log.warning("CLIP preload eligibility failed", exc_info=True)
+        else:
+            if not clip_applicable:
                 readiness.mark_ready("clip")
+            else:
+                log.info("preloading CLIP model %s", embeddings.CLIP_MODEL_NAME)
+                if _preload("model_clip", embeddings.get_clip_model, lambda m: m.encode(["warm"])):
+                    log.info("CLIP model ready")
+                    readiness.mark_ready("clip")
 
     if carried:
         log.info("warm complete: %s carried_from_standby=%s", durations, sorted(carried))
@@ -707,7 +730,7 @@ def _carry_forward_standby_readiness() -> frozenset[str]:
     return carried
 
 
-def start_background(vault_root: Path) -> threading.Thread:
+def start_background(vault_root: Path, stop: threading.Event | None = None) -> threading.Thread:
     """Run `warm_all` on a daemon thread; the transport serves meanwhile.
 
     `readiness.begin_warm()` fires BEFORE the thread starts so request paths
@@ -727,7 +750,13 @@ def start_background(vault_root: Path) -> threading.Thread:
 
     def _run() -> None:
         try:
-            warm_all(vault_root)
+            with (
+                foreground_priority.cancellable(stop),
+                runtime_resources.model_work("bulk", cancel_event=stop),
+            ):
+                warm_all(vault_root)
+        except foreground_priority.BulkCancelled:
+            pass
         except Exception:  # noqa: BLE001 — the warm thread must never die loudly
             log.warning("background warm-up crashed", exc_info=True)
         finally:
@@ -738,6 +767,7 @@ def start_background(vault_root: Path) -> threading.Thread:
     try:
         thread.start()
     except Exception:  # noqa: BLE001 — a failed start must not defer forever
+        _WARM_THREAD = None
         readiness.finish_warm()
         raise
     return thread

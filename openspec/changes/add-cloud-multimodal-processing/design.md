@@ -129,7 +129,15 @@ Reuse wins where it fits.
   - The captioner is never an instruction-following model. The authority matrix in `openspec/config.yaml` admits pinned-weight frozen captioners as transducers, default-off because they emit prose. It puts an instruction-following generative model out of bounds in every modality pairing, except as an instrument.
   - The hook exists today as `EXOMEM_VISION_CAPTION`, off by default. Its default checkpoint (`Salesforce/blip-image-captioning-large`) runs through the transformers pipeline on torch, so Cloud needs a build that meets the shared model runtime rule.
   - It ships behind its own D7 switch after images.
-- **HEIC.** Decoded through `pillow-heif`, after a licence check of its bundled decoders.
+- **HEIC.** Use the released `pillow-heif` 1.8.1 wheels through the shared image-codec dependency.
+  The Python wrapper uses BSD-3-Clause; its bundled libheif 1.23.6 and libde265 1.1.3 use LGPLv3.
+  The wheel also includes x265 4.3, whose source grants GPLv2 or later.
+  Retain the bundled notices and corresponding-source links in distributed packages.
+  Sources: [wheel inventory](https://github.com/bigcat88/pillow_heif/blob/v1.8.1/LICENSES_bundled.txt) and [x265 source licence](https://github.com/Multicorewareinc/x265/blob/4.3/source/x265.h).
+  This records software licence terms; it does not claim patent clearance.
+  Register the maintained Pillow opener lazily with one decoding thread.
+  OCR and image embeddings use that same decoding boundary; no custom codec or native build pipeline is introduced.
+  A real HEIC version of the existing neutral OCR fixture joins the offline Cloud image gate.
 
 ### D6. Speech
 
@@ -189,6 +197,25 @@ Until images ship, the interim is configuration only: `EXOMEM_DISABLE_CLIP=1` in
 - **Backfill.** When an engine's switch turns on, media already in the cell is queued automatically. Rollout turns engines on one cell at a time, so backfill never runs in every cell at once. This holds for a fleet default set under the D7 precondition, which starts no backfill in an existing cell, and for a cell created later, which backfills only its own media. On every install, the same backfill is reconciliation: media that waited with a pending sidecar and no job gets its stage once the engine is enabled.
 - **Recovery.** A job blocked with the typed reason "engine unavailable" is requeued when the engine appears. Today that reason is an `ExtractionUnavailable` error (`media_worker`). Other blocked reasons keep today's behaviour.
 
+### D9. Material identity and publication concurrency
+
+Whole-file staleness currently rejects an extraction when a writer adds only an `ingested_into` backlink.
+Reuse `provenance.evidence_version()` to identify material input; do not define another metadata ignore rule.
+It binds the retained body and typed parsed frontmatter, excluding backlinks and equivalent YAML formatting.
+All other content changes and binary changes retain their existing protection.
+
+Keep the original full-byte hash and binary identity alongside the input evidence version.
+At publication, validate a fresh guarded snapshot, render against that same snapshot, then compare-and-swap its full bytes.
+This preserves late backlinks without allowing an edit between validation and rendering to bypass the guard.
+Apply the same rule to inline extraction, parent publication and failure publication.
+
+Add nullable `sidecar_before_evidence_version` and `target_evidence_version` fields to the durable result.
+Persist the target version with its hash, size and deferred receipt before the canonical write.
+Separate versions distinguish unpublished input from committed output after a crash and a later backlink update.
+An equivalent target may have a different byte size; recovery converges current bytes through the existing receipt path.
+Retain claim revisions, generation fences and receipt-revision guards.
+Old rows without versions keep exact-byte protection; invalid versions never establish equivalence.
+
 ## Acceptance (per engine, in the owner's cell, before the switch rolls out)
 
 Run on the owner-sized cell with that engine's backlog active:
@@ -226,7 +253,8 @@ Run on the owner-sized cell with that engine's backlog active:
 ## Open Questions
 
 - The speech engine: pending the bake-off (D6).
-- D4 is delivered through MarkItDown, odfdo and striprtf. HEIC decoding remains pending its decoder licence review and format proof.
+- D4 is delivered through MarkItDown, odfdo and striprtf. D5 records the selected HEIC decoder and its distribution terms.
+  The offline image gate verifies HEIC format support; owner-sized acceptance and the live rollout remain separate.
 - Documents/OCR ship defaults for fallback OCR packs, consecutive memory stops and pressure stalls. Budgets for later engines still need their own acceptance.
 - **Reconcile the memory gate before the first acceptance run.** The service-v1 peak gate counts page cache, and media acceptance reads anonymous plus non-reclaimable memory. The owner of `add-cloud-service-resource-policy` decides how the two measures agree. This change does not edit that change.
 - The agreement bounds for the known-content subsets and the drain-time bound are stated before each run.

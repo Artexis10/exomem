@@ -143,7 +143,8 @@ READY = "ready"
 
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
-_BUILDS: set[Path] = set()
+_BUILDS: dict[Path, threading.Thread] = {}
+_BUILD_SHUTDOWNS: dict[Path, threading.Event] = {}
 #: One inline-build lock per vault root. The managed path single-flights through
 #: `_BUILDS` and a background thread; the unmanaged path has no thread to join,
 #: so two concurrent cold reads would otherwise both walk the vault and the
@@ -834,6 +835,7 @@ def reset_caches_for_tests(*, packets_only: bool = False) -> None:
         if packets_only:
             return
         _BUILDS.clear()
+        _BUILD_SHUTDOWNS.clear()
         _REEMBED_SCHEDULED.clear()
         _INLINE_LOCKS.clear()
     working_set_index.reset_collection_manifests_for_tests()
@@ -1484,6 +1486,11 @@ def _carry_components(
     return tuple(component for members in groups.values() for component in phrase_components(members))
 
 
+def _pair_has_letter(pair: tuple[str, str]) -> bool:
+    # Unicode shape preserves model names; numeric-only support needs a complete title.
+    return any(character.isalpha() for term in pair for character in term)
+
+
 def carry_named_groups(
     vault_root: Path,
     turn: str,
@@ -1559,11 +1566,13 @@ def carry_named_groups(
             # set of domains: one query over every pair, one group.
             components = (tuple(pairs),)
         groups: list[tuple[tuple[str, float], ...]] = []
+        sentences = _positioned_words(turn)
         for component in components:
+            fetch = working_set.carry_fetch_size(corpus_pages) if limit is None else limit
             result = lexstore.search_bm25_result(
                 vault_root,
                 content_words(turn),
-                working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+                fetch,
                 scope="kb",
                 freshness=freshness,
                 allow_delta=False,
@@ -1585,17 +1594,39 @@ def carry_named_groups(
                 and not _is_navigation_page(path)
                 and working_set._is_current_page(vault_root, str(path), status_basis=status_basis)
             )
-            if hits:
-                groups.append(hits)
-                if contacts is not None:
-                    for path, _score in hits:
-                        page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
-                        if page is not None:
-                            found = frozenset(content_stems(page.title + " " + page.search_body))
-                            contacts.setdefault(path, set()).update(
-                                (left, right) for left, right, pair in occurrences
-                                if pair in component and set(pair) <= found
-                            )
+            letter_pairs = tuple(
+                pair for pair in component if _pair_has_letter(pair)
+            )
+            numeric_pairs = set(component) - set(letter_pairs)
+            body_hits = []
+            titles = []
+            for path, score in hits:
+                page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
+                if page is not None:
+                    titles.append((path, score, page.title))
+                found = (
+                    frozenset(content_stems(page.title + " " + page.search_body))
+                    if page else frozenset()
+                )
+                supported = tuple(pair for pair in letter_pairs if set(pair) <= found)
+                if not numeric_pairs or supported:
+                    body_hits.append((path, score))
+                    if contacts is not None:
+                        contacts.setdefault(path, set()).update(
+                            (left, right) for left, right, pair in occurrences if pair in supported
+                        )
+            if body_hits:
+                groups.append(tuple(body_hits))
+            # Numeric body coincidences need complete-title proof, not partial title contact.
+            if numeric_pairs and len(result.value or ()) < fetch:
+                groups.extend(_qualified_carry_title_groups(
+                    turn, stems=stems, titles=titles,
+                    occurrences=tuple(
+                        occurrence for occurrence in _pair_occurrences(sentences, rare)
+                        if occurrence[3] in numeric_pairs
+                    ),
+                    contacts=contacts, partial=False,
+                ))
         if not groups:
             groups = _carry_title_groups(
                 vault_root,
@@ -1681,7 +1712,7 @@ def _carry_title_groups(
     if not result.readiness.complete or len(result.value or ()) >= fetch:
         # A bounded prefix cannot prove that a namesake was not cut off.
         return []
-    candidates = []
+    titles = []
     for path, score in result.value or ():
         path = str(path)
         if (
@@ -1691,15 +1722,33 @@ def _carry_title_groups(
         ):
             continue
         title = working_set._page_title(vault_root, path)
-        if not title:
-            continue
+        if title:
+            titles.append((path, float(score), title))
+    return _qualified_carry_title_groups(
+        turn, stems=stems, titles=titles, occurrences=occurrences, contacts=contacts,
+    )
+
+
+def _qualified_carry_title_groups(
+    turn: str,
+    *,
+    stems: Sequence[str],
+    titles: Sequence[tuple[str, float, str]],
+    occurrences: Sequence[tuple[int, int, int, tuple[str, str]]],
+    contacts: dict[str, set[tuple[int, int]]] | None = None,
+    partial: bool = True,
+) -> list[tuple[tuple[str, float], ...]]:
+    """Qualify title occurrences within one complete, already ranked window."""
+    sentences = _positioned_words(turn)
+    candidates = []
+    for path, score, title in titles:
         title_stems = frozenset(pairable_stems(title))
         title_sentences = tuple(
             tuple(word_stems for _position, word_stems in words)
             for words in _positioned_words(title)
             if words
         )
-        candidates.append((path, float(score), title_stems, title_sentences))
+        candidates.append((path, score, title_stems, title_sentences))
 
     turn_words = [tuple(word_stems for _position, word_stems in words) for words in sentences]
     matches = set()
@@ -1760,7 +1809,8 @@ def _carry_title_groups(
     ]
     remaining_occurrences = tuple(
         occurrence for occurrence in occurrences
-        if not any(
+        if partial and _pair_has_letter(occurrence[3])
+        and not any(
             sentence == occurrence[0] and (start <= occurrence[1] < end
                                           or start <= occurrence[2] < end)
             for sentence, start, end in matches
@@ -2077,6 +2127,28 @@ def _managed() -> bool:
         return False
 
 
+def bind_shutdown(vault_root: Path, stop: threading.Event) -> None:
+    """Bind managed refresh producers to their activation's lifetime."""
+    with _CACHE_LOCK:
+        _BUILD_SHUTDOWNS[Path(vault_root).absolute()] = stop
+
+
+def stop_builds(vault_root: Path) -> None:
+    """Close managed scheduling before joining the last owned refresh."""
+    with _CACHE_LOCK:
+        stop = _BUILD_SHUTDOWNS.get(Path(vault_root).absolute())
+        if stop is not None:
+            stop.set()
+
+
+def join_builds(vault_root: Path) -> None:
+    """Wait for the owned refresh to leave native code and finish."""
+    with _CACHE_LOCK:
+        thread = _BUILDS.get(Path(vault_root).absolute())
+    if thread is not None and thread is not threading.current_thread():
+        thread.join()
+
+
 def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
     """Single-flight a cold or stale build away from the request thread.
 
@@ -2090,36 +2162,49 @@ def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
     enough.
     """
     root = Path(vault_root).absolute()
+    from . import foreground_priority, runtime_resources
+
     pending = _DEFERRED_BUILDS.get()
-    if pending is not None:
-        # Preserve the first dispatch's stamp, as the existing single-flight owner does.
-        pending.setdefault(root, freshness_stamp)
-        return
     with _CACHE_LOCK:
-        if root in _BUILDS:
+        stop = _BUILD_SHUTDOWNS.get(root)
+        if (stop is not None and stop.is_set()) or root in _BUILDS:
             return
-        _BUILDS.add(root)
+        if pending is not None:
+            # Preserve the first dispatch's stamp, as the existing single-flight owner does.
+            pending.setdefault(root, freshness_stamp)
+            return
 
     def _warm() -> None:
         try:
             # The one pass that may load a cold activation encoder: it runs off
             # the request thread, which never loads a model.
-            working_set_index.WorkingSetIndex(root).update(
-                freshness_stamp=freshness_stamp or None, load_encoder=True
-            )
+            with (
+                foreground_priority.cancellable(stop),
+                runtime_resources.model_work("bulk", cancel_event=stop),
+            ):
+                working_set_index.WorkingSetIndex(root).update(
+                    freshness_stamp=freshness_stamp or None, load_encoder=True
+                )
+        except foreground_priority.BulkCancelled:
+            pass
         except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
             log.warning("activation index background build failed", exc_info=True)
         finally:
             with _CACHE_LOCK:
-                _BUILDS.discard(root)
+                _BUILDS.pop(root, None)
 
     thread = threading.Thread(target=_warm, name="exomem-working-set-warm", daemon=True)
-    try:
-        thread.start()
-    except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
-        with _CACHE_LOCK:
-            _BUILDS.discard(root)
-        log.warning("activation index background build could not start", exc_info=True)
+    with _CACHE_LOCK:
+        # Register and start under the same lock so shutdown cannot join an unstarted thread.
+        stop = _BUILD_SHUTDOWNS.get(root)
+        if (stop is not None and stop.is_set()) or root in _BUILDS:
+            return
+        _BUILDS[root] = thread
+        try:
+            thread.start()
+        except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
+            _BUILDS.pop(root, None)
+            log.warning("activation index background build could not start", exc_info=True)
 
 
 def serve(

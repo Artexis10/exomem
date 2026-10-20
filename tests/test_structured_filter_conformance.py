@@ -437,6 +437,9 @@ def test_optional_clip_backend_receives_and_cannot_escape_exact_eligibility(
     expected_allowed = {"Knowledge Base/Evidence/eligible.jpg"}
 
     class ClipIndex:
+        def has_vectors(self):
+            return True
+
         def search(
             self,
             _query_vec: np.ndarray,

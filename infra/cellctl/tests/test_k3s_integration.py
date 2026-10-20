@@ -2459,6 +2459,10 @@ def test_the_edge_reads_no_key_and_still_reaches_the_gateway(k3s: K3sCluster, ed
             for args in (
                 ["logs", "--namespace", edge_platform.traefik_namespace,
                  f"deployment/{EDGE_RELEASE}-traefik", "--all-containers", "--tail=100"],
+                ["get", "ingressroute", "exomem-cloud-gateway", "--namespace",
+                 edge_platform.traefik_namespace, "--output=yaml"],
+                ["get", "service", "exomem-cloud-gateway", "--namespace",
+                 edge_platform.traefik_namespace, "--output=yaml"],
                 ["get", "service", "exomem-cloud-gateway", "--namespace", "exomem-cloud", "--output=wide"],
                 ["get", "endpointslices", "--namespace", "exomem-cloud",
                  "--selector=kubernetes.io/service-name=exomem-cloud-gateway", "--output=wide"],

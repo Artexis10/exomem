@@ -1620,6 +1620,15 @@ def _publication_split(
     return owned, frozenset(retired | handed_on)
 
 
+def pending_visibility_complete(vault_root: Path, receipt: DerivedBatchReceipt) -> bool:
+    """Whether durable custody has no unpublished rows; this is not byte proof."""
+    connection = _connect_receipt_read(vault_root)
+    try:
+        return _pending_visibility_complete(connection, receipt.batch_id)
+    finally:
+        connection.close()
+
+
 def publish_pending_visibility(
     vault_root: Path,
     receipt: DerivedBatchReceipt,

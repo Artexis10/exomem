@@ -72,6 +72,7 @@ Invited friends write in Japanese and other languages, so these gaps are part of
 - `multimodal-job-runtime`:
   - a job blocked on a missing engine is requeued when the engine becomes available;
   - a memory stop, for pressure or for an allocation failure under the hard limit, returns its job to pending.
+  - retained results survive backlink bookkeeping through the existing evidence-version contract, with full-byte publication guards and crash recovery.
 - `automatic-media-processing`:
   - EPUB, OpenDocument, RTF and HEIC are extracted on every install;
   - media whose engine is disabled keeps its pending sidecar without a job, and is queued once the engine is enabled;

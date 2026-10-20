@@ -5,12 +5,12 @@ to a phrase that find's lexical presence check must find in its extracted text.
 The Cloud image build (`Dockerfile`, stage `cloud`) and
 `scripts/check-media-samples.py` read it.
 
-The script needs the document libraries, Pillow, python-docx and a CJK font. Run it
+The script needs the document libraries, Pillow, pillow-heif, python-docx and a CJK font. Run it
 in a throwaway container, not on the host:
 
     docker run --rm -v "$PWD:/w" -w /w python:3.12-slim sh -c \
       "apt-get update && apt-get install -y fonts-noto-cjk fonts-dejavu-core && \
-       pip install pillow pymupdf python-docx openpyxl python-pptx odfdo && \
+       pip install pillow pillow-heif==1.8.1 pymupdf python-docx openpyxl python-pptx odfdo && \
        python scripts/make-media-samples.py tests/fixtures/media-samples"
 """
 
@@ -44,6 +44,8 @@ PHRASES = {
     "ocr-jpn.png": "東京駅の近く",
     "ocr-jpn-vert.png": "静かな朝を過ごしました",
 }
+
+PHRASES["ocr-eng.heic"] = PHRASES["ocr-eng.png"]
 
 OCR_LINES = {
     "ocr-eng.png": [
@@ -93,6 +95,16 @@ def _png(path: Path, lines: list[str], *, font: str, vertical: bool = False) -> 
         for row, line in enumerate(lines):
             draw.text((step, step // 2 + row * step), line, font=face, fill=0)
     image.save(path, optimize=True)
+
+
+def _heic(source: Path, target: Path) -> None:
+    from PIL import Image
+    from pillow_heif import from_pillow
+
+    with Image.open(source) as image:
+        from_pillow(image.convert("RGB")).save(
+            target, quality=90, enc_params={"x265:pools": "1", "x265:frame-threads": "1"}
+        )
 
 
 def _epub(path: Path, phrase: str) -> None:
@@ -199,6 +211,7 @@ def main(out: Path) -> None:
     )
 
     _png(out / "ocr-eng.png", OCR_LINES["ocr-eng.png"], font=LATIN_FONT)
+    _heic(out / "ocr-eng.png", out / "ocr-eng.heic")
     _png(out / "ocr-est.png", OCR_LINES["ocr-est.png"], font=LATIN_FONT)
     _png(out / "ocr-jpn.png", OCR_LINES["ocr-jpn.png"], font=CJK_FONT)
     _png(out / "ocr-jpn-vert.png", OCR_LINES["ocr-jpn-vert.png"], font=CJK_FONT, vertical=True)

@@ -45,6 +45,9 @@ def main(root: Path, engines: set[str]) -> int:
     }
     samples = sorted(path for path in root.iterdir() if path.name != "expected.json")
     covered = {media_types.media_type_for(path) for path in samples}
+    # Image-kind coverage alone cannot prove that the HEIC codec ships and works offline.
+    if "ocr" in engines and not any(path.suffix.lower() == ".heic" for path in samples):
+        failures.append("no HEIC sample for the shipped OCR engine")
     for kind in sorted(served - covered):
         failures.append(f"no sample for media kind {kind!r}, which this image serves")
     for path in samples:

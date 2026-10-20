@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from memory_measurement import run_in_fresh_process
 
 from exomem import (
     commands,
@@ -973,10 +974,12 @@ def test_doctor_census_line_reports_an_unavailable_graph(tmp_path: Path) -> None
 
 
 def test_census_streams_edges_instead_of_holding_them(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     """The reduction aggregates while it reads: Python memory stays flat as the
     edge count grows, instead of holding one object per edge."""
+    if run_in_fresh_process(request, tmp_path):
+        return
     import sqlite3
     import tracemalloc
 

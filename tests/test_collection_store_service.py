@@ -16,6 +16,7 @@ import functools
 import json
 import os
 import sqlite3
+import threading
 import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -488,6 +489,57 @@ def test_global_inspection_rechecks_canonical_support_and_permissions_without_a_
     assert projection.read_bytes() != original_projection
     replaced = call(root, "record_memory", action="inspect")
     assert next(row for row in replaced["collections"] if row["collection_id"] == DAILY)["unreflected"] == 0
+
+
+def test_expired_due_refresh_keeps_the_request_principal_and_canonical_ownership(service, monkeypatch):
+    """File-backed routing under the service coordinator keeps the original audience and canonical read scope."""
+    from test_collection_claims import _write_observation
+    from test_governance_egress import _external
+
+    from exomem import due_state
+    from exomem.collection_store import ownership
+    from exomem.governance.principal import current_principal
+
+    root = service.root
+    daily_text = DAILY_TEXT.replace("view_mode: summary\n", "").replace("lifecycle: active\n",
+        "lifecycle: active\nclaims:\n  terms: [account, subscriptions]\n")
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+         manifest_text=daily_text, why="declared routing")
+    observation, _ref = _write_observation(root)
+    now = dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)
+    with request_scope(OWNER):
+        runtime._SERVERS[root].call(lambda: due_state.reconcile(root, now=now))
+    due_state.reset_serve_cache()
+    guest = _external()
+    with request_scope(guest):
+        before = due_state.served_entries(root, now=now, principal=guest)
+    assert any(row["path"] == observation for row in before)
+    real = due_state._served_entries_uncached
+    observed = []
+    workers = []
+
+    def rebuilding(*args, **kwargs):
+        rows = real(*args, **kwargs)
+        if threading.current_thread().name == "exomem-due-state-serve-refresh":
+            observed.append((current_principal(), ownership._READ.get() is not None, rows[0]))
+            workers.append(threading.current_thread())
+        return rows
+
+    monkeypatch.setattr(due_state, "_served_entries_uncached", rebuilding)
+    monkeypatch.setattr(due_state, "_SERVE_CACHE_TTL_SECONDS", 0)
+    monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
+    try:
+        with request_scope(guest):
+            assert due_state.served_entries(root, now=now, principal=guest) == before
+        _until(lambda: bool(observed))
+        for worker in workers:
+            worker.join(5)
+            assert not worker.is_alive()
+        assert observed == [(guest, True, before)]
+    finally:
+        for worker in workers:
+            worker.join(5)
+        due_state.reset_serve_cache()
 
 
 def test_the_service_builds_a_revised_rollup_and_publishes_the_summary_page(service, monkeypatch):

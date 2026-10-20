@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.132.4](https://github.com/Artexis10/exomem/compare/v0.132.3...v0.132.4) (2026-10-20)
+
+
+### Performance
+
+* **episode:** attribute recap commit phases ([#1954](https://github.com/Artexis10/exomem/issues/1954)) ([ab6edee](https://github.com/Artexis10/exomem/commit/ab6edee85f1f429b3ce738919709be0a995e8ca8))
+
+## [0.132.3](https://github.com/Artexis10/exomem/compare/v0.132.2...v0.132.3) (2026-10-20)
+
+
+### Bug Fixes
+
+* **hooks:** route capture checks through the portable contract ([#1949](https://github.com/Artexis10/exomem/issues/1949)) ([6da9533](https://github.com/Artexis10/exomem/commit/6da953399d3f6964722cc9f6927b7be4f0932757))
+* own background embedding lifetimes and reuse egress snapshots ([#1950](https://github.com/Artexis10/exomem/issues/1950)) ([6735472](https://github.com/Artexis10/exomem/commit/6735472d9e70a438a3501b93ff7196ba004b66c4))
+* **release:** upload only selected release assets ([#1951](https://github.com/Artexis10/exomem/issues/1951)) ([5182a59](https://github.com/Artexis10/exomem/commit/5182a593d4fc64fddc39d6970db08c105ce7f77c))
+
+
+### Performance
+
+* reuse complete pending visibility during handoff ([#1953](https://github.com/Artexis10/exomem/issues/1953)) ([de32763](https://github.com/Artexis10/exomem/commit/de32763f4509a13624c6854ef26e04f257957212))
+
+## [0.132.2](https://github.com/Artexis10/exomem/compare/v0.132.1...v0.132.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* **compiler:** require complete titles for numeric-only carry ([#1946](https://github.com/Artexis10/exomem/issues/1946)) ([0c296dd](https://github.com/Artexis10/exomem/commit/0c296ddb23056a3a91aafa764b00d8a335e66292))
+
+
+### Performance
+
+* trace episode reference preparation retries ([b963a9c](https://github.com/Artexis10/exomem/commit/b963a9cbe84e002caf872581c1d3821a7f5da21f))
+
+## [0.132.1](https://github.com/Artexis10/exomem/compare/v0.132.0...v0.132.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **context:** report visible dependency ambiguity ([#1944](https://github.com/Artexis10/exomem/issues/1944)) ([0db96ff](https://github.com/Artexis10/exomem/commit/0db96ffe039fd24c126abc9e2337f016815507ef))
+* **media:** preserve valid results and decode HEIC images ([#1941](https://github.com/Artexis10/exomem/issues/1941)) ([510873e](https://github.com/Artexis10/exomem/commit/510873ebe56779ee6aef63ee914fff2511a31f10))
+
 ## [0.132.0](https://github.com/Artexis10/exomem/compare/v0.131.0...v0.132.0) (2026-10-20)
 
 

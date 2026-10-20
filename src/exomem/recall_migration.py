@@ -682,6 +682,8 @@ def _run_logged(vault_root: Path, stop: threading.Event) -> None:
     try:
         # Bulk work: on a service cell's fair model gate a query's encode goes
         # ahead of the build's next passage, so it waits for at most one.
+        # Migration batches finish their publication before the existing stop
+        # check; per-forward cancellation would discard their completed vectors.
         with runtime_resources.model_work("bulk"):
             run(vault_root, stop)
     except Exception as error:  # noqa: BLE001 - the job must never take the service down

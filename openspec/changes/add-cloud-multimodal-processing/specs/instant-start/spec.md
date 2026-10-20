@@ -68,3 +68,14 @@ such a lane without touching its model getter, and SHALL NOT report it as warmin
 - **WHEN** image search is enabled but the vault holds no stored image vectors
 - **THEN** the CLIP lane is skipped without loading the image query encoder
 - **AND** the response lists `clip` neither in a `warming` object nor as a degraded component
+- **AND** a captured lane trace reports `non_applicable` with reason `no_image_vectors`
+
+#### Scenario: Image vectors arrive after an empty query
+
+- **WHEN** a query observes an empty image index and a later write inserts an image vector
+- **THEN** the next query can use that vector without restarting the service
+
+#### Scenario: An unreadable image index is not empty
+
+- **WHEN** an existing image index cannot be read because of corruption or another storage error
+- **THEN** the existing lane failure behavior reports the error instead of classifying the index as empty

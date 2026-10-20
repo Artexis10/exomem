@@ -10,6 +10,51 @@ import pytest
 from exomem import deferred_index, embeddings, index_sync, runtime_resources
 
 
+def test_final_join_includes_a_bulk_worker_assigned_while_dispatcher_exits(tmp_path):
+    """Shutdown must join work the dispatcher assigns after final joining begins."""
+    from exomem import semantic_drain
+
+    owner = semantic_drain.SemanticDrain(tmp_path)
+    release_dispatcher = threading.Event()
+    bulk_started = threading.Event()
+    release_bulk = threading.Event()
+    joined = threading.Event()
+    joining_dispatcher = threading.Event()
+
+    class Dispatcher(threading.Thread):
+        def join(self, *args, **kwargs):
+            joining_dispatcher.set()
+            return super().join(*args, **kwargs)
+
+    def bulk():
+        bulk_started.set()
+        assert release_bulk.wait(3)
+
+    def dispatch():
+        assert release_dispatcher.wait(3)
+        owner._bulk_thread = threading.Thread(target=bulk, daemon=True)
+        owner._bulk_thread.start()
+
+    owner._thread = Dispatcher(target=dispatch, daemon=True)
+    owner._thread.start()
+    joining = threading.Thread(target=lambda: (owner.join(), joined.set()), daemon=True)
+    joining.start()
+    try:
+        assert joining_dispatcher.wait(2)
+        release_dispatcher.set()
+        assert bulk_started.wait(2)
+        assert not joined.wait(0.02)
+        release_bulk.set()
+        joining.join(2)
+        assert joined.is_set()
+        assert not owner._alive()
+    finally:
+        release_dispatcher.set()
+        release_bulk.set()
+        joining.join(3)
+        owner.join()
+
+
 def test_small_receipt_publishes_while_bulk_parent_is_still_running(vault: Path, monkeypatch) -> None:
     """The former whole-parent replay owner left every new small save behind it."""
     from exomem import semantic_drain

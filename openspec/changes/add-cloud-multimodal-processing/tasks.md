@@ -35,11 +35,15 @@ Automatic ingestion is delivered. Manual `process_media` exposure is decided in 
 - [ ] 3.2 Ship its pinned offline runtime through the shared-model contract. Verify same-precision parity where the existing vector space is retained.
 - [ ] 3.3 Record model, width, precision and artifact identity in the image sidecar. Verify legacy-space reads, space-change backfill and refusal to mix spaces.
 - [ ] 3.4 Add the aligned multilingual query encoder. Verify supported-language retrieval and that a space-preserving encoder change keeps stored image vectors.
-- [ ] 3.5 Resolve HEIC decoder licensing before adding its dependency. Verify a real HEIC sample through the image gate and document the supported format.
+- [x] 3.5 Resolve HEIC decoder licensing before adding its dependency. Verify a real HEIC sample through the image gate and document the supported format.
 - [ ] 3.6 Record whether to ship optional frozen captions under design D5. If selected, verify their independent switch, default-off behavior and sidecar search.
-- [ ] 3.7 Recheck disabled and empty image lanes without loading the query encoder. Verify neither state reports warming or degradation.
+- [x] 3.7 Recheck disabled and empty image lanes without loading the query encoder. Verify neither state reports warming or degradation.
 
-Image search, HEIC and captions are not delivered by the documents/OCR slice. Model selection and caption selection remain open decisions.
+HEIC uses the shared pinned decoder and the generated `ocr-eng.heic` sample.
+`tests/test_heic.py` verifies real decoding at the OCR and image-embedding boundaries.
+Delivery requires the existing offline Cloud image gate on both architectures.
+`tests/test_idle_clip.py` verifies disabled, empty, populated and failed-storage behavior through direct and prepared query paths.
+Image model selection and caption selection remain open decisions.
 
 ## 4. Speech
 
@@ -55,3 +59,10 @@ The selection record must precede speech implementation; no candidate is selecte
 - [ ] 5.2 For model-bearing engines, verify file-backed weights with node-level Pss evidence. Record sharing and measured budgets without counting shared pages twice.
 - [ ] 5.3 Roll out each accepted engine under an operator-approved live change. Verify every cell, the fleet default and unchanged start times where no restart is expected.
 - [ ] 5.4 Synchronize the completed deltas and archive this change only after its remaining contracts and acceptance tasks close. Verify strict OpenSpec validation before and after archival.
+
+## 6. Retained result publication
+
+- [x] 6.1 Bind retained media results to input and target evidence versions while keeping full-byte publication guards. Verify backlinks, meaningful edits, binary changes, concurrent writes, legacy rows and crash recovery through the media worker and job suites.
+
+Evidence: `tests/test_media_result_staleness.py` covers inline and durable publication, concurrent edits and recovery on either side of the canonical write.
+`tests/test_media_jobs.py` covers additive migration and optional evidence-version validation.

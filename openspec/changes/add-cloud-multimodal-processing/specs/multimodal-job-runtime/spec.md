@@ -64,3 +64,49 @@ NOT be recorded as an artifact failure, and SHALL NOT consume an artifact attemp
 #### Scenario: An allocation failure under the hard limit is a memory stop
 - **WHEN** an engine's allocation fails under the worker's hard memory limit
 - **THEN** the job returns to pending with a typed memory reason and its artifact attempt count unchanged
+
+## ADDED Requirements
+
+### Requirement: Retained media results bind material evidence and publish against current bytes
+
+A retained result SHALL bind the original binary identity and the sidecar's existing evidence version.
+The evidence version binds the body and typed frontmatter, excluding only `ingested_into` backlinks.
+Backlink changes and equivalent YAML formatting SHALL NOT discard otherwise valid computation.
+Body changes, meaningful metadata changes and binary replacement SHALL retain their existing invalidation behavior.
+
+Publication SHALL validate and render from the same guarded current sidecar snapshot.
+The final write SHALL retain full-byte compare-and-swap protection and preserve current backlinks.
+A concurrent publication conflict SHALL revalidate retained computation without repeating extraction solely because backlinks changed.
+Admission, completed-transcript handling, preserved-note boundaries and claim fences SHALL remain in force.
+
+The durable result SHALL retain separate input and prepared-target evidence versions for recovery across publication.
+Recovery SHALL recognize committed output after backlinks change and converge current content through the existing receipt path.
+Recovery SHALL verify the binary before accepting material equivalence or a foreign completed extraction.
+Legacy results without evidence versions SHALL retain exact-byte protection; unavailable versions SHALL never establish equivalence.
+
+#### Scenario: A backlink changes during extraction
+- **WHEN** a governed writer adds a backlink while extraction runs
+- **THEN** the retained extraction publishes without repeating computation
+- **AND** the published sidecar preserves the new backlink
+
+#### Scenario: A meaningful edit accompanies a backlink
+- **WHEN** the body or meaningful metadata changes alongside a backlink
+- **THEN** publication preserves the edit and rejects the obsolete result
+
+#### Scenario: The binary changes alongside bookkeeping
+- **WHEN** the source binary changes while only backlinks change in the sidecar
+- **THEN** the old result cannot publish or finalize against the replacement binary
+
+#### Scenario: An edit races with publication
+- **WHEN** another writer changes the sidecar after validation
+- **THEN** the full-byte publication guard refuses the stale write
+- **AND** retained computation is revalidated before another publication attempt
+
+#### Scenario: Recovery spans a canonical write
+- **WHEN** a process exits before or after canonical publication and a backlink changes before recovery
+- **THEN** recovery distinguishes unchanged input from committed output through their separate evidence versions
+- **AND** it preserves current backlinks and clears only the recorded receipt revision after convergence
+
+#### Scenario: A legacy result cannot prove material equivalence
+- **WHEN** a result lacks evidence versions or current metadata cannot supply a valid version
+- **THEN** recovery grants no material-equivalence exception to its exact-byte protection

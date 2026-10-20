@@ -701,10 +701,25 @@ _DECLARED_UNBOUNDED_JOINS = {
     ): "single-flight corpus-matrix load: bounded by the one load the inline reader would "
     "otherwise run itself; a managed recall defers with matrix_warming and never waits",
     (
+        "semantic_drain.py",
+        "SemanticDrain.join",
+        "thread.join",
+    ): "shutdown joins the stopped dispatcher and its final bulk worker; the supervisor bounds process retirement",
+    (
+        "server_runtime.py",
+        "LocalRuntimeActivation._join_native_workers",
+        "thread.join",
+    ): "shutdown joins owned native workers before interpreter teardown; the supervisor bounds process retirement",
+    (
         "server_runtime.py",
         "_warm_embedding_matrix",
         "embeddings.get_embedding_index(vault_root).start_corpus_matrix_load().join",
     ): "startup warm thread joins the background matrix load it shares; not a request path",
+    (
+        "working_set_runtime.py",
+        "join_builds",
+        "thread.join",
+    ): "shutdown joins the owned refresh after scheduling closes; the supervisor bounds process retirement",
 }
 
 
