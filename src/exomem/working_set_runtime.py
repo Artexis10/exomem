@@ -55,7 +55,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import (
     activation_conventions,
@@ -1869,6 +1869,17 @@ def carry_candidates(
     return tuple(sorted(merged.items(), key=lambda item: (-item[1], item[0]))), state
 
 
+class TitleListing(NamedTuple):
+    """What one bounded title query answered: `window`, its ranked rows with
+    raw material and navigation already excluded, and `named`, the current
+    pages among them whose title the turn names. `state` is the readiness
+    status; `window` and `named` are empty unless it is `available`."""
+
+    window: tuple[tuple[str, float], ...]
+    named: tuple[tuple[str, float], ...]
+    state: str
+
+
 def title_named_pages(
     vault_root: Path,
     turn: str,
@@ -1879,8 +1890,31 @@ def title_named_pages(
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
 ) -> tuple[tuple[tuple[str, float], ...], str]:
+    """`title_listing`'s named pages and its readiness status."""
+    listing = title_listing(
+        vault_root,
+        turn,
+        freshness=freshness,
+        recall_checkpoint=recall_checkpoint,
+        visible=visible,
+        status_basis=status_basis,
+        query_context=query_context,
+    )
+    return listing.named, listing.state
+
+
+def title_listing(
+    vault_root: Path,
+    turn: str,
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
+) -> TitleListing:
     """Current pages whose TITLE the turn names in ordinary words, in rank
-    order. Returns `(hits, readiness status)`.
+    order, with the ranked rows of the query they were read from.
 
     For a turn the carry named nothing in: "the smooth chain cleaning" names
     the page titled "Smooth chain cleaning", although none of those words is
@@ -1902,6 +1936,9 @@ def title_named_pages(
     owner and a restricted reader alike. The corpus-size floor does not
     apply: it exists because rarity cannot be measured in a small vault, and
     nothing here measures rarity.
+
+    `window` is those rows as ranked, before the naming and lifecycle tests:
+    a caller that lists a page from it checks that the page is current.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import lexstore
@@ -1917,7 +1954,7 @@ def title_named_pages(
         sentences = _positioned_units(turn)
         units = bm25_module.token_units(turn, query=True)
         if len({unit for unit in units}) < 2:
-            return (), "available"
+            return TitleListing((), (), "available")
         # Reuse request admission only after this snapshot proves its generation.
         corpus = lexstore.carry_term_statistics(
             vault_root,
@@ -1930,7 +1967,7 @@ def title_named_pages(
             query_context=query_context,
         )
         if not corpus.readiness.complete:
-            return (), corpus.readiness.status
+            return TitleListing((), (), corpus.readiness.status)
         _frequencies, corpus_pages, _paths, _admitted = corpus.value
         result = lexstore.search_bm25_result(
             vault_root,
@@ -1950,17 +1987,21 @@ def title_named_pages(
             query_context=query_context,
         )
         if not result.readiness.complete:
-            return (), result.readiness.status
-        return (
+            return TitleListing((), (), result.readiness.status)
+        window = tuple(
+            (str(path), float(score))
+            for path, score in (result.value or ())
+            if not _is_raw_material(str(path)) and not _is_navigation_page(str(path))
+        )
+        return TitleListing(
+            window,
             tuple(
-                (str(path), float(score))
-                for path, score in (result.value or ())
-                if not _is_raw_material(str(path))
-                and not _is_navigation_page(str(path))
+                (path, score)
+                for path, score in window
                 # Naming first: each test reads the page, and most rows are
                 # not named, so the lifecycle read is paid only by those that are.
-                and _names_title(sentences, working_set._page_title(vault_root, str(path)))
-                and working_set._is_current_page(vault_root, str(path), status_basis=status_basis)
+                if _names_title(sentences, working_set._page_title(vault_root, path))
+                and working_set._is_current_page(vault_root, path, status_basis=status_basis)
             ),
             "available",
         )
@@ -1968,7 +2009,7 @@ def title_named_pages(
         raise egress.ReaderViewUnavailable("status classification is unavailable") from error
     except Exception:  # noqa: BLE001 - a listing is additive; it lists nothing, never raises
         log.debug("activation title listing unavailable", exc_info=True)
-        return (), "unavailable"
+        return TitleListing((), (), "unavailable")
 
 
 def _names_title(
@@ -2366,6 +2407,10 @@ def serve(
         # rows and the sidecar token exactly as they were, and a cached copy
         # would go on saying `index_stale` after the catalogue caught up.
         packet["generation"]["index_stale"] = True
+        return packet
+    # A chunk writer can publish without changing the anchor or lexical tokens.
+    # Recheck every related attempt instead of caching its publication-dependent result.
+    if "related_evidence" in packet["generation"]:
         return packet
     if packet["generation"].get("semantic_evidence") in {
         "warming",

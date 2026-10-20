@@ -158,7 +158,7 @@ def test_a_fingerprint_change_empties_the_matrix_until_a_background_pass(encoder
     fake.encoded.clear()
 
     ids, matrix = index.vector_matrix(fake.fingerprint)
-    bands, state = working_set.signature_evidence(index, "Could the sled cope?")
+    bands, state, _vector = working_set.signature_evidence(index, "Could the sled cope?")
 
     assert (ids, matrix) == ((), None)
     assert (bands, state) == ({}, "absent")
@@ -288,7 +288,7 @@ def test_signature_evidence_uses_the_activation_query_lane(encoder, monkeypatch)
         dataclasses.replace(ranking_config.DEFAULT_RANKING, working_set_semantic_min_population=1),
     )
 
-    bands, state = working_set.signature_evidence(index, "Could the sled cope?")
+    bands, state, _vector = working_set.signature_evidence(index, "Could the sled cope?")
 
     assert turns == ["Could the sled cope?"]
     assert state in {"ready", "uncalibrated"}
@@ -304,7 +304,7 @@ def test_a_cold_encoder_reads_unavailable_without_loading(encoder, monkeypatch) 
         embeddings, "embed_activation_query_if_loaded", lambda *_a: pytest.fail("no encode on a cold encoder")
     )
 
-    assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "unavailable")
+    assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "unavailable", None)
     assert fake.loads == 0
 
 
@@ -319,7 +319,7 @@ def test_a_catalogue_without_vectors_reads_absent_not_unavailable(encoder) -> No
     index.rebuild()
 
     assert index.vector_matrix(fake.fingerprint) == ((), None)
-    assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "absent")
+    assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "absent", None)
 
 
 def test_the_fingerprint_and_the_rows_are_read_in_one_snapshot(encoder, monkeypatch) -> None:
@@ -393,7 +393,7 @@ def test_an_inline_pass_never_starts_another_encoders_vector_space(encoder, monk
     assert fake.encoded == []
     assert set(index.vector_matrix(first)[0]) == set(stored)
     assert index.vector_matrix(fake.fingerprint) == ((), None)
-    assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "absent")
+    assert working_set.signature_evidence(index, "Could the sled cope?") == ({}, "absent", None)
 
 
 def test_an_unmanaged_runtime_refills_a_changed_encoder_s_vectors_inline(encoder, monkeypatch) -> None:

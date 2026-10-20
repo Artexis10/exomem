@@ -928,3 +928,101 @@ Current disclosure checks SHALL apply to reused packets after an access change.
 - **WHEN** access changes before another checkpoint reuses a packet or source reference
 - **THEN** current disclosure checks prevent serving the withheld material
 - **AND** unchanged task identity does not bypass those checks
+
+### Requirement: An unresolved turn MAY list related pages where lexical and semantic evidence agree
+
+A turn that resolves nothing, names no page, and is not a pointing-back turn, but
+has at least one content word, MAY list up to three pages under a `related` block
+of its `unresolved` abstention. A page SHALL be listed only where two independent
+readings agree. The lexical reading SHALL be that the page is a current,
+caller-visible row of the bounded full-subject window that the title listing
+already ranks, with raw material and navigation excluded; the lane SHALL NOT run a
+second lexical query. The semantic reading SHALL be that at least one of the
+page's stored note-chunk vectors clears the same corpus-relative band as
+`vector_band` (same chance rate and population floor), computed over every chunk
+of the resident note-chunk matrix against the turn vector that the anchor lane
+already encoded. The lane SHALL NOT encode a second time, SHALL NOT cap the
+population at the anchors, and SHALL read only an already-resident matrix: it SHALL
+NOT take a lock, load, wait for a load, start a load or catch up. It SHALL compare
+only a matrix whose recorded vector space equals the activation encoder's, and
+SHALL compute one matrix-vector product and map only the rows that clear to pages.
+
+The lane is for the owner. Before any similarity is computed, a reader that a
+governed policy restricts SHALL get the packet it got without the lane, and the
+chunk population SHALL NOT be touched for it. Entries SHALL carry `path`, `title`,
+`projects` and `evidence` of `retrieval` and `vector_band`, ordered by best-chunk
+similarity, then lexical rank, then path; no similarity or rank SHALL appear in the
+packet. A cut list SHALL add `{"role": "related", "reason": "lane_truncated"}` to
+`missing`. A listed page is not served: the turn SHALL stay `unresolved` with no
+unit, pointer, current state, resolution, continuity token for it or `anchors[]`
+entry, and `recent_context` SHALL NOT change.
+
+`generation.related_evidence` SHALL be set on every packet that reaches the lane's
+gate and SHALL name one state: `ready` (the lane ran; nothing listed is a valid
+outcome), `cold` (no resident matrix serves), `space_mismatch` (the matrix was
+made by another encoder), `uncalibrated`, `unavailable`, `busy`, `warming`,
+`absent`, `disabled` or `audience_restricted`. When the turn was not encoded, the
+state SHALL be the anchor lane's own `semantic_evidence` state. A packet that
+reaches this lane SHALL NOT be cached: every attempt SHALL recheck the current
+resident publication, including changes from another writer. If a writer blocks
+that check, the lane SHALL decline immediately without changing ordinary recall.
+
+#### Scenario: A recurring subject is listed and nothing is served
+- **WHEN** a turn names no page, and a current page matches the turn's words in the
+  lexical window and has a chunk that bands against the turn vector
+- **THEN** the packet abstains `unresolved`, lists that page under `related` with
+  `evidence` of `retrieval` and `vector_band`, serves no unit, pointer or current
+  state, and reports `related_evidence` as `ready`
+
+#### Scenario: A content-free turn lists nothing
+- **WHEN** a turn has no content word
+- **THEN** the lane does not run, the matrix is not read, and the packet is the one
+  it was without the lane
+
+#### Scenario: A page that bands without lexical support is not listed
+- **WHEN** a page has a banding chunk but is not a row of the turn's lexical window
+- **THEN** it is not listed and `related_evidence` is `ready`
+
+#### Scenario: A full lexical window without a band lists nothing
+- **WHEN** the lexical window is full and no chunk of its pages clears the band
+- **THEN** nothing is listed and `related_evidence` is `ready`
+
+#### Scenario: A restricted reader gets the packet it got before
+- **WHEN** a governed policy restricts the reader
+- **THEN** the packet has no `related` block, `related_evidence` is
+  `audience_restricted`, and no similarity is computed
+
+#### Scenario: A cold matrix is never loaded for the listing
+- **WHEN** no note-chunk matrix is resident
+- **THEN** activation neither loads one nor waits for one, nothing is listed, and
+  `related_evidence` is `cold`
+
+#### Scenario: A resolved turn and a mismatched space skip the lane
+- **WHEN** the turn resolves, or the matrix was made by another encoder
+- **THEN** a resolved turn carries no `related_evidence` and reads no matrix, and a
+  mismatched matrix is not compared, reports `space_mismatch` and lists nothing
+
+#### Scenario: The list is capped and ordered without exposing a score
+- **WHEN** more than three pages agree
+- **THEN** the three with the highest best-chunk similarity are listed in that order
+  and `missing` gains `related` with `lane_truncated`; no float appears in the block
+
+#### Scenario: The packet cache follows the resident matrix
+- **WHEN** the resident matrix is dropped after a packet was cached and loaded again
+- **THEN** the next packet reports `cold`, and the one after the matrix is back lists
+  the page again
+
+#### Scenario: Another writer changes the chunk publication
+- **WHEN** a chunk writer publishes after an unresolved turn listed a related page
+  and the held matrix has not caught up
+- **THEN** a repeated turn rechecks the publication, reports `cold`, and lists nothing
+
+#### Scenario: The index registry is busy
+- **WHEN** another operation holds the shared embedding-index registry lock
+- **THEN** an eligible related listing reads its existing serving index without
+  acquiring that lock, creating an index or promoting a building sidecar
+
+#### Scenario: A writer blocks the publication check
+- **WHEN** a writer prevents the resident matrix's publication from being verified
+- **THEN** the related listing reports `cold` immediately and serves nothing,
+  while ordinary recall retains its existing behaviour

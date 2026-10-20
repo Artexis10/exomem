@@ -24,8 +24,11 @@ SHALL inject the data header, at most five such candidates in the packet's order
 as one whole line with its kind, title and ref, and the same one-line instruction;
 candidates reached only by retrieval SHALL NOT be rendered, and the ordinary reminder
 SHALL follow the block, because the agent may still need ordinary recall. A packet
-abstained for any other reason, or as `unresolved` with no worded candidate, SHALL
-inject nothing beyond the ordinary reminder. Any transport
+abstained for any other reason, or as `unresolved` with no worded candidate and no
+`related` page, SHALL inject nothing beyond the ordinary reminder. A packet abstained
+as `unresolved` that lists `related` pages and no worded candidate SHALL inject the data
+header, each related page as one whole line with its title and path only, and one line
+saying the pages are related and not loaded, followed by the ordinary reminder. Any transport
 failure, non-JSON response or budget exhaustion SHALL fall back to the existing
 reminder behaviour. The mode SHALL honour the same prominence presets, prompt-length
 gate, cooldown, control-prompt silence and absent-client skip as stub mode, SHALL
@@ -53,9 +56,17 @@ the client delivers (Claude Code: `SessionStart`, `PreCompact`, `SessionEnd`; Co
   and ref, the instruction to call `activate_context` with `anchor`, no unit text and
   none of the retrieval-only candidates, followed by the ordinary reminder
 
+#### Scenario: Related pages are shown as listed, not loaded
+- **WHEN** the service abstains as `unresolved`, lists no worded candidate and lists
+  related pages
+- **THEN** the hook injects the data header, one line per related page with its title
+  and path, a line saying the pages are related and not loaded, and no unit text,
+  followed by the ordinary reminder
+
 #### Scenario: Any other abstention injects nothing extra
 - **WHEN** the service answers with `abstained: true` for a reason other than
   `ambiguous`, or as `unresolved` with no candidate reached by the turn's own words
+  and no related page
 - **THEN** the hook emits exactly the ordinary reminder
 
 #### Scenario: Failure falls back to the reminder
