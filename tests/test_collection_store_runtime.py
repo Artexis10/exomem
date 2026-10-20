@@ -931,3 +931,92 @@ def test_standalone_close_from_borrower_stays_pending(tmp_path, monkeypatch):
             assert writer.connection.execute("SELECT 1").fetchone() == (1,)
         manager.close()
         assert client.released.is_set()
+
+
+class CoordinatorClient:
+    """The coordinator's own SQLite store behind the lease client interface, counting the acquires it serves."""
+
+    def __init__(self, store, config):
+        self.store, self.config, self.acquires = store, config, 0
+
+    def acquire(self, **kwargs):
+        self.acquires += 1
+        return LeaseRecord.from_json(self.store.acquire(
+            self.config.vault_id, self.config.replica_id, self.config.ttl_seconds,
+            schema_version=self.config.schema_version, **kwargs))
+
+    def status(self):
+        return LeaseRecord.from_json(self.store.status(self.config.vault_id))
+
+    def renew(self, token, collection_store_head=None, **kwargs):
+        # This vault enrols no store fence, so the coordinator has nowhere to record a head.
+        return LeaseRecord.from_json(self.store.renew(
+            self.config.vault_id, self.config.replica_id, token, self.config.ttl_seconds,
+            schema_version=self.config.schema_version, **kwargs))
+
+
+@pytest.fixture
+def coordinated(tmp_path, monkeypatch):
+    from exomem.lease_coordinator import SQLiteLeaseStore
+
+    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
+    root = tmp_path / "vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+    config = LeaseConfig(
+        url="https://lease.example", vault_id="vault", replica_id="local",
+        state_dir=tmp_path / "lease", ttl_seconds=30,
+    )
+    store = SQLiteLeaseStore(tmp_path / "coordinator.sqlite")
+    client = CoordinatorClient(store, config)
+    manager = LeaseManager(config, client=client)
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True):
+        pass
+    runtime = CollectionStoreRuntime(root, manager, authority_check=lambda: True)
+    yield runtime, store, client
+    if runtime._handle is not None:
+        runtime._handle.close()
+    manager._stop.set()
+
+
+def test_a_store_write_inside_the_operations_guard_asks_the_coordinator_for_one_grant(coordinated):
+    from exomem.record_memory import record_memory
+
+    runtime, _, client = coordinated
+    _create(runtime)
+    granted_before = client.acquires
+    with runtime.manager.writer_authority_guard(vault_root=runtime.root):
+        with preview_store(runtime.root, runtime):
+            record_memory(runtime.root, "append", collection=CID,
+                          item={"title": "One"}, item_key=KEY, why="capture")
+    assert runtime.sample_head().commit_seq == 2
+    assert client.acquires - granted_before == 1
+
+
+def test_a_file_effect_nested_in_an_operation_is_refused_once_the_operations_grant_is_revoked(coordinated):
+    from exomem.create_directory import create_directory
+
+    runtime, store, _ = coordinated
+    with runtime.manager.mutation_guard(runtime.root, operation="outer_operation"):
+        # The cut revokes the holder and advances the token, as a takeover by another replica does.
+        store.transition_schema_fence("vault", expected_generation=0, schema_version=3)
+        with pytest.raises(OpError) as refused:
+            create_directory(runtime.root, path="Notes/after-the-cut")
+    assert refused.value.code == "WRITER_SCHEMA_FENCE_MISMATCH"
+    assert not (runtime.root / "Notes").exists()
+
+
+def test_a_schema_cut_after_the_operations_grant_fences_the_store_write(coordinated):
+    from exomem.record_memory import record_memory
+
+    runtime, store, _ = coordinated
+    _create(runtime)
+    committed = runtime.sample_head().commit_seq
+    with runtime.manager.writer_authority_guard(vault_root=runtime.root):
+        with preview_store(runtime.root, runtime):
+            # The cut revokes the holder and advances the token; nothing renews before the write.
+            store.transition_schema_fence("vault", expected_generation=0, schema_version=3)
+            with pytest.raises(OpError) as fenced:
+                record_memory(runtime.root, "append", collection=CID,
+                              item={"title": "Late"}, item_key=KEY, why="after the cut")
+    assert fenced.value.code == "WRITER_FENCED"
+    assert runtime.sample_head().commit_seq == committed

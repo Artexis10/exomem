@@ -75,6 +75,13 @@ token:
    preflight; an unequal before/after pair collapses to `token=None`,
    mirroring the existing `freshness.triple` sandwich (`sw:1273-1280`).
 
+The commit-generation counter is replaced atomically without an fsync. Every
+validity stamp is captured and compared within one invocation, so none outlives
+the process; a power loss may leave the counter older or empty, and an empty
+counter reads as 0. The mutation boundary serializes each bump with every
+in-boundary comparison, so no in-boundary comparison sees a partly written
+counter.
+
 ## Guard narrowing (`writer_lease.py`)
 
 Generalize the existing narrow-guard branch (`:1353-1364`, today scoped to
