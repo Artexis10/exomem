@@ -1106,8 +1106,8 @@ def pairwise_best_cosine_from_sidecar(
             if cloud_cell.resource_policy() == "service-v1":
                 return idx.pairwise_current_chunks(wanted)
             # A managed service never loads a cold corpus matrix on a request's
-            # thread: a cold one starts the one background load and raises, and
-            # the pack degrades to no tension below, as with no sidecar.
+            # thread: a cold one starts the one background load and raises
+            # `CorpusMatrixCold` to the pack, which reports it.
             resident = idx.require_resident_matrix() if readiness.runtime_managed() else None
             metadata, matrix = (
                 (resident.metadata, resident.matrix) if resident is not None else idx.all_vectors()
@@ -1140,6 +1140,8 @@ def pairwise_best_cosine_from_sidecar(
                 for b in names[i + 1 :]:
                     best[frozenset((a, b))] = float((vectors[a] @ vectors[b].T).max())
             return best, set(names)
+    except recall_space.CorpusMatrixCold:
+        raise
     except ImportError as e:
         log.debug("pairwise_best_cosine_from_sidecar unavailable (%s)", e)
         return {}, set()

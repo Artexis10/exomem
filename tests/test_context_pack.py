@@ -370,6 +370,22 @@ def test_tension_pairs_only_in_band(cluster: Path, monkeypatch: pytest.MonkeyPat
     assert not [t for t in pack["truncation"] if "embedding rows" in t]
 
 
+def test_a_pack_says_when_the_embedding_matrix_is_still_loading(
+    cluster: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty tension list must not read as "no tension" while the matrix loads."""
+    from exomem import recall_space
+
+    def loading(_vault_root, _pages):
+        raise recall_space.CorpusMatrixCold("corpus matrix is loading")
+
+    monkeypatch.setattr(corpus_aware, "pairwise_best_cosine_from_sidecar", loading)
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
+
+    assert pack["embeddings_available"] is False
+    assert any("still loading" in line for line in pack["truncation"])
+
+
 def test_pack_tension_never_encodes_the_packed_pages(
     cluster: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

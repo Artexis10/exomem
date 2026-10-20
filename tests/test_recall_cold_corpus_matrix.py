@@ -209,11 +209,11 @@ def test_an_inline_reader_waits_for_the_background_load_instead_of_reading_again
     assert loads == ["exomem-matrix-load"]
 
 
-def test_a_managed_pack_reads_no_pairs_instead_of_loading_a_cold_matrix(
+def test_a_managed_pack_raises_instead_of_loading_a_cold_matrix(
     managed_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A deep ask's pack waited on the very load its own find had just started."""
-    from exomem import corpus_aware
+    from exomem import corpus_aware, recall_space
 
     index = embeddings.get_embedding_index(managed_vault)
     index.upsert_file(_OTHER_PAGE, ["later session"], _unit_vector()[None, :], 1.0)
@@ -221,11 +221,11 @@ def test_a_managed_pack_reads_no_pairs_instead_of_loading_a_cold_matrix(
     loads = _count_loads(index, monkeypatch)
     pages = [(_PAGE, ["metabolism curriculum"]), (_OTHER_PAGE, ["later session"])]
 
-    during_load = corpus_aware.pairwise_best_cosine_from_sidecar(managed_vault, pages)
+    with pytest.raises(recall_space.CorpusMatrixCold):
+        corpus_aware.pairwise_best_cosine_from_sidecar(managed_vault, pages)
     _settle(index)
     after_load = corpus_aware.pairwise_best_cosine_from_sidecar(managed_vault, pages)
 
-    assert during_load == ({}, set())
     assert loads == ["exomem-matrix-load"]
     assert after_load[1] == {_PAGE, _OTHER_PAGE}
 
