@@ -2825,7 +2825,15 @@ def _build_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     for _attempt in range(2):
         with _identity_coordination_scope(vault_root) as before:
             pass
-        candidate = IdentityCatalogue.from_vault(vault_root)
+        try:
+            candidate = IdentityCatalogue.from_vault(vault_root)
+        except RuntimeError:
+            # An owner can retire a listed name during the unlocked scan.
+            # Retry only when its publication invalidated this attempt.
+            with _identity_coordination_scope(vault_root) as after:
+                if before == after:
+                    raise
+            continue
         with _identity_coordination_scope(vault_root) as after:
             with _PUBLISHED_IDENTITY_LOCK:
                 cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
