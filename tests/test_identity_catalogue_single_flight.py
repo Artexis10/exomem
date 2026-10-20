@@ -231,6 +231,60 @@ def test_c2_revalidation_keeps_a_catalogue_whose_generation_still_matches(
     assert reserved_paths._baseline_identity_catalogue(vault_root) is built
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory enumeration race")
+@pytest.mark.parametrize("coordinated", [True, False])
+def test_cold_read_handles_a_name_retired_during_identity_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    coordinated: bool,
+) -> None:
+    """Owner churn recovers; unproved scan failures and private aliases refuse."""
+
+    from exomem import _held_fs_posix
+
+    vault_root = _vault(tmp_path)
+    _manager(tmp_path, monkeypatch)
+    kb = vault_root / "Knowledge Base"
+    private = kb / ".embeddings.sqlite"
+    private.write_bytes(b"private index bytes")
+    alias = kb / "Notes" / "ordinary.bin"
+    os.link(private, alias)
+    transient = kb / "Notes" / "transient.md"
+    transient.write_text("# Retiring note\n", encoding="utf-8")
+    original_names = _held_fs_posix._names
+
+    def retire_listed_name(descriptor):
+        names = list(original_names(descriptor))
+        parent = transient.parent.stat()
+        held = os.fstat(descriptor)
+        if transient.name in names and (held.st_dev, held.st_ino) == (
+            parent.st_dev, parent.st_ino
+        ):
+            if coordinated:
+                with reserved_paths._subsystem_authority_scope("embedding_index"):
+                    with reserved_paths._identity_coordination_scope(
+                        vault_root, descriptor_ids=("embeddings-store",)
+                    ):
+                        transient.unlink()
+            else:
+                transient.unlink()
+        return iter(names)
+
+    monkeypatch.setattr(_held_fs_posix, "_names", retire_listed_name)
+    if not coordinated:
+        with pytest.raises(RuntimeError, match="could not enumerate"):
+            reserved_paths.read_generic_bytes(vault_root, "Knowledge Base/Notes/note.md")
+        assert reserved_paths.identity_catalogue_ready(vault_root) is False
+        return
+
+    assert reserved_paths.read_generic_bytes(
+        vault_root, "Knowledge Base/Notes/note.md"
+    ).data == b"# Note\n"
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as error:
+        reserved_paths.read_generic_bytes(vault_root, "Knowledge Base/Notes/ordinary.bin")
+    assert error.value.code == "RESERVED_PATH"
+
+
 def test_c3_readiness_reports_cold_without_scanning_or_taking_the_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
