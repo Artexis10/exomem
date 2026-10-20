@@ -21,6 +21,7 @@ from exomem import (
     graph_sync,
     index_sync,
     media_jobs,
+    media_processing,
     media_worker,
     preserve,
     runtime_resources,
@@ -61,6 +62,21 @@ def _preserve_media_stub(vault, filename="rec.mp3"):
     return preserve.preserve_bytes(
         vault, scope="Rental", category="audio", filename=filename, data=b"FAKEBYTES"
     )
+
+
+def _reconciled_pending_media(vault, filename="rec.mp3"):
+    """A pending sidecar that reconciliation rendered, whose job was then lost."""
+    stub = _preserve_media_stub(vault, filename=filename)
+    binary = vault / stub.path
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    media_jobs.MediaJobStore(vault).discard(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=vault / stub.sidecar_path,
+            media_type=media_processing.classify_media(binary),
+        )
+    )
+    return stub
 
 
 def _parsed_frontmatter(path) -> dict[str, object]:
@@ -2425,14 +2441,14 @@ def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatc
 
 def test_scan_pending_reenqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
-    _preserve_media_stub(vault, filename="one.mp3")
-    _preserve_media_stub(vault, filename="two.wav")
+    _reconciled_pending_media(vault, filename="one.mp3")
+    _reconciled_pending_media(vault, filename="two.wav")
     w = media_worker.MediaWorker(vault)
     assert w.scan_pending() == 2
 
 
 def test_scan_pending_does_not_reenqueue_a_claimed_ocr(vault) -> None:
-    result = _preserve_media_stub(vault, filename="claimed-before-scan.mp3")
+    result = _reconciled_pending_media(vault, filename="claimed-before-scan.mp3")
     binary = vault / result.path
     sidecar = vault / result.sidecar_path
     store = media_jobs.MediaJobStore(vault)
@@ -2447,7 +2463,7 @@ def test_scan_pending_does_not_reenqueue_a_claimed_ocr(vault) -> None:
 
 
 def test_scan_pending_adds_ocr_to_a_clip_only_job(vault) -> None:
-    result = _preserve_media_stub(vault, filename="clip-only-before-scan.mp3")
+    result = _reconciled_pending_media(vault, filename="clip-only-before-scan.mp3")
     binary = vault / result.path
     sidecar = vault / result.sidecar_path
     store = media_jobs.MediaJobStore(vault)
@@ -2478,7 +2494,7 @@ def test_scan_pending_ignores_non_canonical_sidecar_copies(
     different files, both of which got embedded.
     """
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
-    stub = _preserve_media_stub(vault, filename="conflicted.mp3")
+    stub = _reconciled_pending_media(vault, filename="conflicted.mp3")
     sidecar = Path(stub.sidecar_path)
     if not sidecar.is_absolute():
         sidecar = vault / sidecar
@@ -2492,6 +2508,119 @@ def test_scan_pending_ignores_non_canonical_sidecar_copies(
 
     assert media_worker.MediaWorker(vault).scan_pending() == 1
     assert media_jobs.MediaJobStore(vault).counts()["pending"] == 1
+
+
+def test_upload_during_startup_finishes_its_ocr_instead_of_failing_stale(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restart recovery queued a preserve stub that the upload had not reconciled
+    yet. The upload's reconcile then rendered it, and the parent failed the fresh
+    transcript as stale, asking the owner to review changes nobody made."""
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] fresh transcript", media_type="audio", engine="faster-whisper:test+timed"
+        ),
+    )
+    stub = _preserve_media_stub(vault, filename="uploaded-at-startup.m4a")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    worker.scan_pending()
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+    media_processing.reconcile_media(vault, vault / stub.path, explicit=False)
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+    worker._drain_parent_results()
+
+    assert media_jobs.status(vault)["jobs"] == []
+    assert "fresh transcript" in (vault / stub.sidecar_path).read_text(encoding="utf-8")
+
+
+def test_reconcile_after_ocr_keeps_the_queued_clip_stage(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OCR and CLIP run as separate claims. A reconcile that found the image's
+    sidecar completed in between deleted the whole job, so the image never
+    reached visual search."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="RECEIPT 42", media_type="image", engine="tesseract"
+        ),
+    )
+    monkeypatch.setattr(
+        embeddings, "embed_image", lambda _path: np.ones(embeddings.CLIP_DIM, dtype=np.float32)
+    )
+    stub = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="receipt.png", data=b"\x89PNG fake"
+    )
+    binary = vault / stub.path
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+    worker._drain_parent_results()
+
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+
+    assert embeddings.ClipIndex(vault).has(stub.path)
+
+
+def test_failed_ocr_whose_transcript_completes_elsewhere_still_gets_clip(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reconcile turned a failed OCR row whose result still waited for the parent
+    into a pending CLIP row. The parent could then never settle that result, and
+    the supervisor launched no child for any media in the vault again."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_image", lambda _path: np.ones(embeddings.CLIP_DIM, dtype=np.float32)
+    )
+    stub = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="scan.png", data=b"\x89PNG fake"
+    )
+    binary = vault / stub.path
+    sidecar = vault / stub.sidecar_path
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.do_clip
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="failure",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"error": "decoder failed", "next_action": "replace it"},
+        terminal_state=media_jobs.FAILED,
+    )
+    sidecar.write_text(
+        preserve.render_sidecar_extraction(
+            sidecar.read_text(encoding="utf-8"),
+            text="SCANNED LEASE 2026",
+            engine="tesseract",
+            speakers=[],
+            speaker_verification="unavailable",
+            attempts=1,
+        ),
+        encoding="utf-8",
+    )
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    worker._drain_parent_results()
+
+    assert store.pending_result_count() == 0  # the parent settled it; children launch again
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+    assert embeddings.ClipIndex(vault).has(stub.path)
 
 
 def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1693,7 +1693,8 @@ class MediaWorker:
             if media_processing.has_completed_transcript(
                 current_content, media_type=job.media_type
             ):
-                self._store.discard(job)
+                # The OCR stage is done; a queued CLIP or re-embed stage still runs.
+                self._store.finalize_result(result, requeue_remaining=True, ocr_complete=True)
             else:
                 self._store.terminalize_result(
                     result,
@@ -1860,6 +1861,8 @@ class MediaWorker:
 
     def _scan_pending_ocr(self) -> int:
         """Re-enqueue every `extracted_by: pending` sidecar under the KB. Returns count."""
+        from . import media_processing
+
         kb = self._vault_root / kb_dirname()
         if not kb.is_dir():
             return 0
@@ -1872,9 +1875,10 @@ class MediaWorker:
             if not self._is_automatic_media_sidecar(sidecar):
                 continue
             try:
-                head = sidecar.read_text(encoding="utf-8")[:800]
+                text = sidecar.read_text(encoding="utf-8")
             except OSError:
                 continue
+            head = text[:800]
             if _PENDING_MARKER not in head:
                 continue
             ef = _EVIDENCE_FILE_RE.search(head)
@@ -1888,6 +1892,10 @@ class MediaWorker:
             # two workers extracted one binary into two different sidecars.
             if not _is_canonical_sidecar(sidecar, binary):
                 skipped_strays += 1
+                continue
+            # Reconciliation renders a preserved stub and queues it itself. A job
+            # claimed against the stub went stale as soon as it did.
+            if media_processing.awaits_reconciliation(self._vault_root, binary, text):
                 continue
             mt_match = _MEDIA_TYPE_RE.search(head)
             media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
@@ -2183,7 +2191,11 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
                     )
                     if media_processing.has_completed_transcript(
                         current_content, media_type=job.media_type
-                    ) or binary_only_stale:
+                    ):
+                        # This claim already ran its CLIP and re-embed stages; a
+                        # stage queued while it ran stays.
+                        store.complete(job)
+                    elif binary_only_stale:
                         store.discard(job)
                     else:
                         store.mark(

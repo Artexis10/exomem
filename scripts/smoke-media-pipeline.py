@@ -14,8 +14,10 @@ Run from a box with the [media] extra: uv run python scripts/smoke-media-pipelin
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -32,13 +34,17 @@ REPO = Path(__file__).resolve().parents[1]
 TOKEN = "smoke-token"
 
 
-def _wait(predicate, *, timeout=120.0, what="condition"):
-    deadline = time.monotonic() + timeout
+def _wait(predicate, *, timeout=120.0, what="condition", explain=None):
+    started = time.monotonic()
+    deadline = started + timeout
     while time.monotonic() < deadline:
-        if predicate():
-            return True
+        result = predicate()
+        if result:
+            print(f"  waited {time.monotonic() - started:.1f}s for {what}")
+            return result
         time.sleep(0.5)
-    raise AssertionError(f"timed out waiting for {what}")
+    detail = f"\n{explain()}" if explain is not None else ""
+    raise AssertionError(f"timed out waiting for {what}{detail}")
 
 
 def _missing_dependencies() -> list[str]:
@@ -56,6 +62,8 @@ def main() -> int:
         help="fail instead of explicitly skipping when a heavy dependency is unavailable",
     )
     args = parser.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)  # keep lane lines in order with the server's logs
+    faulthandler.enable()  # a native abort at exit names the threads still alive
     missing = _missing_dependencies()
     if missing:
         print(f"SMOKE: optional media lanes unavailable: {', '.join(sorted(missing))}")
@@ -73,7 +81,14 @@ def main() -> int:
     os.environ.setdefault("EXOMEM_CLIP_DEVICE", "cpu")
     os.environ.setdefault("EXOMEM_ASR_DEVICE", "cpu")
     with scratch_root.scratch_root("exomem-media-smoke-") as root:
-        return _smoke(root / "vault")
+        code = _smoke(root / "vault")
+    # The server's shutdown does not join its background embedding work. A thread
+    # still inside torch when the interpreter finalizes is aborted through
+    # std::terminate (exit 134), which would turn every result here red. That
+    # shutdown defect is outside this smoke, whose verdict is the lanes.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
 
 
 def _smoke(vault: Path) -> int:
@@ -81,15 +96,31 @@ def _smoke(vault: Path) -> int:
     os.environ["EXOMEM_VAULT_PATH"] = str(vault)
     os.environ["EXOMEM_UPLOAD_TOKEN"] = TOKEN
 
-    from PIL import Image, ImageDraw
     from starlette.testclient import TestClient
 
-    from exomem import embeddings, server, upload_tokens
-    from exomem import find as find_module
+    from exomem import server
 
     server.load_dotenv = lambda *a, **k: None  # don't let repo .env clobber the smoke vault
     print("building server (loads bge + CLIP; first time is slow)…")
-    client = TestClient(server.build_server(require_auth=False).http_app())
+    # The media worker starts in the server lifespan, which TestClient runs
+    # only when it is entered as a context manager.
+    with TestClient(server.build_server(require_auth=False).http_app()) as client:
+        return _lanes(vault, client)
+
+
+def _lanes(vault: Path, client) -> int:
+    from PIL import Image, ImageDraw
+
+    from exomem import embeddings, media_jobs, upload_tokens
+    from exomem import find as find_module
+
+    def queue():
+        return json.dumps(media_jobs.status(vault), indent=1, default=str)
+
+    # Search indexes a new sidecar asynchronously, so each lane waits for it.
+    def found(query, mode, name):
+        find_module.clear_cache()
+        return [h for h in find_module.find(vault, query=query, mode=mode) if name in h.path]
 
     def up_token():
         return upload_tokens.mint(TOKEN, scope="upload")
@@ -115,14 +146,13 @@ def _smoke(vault: Path) -> int:
     post("notice.png", b.getvalue(), "image/png", "Smoke", "01")
     sidecar = vault / "Knowledge Base/Evidence/Smoke/01/notice.png.md"
     _wait(lambda: sidecar.exists() and "extracted_by: pending" not in sidecar.read_text("utf-8"),
-          what="OCR of notice.png")
+          what="OCR of notice.png", explain=queue)
     body = sidecar.read_text("utf-8")
     assert "whitechapel" in body.lower() or "eviction" in body.lower(), (
         f"OCR text missing:\n{body[:400]}"
     )
-    find_module.clear_cache()
-    hits = find_module.find(vault, query="eviction whitechapel", mode="keyword")
-    assert any("notice.png.md" in h.path for h in hits), "find did not surface the OCR'd image"
+    _wait(lambda: found("eviction whitechapel", "keyword", "notice.png.md"),
+          what="find to surface the OCR'd image")
     print("  [1] image OCR -> searchable by its text          PASS")
 
     # ---- 2. CLIP textless image ----
@@ -130,11 +160,10 @@ def _smoke(vault: Path) -> int:
     Image.new("RGB", (320, 320), "red").save(red, "PNG")
     post("red.png", red.getvalue(), "image/png", "Smoke", "02")
     red_rel = "Knowledge Base/Evidence/Smoke/02/red.png"
-    _wait(lambda: embeddings.ClipIndex(vault).has(red_rel), what="CLIP index of red.png")
-    find_module.clear_cache()
-    hits = find_module.find(vault, query="a solid red square", mode="hybrid")
-    red_hit = [h for h in hits if "red.png.md" in h.path]
-    assert red_hit, "CLIP did not surface the textless red image"
+    _wait(lambda: embeddings.ClipIndex(vault).has(red_rel),
+          what="CLIP index of red.png", explain=queue)
+    red_hit = _wait(lambda: found("a solid red square", "hybrid", "red.png.md"),
+                    what="CLIP to surface the textless red image")
     assert red_hit[0].as_dict().get("media_type") == "image"
     print("  [2] textless image -> found by CLIP visual match  PASS")
 
@@ -151,21 +180,25 @@ def _smoke(vault: Path) -> int:
         lambda: pdf_sidecar.exists()
         and "extracted_by: pending" not in pdf_sidecar.read_text("utf-8"),
         what="PDF extraction",
+        explain=queue,
     )
     assert "cardiology" in pdf_sidecar.read_text("utf-8").lower(), "PDF text not extracted"
-    find_module.clear_cache()
-    hits = find_module.find(vault, query="cardiology consult", mode="keyword")
-    assert any("report.pdf.md" in h.path for h in hits), "find did not surface the PDF"
+    _wait(lambda: found("cardiology consult", "keyword", "report.pdf.md"),
+          what="find to surface the PDF")
     print("  [3] PDF text -> extracted (PyMuPDF) & searchable   PASS")
 
     # ---- 4. /download reverse channel (scoped token) ----
-    dtok = upload_tokens.mint(TOKEN, scope="download")
+    from exomem.governance.principal import OWNER_AUDIENCE
+
+    # A download capability names who it serves; this one is the owner's own.
+    dtok = upload_tokens.mint_bound(TOKEN, audience=OWNER_AUDIENCE)
     r = client.get(
         "/download",
         params={"path": red_rel},
         headers={"Authorization": f"Bearer {dtok}"},
     )
-    assert r.status_code == 200 and r.content == red.getvalue(), "download byte mismatch"
+    assert r.status_code == 200, f"/download refused: {r.status_code} {r.text[:400]}"
+    assert r.content == red.getvalue(), "download byte mismatch"
     # scope isolation: an upload-scoped token must NOT download
     r2 = client.get(
         "/download",
