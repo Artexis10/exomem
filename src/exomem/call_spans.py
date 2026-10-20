@@ -362,6 +362,9 @@ CATALOGUE_MS = "catalogue_ms"
 #: Unit-parent pages read from Markdown and parsed, and their wall time.
 PAGES_PARSED = "pages_parsed"
 HYDRATION_MS = "hydration_ms"
+#: Move semantic preflight wall time and attempts, including refused attempts.
+MOVE_PREFLIGHT_MS = "move_preflight_ms"
+MOVE_PREFLIGHTS = "move_preflights"
 #: A carry rung's work: the request's admitted pages, the rows its per-stem
 #: counts scanned, the candidate rows its corroboration test examined, and
 #: whether admitted ranking statistics were rebuilt rather than reused.

@@ -216,6 +216,32 @@ def test_missing_read_keeps_its_refusal_and_failed_stage_timings(vault, token) -
         assert stages[name]["fields"]["thread_cpu_us"] >= 0
 
 
+def test_a_public_move_attributes_preflight_to_its_existing_command_span(vault, token) -> None:
+    """A successful rename must distinguish semantic preparation from other held work."""
+    from exomem import commands, writer_lease
+    from exomem.governance.principal import library_scope
+
+    old_path = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    new_path = "Knowledge Base/Notes/Insights/renamed-example.md"
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "manage_memory_file")
+    with library_scope():
+        result = writer_lease.invoke_command(
+            command, vault, operation="move", old_path=old_path, new_path=new_path,
+        )
+
+    assert result["status"] == "committed"
+    assert not (vault / old_path).exists()
+    assert (vault / new_path).exists()
+    stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    body = stages["command.body"]
+    fields = body["fields"]
+    assert fields[call_spans.MOVE_PREFLIGHTS] == 1
+    assert 0 < fields[call_spans.MOVE_PREFLIGHT_MS] <= body["ms"]
+    assert set(fields) - call_spans.CPU_FIELDS == {
+        call_spans.MOVE_PREFLIGHT_MS, call_spans.MOVE_PREFLIGHTS,
+    }
+
+
 def test_idempotency_claim_is_visible_without_repeating_the_write(tmp_path, token) -> None:
     """A slow claim must not disappear into the command body or replay its write."""
     from exomem.writer_lease import IdempotencyStore
