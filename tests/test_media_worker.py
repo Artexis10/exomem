@@ -2615,7 +2615,6 @@ def test_failed_ocr_whose_transcript_completes_elsewhere_still_gets_clip(
     )
     media_processing.reconcile_media(vault, binary, explicit=False)
     worker = media_worker.MediaWorker(vault, execution_mode="process")
-    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
 
     worker._drain_parent_results()
 

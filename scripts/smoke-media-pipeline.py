@@ -160,7 +160,8 @@ def _lanes(vault: Path, client) -> int:
     Image.new("RGB", (320, 320), "red").save(red, "PNG")
     post("red.png", red.getvalue(), "image/png", "Smoke", "02")
     red_rel = "Knowledge Base/Evidence/Smoke/02/red.png"
-    _wait(lambda: embeddings.ClipIndex(vault).has(red_rel), what="CLIP index of red.png", explain=queue)
+    _wait(lambda: embeddings.ClipIndex(vault).has(red_rel),
+          what="CLIP index of red.png", explain=queue)
     red_hit = _wait(lambda: found("a solid red square", "hybrid", "red.png.md"),
                     what="CLIP to surface the textless red image")
     assert red_hit[0].as_dict().get("media_type") == "image"
