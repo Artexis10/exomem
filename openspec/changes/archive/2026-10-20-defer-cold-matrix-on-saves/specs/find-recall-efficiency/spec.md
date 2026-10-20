@@ -2,7 +2,7 @@
 
 ### Requirement: A managed save's write advisory never loads the corpus matrix on its request thread
 
-In an activated managed-server runtime, a write advisory's overlap sweep that needs the in-memory embedding matrix SHALL use a resident matrix that is current, or that the bounded catch-up makes current. When only a full load would serve, the sweep SHALL start at most one background load and skip with reason `matrix_warming`, and the save SHALL proceed without the advisory. While the last background load has failed and its backoff has not ended, the sweep SHALL start no load and skip as failed. The receipt-owned deferred advisory SHALL follow the same rule and publish its result as failed. No sweep SHALL start a second full load while one runs. An explicit offline caller with no activated runtime SHALL keep the inline load.
+In an activated managed-server runtime, a write advisory's overlap sweep that needs the in-memory embedding matrix SHALL use a resident matrix that is current, or that the bounded catch-up makes current. When only a full load would serve, the sweep SHALL start at most one background load and skip with reason `matrix_warming`, and the save SHALL proceed without the advisory. While the last background load has failed and its backoff has not ended, the sweep SHALL start no load and skip as failed. The receipt-owned deferred advisory SHALL follow the same rule and, when it skips, publish its result as failed. No sweep SHALL start a second full load while one runs. An explicit offline caller with no activated runtime SHALL keep the inline load.
 
 #### Scenario: A save skips its advisory while a cold matrix loads
 
