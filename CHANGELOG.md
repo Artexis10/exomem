@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.130.1](https://github.com/Artexis10/exomem/compare/v0.130.0...v0.130.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **context:** keep a bare number out of rare-term name evidence ([#1930](https://github.com/Artexis10/exomem/issues/1930)) ([5e47cb3](https://github.com/Artexis10/exomem/commit/5e47cb30ab2102745845c76cf87292d4c6d18e9c))
+* **media:** keep CLIP stages, fresh uploads and refused files in the queue ([#1924](https://github.com/Artexis10/exomem/issues/1924)) ([783da09](https://github.com/Artexis10/exomem/commit/783da09237fadbef36db6fb2237eee5ccf7b2ba5))
+* **media:** keep PyAV below 19 so transcription decodes again ([#1919](https://github.com/Artexis10/exomem/issues/1919)) ([c96e267](https://github.com/Artexis10/exomem/commit/c96e267fa9c291e3deb6fbd782cd6dbfb0d54cf1))
+* **records:** bound Records query sources and measure store latency on NTFS ([#1922](https://github.com/Artexis10/exomem/issues/1922)) ([9c6c181](https://github.com/Artexis10/exomem/commit/9c6c1814923146edc17ca18041944dd9476066c3))
+
+
+### Performance
+
+* **advisory:** skip the overlap sweep while a cold corpus matrix loads in the background ([#1933](https://github.com/Artexis10/exomem/issues/1933)) ([6e6196c](https://github.com/Artexis10/exomem/commit/6e6196c0c0c0abeec082774b5430c015cd360de8))
+* **collection-store:** run edit-back census windows in slices ([#1925](https://github.com/Artexis10/exomem/issues/1925)) ([7663f78](https://github.com/Artexis10/exomem/commit/7663f78d68a1459727c59e610a353a2723d575b2))
+* **collection-store:** stat-check history pages in the census and isolate refused collections ([#1928](https://github.com/Artexis10/exomem/issues/1928)) ([1aa8521](https://github.com/Artexis10/exomem/commit/1aa852187dbb33348ee78853ac1cc78d7c960830))
+* **due-state:** serve an expired build while one background build replaces it ([#1932](https://github.com/Artexis10/exomem/issues/1932)) ([2cf2acf](https://github.com/Artexis10/exomem/commit/2cf2acffc9084aefc23299860f7fb5dadeb36c48))
+* **lease:** reuse an operation's writer grant in nested collection-store writes ([#1926](https://github.com/Artexis10/exomem/issues/1926)) ([de649d9](https://github.com/Artexis10/exomem/commit/de649d984c0c5db98883813d7331edf722504f16))
+* load a cold corpus matrix in the background, off the index lock ([#1920](https://github.com/Artexis10/exomem/issues/1920)) ([6c546e9](https://github.com/Artexis10/exomem/commit/6c546e944d0758f0fd211ff4c0885f7e22ad5599))
+* **spans:** split catalogue and recall-projection waits in the call ledger ([#1931](https://github.com/Artexis10/exomem/issues/1931)) ([b4b6b54](https://github.com/Artexis10/exomem/commit/b4b6b54515ea3d594b2fb43ed7efb9d1102eb341))
+
 ## [0.130.0](https://github.com/Artexis10/exomem/compare/v0.129.0...v0.130.0) (2026-10-19)
 
 
