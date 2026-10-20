@@ -148,6 +148,7 @@ def test_recall_stage_outside_mcp_never_samples_thread_cpu(monkeypatch) -> None:
         raise AssertionError("offline recall sampled an MCP CPU clock")
 
     monkeypatch.setattr(time, "thread_time_ns", unexpected_cpu_clock)
+    monkeypatch.setattr(time, "process_time_ns", unexpected_cpu_clock)
     with FindTimings().span("semantic.search"):
         pass
 
@@ -412,6 +413,18 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "index.embeddings",
         "graph.refresh_paths",
         "lexical.rebuild_atomic",
+        "lexical.connect",
+        "lexical.connect.guard",
+        "lexical.connect.sqlite",
+        "lexical.connect.owner_family",
+        "lexical.readiness",
+        "lexical.proof",
+        "lexical.query",
+        "lexical.resolver_entries",
+        "recall.projection.checkpoint",
+        "recall.projection.snapshot",
+        "recall.projection.scope_snapshot",
+        "recall.projection.relativize",
         "embeddings.model_load",
         "embeddings.encode",
         "embeddings.matrix_load",

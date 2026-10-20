@@ -309,6 +309,10 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `index.memory_refs`, `index.resolver`, `index.lexstore`, `index.epistemic_graph`, `index.embeddings` | One per derived component, recorded at the shared dispatch seam. |
 | `graph.refresh_paths` | The graph's incremental pass inside `index.epistemic_graph`. |
 | `lexical.rebuild_atomic` | A whole-corpus lexical rebuild. |
+| `lexical.connect`, `lexical.connect.guard`, `lexical.connect.sqlite`, `lexical.connect.owner_family` | One ordinary lexical-store read connection, and three of its parts: entering the reserved-identity guard, the SQLite open with its pragmas, and the owner-family write. The rest of `lexical.connect` is the owner-target scope and the guard's exit. `lexical.connect.sqlite` also counts setup connections, which `lexical.connect` does not wrap. |
+| `lexical.readiness`, `lexical.proof`, `lexical.query` | A catalogue read's readiness verdict, its re-proof inside the pinned read transaction (schema, checkpoint, policy and catalogue identity), and the query itself. `lexical.proof` also covers capturing a selection's read view and the resolver-entries proof. |
+| `lexical.resolver_entries` | Reading a scope's resolver entries from the catalogue; `rows` counts the entries returned. |
+| `recall.projection.checkpoint`, `recall.projection.snapshot`, `recall.projection.scope_snapshot`, `recall.projection.relativize` | The recall projection when no admitted catalogue view answers it: choosing the checkpoint, copying the live registry's projection (`snapshot`) or the offline scope snapshot (`scope_snapshot`), each with `rows`, and turning the entries into vault-relative paths. |
 | `embeddings.model_load` | Lazy load of the embedding model weights. |
 | `embeddings.encode` | Encoding text to vectors. |
 | `embeddings.matrix_load` | A full vector-matrix load from the sidecar; the log line `embedding matrix full load: … rows=… cached_gen=…` names the reason. |
@@ -376,8 +380,13 @@ items they covered (`paths` on the `index.*` components, `texts`/`chars` on
 `advisory.overlap_groups`). The key is absent on a span that measured only time,
 so nothing about an existing row changes.
 
-Recall stage spans also carry `thread_cpu_us` during MCP calls, including stages
-that raise. This measures CPU on the executing thread, excluding other threads.
+During MCP calls every span also carries `thread_cpu_us` and `process_cpu_us`,
+including spans that raise. `thread_cpu_us` measures CPU on the executing thread.
+`process_cpu_us` measures CPU of the whole process over the same interval; it
+does not name the thread that used it, and it can read slightly below
+`thread_cpu_us`. Wall time far above both clocks is a wait on a lock, I/O,
+SQLite or another process. Process CPU far above thread CPU means other threads
+ran meanwhile; it does not prove they blocked this one.
 Nested stage measurements overlap; do not add them. These fields do not change
 public wall-time diagnostics. Outside MCP, recall does not sample this CPU clock.
 Missing CPU fields leave consumption unknown.

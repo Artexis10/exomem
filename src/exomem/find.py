@@ -785,7 +785,7 @@ class FreshnessSnapshot:
                         )
                         measured["rows"] = len(entries)
                 else:
-                    with call_spans.span("recall.projection.scope_walk", {}) as measured:
+                    with call_spans.span("recall.projection.scope_snapshot", {}) as measured:
                         checkpoint, entries, scope_triple = (
                             freshness.recall_projection_scope_snapshot(self._root, scope)
                         )

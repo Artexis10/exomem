@@ -66,9 +66,9 @@ NAME_MAX_CHARS = 64
 MAX_FIELDS_PER_SPAN = 4
 # CPU is fixed metadata, separate from the four caller measurements.
 THREAD_CPU_US = "thread_cpu_us"
-#: CPU of every thread in the process over the span. Beside `thread_cpu_us` it
-#: tells a wait on other threads (process CPU near wall x cores: GIL or run-queue
-#: contention) from a blocking wait on a lock, I/O or SQLite (both far below wall).
+#: CPU of every thread in the process over the span. Wall far above both clocks
+#: is a wait on a lock, I/O, SQLite or another process; process CPU far above
+#: thread CPU says other threads ran meanwhile, not that they blocked this one.
 PROCESS_CPU_US = "process_cpu_us"
 CPU_FIELDS = frozenset({THREAD_CPU_US, PROCESS_CPU_US})
 #: A field key is a measurement name, never a value. Structural rather than a
