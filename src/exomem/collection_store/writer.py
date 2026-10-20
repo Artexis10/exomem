@@ -1661,10 +1661,14 @@ class CollectionWriter:
                           "AND kind='history' AND state!='pending'", (cid,))
 
     def invalidate_history_pages(self):
-        """Queue derived history after governance changes; the normal drain does all publication."""
+        """Queue derived history after its release inputs change; the normal drain does all publication."""
+        from . import history
+
+        # Read before the pages are marked: an input that moves later differs from this value at the next tick.
+        inputs = history.release_inputs(self.root)
         with self._mutation(reconcile=True):
             self._execute("UPDATE projection_state SET state='pending' WHERE kind='history' AND state!='pending'")
-            return self._operation.policy.fingerprint
+            return inputs
 
     def apply_view_edit(self, observation, found):
         """Apply one settled, valid view edit as ONE governed update through the ordinary leaf.

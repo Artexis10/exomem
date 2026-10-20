@@ -1,10 +1,13 @@
 """Canonical history survives corrections, policy changes and derived-state damage."""
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+from test_collection_store_edit_back import served as served
 from test_collection_store_legacy import _event, _rewrite
 from test_collection_store_legacy_import import CONTEXT, _capture, _items
+from test_collection_store_migration import env as env
 from test_collection_store_service import service as service
 from test_collection_store_writer import CID, KEY, create
 from test_collection_store_writer import store as store
@@ -293,6 +296,7 @@ def test_history_page_partition_grows_only_at_its_tail_and_policy_repairs_old_pa
         with pytest.raises(ValueError, match="NOT_FOUND"):
             commands.op_get(store.root, path=first.relative_to(store.root).as_posix())
     monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {capability.COLLECTION_VIEWS_V1})
+    store.invalidate_history_pages()  # the store thread queues every page when a release input changes, as in production
     passes(store, 0.0, 2.0)
     assert not first.exists() and not tail.exists()
     assert KEY not in (store.root / history.main_path(manifest)).read_text()
@@ -625,6 +629,37 @@ def test_history_withdraws_rows_when_current_content_access_changes(store, monke
     else:
         monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda root: frozenset({collections.record_ref(CID, KEY)}))
     assert KEY not in history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]
+
+
+@pytest.mark.parametrize("boundary", ["excluded", "tombstoned"])
+def test_a_running_store_republishes_history_when_access_or_tombstones_change(served, monkeypatch, boundary):
+    """The store thread must queue every history page when an access file or tombstone changes, with no census render."""
+    from test_collection_store_edit_back import VIEWS, WORK, published_view, store_rows
+    from test_collection_store_s1_gate import _until
+
+    from exomem.collection_store import capability, runtime
+    from exomem.governance import lifecycle
+
+    root = served.root
+    relative, _ = published_view(root, "Withdrawn", count=1)
+    page = root / Path(WORK).parent / "_history.md"
+    _until(lambda: page.exists() and relative in page.read_text())
+    # No edit-back census: only the tick can repair a page, as on a release that publishes views without it.
+    monkeypatch.setattr(capability, "RELEASED", (capability.RELEASED - {VIEWS}) | {capability.RECORDS_SUMMARY_V1})
+    txns = store_rows(root, "SELECT COUNT(*) FROM txns")
+    # Withdraw the page's own path: a withheld row would make the publishing write refuse the whole collection.
+    withdrawn_path = page.relative_to(root).as_posix()
+    if boundary == "excluded":
+        (root / "Knowledge Base/_access.yaml").write_text(f"excluded: [{withdrawn_path.removeprefix('Knowledge Base/')}]\n")
+    else:
+        monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda _root: frozenset({withdrawn_path}))
+
+    def republished():
+        runtime._server(root).call(lambda: None)  # each served request wakes the store thread's views tick
+        return relative not in page.read_text()
+
+    _until(republished)
+    assert store_rows(root, "SELECT COUNT(*) FROM txns") == txns
 
 
 def test_blocked_history_policy_cannot_broaden_the_generated_page(store):

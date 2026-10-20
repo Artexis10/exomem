@@ -584,7 +584,7 @@ def _stat(version) -> str:
 
 
 def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) -> list[Observation]:
-    """Read the item, manifest and log views a pass checks, outside the write transaction.
+    """Read the item, manifest, log, summary and history views a pass checks, outside the write transaction.
 
     A view whose stat identity matches the one recorded with its current bytes costs one
     stat. ``paths`` limits the pass to the views still settling. A collection behind a
@@ -607,16 +607,6 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
         names = [column[0] for column in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
         admitted = {cid: _served(writer, cid) for cid in {row["collection_id"] for row in rows}}
-        from . import history
-
-        for cid, served in admitted.items():
-            selected = [row for row in rows if row["kind"] == "history" and row["collection_id"] == cid]
-            if served and selected:
-                manifest = writer._collection(cid)[1]
-                context = history.PageContext(writer.connection, writer.root, manifest, cache=writer.handle.release_cache)
-                rendered = context.render_many(row["path"] for row in selected)
-                for row in selected:
-                    row["history_sha256"] = hashlib.sha256(rendered[row["path"]][1].encode()).hexdigest()
     found = []
     with ExitStack() as stack:
         fs = stack.enter_context(held_fs.acquire(writer.root).require())
@@ -643,7 +633,7 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
                     continue
                 with opened.require() as file:
                     before = file.version()
-                    if row["kind"] != "history" and row["path"] not in force and _stat(before) == row["stat_identity"] \
+                    if row["path"] not in force and _stat(before) == row["stat_identity"] \
                             and row["state"] in ("current", "held"):
                         continue
                     bound = collections._MAX_MANIFEST_BYTES if row["kind"] == "manifest" else (
@@ -749,8 +739,8 @@ class EditBack:
                 state.forget(path)
         own = []
         for observation in observations:
-            if (observation.projection["kind"] == "history"
-                    and observation.digest != observation.projection.get("history_sha256")):
+            if observation.projection["kind"] == "history" and not observation.own:
+                # Only the store writes a history page: reconcile re-renders an edit, an overwrite or a deletion.
                 mutate(writer.reconcile_views, paths={observation.path: observation})
                 continue
             if observation.own:
