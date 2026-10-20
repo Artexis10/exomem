@@ -852,6 +852,11 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
     try:
         from . import derived_receipts
 
+        boundary_held = (
+            active_manager()
+            ._mutation_coordinator_for(session.vault_root)
+            .current_thread_holds_boundary()
+        )
         for batch in affected:
             batch.handoff_outcome = None
             batch.handoff_error = None
@@ -878,15 +883,20 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
                     raise RuntimeError(
                         "derived receipt did not prove the committed generation"
                     )
+                # Fresh proof and existing custody share the outer hold. The
+                # direct fallback still publishes because its proof released it.
                 where["stage"] = "pending_visibility"
-                with call_spans.span("derived.pending_visibility"):
-                    published = derived_receipts.publish_pending_visibility(
-                        session.vault_root,
-                        receipt,
-                        publisher=_PENDING_VISIBILITY_PUBLISHER,
-                    )
-                if not published:
-                    raise RuntimeError("pending visibility publication was not proven")
+                if not boundary_held or not derived_receipts.pending_visibility_complete(
+                    session.vault_root, receipt
+                ):
+                    with call_spans.span("derived.pending_visibility"):
+                        published = derived_receipts.publish_pending_visibility(
+                            session.vault_root,
+                            receipt,
+                            publisher=_PENDING_VISIBILITY_PUBLISHER,
+                        )
+                    if not published:
+                        raise RuntimeError("pending visibility publication was not proven")
                 where["stage"] = "signal"
                 derived_receipts.signal_components(session.vault_root, receipt)
             batch.handoff_outcome = proof.outcome

@@ -4434,6 +4434,7 @@ def _fast_ack_derived_batch(
     for seam in (
         "prepare_batch",
         "prove_committed",
+        "pending_visibility_complete",
         "publish_pending_visibility",
         "signal_components",
         "component_status",

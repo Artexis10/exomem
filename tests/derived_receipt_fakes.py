@@ -273,6 +273,14 @@ class DerivedReceiptProtocolFake:
             canonical_replay_authorized=False,
         )
 
+    def pending_visibility_complete(
+        self,
+        vault_root: Path,
+        receipt: DerivedBatchReceipt,
+    ) -> bool:
+        pending = self._pending_batches.get(receipt.batch_id)
+        return pending is None or all(row.state != "prepared" for row in pending.rows)
+
     def publish_pending_visibility(
         self,
         vault_root: Path,
