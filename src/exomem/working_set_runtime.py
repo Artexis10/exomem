@@ -1484,6 +1484,11 @@ def _carry_components(
     return tuple(component for members in groups.values() for component in phrase_components(members))
 
 
+def _pair_has_letter(pair: tuple[str, str]) -> bool:
+    # Unicode shape preserves model names; numeric-only support needs a complete title.
+    return any(character.isalpha() for term in pair for character in term)
+
+
 def carry_named_groups(
     vault_root: Path,
     turn: str,
@@ -1559,11 +1564,13 @@ def carry_named_groups(
             # set of domains: one query over every pair, one group.
             components = (tuple(pairs),)
         groups: list[tuple[tuple[str, float], ...]] = []
+        sentences = _positioned_words(turn)
         for component in components:
+            fetch = working_set.carry_fetch_size(corpus_pages) if limit is None else limit
             result = lexstore.search_bm25_result(
                 vault_root,
                 content_words(turn),
-                working_set.carry_fetch_size(corpus_pages) if limit is None else limit,
+                fetch,
                 scope="kb",
                 freshness=freshness,
                 allow_delta=False,
@@ -1585,17 +1592,39 @@ def carry_named_groups(
                 and not _is_navigation_page(path)
                 and working_set._is_current_page(vault_root, str(path), status_basis=status_basis)
             )
-            if hits:
-                groups.append(hits)
-                if contacts is not None:
-                    for path, _score in hits:
-                        page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
-                        if page is not None:
-                            found = frozenset(content_stems(page.title + " " + page.search_body))
-                            contacts.setdefault(path, set()).update(
-                                (left, right) for left, right, pair in occurrences
-                                if pair in component and set(pair) <= found
-                            )
+            letter_pairs = tuple(
+                pair for pair in component if _pair_has_letter(pair)
+            )
+            numeric_pairs = set(component) - set(letter_pairs)
+            body_hits = []
+            titles = []
+            for path, score in hits:
+                page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
+                if page is not None:
+                    titles.append((path, score, page.title))
+                found = (
+                    frozenset(content_stems(page.title + " " + page.search_body))
+                    if page else frozenset()
+                )
+                supported = tuple(pair for pair in letter_pairs if set(pair) <= found)
+                if not numeric_pairs or supported:
+                    body_hits.append((path, score))
+                    if contacts is not None:
+                        contacts.setdefault(path, set()).update(
+                            (left, right) for left, right, pair in occurrences if pair in supported
+                        )
+            if body_hits:
+                groups.append(tuple(body_hits))
+            # Numeric body coincidences need complete-title proof, not partial title contact.
+            if numeric_pairs and len(result.value or ()) < fetch:
+                groups.extend(_qualified_carry_title_groups(
+                    turn, stems=stems, titles=titles,
+                    occurrences=tuple(
+                        occurrence for occurrence in _pair_occurrences(sentences, rare)
+                        if occurrence[3] in numeric_pairs
+                    ),
+                    contacts=contacts, partial=False,
+                ))
         if not groups:
             groups = _carry_title_groups(
                 vault_root,
@@ -1681,7 +1710,7 @@ def _carry_title_groups(
     if not result.readiness.complete or len(result.value or ()) >= fetch:
         # A bounded prefix cannot prove that a namesake was not cut off.
         return []
-    candidates = []
+    titles = []
     for path, score in result.value or ():
         path = str(path)
         if (
@@ -1691,15 +1720,33 @@ def _carry_title_groups(
         ):
             continue
         title = working_set._page_title(vault_root, path)
-        if not title:
-            continue
+        if title:
+            titles.append((path, float(score), title))
+    return _qualified_carry_title_groups(
+        turn, stems=stems, titles=titles, occurrences=occurrences, contacts=contacts,
+    )
+
+
+def _qualified_carry_title_groups(
+    turn: str,
+    *,
+    stems: Sequence[str],
+    titles: Sequence[tuple[str, float, str]],
+    occurrences: Sequence[tuple[int, int, int, tuple[str, str]]],
+    contacts: dict[str, set[tuple[int, int]]] | None = None,
+    partial: bool = True,
+) -> list[tuple[tuple[str, float], ...]]:
+    """Qualify title occurrences within one complete, already ranked window."""
+    sentences = _positioned_words(turn)
+    candidates = []
+    for path, score, title in titles:
         title_stems = frozenset(pairable_stems(title))
         title_sentences = tuple(
             tuple(word_stems for _position, word_stems in words)
             for words in _positioned_words(title)
             if words
         )
-        candidates.append((path, float(score), title_stems, title_sentences))
+        candidates.append((path, score, title_stems, title_sentences))
 
     turn_words = [tuple(word_stems for _position, word_stems in words) for words in sentences]
     matches = set()
@@ -1760,7 +1807,8 @@ def _carry_title_groups(
     ]
     remaining_occurrences = tuple(
         occurrence for occurrence in occurrences
-        if not any(
+        if partial and _pair_has_letter(occurrence[3])
+        and not any(
             sentence == occurrence[0] and (start <= occurrence[1] < end
                                           or start <= occurrence[2] < end)
             for sentence, start, end in matches

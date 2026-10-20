@@ -676,7 +676,10 @@ Nested matches and loose pairs touching a qualifying occurrence SHALL be
 consumed only there. Independently stated full titles and shorter phrases
 elsewhere SHALL remain separate domains; non-contained overlapping titles
 SHALL remain contested. Unqualified occurrences SHALL retain the existing
-partial-title behaviour. Words consumed by a resolved anchor SHALL NOT supply
+partial-title behaviour for pairs containing a Unicode letter. Numeric-only
+body matches SHALL NOT establish a named page. A complete numeric title SHALL
+qualify within its strict query's complete candidate window, even beside a
+separately named text domain. Words consumed by a resolved anchor SHALL NOT supply
 a new qualifier. Qualification SHALL NOT use a global best-title ranking or
 infer uniqueness from incomplete or truncated candidate evidence.
 
@@ -684,6 +687,16 @@ The fallback SHALL retain current maintained-catalogue bounds, page eligibility,
 raw-token and sentence semantics, packet budgets, disclosure, continuity and
 named-versus-carried statuses. It SHALL NOT add a foreground corpus scan,
 index repair, model call or second matching system.
+
+#### Scenario: Clock digits do not name unrelated measurements
+- **WHEN** the turn states a time whose numeric components occur in an unrelated
+  page's body or as only part of a longer title
+- **THEN** that numeric-only support does not carry the page or serve its units
+
+#### Scenario: A numeric title remains available beside another domain
+- **WHEN** the turn states a complete numeric title and independently names a
+  text domain, and each query returns its complete candidate window
+- **THEN** both domains retain their units under the existing namesake rules
 
 #### Scenario: A full title distinguishes shared-suffix siblings
 - **WHEN** the turn states one current page's complete qualifying title and
