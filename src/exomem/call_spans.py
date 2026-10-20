@@ -22,6 +22,7 @@ between them.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import re
@@ -63,8 +64,13 @@ NAME_MAX_CHARS = 64
 #: calls, exactly as `ms` and `count` are, so an aggregated span still reports
 #: one honest total.
 MAX_FIELDS_PER_SPAN = 4
-# CPU is one fixed metadata field, separate from the four caller measurements.
+# CPU is fixed metadata, separate from the four caller measurements.
 THREAD_CPU_US = "thread_cpu_us"
+#: CPU of every thread in the process over the span. Wall far above both clocks
+#: is a wait on a lock, I/O, SQLite or another process; process CPU far above
+#: thread CPU says other threads ran meanwhile, not that they blocked this one.
+PROCESS_CPU_US = "process_cpu_us"
+CPU_FIELDS = frozenset({THREAD_CPU_US, PROCESS_CPU_US})
 #: A field key is a measurement name, never a value. Structural rather than a
 #: declared list, so a new count needs no registry edit, but a key carrying
 #: content cannot pass: no slashes, dots, spaces, digits or capitals, which is
@@ -187,8 +193,8 @@ def _merge_fields_locked(
         if not FIELD_KEY_PATTERN.match(clean_key):
             _warn_rejected_field_key(clean_key)
             continue
-        measurements = len(totals) - int(THREAD_CPU_US in totals)
-        if (clean_key != THREAD_CPU_US and clean_key not in totals
+        measurements = len(totals.keys() - CPU_FIELDS)
+        if (clean_key not in CPU_FIELDS and clean_key not in totals
                 and measurements >= MAX_FIELDS_PER_SPAN):
             continue
         try:
@@ -211,6 +217,22 @@ def _warn_rejected_field_key(key: str) -> None:
     )
 
 
+def cpu_started() -> tuple[int, int] | None:
+    """The thread and process CPU clocks at a span's start; None outside an MCP call."""
+    if MCP_CALL_TOKEN.get() is None:
+        return None
+    return time.thread_time_ns(), time.process_time_ns()
+
+
+def cpu_fields(started: tuple[int, int]) -> dict[str, int]:
+    """The CPU metadata fields for a span that began at `started`."""
+    thread_ns, process_ns = started
+    return {
+        THREAD_CPU_US: (time.thread_time_ns() - thread_ns) // 1000,
+        PROCESS_CPU_US: (time.process_time_ns() - process_ns) // 1000,
+    }
+
+
 @contextmanager
 def span(name: str, fields: dict[str, Any] | None = None):
     """Time one named phase of the current MCP call.
@@ -226,15 +248,25 @@ def span(name: str, fields: dict[str, Any] | None = None):
     nothing and the span is shaped exactly as it always was.
     """
     started = time.perf_counter()
-    cpu_started = time.thread_time_ns() if MCP_CALL_TOKEN.get() is not None else None
+    cpu = cpu_started()
     try:
         yield fields
     finally:
-        measured = (
-            {**(fields or {}), THREAD_CPU_US: (time.thread_time_ns() - cpu_started) // 1000}
-            if cpu_started is not None else fields
-        )
+        measured = {**(fields or {}), **cpu_fields(cpu)} if cpu is not None else fields
         record_span(name, (time.perf_counter() - started) * 1000.0, measured)
+
+
+@contextmanager
+def entered(name: str, manager: Any):
+    """Enter `manager` under it, recording only the time its entry took as `name`.
+
+    For a guard whose acquisition is the question: the body's time stays with
+    the enclosing span, so a slow acquisition and a slow body read apart.
+    """
+    with contextlib.ExitStack() as stack:
+        with span(name):
+            value = stack.enter_context(manager)
+        yield value
 
 
 def timed(name: str):

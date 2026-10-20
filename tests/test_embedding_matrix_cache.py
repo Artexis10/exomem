@@ -121,7 +121,7 @@ def test_failed_matrix_load_retains_partial_counts_in_the_call_ledger(tmp_path, 
     assert row is not None
     measured = {span["name"]: span for span in row["spans"]}
     fields = measured["embeddings.matrix_load.rows"]["fields"]
-    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
         "expected_rows": 2,
         "width_sum": embeddings.VECTOR_DIM,
         "rows": 1,
@@ -1026,7 +1026,7 @@ def test_service_scoring_preserves_eligible_scores_without_resident_matrix(tmp_p
     }
     assert measured['embeddings.disk_score.decode']['count'] == 4
     fields = measured['embeddings.disk_score.decode']['fields']
-    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
         'rows': 8,
         'vector_bytes': 8 * embeddings.VECTOR_DIM * np.dtype(np.float32).itemsize,
     }
@@ -1090,7 +1090,7 @@ def test_failed_service_scan_retains_partial_decode_counts_and_releases_snapshot
     assert row is not None
     measured = {span['name']: span for span in row['spans']}
     fields = measured['embeddings.disk_score.decode']['fields']
-    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
         'rows': 1,
         'vector_bytes': embeddings.VECTOR_DIM * np.dtype(np.float32).itemsize,
     }
