@@ -409,8 +409,12 @@ def peek_sidecar_token(
     if not path.exists():
         return (0, 0, 0)
     try:
-        # Optional nonblocking readers decline contention instead of waiting for a writer.
-        conn = sqlite3.connect(path, timeout=0.0) if nonblocking else sqlite3.connect(path)
+        # Optional readers neither wait for a writer nor recreate a sidecar removed during the read.
+        conn = (
+            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0)
+            if nonblocking
+            else sqlite3.connect(path)
+        )
         try:
             has_meta = (
                 conn.execute(

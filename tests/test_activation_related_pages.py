@@ -404,3 +404,32 @@ def test_a_locked_chunk_publication_lists_nothing(
     _nothing_served(packet)
     _no_related_block(packet)
     assert packet["generation"]["related_evidence"] == "cold"
+
+
+def test_a_listing_does_not_recreate_a_sidecar_removed_during_its_read(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent sidecar retirement must not leave a new empty database behind."""
+    _planted_vault(vault, monkeypatch, {"Brine ledger": (BODY, _toward_turn(1.0))})
+    recall = embeddings.get_embedding_index(vault)
+    connect = sqlite3.connect
+    removed = False
+
+    def remove_before_connect(database, *args, **kwargs):
+        nonlocal removed
+        if not removed and database in (
+            recall.path, str(recall.path), f"{recall.path.resolve().as_uri()}?mode=ro"
+        ):
+            recall.path.unlink()
+            removed = True
+        return connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", remove_before_connect)
+
+    packet = _activate(vault)
+
+    assert removed
+    assert not recall.path.exists()
+    _nothing_served(packet)
+    _no_related_block(packet)
+    assert packet["generation"]["related_evidence"] == "cold"
