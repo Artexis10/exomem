@@ -403,13 +403,14 @@ def catchup_is_eligible(
 
 
 def peek_sidecar_token(
-    path: Path, *, generation_key: str = "generation"
+    path: Path, *, generation_key: str = "generation", nonblocking: bool = False
 ) -> tuple[int, int, int] | None:
     """Read `(epoch, generation, instance)` without creating or migrating a sidecar."""
     if not path.exists():
         return (0, 0, 0)
     try:
-        conn = sqlite3.connect(path)
+        # Optional nonblocking readers decline contention instead of waiting for a writer.
+        conn = sqlite3.connect(path, timeout=0.0) if nonblocking else sqlite3.connect(path)
         try:
             has_meta = (
                 conn.execute(
@@ -443,10 +444,15 @@ def cache_is_fresh(c, path: Path, epoch: int, gen: int, instance: int) -> bool:
         return False
 
 
-def try_serve_cached(c, path: Path, *, generation_key: str = "generation"):
+def try_serve_cached(
+    c, path: Path, *, generation_key: str = "generation", nonblocking: bool = False
+):
     """Return `c` if it can serve the current sidecar token, else None."""
-    token = peek_sidecar_token(path, generation_key=generation_key)
+    token = peek_sidecar_token(path, generation_key=generation_key, nonblocking=nonblocking)
     if token is None:
+        # An optional listing loses a reference on contention; ordinary recall keeps its fallback.
+        if nonblocking:
+            return None
         if c is not None:
             log.warning(
                 "sidecar token read failed for %s; serving the warm cache", path

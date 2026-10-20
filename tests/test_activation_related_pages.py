@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +28,7 @@ from test_working_set_index import _seed_structure, _write
 
 from exomem import (
     commands,
+    embedding_index,
     embeddings,
     lexstore,
     readiness,
@@ -340,3 +343,64 @@ def test_the_packet_cache_follows_the_resident_matrix(
     assert while_cold["generation"]["related_evidence"] == "cold"
     assert "related" not in while_cold
     assert [entry["path"] for entry in warm_again["related"]] == [paths["Brine ledger"]]
+
+
+def test_a_chunk_publication_invalidates_a_previously_related_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A derived writer can finish after the lexical catalogue already caught up."""
+    paths = _planted_vault(
+        vault, monkeypatch, {"Brine ledger": (BODY, _toward_turn(1.0))}
+    )
+    first = working_set_runtime.serve(vault, turn=TURN, max_chars=4000)
+    assert [entry["path"] for entry in first["related"]] == [paths["Brine ledger"]]
+
+    recall = embeddings.get_embedding_index(vault)
+    writer = embedding_index.EmbeddingIndex(vault, path=recall.path)
+    writer.upsert_file(
+        paths["Brine ledger"], ["published chunk"], _random_unit("new publication")[None, :], 2.0
+    )
+
+    packet = working_set_runtime.serve(vault, turn=TURN, max_chars=4000)
+
+    _nothing_served(packet)
+    _no_related_block(packet)
+    assert packet["generation"]["related_evidence"] == "cold"
+
+
+def test_a_busy_index_registry_does_not_delay_related_activation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unrelated index registry holder must not stall the public activation."""
+    paths = _planted_vault(
+        vault, monkeypatch, {"Brine ledger": (BODY, _toward_turn(1.0))}
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        embeddings._INDEX_CACHE_LOCK.acquire()
+        try:
+            # The deadline bounds a deadlock reproduction, not activation performance.
+            packet = executor.submit(_activate, vault).result(timeout=3)
+        finally:
+            embeddings._INDEX_CACHE_LOCK.release()
+
+    _nothing_served(packet)
+    assert [entry["path"] for entry in packet["related"]] == [paths["Brine ledger"]]
+
+
+def test_a_locked_chunk_publication_lists_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listing cannot use a matrix whose publication a writer prevents it verifying."""
+    _planted_vault(vault, monkeypatch, {"Brine ledger": (BODY, _toward_turn(1.0))})
+    recall = embeddings.get_embedding_index(vault)
+    with sqlite3.connect(recall.path) as writer:
+        writer.execute("PRAGMA journal_mode=DELETE")
+        writer.execute("BEGIN EXCLUSIVE")
+        try:
+            packet = _activate(vault)
+        finally:
+            writer.rollback()
+
+    _nothing_served(packet)
+    _no_related_block(packet)
+    assert packet["generation"]["related_evidence"] == "cold"

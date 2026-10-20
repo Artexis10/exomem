@@ -44,7 +44,7 @@ def space_sidecar_name(fingerprint: str) -> str:
     return f".embeddings.{digest}.sqlite"
 
 
-def active_sidecar_name(vault_root: Path) -> str | None:
+def active_sidecar_name(vault_root: Path, *, nonblocking: bool = False) -> str | None:
     """The sidecar the active pointer names, or None when none is named.
 
     Read on every sidecar lookup, so it costs one `stat` while the pointer is
@@ -60,8 +60,11 @@ def active_sidecar_name(vault_root: Path) -> str | None:
     if not stat.S_ISREG(info.st_mode) or info.st_size > _POINTER_LIMIT:
         return None
     key = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
-    with _POINTER_LOCK:
+    if nonblocking:
         cached = _POINTER_CACHE.get(str(pointer))
+    else:
+        with _POINTER_LOCK:
+            cached = _POINTER_CACHE.get(str(pointer))
     if cached is not None and cached[0] == key:
         return cached[1]
     try:
@@ -72,8 +75,10 @@ def active_sidecar_name(vault_root: Path) -> str | None:
         return None
     text = raw.decode("utf-8", "replace").strip()
     name = text if SPACE_SIDECAR_RE.fullmatch(text) else None
-    with _POINTER_LOCK:
-        _POINTER_CACHE[str(pointer)] = (key, name)
+    # Optional readers only inspect the immutable cached pair and never wait to publish one.
+    if not nonblocking:
+        with _POINTER_LOCK:
+            _POINTER_CACHE[str(pointer)] = (key, name)
     return name
 
 
@@ -90,9 +95,9 @@ def publish_active_sidecar(vault_root: Path, name: str) -> None:
         )
 
 
-def sidecar_path(vault_root: Path) -> Path:
+def sidecar_path(vault_root: Path, *, nonblocking: bool = False) -> Path:
     """Per-machine text embedding sidecar path: the one that serves recall now."""
-    name = active_sidecar_name(vault_root)
+    name = active_sidecar_name(vault_root, nonblocking=nonblocking)
     return state_paths.vault_state_dir(vault_root) / (name or EMBEDDINGS_SIDECAR)
 
 

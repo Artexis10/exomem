@@ -962,9 +962,10 @@ gate and SHALL name one state: `ready` (the lane ran; nothing listed is a valid
 outcome), `cold` (no resident matrix serves), `space_mismatch` (the matrix was
 made by another encoder), `uncalibrated`, `unavailable`, `busy`, `warming`,
 `absent`, `disabled` or `audience_restricted`. When the turn was not encoded, the
-state SHALL be the anchor lane's own `semantic_evidence` state. A packet cached
-under one state SHALL NOT be served after the resident matrix changes, and a
-transient state SHALL NOT be cached.
+state SHALL be the anchor lane's own `semantic_evidence` state. A packet that
+reaches this lane SHALL NOT be cached: every attempt SHALL recheck the current
+resident publication, including changes from another writer. If a writer blocks
+that check, the lane SHALL decline immediately without changing ordinary recall.
 
 #### Scenario: A recurring subject is listed and nothing is served
 - **WHEN** a turn names no page, and a current page matches the turn's words in the
@@ -1010,3 +1011,18 @@ transient state SHALL NOT be cached.
 - **WHEN** the resident matrix is dropped after a packet was cached and loaded again
 - **THEN** the next packet reports `cold`, and the one after the matrix is back lists
   the page again
+
+#### Scenario: Another writer changes the chunk publication
+- **WHEN** a chunk writer publishes after an unresolved turn listed a related page
+  and the held matrix has not caught up
+- **THEN** a repeated turn rechecks the publication, reports `cold`, and lists nothing
+
+#### Scenario: The index registry is busy
+- **WHEN** another operation holds the shared embedding-index registry lock
+- **THEN** an eligible related listing reads its existing serving index without
+  acquiring that lock, creating an index or promoting a building sidecar
+
+#### Scenario: A writer blocks the publication check
+- **WHEN** a writer prevents the resident matrix's publication from being verified
+- **THEN** the related listing reports `cold` immediately and serves nothing,
+  while ordinary recall retains its existing behaviour

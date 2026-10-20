@@ -2310,10 +2310,6 @@ def serve(
         lexical_state,
         index.token(),
         working_set.band_audience_allowed(root),
-        # The related-page listing reads the resident chunk matrix, so a packet
-        # compiled against one matrix is never served after it is replaced,
-        # patched or dropped.
-        _resident_matrix_token(root),
     )
     # A reader other than the owner resolves anchors over its own view
     # (`working_set_resolve.audience_view`), so its packet is neither served
@@ -2412,11 +2408,15 @@ def serve(
         # would go on saying `index_stale` after the catalogue caught up.
         packet["generation"]["index_stale"] = True
         return packet
-    if (
-        packet["generation"].get("semantic_evidence") in _TRANSIENT_SEMANTIC_STATES
-        or packet["generation"].get("related_evidence") in _TRANSIENT_SEMANTIC_STATES
-        or lexical_state not in {"available", "not_requested", "agent_choice"}
-    ):
+    # A chunk writer can publish without changing the anchor or lexical tokens.
+    # Recheck every related attempt instead of caching its publication-dependent result.
+    if "related_evidence" in packet["generation"]:
+        return packet
+    if packet["generation"].get("semantic_evidence") in {
+        "warming",
+        "busy",
+        "unavailable",
+    } or lexical_state not in {"available", "not_requested", "agent_choice"}:
         return packet
     # A lane can recover without changing the vault or its catalogue token.
     # Retain this request's coverage, but never cache a transient lookup failure.
@@ -2430,23 +2430,6 @@ def serve(
         while len(_PACKET_CACHE) > CACHE_SIZE:
             _PACKET_CACHE.popitem(last=False)
     return packet
-
-
-#: States of an optional semantic reading that can recover without the vault,
-#: the catalogue or a matrix changing, so a packet carrying one is never stored.
-_TRANSIENT_SEMANTIC_STATES = frozenset({"warming", "busy", "unavailable"})
-
-
-def _resident_matrix_token(root: Path) -> tuple[int, int, int] | None:
-    """The write token of the resident chunk matrix, or None when none is held.
-
-    Read with no I/O and no load, and not at all while embeddings are off.
-    """
-    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return None
-    from . import embeddings
-
-    return embeddings.get_embedding_index(root).resident_token()
 
 
 def _key_text(freshness_key: Any) -> str:

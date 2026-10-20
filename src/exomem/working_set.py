@@ -2855,7 +2855,9 @@ def related_pages(
 
             from . import embeddings, ranking_config
 
-            embedding_index = embeddings.get_embedding_index(vault_root)
+            embedding_index = embeddings.peek_embedding_index(vault_root)
+            if embedding_index is None:
+                return (), (), "cold"
             resident = embedding_index.resident_matrix()
             if resident is None:
                 return (), (), "cold"
