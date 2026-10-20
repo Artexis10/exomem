@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.132.2](https://github.com/Artexis10/exomem/compare/v0.132.1...v0.132.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* **compiler:** require complete titles for numeric-only carry ([#1946](https://github.com/Artexis10/exomem/issues/1946)) ([0c296dd](https://github.com/Artexis10/exomem/commit/0c296ddb23056a3a91aafa764b00d8a335e66292))
+
+
+### Performance
+
+* trace episode reference preparation retries ([b963a9c](https://github.com/Artexis10/exomem/commit/b963a9cbe84e002caf872581c1d3821a7f5da21f))
+
 ## [0.132.1](https://github.com/Artexis10/exomem/compare/v0.132.0...v0.132.1) (2026-10-20)
 
 
