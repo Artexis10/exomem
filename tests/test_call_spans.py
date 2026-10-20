@@ -131,7 +131,8 @@ def test_recall_stages_record_cpu_and_counts_when_a_stage_refuses(token, monkeyp
     row = call_spans.pop_call_spans(token)[0]
     assert row["name"] == "recall.semantic.search"
     assert row["count"] == 2
-    assert {key: value for key, value in row["fields"].items() if key != call_spans.PROCESS_CPU_US} == {
+    fields = row["fields"]
+    assert {key: value for key, value in fields.items() if key != call_spans.PROCESS_CPU_US} == {
         "candidates": 6, "thread_cpu_us": 4000,
     }
     assert measured == {"candidates": 3}

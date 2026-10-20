@@ -990,6 +990,7 @@ def test_completion_and_fallback_work_have_exact_timing_spans(
             perf_counter=lambda: clock[0],
             monotonic=lambda: clock[0],
             thread_time_ns=call_spans.time.thread_time_ns,
+            process_time_ns=call_spans.time.process_time_ns,
         ),
     )
     monkeypatch.setattr(file_watcher, "register_self_write", lambda *a, **kw: ([], False))

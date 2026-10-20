@@ -1488,5 +1488,6 @@ def test_a_span_with_every_field_slot_used_keeps_both_cpu_readings(
         return {"ok": True}
 
     _drive("remember", {"content": "x"}, leaf)
-    fields = {span["name"]: span for span in _rows(ledger_dir)[-1]["spans"]}["derived.full"]["fields"]
+    spans = {span["name"]: span for span in _rows(ledger_dir)[-1]["spans"]}
+    fields = spans["derived.full"]["fields"]
     assert set(fields) == {"a", "b", "c", "d", "thread_cpu_us", "process_cpu_us"}
