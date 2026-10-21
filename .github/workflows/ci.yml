@@ -28,6 +28,8 @@ jobs:
       EXOMEM_SERIAL_CORE_MODULE: tests/test_governance_overhead.py
       EXOMEM_SERIAL_ANALYTICS_MODULE: tests/test_query_engine_analytics.py
       EXOMEM_SERIAL_GRAPH_MODULE: tests/test_graph_lane_perf.py
+      # The write-burst clock guard measures its own concurrent workload, outside the worker pool.
+      EXOMEM_SERIAL_SENSING_MODULE: tests/test_sensed_write_burst_probe.py
       # Real-clock attribution needs an idle process, outside the worker pool.
       EXOMEM_SERIAL_RECALL_NODE: tests/test_recall_integration.py::test_every_request_shape_attributes_its_time
     if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
@@ -74,6 +76,7 @@ jobs:
           "$EXOMEM_SERIAL_CORE_MODULE"
           "$EXOMEM_SERIAL_ANALYTICS_MODULE"
           "$EXOMEM_SERIAL_GRAPH_MODULE"
+          "$EXOMEM_SERIAL_SENSING_MODULE"
           "$EXOMEM_SERIAL_RECALL_NODE"
           -o timeout=180
           --durations-path="$EXOMEM_DURATIONS_PATH"
@@ -200,6 +203,7 @@ jobs:
           --ignore="$EXOMEM_SERIAL_CORE_MODULE"
           --ignore="$EXOMEM_SERIAL_ANALYTICS_MODULE"
           --ignore="$EXOMEM_SERIAL_GRAPH_MODULE"
+          --ignore="$EXOMEM_SERIAL_SENSING_MODULE"
           --deselect="$EXOMEM_SERIAL_RECALL_NODE"
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
