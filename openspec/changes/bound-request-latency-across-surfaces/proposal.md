@@ -11,7 +11,7 @@ Existing latency checks measure different boundaries, populations and percentile
 - Add a live warm activation bar: p95 below 1,000 ms across all eligible terminal outcomes at the public activation leaf.
 - Preserve packet and CPU behavior; require budgeted read-only activation to return a packet or existing budget abstention within its absolute deadline.
 - Reuse the existing recall, conversation, foreground-operation and durable-acknowledgement contracts for their distinct bars.
-- Keep unmeasured read, browse, deep, cold and background-freshness thresholds pending until current measurements support a recorded engineering choice.
+- Keep unmeasured browse, deep, cold and background-freshness thresholds pending until current measurements support a recorded engineering choice.
 - Require attribution before runtime fixes and compare installed before/after arms on the same inputs, with data, authorization and packet identity checks.
 - Repair read-only deadline overruns through existing budget and deferral paths, including packet finalization; keep unsafe-to-bound repairs open.
 - Keep direct page reads available during optional link recovery. Serve unknown inbound links explicitly instead of building a vault index before releasing the page.
@@ -35,7 +35,7 @@ Ordinary warm public writes additionally target p95 below 1,000 ms, with cold an
 
 ## Impact
 
-Implementation will extend `src/exomem/latency_watch.py`, MCP middleware in `server.py`, the REST command facade in `server_rest.py`, and activation observations in `commands.py` and `query_log.py`. A packaged `src/exomem/request_latency_contract.json` will hold the bars. Existing gate and runtime paths remain the implementation homes; `accelerate-governed-recall` task 6.1 remains the recall acceptance slice.
+Implementation will extend `src/exomem/latency_watch.py`, MCP middleware in `server.py`, the REST command facade in `server_rest.py`, activation observations in `commands.py` and `query_log.py`, and the shared canary for `ask_memory`, `activate_context` and `read_memory`. A packaged `src/exomem/request_latency_contract.json` will hold the bars. Existing gate and runtime paths remain the implementation homes; `accelerate-governed-recall` task 6.1 remains the recall acceptance slice.
 
 The contract adds no MCP tool, model role, paid evaluation, CPU quota increase or live flag switch. Observation remains advisory and cannot block requests or third-party-controlled releases. Existing release and installation ownership applies to product delivery.
 

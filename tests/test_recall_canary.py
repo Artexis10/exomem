@@ -77,6 +77,31 @@ def test_mcp_canary_proves_material_over_parsed_public_calls(tmp_path):
         assert secret not in rendered
 
 
+def test_mcp_canary_accepts_a_positive_read_memory_case(tmp_path):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def read_memory(path: str) -> dict:
+        return {"ok": True, "path": path, "body": "page material"}
+
+    case = _canary_case(
+        state_path=["ok"],
+        state=True,
+        references=[{"path": ["path"], "value": "private-page"}],
+        material_paths=[["body"]],
+    )
+    case.update(tool="read_memory", arguments={"path": "private-page"})
+
+    report = _run_canary(tmp_path, server, [case])
+
+    assert report["availability"] == "passed"
+    assert report["positive_coverage"]["read_memory"]["successful_cases"] == 1
+    assert report["verdict"] == "passed"
+    assert "private-page" not in json.dumps(report)
+
+
 def test_mcp_deep_recall_cannot_pass_the_ordinary_population(tmp_path):
     from fastmcp import FastMCP
 
