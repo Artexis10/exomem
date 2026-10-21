@@ -556,7 +556,6 @@ def add(
         vault_root,
         top_index_text=update.top_index_content,
         pending_paths=[rel_source_no_ext],
-        source_counts=pre_counts,
     )
     sub_writes = [
         write for write in sub_writes

@@ -725,7 +725,6 @@ def compute_subindex_writes(
     base_writes: Mapping[Path, PlannedWrite] | None = None,
     pending_paths: list[str] | None = None,
     include_unchanged: bool = False,
-    source_counts: Mapping[str, int] | None = None,
 ) -> tuple[list[PlannedWrite], str | None]:
     """Build the planned writes for sub-folder + top-index count refreshes.
 
@@ -744,9 +743,6 @@ def compute_subindex_writes(
     without re-scanning twice. Pass `[]` or omit for ops that don't add
     counted files (edit, preserve).
 
-    `source_counts` can supply the caller's on-disk snapshot before applying
-    `pending_paths`, without changing the scanner used by other callers.
-
     Writes are only included for files that exist. Missing sub-indexes
     are silently skipped — not every machine maintains the full hierarchy.
     """
@@ -761,7 +757,7 @@ def compute_subindex_writes(
     entities_dir = kb / "Entities"
     entity_registry = load_entity_types(vault_root)
 
-    sources_counts = _count_sources(sources_dir) if source_counts is None else dict(source_counts)
+    sources_counts = _count_sources(sources_dir)
     notes_counts = _count_notes(notes_dir)
     entities_counts = _count_entities(entities_dir, registry=entity_registry)
     notes_by_subfolder = _count_notes_by_subfolder(notes_dir)
