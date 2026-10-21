@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from pathlib import Path
 
 import pytest
 import yaml
 
 from exomem import add as add_module
+from exomem import audit, indexes
 from exomem import schema as schema_module
 
 
@@ -190,6 +193,36 @@ def test_add_updates_sources_index_count(
     after = _read(sources_index)
     assert "Articles]] — captured web/PDF content (3)" in after
     assert "2026-05-18 — [[Knowledge Base/Sources/Articles/2026-05-18-new-article]]" in after
+
+
+def test_pending_capture_does_not_change_an_independent_index_audit(
+    vault: Path,
+    source_schema: schema_module.SourceSchema,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = audit.audit(vault, categories=["index_drift"]).findings
+    observed = []
+    compute_updates = indexes.compute_updates
+    audit_context = copy_context()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def audit_during_planning(*args, **kwargs):
+            report = pool.submit(audit_context.run, audit.audit, vault, categories=["index_drift"])
+            observed.append(report.result(timeout=10).findings)
+            return compute_updates(*args, **kwargs)
+
+        monkeypatch.setattr(indexes, "compute_updates", audit_during_planning)
+        add_module.add(
+            vault,
+            source_schema,
+            content="A captured discussion.",
+            source_type="session",
+            title="Independent count audit",
+            today=TODAY,
+        )
+
+    assert observed
+    assert all(findings == before for findings in observed)
 
 
 def test_add_renders_generated_indexes_for_nested_obsidian_root(

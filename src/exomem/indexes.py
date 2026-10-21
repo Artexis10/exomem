@@ -86,6 +86,7 @@ def compute_updates(
     activity_summary: str,
     log_entry_body: str,
     stamp_iso: str | None = None,
+    source_counts: Mapping[str, int] | None = None,
 ) -> IndexUpdate:
     """Build the new contents of Sources/index.md, top-level index.md, and log.md.
 
@@ -98,6 +99,9 @@ def compute_updates(
     recorded instant for the `log.md` heading, which is what makes several
     writes on one day orderable. It defaults to `date_iso` so callers that
     genuinely only have a day keep their existing behaviour.
+
+    `source_counts`, when supplied, includes the caller's planned Source.
+    The snapshot stays local to this update.
     """
     kb = kb_root(vault_root)
     sources_dir = kb / "Sources"
@@ -112,7 +116,7 @@ def compute_updates(
     if not log_file.exists():
         raise FileNotFoundError(f"log.md missing: {log_file}")
 
-    counts = _count_sources(sources_dir)
+    counts = _count_sources(sources_dir) if source_counts is None else dict(source_counts)
 
     sources_index_new = _update_sources_index(
         sources_index.read_text(encoding="utf-8"),
@@ -721,6 +725,7 @@ def compute_subindex_writes(
     base_writes: Mapping[Path, PlannedWrite] | None = None,
     pending_paths: list[str] | None = None,
     include_unchanged: bool = False,
+    source_counts: Mapping[str, int] | None = None,
 ) -> tuple[list[PlannedWrite], str | None]:
     """Build the planned writes for sub-folder + top-index count refreshes.
 
@@ -739,6 +744,9 @@ def compute_subindex_writes(
     without re-scanning twice. Pass `[]` or omit for ops that don't add
     counted files (edit, preserve).
 
+    `source_counts` can supply the caller's on-disk snapshot before applying
+    `pending_paths`, without changing the scanner used by other callers.
+
     Writes are only included for files that exist. Missing sub-indexes
     are silently skipped — not every machine maintains the full hierarchy.
     """
@@ -753,7 +761,7 @@ def compute_subindex_writes(
     entities_dir = kb / "Entities"
     entity_registry = load_entity_types(vault_root)
 
-    sources_counts = _count_sources(sources_dir)
+    sources_counts = _count_sources(sources_dir) if source_counts is None else dict(source_counts)
     notes_counts = _count_notes(notes_dir)
     entities_counts = _count_entities(entities_dir, registry=entity_registry)
     notes_by_subfolder = _count_notes_by_subfolder(notes_dir)
