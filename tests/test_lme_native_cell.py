@@ -157,6 +157,28 @@ def test_native_cell_uses_real_public_mcp_and_keeps_the_vault(tmp_path: Path, mo
         os.kill(child_pid, 0)
 
 
+@pytest.mark.parametrize("backend", [None, "auto"])
+def test_native_cell_keeps_the_requested_backend_through_server_startup(
+    tmp_path: Path, backend: str | None
+) -> None:
+    """An explicit indexed-backend request must survive server startup."""
+    expected = "python" if backend is None else backend
+
+    async def exercise() -> None:
+        async with NativeCell(
+            tmp_path / "cell",
+            python=PYTHON,
+            product_root=ROOT,
+            lexical_backend=backend,
+        ) as cell:
+            assert cell.runtime_receipt["lexical_backend_setting"] == expected
+            assert cell.runtime_receipt["lexical_backend"] == expected
+            assert cell.runtime_receipt["prebuild_bindings"]["lexical_backend"] == expected
+            assert cell.runtime_receipt["vault_root"] == str(cell.vault)
+
+    asyncio.run(exercise())
+
+
 def test_native_cell_scrubs_caller_environment_and_denies_external_ingest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
