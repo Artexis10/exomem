@@ -90,6 +90,25 @@ def is_cached(model_name: str, hub: Path | None = None) -> bool:
     return snapshot_populated(hub or hub_dir(), snapshot_dirname(model_name))
 
 
+def snapshot_path(model_name: str, hub: Path | None = None) -> Path | None:
+    """Return the cached `main` snapshot path when its ref resolves locally.
+
+    Sentence Transformers' ONNX loader lists repository files when it receives a
+    Hub ID. A local snapshot path lets a complete cached ONNX model load without
+    that network lookup.
+    """
+    root = (hub or hub_dir()) / snapshot_dirname(model_name)
+    snapshots = root / "snapshots"
+    try:
+        revision = (root / "refs" / "main").read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    if not revision:
+        return None
+    candidate = snapshots / revision
+    return candidate if candidate.is_dir() else None
+
+
 def offline_enabled() -> bool:
     """Whether offline-first loading is switched on at all. Default: yes."""
     override = os.environ.get(OFFLINE_ENV)
