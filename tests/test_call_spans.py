@@ -352,7 +352,9 @@ def test_the_row_bounds_spans_independently_of_the_producer() -> None:
         return call_ledger.build_row(
             sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id="request",
             tool="read_memory", outcome="ok", duration_ms=1.0,
-            spans=[{"name": f"phase.{i}", "count": 1, "ms": float(i)} for i in range(count - 1)] + [{
+            spans=[
+                {"name": f"phase.{i}", "count": 1, "ms": float(i)} for i in range(count - 1)
+            ] + [{
                 "name": "embeddings.encode", "count": 2, "ms": float(count),
                 "fields": {"texts": 6, "chars": 12, "execution_wait_us": 30, "model_encode_us": 42,
                            "thread_cpu_us": 2, "process_cpu_us": 8},
