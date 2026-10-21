@@ -392,7 +392,8 @@ def _in_flight() -> Iterator[None]:
 
 
 def encode_with_previous(
-    model: str, texts: list[str], *, is_query: bool, encoder: Any = None
+    model: str, texts: list[str], *, is_query: bool, encoder: Any = None,
+    measurements: dict[str, int] | None = None,
 ) -> Any:
     """Encode for a sidecar written by `model`, with its resident encoder."""
     from . import embeddings
@@ -410,6 +411,7 @@ def encode_with_previous(
             [prefix + text for text in texts] if prefix else list(texts),
             admission=gate.admission,
             execution=gate.execution,
+            measurements=measurements,
         )
 
 

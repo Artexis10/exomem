@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -117,28 +118,150 @@ def test_a_deep_pack_names_its_phases(vault: Path, token: str) -> None:
     assert names["recall.pack.parents"]["ms"] <= names["recall.pack"]["ms"]
 
 
-def test_an_encode_names_the_module_that_asked(token: str, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("previous", [False, True])
+def test_an_encode_names_the_module_that_asked_and_separates_waiting(
+    token: str, monkeypatch: pytest.MonkeyPatch, previous: bool
+) -> None:
+    import numpy as np
+
+    from exomem import embeddings, recall_space, runtime_resources
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    now_ns = 0
+
+    @contextlib.contextmanager
+    def execution():
+        nonlocal now_ns
+        now_ns += 5000
+        try:
+            yield
+        finally:
+            now_ns += 11000  # Releasing the turn is neither waiting nor encoding.
+
+    def encode(texts, **_kwargs):
+        nonlocal now_ns
+        now_ns += 7000
+        return np.asarray([[len(text)] for text in texts], dtype=np.float32)
+
+    model = SimpleNamespace(encode=encode)
+    monkeypatch.setattr(embeddings, "time", SimpleNamespace(perf_counter_ns=lambda: now_ns))
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
+    monkeypatch.setattr(embeddings, "BGE_GUARD", SimpleNamespace(active=contextlib.nullcontext))
+    monkeypatch.setattr(embeddings, "_prefixes", lambda *_args: ("", ""))
+    monkeypatch.setattr(embeddings, "encode_batch_size", lambda _model: 1)
+    monkeypatch.setattr(runtime_resources, "model_admission", contextlib.nullcontext)
+    monkeypatch.setattr(runtime_resources, "model_execution", execution)
+    monkeypatch.setattr(recall_space, "previous_resident", lambda _name: model)
+    monkeypatch.setattr(recall_space, "_previous_gate", lambda: SimpleNamespace(
+        admission=contextlib.nullcontext, execution=execution,
+    ))
+    # A caller whose frame belongs to an Exomem module, without importing one
+    # that would need a model: the attribution reads the frame's module name.
+    namespace = {"__name__": "exomem.context_pack", "embeddings": embeddings}
+    exec("def ask():\n    return embeddings.embed_texts(['a', 'ccc', 'bb'])\n", namespace)
+    with recall_space.selecting("previous-model" if previous else embeddings.MODEL_NAME):
+        for _ in range(2):
+            actual = namespace["ask"]()
+            assert actual[:, 0].tolist() == [1, 3, 2]
+    names = _names(token)
+    row = names["embeddings.encode"]
+    assert row["count"] == 2
+    fields = row["fields"]
+    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
+        "texts": 6, "chars": 12, "execution_wait_us": 30, "model_encode_us": 42,
+    }
+    assert "encode.by.context_pack" in names
+
+
+@pytest.mark.parametrize("phase", ["empty", "admission", "execution", "encode"])
+def test_failed_encodes_report_only_attempted_intervals(token, monkeypatch, phase) -> None:
+    from exomem import embeddings, runtime_resources
+
+    now_ns = 0
+
+    @contextlib.contextmanager
+    def admission():
+        if phase == "admission":
+            raise RuntimeError(phase)
+        yield
+
+    @contextlib.contextmanager
+    def execution():
+        nonlocal now_ns
+        now_ns += 5000
+        if phase == "execution":
+            raise RuntimeError(phase)
+        yield
+
+    def encode(_texts, **_kwargs):
+        nonlocal now_ns
+        now_ns += 7000
+        raise RuntimeError(phase)
+
+    monkeypatch.setattr(embeddings, "time", SimpleNamespace(perf_counter_ns=lambda: now_ns))
+    monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(encode=encode))
+    monkeypatch.setattr(embeddings, "BGE_GUARD", SimpleNamespace(active=contextlib.nullcontext))
+    monkeypatch.setattr(embeddings, "_prefixes", lambda *_args: ("", ""))
+    monkeypatch.setattr(embeddings, "encode_batch_size", lambda _model: 1)
+    monkeypatch.setattr(runtime_resources, "model_admission", admission)
+    monkeypatch.setattr(runtime_resources, "model_execution", execution)
+    if phase == "empty":
+        assert len(embeddings.embed_texts([])) == 0
+    else:
+        with pytest.raises(RuntimeError, match=phase):
+            embeddings.embed_texts(["one"])
+    row = _names(token)["embeddings.encode"]
+    assert row["count"] == 1
+    measured = {key: value for key, value in row["fields"].items() if key not in call_spans.CPU_FIELDS}
+    expected = {"texts": 0, "chars": 0} if phase == "empty" else {"texts": 1, "chars": 3}
+    if phase in {"execution", "encode"}:
+        expected["execution_wait_us"] = 5
+    if phase == "encode":
+        expected["model_encode_us"] = 7
+    assert measured == expected
+
+
+@pytest.mark.parametrize("separate", [False, True])
+def test_resident_activation_encodes_separate_entry_and_body(token, monkeypatch, separate) -> None:
     import numpy as np
 
     from exomem import embeddings
 
+    now_ns = 0
+
+    @contextlib.contextmanager
+    def execution(*_args):
+        nonlocal now_ns
+        now_ns += 5000
+        try:
+            yield
+        finally:
+            now_ns += 11000
+
+    def encode(_texts, **_kwargs):
+        nonlocal now_ns
+        now_ns += 7000
+        return np.asarray([[1.0]], dtype=np.float32)
+
+    model = SimpleNamespace(encode=encode)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setattr(
-        embeddings, "_embed_texts",
-        lambda texts, is_query=False: np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32),
-    )
-    # A caller whose frame belongs to an Exomem module, without importing one
-    # that would need a model: the attribution reads the frame's module name.
-    namespace = {"__name__": "exomem.context_pack", "embeddings": embeddings}
-    exec("def ask():\n    return embeddings.embed_texts(['one', 'two'])\n", namespace)
-    namespace["ask"]()
-    names = _names(token)
-    fields = names["embeddings.encode"]["fields"]
-    assert {key: value for key, value in fields.items() if key not in call_spans.CPU_FIELDS} == {
-        "texts": 2, "chars": 6,
+    monkeypatch.setattr(embeddings, "time", SimpleNamespace(perf_counter_ns=lambda: now_ns))
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "_ACTIVATION_MODEL", model)
+    monkeypatch.setattr(embeddings, "activation_encoder_is_shared", lambda: not separate)
+    monkeypatch.setattr(embeddings, "BGE_GUARD", SimpleNamespace(active=contextlib.nullcontext))
+    monkeypatch.setattr(embeddings, "ACTIVATION_GUARD", SimpleNamespace(active=contextlib.nullcontext))
+    monkeypatch.setattr(embeddings, "_prefixes", lambda *_args: ("", ""))
+    monkeypatch.setattr(embeddings, "encode_batch_size", lambda _model: 1)
+    monkeypatch.setattr(embeddings, "_interactive_execution", execution)
+    actual = embeddings.embed_activation_query_if_loaded("turn")
+    assert actual is not None
+    assert actual.tolist() == [1.0]
+    row = _names(token)["embeddings.encode"]
+    assert row["count"] == 1
+    assert {key: value for key, value in row["fields"].items() if key not in call_spans.CPU_FIELDS} == {
+        "texts": 1, "chars": 4, "execution_wait_us": 5, "model_encode_us": 7,
     }
-    assert "encode.by.context_pack" in names
-    assert embeddings._encode_caller.__doc__  # the attribution is documented at the seam
 
 
 def test_a_direct_read_names_its_phases(vault: Path, token: str) -> None:
