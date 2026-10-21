@@ -234,13 +234,18 @@ _PRIVATE_OUTPUT_MARKER = ".exomem-private-output.json"
 # public binary format requires adding an equally explicit provenance declaration.
 DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
     BinaryProvenance("*.ico", "repository-authored Exomem application icon"),
-    BinaryProvenance(
-        "plugins/cloud/assets/icon.png", "rasterization of the repository-authored Cloud SVG icon"
+    # This closed inventory names the two approved brand assets and their generated locations.
+    *(
+        BinaryProvenance(
+            f"{prefix}/{name}", "approved Dot E asset; provenance in plugins/cloud/assets/README.md"
+        )
+        for prefix in (
+            "plugins/cloud/assets",
+            "plugins/cloud/generated/openai/assets",
+            "assets",
+        )
+        for name in ("icon.png", "icon-small.png")
     ),
-    BinaryProvenance(
-        "plugins/cloud/generated/openai/assets/icon.png", "generated copy of the Cloud PNG icon"
-    ),
-    BinaryProvenance("assets/icon.png", "Cloud plugin archive copy of its repository-authored icon"),
     # Each committed sample in a binary or provenance-checked format is named: a glob
     # here would also admit any file added under that folder later, and fnmatch's
     # `*` crosses directories.

@@ -157,6 +157,61 @@ uv run --frozen python scripts/cloud-plugin.py readiness --evidence <private-evi
 
 ## Directory preparation and submission
 
+### Public metadata and branding
+
+`plugins/cloud/definition.json` owns the public copy, starter prompts and provider release notes.
+The producer maps `short_description` to OpenAI's subtitle and `description` to both providers' long descriptions.
+Connector preparation exports `claude_tagline` for the portal where that field is available.
+The Claude plugin manifest has no invented tagline field.
+
+`plugins/cloud/assets/` holds the approved Dot E icons and their size variants.
+OpenAI uses the full PNG for its listing and the compact PNG in the composer.
+Claude uses the SVG, which selects the compact mark below 32 pixels in supporting renderers.
+Provider previews remain the final check for provider-specific rasterisation.
+
+### Claude credential-flow findings
+
+The registered Cloud hooks use the admitted MCP connection.
+Their command arguments fix `--activation-mode mcp` before ambient transport settings are read.
+The retrieve hook emits native activation guidance without selecting its REST or CLI transport ladder.
+The capture hook's episode door returns before local credential resolution in MCP mode.
+The continuation hook reads local structural state and uses a restricted environment for its fixed Git probes.
+It does not load the self-hosted credential helper.
+
+The package retains canonical shared scripts, including dormant self-hosted transport branches in retrieve and capture.
+The producer excludes `exomem_local_credentials.py`, which contains the local credential-file readers.
+Do not prune Python functions during packaging or create a second Cloud hook implementation to change a scanner result.
+The registered-hook regression check executes all five events with conflicting transport settings and synthetic credentials.
+It records attempted credential-file reads, network connections and unexpected child processes even when a hook soft-fails.
+
+An automated credential-flow finding requires review of those reachable paths; its text alone does not prove credential forwarding.
+Keep the finding and the execution evidence available to the directory reviewer.
+`USES_HOOKS` describes an intentional supported component.
+Directory-only manifest fields are supported metadata, not a reason to remove policy links or the icon.
+Older Claude validators can report those fields as warnings; record the validator version and its actual result.
+
+### Updating an existing listing
+
+Keep the current human-review submission unchanged until the operator approves the proposed update.
+Keep the proposal on its feature branch and confirm the directory's tracked branch before integration.
+Do not overwrite an existing release asset or change the plugin name, publisher, MCP resource or OAuth flow.
+Proposed artefacts must name their source revision, package version and SHA-256 separately from an official release.
+
+After operator approval, use the existing OpenAI plugin:
+
+1. Select **Create draft from ZIP** and upload the approved archive; the existing plugin gains a new draft.
+2. Inspect **Metadata & Skills** and **MCPs**; the copy, icons, policy links and existing OAuth connection match the proposal.
+3. Review the draft's checks; any remaining findings have their actual evidence attached for manual review.
+4. Select the approved submission or publication action; the portal records the selected version and its actual state.
+
+After operator approval, use the existing Claude listing:
+
+1. Confirm the tracked repository, branch and plugin folder; the existing submission remains identified.
+2. Release the reviewed change through that tracked branch; the portal observes the intended new version.
+3. Inspect its validation, security findings and icon previews; the retained hooks and credential-flow evidence match the package.
+4. Update the connector tagline where supported; the connector keeps its existing MCP resource and OAuth configuration.
+5. Select the approved review or publication action; the portal records the actual outcome without an automatic withdrawal.
+
 Prepare five positive and three negative review cases from the shared corpus.
 The OpenAI ZIP already includes those cases. Keep the same publisher and Cloud
 resource on Claude's connector and plugin bundle entries. Validate the bundle

@@ -175,13 +175,16 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             "provider also processes the conversation and tool results under its policies.\n\n"
             "## Surface support\n\n"
             "Skills and the remote MCP connector carry the portable operating contract. "
-            "Lifecycle hooks run only where the client supports and trusts them; they "
-            "do not run in ordinary Claude Chat or ChatGPT conversations. The public "
-            "OpenAI directory package deliberately contains no lifecycle hooks: current "
-            "submission rules forbid them, although local Codex configurations support "
-            "hooks. Local profile hook installation is a separate release-owned path. "
-            "A delegated MCP activation is not a pre-injected context packet.\n\n"
-            f"Publisher: {definition['author']['name']}.\n\n"
+            + (
+                "Trusted lifecycle hooks support Claude Code and Cowork; they do not "
+                "run in Claude Chat. Hooks request native MCP activation rather than "
+                "injecting a context packet.\n\n"
+                if provider == "claude"
+                else "This public directory package contains skills and a remote MCP "
+                "connection, without lifecycle hooks.\n\n"
+            )
+            + f"## Release notes\n\n{definition['release_notes'][provider]}\n\n"
+            + f"Publisher: {definition['author']['name']}.\n\n"
             f"[Documentation]({definition['documentation']}) · "
             f"[Privacy policy]({definition['privacy']}) · "
             f"[Terms of service]({definition['terms']}) · "
@@ -234,9 +237,10 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             from .cloud_plugin_evals import directory_cases
 
             shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
+            shutil.copyfile(root / "plugins/cloud/assets/icon-small.png", assets / "icon-small.png")
             interface = {
                 "displayName": definition["display_name"],
-                "shortDescription": "Memory across conversations",
+                "shortDescription": definition["short_description"],
                 "longDescription": definition["description"],
                 "developerName": definition["author"]["name"],
                 "category": "Productivity",
@@ -246,7 +250,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "supportURL": definition["support"],
                 "privacyPolicyURL": definition["privacy"],
                 "termsOfServiceURL": definition["terms"],
-                "composerIcon": "./assets/icon.png",
+                "composerIcon": "./assets/icon-small.png",
                 "logo": "./assets/icon.png",
             }
             manifest = {
@@ -272,7 +276,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                         },
                         "publication": {
                             "countries": [],
-                            "release_notes": definition["release_notes"],
+                            "release_notes": definition["release_notes"][provider],
                         },
                     }
                 },

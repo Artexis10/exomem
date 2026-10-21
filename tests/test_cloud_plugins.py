@@ -6,6 +6,7 @@ import os
 import struct
 import subprocess
 import sys
+import textwrap
 import tomllib
 import zipfile
 from pathlib import Path
@@ -23,6 +24,12 @@ def test_directory_starters_ship_from_the_shared_product_definition(tmp_path: Pa
     cloud_plugins.build_packages(ROOT, tmp_path)
     definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
     manifest = json.loads((tmp_path / "openai/plugin.json").read_text())
+    interface = manifest["extensions"]["com.openai"]["interface"]
+    assert interface["shortDescription"] == definition["short_description"]
+    assert interface["longDescription"] == definition["description"]
+    assert manifest["extensions"]["com.openai"]["publication"]["release_notes"] == (
+        definition["release_notes"]["openai"]
+    )
     assert (
         manifest["extensions"]["com.openai"]["interface"]["defaultPrompt"]
         == definition["default_prompts"]
@@ -31,6 +38,8 @@ def test_directory_starters_ship_from_the_shared_product_definition(tmp_path: Pa
         readme = (tmp_path / provider / "README.md").read_text()
         for prompt in definition["default_prompts"]:
             assert prompt in readme
+        assert definition["description"] in readme
+        assert definition["release_notes"][provider] in readme
 
 
 def test_claude_directory_manifest_declares_privacy_policy(tmp_path: Path) -> None:
@@ -127,7 +136,7 @@ def test_claude_cloud_hooks_use_canonical_bytes_and_native_mcp_binding(tmp_path:
         assert not any(name.startswith("hooks/") for name in archive.namelist())
 
 
-def test_cloud_hooks_run_without_local_credential_reader(tmp_path: Path) -> None:
+def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_path: Path) -> None:
     # Catch a public archive carrying local credential access, or losing its
     # native activation/capture behaviour when that local-only dependency is absent.
     cloud_plugins.build_packages(ROOT, tmp_path / "built")
@@ -145,41 +154,99 @@ def test_cloud_hooks_run_without_local_credential_reader(tmp_path: Path) -> None
     }
     env.update(
         {
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
             "CLAUDE_PLUGIN_DATA": str(tmp_path / "state"),
             "EXOMEM_PROMINENCE": "maximal",
             "EXOMEM_CONFIG_PATH": str(tmp_path / "absent-config.json"),
             "EXOMEM_REST_API_KEY": "synthetic-must-not-be-read",
+            "EXOMEM_RETRIEVE_INJECT": "working_set",
+            "KB_RETRIEVE_INJECT": "1",
+            "EXOMEM_RETRIEVE_INJECT_CLI": "1",
+            "EXOMEM_HOST": "http://127.0.0.1:9",
             "EXOMEM_CAPTURE_NUDGE_MIN_CHARS": "1",
             "EXOMEM_EPISODE_ASK_TURNS": "1",
         }
     )
-    for stem, event, expected in (
-        ("retrieve_nudge", {"prompt": "continue"}, "activate_context"),
+    secret = tmp_path / "local-token"
+    secret.write_text("synthetic-must-not-be-read")
+    env["EXOMEM_LOCAL_TOKEN_FILE"] = str(secret)
+    guard = tmp_path / "guard"
+    guard.mkdir()
+    attempts = tmp_path / "credential-attempts.log"
+    env.update(PYTHONPATH=str(guard), CHECK_SECRET=str(secret), CHECK_ATTEMPTS=str(attempts))
+    # Hooks soft-fail, so retain attempted operations even if the hook catches the refusal.
+    (guard / "sitecustomize.py").write_text(
+        textwrap.dedent(
+            """
+            import os
+            import sys
+            from pathlib import Path
+
+            secret = os.environ['CHECK_SECRET']
+            log = os.open(os.environ['CHECK_ATTEMPTS'], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+
+            def audit(event, args):
+                forbidden = event == 'socket.connect' or event == 'os.system'
+                if event == 'open':
+                    forbidden = str(args[0]) == secret
+                if event == 'subprocess.Popen':
+                    executable, argv, cwd, env = args
+                    forbidden = Path(executable).name.lower() not in {'git', 'git.exe'}
+                    child_env = os.environ if env is None else env
+                    forbidden |= any('synthetic-must-not-be-read' in str(v) for v in child_env.values())
+                if forbidden:
+                    os.write(log, (event + '\\n').encode())
+                    raise RuntimeError('unexpected local credential or transport operation')
+
+            sys.addaudithook(audit)
+            """
+        )
+    )
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "Review the adapter."}})
+        + "\n"
+        + json.dumps(
+            {"type": "assistant", "message": {"role": "assistant", "content": "The adapter is ready."}}
+        )
+        + "\n"
+    )
+    registrations = json.loads((package / "hooks/hooks.json").read_text())["hooks"]
+    for event, fields, expected in (
+        ("UserPromptSubmit", {"prompt": "continue"}, "activate_context"),
         (
-            "capture_nudge",
+            "Stop",
             {"last_assistant_message": "We settled the adapter boundary."},
             "Exomem capture check",
         ),
+        ("PreCompact", {"trigger": "manual"}, ""),
+        ("SessionEnd", {}, ""),
+        ("SessionStart", {"source": "resume"}, "[Exomem continuation checkpoint]"),
     ):
+        handler = registrations[event][0]["hooks"][0]
+        argv = [arg.replace("${CLAUDE_PLUGIN_ROOT}", str(package)) for arg in handler["args"]]
         result = subprocess.run(
-            [
-                sys.executable,
-                str(package / f"hooks/exomem_{stem}.py"),
-                "--client",
-                "claude",
-                "--hook-home-env",
-                "CLAUDE_PLUGIN_DATA",
-                "--activation-mode",
-                "mcp",
-            ],
-            input=json.dumps({"session_id": "packaged-native", **event}),
+            [sys.executable, *argv],
+            input=json.dumps(
+                {
+                    "session_id": "packaged-native",
+                    "hook_event_name": event,
+                    "cwd": str(tmp_path),
+                    "transcript_path": str(transcript),
+                    **fields,
+                }
+            ),
             text=True,
             capture_output=True,
             env=env,
             timeout=10,
         )
         assert result.returncode == 0, result.stderr
+        assert attempts.exists(), "The isolated process audit did not run"
+        assert not attempts.read_text(), (event, attempts.read_text())
         assert expected in result.stdout
+        assert "synthetic-must-not-be-read" not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("placement", ["root", "extension", "file", "compatibility"])
@@ -227,13 +294,13 @@ def test_openai_submission_icons_are_contained_square_pngs(tmp_path: Path) -> No
         interface = manifest["extensions"]["com.openai"]["interface"]
         for key, minimum in (("logo", 256), ("composerIcon", 48)):
             relative = interface[key].removeprefix("./")
-            assert relative == "assets/icon.png"
+            assert relative == ("assets/icon.png" if key == "logo" else "assets/icon-small.png")
             data = archive.read(relative)
             assert data[:8] == b"\x89PNG\r\n\x1a\n"
             width, height = struct.unpack(">II", data[16:24])
             assert width == height and minimum <= width <= 4096
             assert len(data) <= 5 * 1024 * 1024
-            assert data == (ROOT / "plugins/cloud/assets/icon.png").read_bytes()
+            assert data == (ROOT / "plugins/cloud" / relative).read_bytes()
 
 
 def test_cloud_packages_share_complete_canonical_skill_bytes(tmp_path: Path) -> None:
