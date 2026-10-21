@@ -382,6 +382,13 @@ items they covered (`paths` on the `index.*` components, `texts`/`chars` on
 `advisory.overlap_groups`). The key is absent on a span that measured only time,
 so nothing about an existing row changes.
 
+An `embeddings.encode` span also reports `execution_wait_us` for execution-context
+entry and `model_encode_us` for the `model.encode` call. Each field sums attempted
+intervals across batches and calls, including failures. Unattempted phases leave
+their fields absent. Encoding includes tokenization, inference and normalization;
+entry time does not identify a gate holder or prove contention.
+These fields survive truncation when the enclosing encode span is retained.
+
 During MCP calls, spans opened with `call_spans.span` and recall stage spans
 also carry `thread_cpu_us` and `process_cpu_us`, including spans that raise.
 Spans recorded directly, such as `egress.artifact_gate` and

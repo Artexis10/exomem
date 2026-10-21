@@ -352,12 +352,20 @@ def test_the_row_bounds_spans_independently_of_the_producer() -> None:
         return call_ledger.build_row(
             sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id="request",
             tool="read_memory", outcome="ok", duration_ms=1.0,
-            spans=[{"name": f"phase.{i}", "count": 1, "ms": float(i)} for i in range(count)],
+            spans=[{"name": f"phase.{i}", "count": 1, "ms": float(i)} for i in range(count - 1)] + [{
+                "name": "embeddings.encode", "count": 2, "ms": float(count),
+                "fields": {"texts": 6, "chars": 12, "execution_wait_us": 30, "model_encode_us": 42,
+                           "thread_cpu_us": 2, "process_cpu_us": 8},
+            }],
         )
 
     clipped = row(200)
     assert len(clipped["spans"]) == call_ledger._MAX_SPANS
     assert clipped["spans"][0]["ms"] > clipped["spans"][-1]["ms"], "kept the slowest"
+    assert clipped["spans"][0]["fields"] == {
+        "texts": 6, "chars": 12, "execution_wait_us": 30, "model_encode_us": 42,
+        "thread_cpu_us": 2, "process_cpu_us": 8,
+    }
     assert clipped["spans_truncated"] == 200 - call_ledger._MAX_SPANS
     assert "spans_truncated" not in row(call_ledger._MAX_SPANS)
 
