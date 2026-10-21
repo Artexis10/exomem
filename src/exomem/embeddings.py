@@ -67,6 +67,12 @@ RERANKER_NAME = (
     or os.environ.get("EXOMEM_RERANKER_MODEL")
     or "BAAI/bge-reranker-base"
 )
+# The CrossEncoder runtime is separate from the bi-encoder runtime. Keep the
+# default unchanged; ONNX selection requires its explicit optional extra.
+RERANKER_BACKEND_ENV = "EXOMEM_RERANKER_BACKEND"
+RERANKER_BACKEND = (os.environ.get(RERANKER_BACKEND_ENV) or "torch").strip().lower()
+# This closed set mirrors the runtimes supported by the pinned CrossEncoder API.
+_RERANKER_BACKENDS = frozenset({"torch", "onnx"})
 # bge documentation recommends prefixing queries (not passages) for retrieval.
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 # Rough word-count cap per chunk. bge-base's tokenizer maxes at 512 tokens;
@@ -309,7 +315,7 @@ def get_model():
 
 
 def get_reranker():
-    """Lazy cross-encoder reranker sharing the configured text-path device."""
+    """Load the configured CrossEncoder backend lazily."""
     global _RERANKER
     with runtime_resources.model_execution():
         if _RERANKER is not None:
@@ -317,16 +323,60 @@ def get_reranker():
         with _RERANKER_LOCK:
             if _RERANKER is not None:
                 return _RERANKER
+            backend = RERANKER_BACKEND
+            if backend not in _RERANKER_BACKENDS:
+                raise ValueError(
+                    f"unknown {RERANKER_BACKEND_ENV}: {backend!r}; "
+                    f"valid: {sorted(_RERANKER_BACKENDS)}"
+                )
             # The tokenizer guard first, before any import a lean install lacks.
             embedding_backend.require_tokenizer(RERANKER_NAME)
             runtime_resources.configure_torch()
             from sentence_transformers import CrossEncoder
 
             device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
-            log.info("loading reranker %s on %s", RERANKER_NAME, device)
+            log.info("loading reranker %s with %s", RERANKER_NAME, backend)
+
+            def load_cross_encoder(**kwargs):
+                if backend == "onnx":
+                    # Do not auto-select CUDA: that would bypass Exomem's
+                    # explicit accelerator/headroom policy. ONNX Runtime has
+                    # no provider in the lean MPS profile, so MPS uses CPU.
+                    provider = (
+                        "CUDAExecutionProvider"
+                        if str(device).startswith("cuda")
+                        else "CPUExecutionProvider"
+                    )
+                    model_path = RERANKER_NAME
+                    if kwargs.get("local_files_only"):
+                        snapshot = model_cache.snapshot_path(RERANKER_NAME)
+                        if snapshot is not None:
+                            model_path = str(snapshot)
+                    return CrossEncoder(
+                        model_path,
+                        # SentenceTransformers probes torch.cuda when device is
+                        # omitted, even with an explicit ONNX Runtime provider.
+                        # Pass policy's resolved device to skip that probe.
+                        device=device,
+                        backend=backend,
+                        model_kwargs={
+                            "provider": provider,
+                            "export": False,
+                            "file_name": "model.onnx",
+                            "subfolder": "onnx",
+                        },
+                        **kwargs,
+                    )
+                return CrossEncoder(
+                    RERANKER_NAME,
+                    device=device,
+                    backend=backend,
+                    **kwargs,
+                )
+
             _RERANKER = model_cache.load_offline_first(
                 RERANKER_NAME,
-                lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
+                load_cross_encoder,
             )
         RERANKER_GUARD.touch()
         return _RERANKER

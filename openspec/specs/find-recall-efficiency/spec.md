@@ -708,6 +708,38 @@ The candidate cap MUST NOT enable reranking by itself or change the existing mod
 - **THEN** the request succeeds with fused results
 - **AND** diagnostics report dependency-unavailable rather than a timeout guarantee
 
+### Requirement: Reranker Runtime Selection Is Explicit
+
+The reranker SHALL use PyTorch by default and SHALL accept only the configured `torch` or `onnx` runtime. Selecting ONNX SHALL use an already-exported model and SHALL NOT export model weights during a retrieval request.
+
+#### Scenario: Default runtime remains PyTorch
+- **WHEN** no CrossEncoder runtime is configured
+- **THEN** explicit reranking uses the PyTorch backend as before
+
+#### Scenario: ONNX runtime uses a published export
+- **WHEN** the operator selects ONNX and requests reranking
+- **THEN** Exomem loads an existing ONNX model artifact without exporting model weights
+
+#### Scenario: ONNX runtime is unavailable
+- **WHEN** ONNX dependencies or a compatible exported model are unavailable
+- **THEN** the reranker soft-fails and recall returns its existing non-reranked order with an unavailable or failed outcome
+
+#### Scenario: Invalid runtime configuration
+- **WHEN** the configured runtime is not `torch` or `onnx`
+- **THEN** reranking soft-fails and recall returns its existing non-reranked order
+
+### Requirement: Cross-Encoder Runtime Does Not Change Retrieval Policy
+
+Selecting a CrossEncoder runtime SHALL NOT change whether reranking runs, the candidate limit, or the candidate ordering presented to the scorer.
+
+#### Scenario: Explicit rerank remains bounded
+- **WHEN** a caller explicitly requests reranking with either runtime
+- **THEN** Exomem scores the same bounded candidate prefix used by the existing reranking path
+
+#### Scenario: CPU auto-rerank remains disabled by policy
+- **WHEN** auto-reranking is disallowed by the current compute policy
+- **THEN** selecting ONNX does not cause reranking to run automatically
+
 ### Requirement: Reproducible Structured Category Latency Gate
 
 The workstation retrieval harness SHALL run page-level and unit-level exact-category lanes in a live service process with semantic catalog and OS file cache warm. Each cold sample SHALL clear the in-process result and parsed-page caches, then run `scope=kb-only`, `mode=keyword`, empty query, graph/rerank/pack disabled, and two indexed candidates. It SHALL collect 30 samples and compute nearest-rank p95, excluding connector RTT and startup/catalog construction. Hot samples SHALL repeat an unchanged request with the result cache live. Cold `filter_eligibility` p95 MUST be below 100 ms, cold total p95 below 250 ms, and hot total p95 below 10 ms.

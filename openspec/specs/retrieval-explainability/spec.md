@@ -65,6 +65,22 @@ BM25 explanations SHALL include backend, rank, raw backend score, and score dire
 - **WHEN** a BM25 backend uses lower-is-better or negative raw values
 - **THEN** the explanation preserves the raw value, names that backend's direction, and still reports the rank used for fusion
 
+### Requirement: Retrieval Explanation Identifies The Cross-Encoder Runtime
+
+When a CrossEncoder rerank runs, the retrieval profile SHALL report the effective runtime backend separately from the CrossEncoder model family.
+
+#### Scenario: PyTorch rerank reports its runtime
+- **WHEN** an explained request reranks with PyTorch
+- **THEN** the rerank profile reports `torch` as its runtime backend
+
+#### Scenario: ONNX rerank reports its runtime
+- **WHEN** an explained request reranks with ONNX
+- **THEN** the rerank profile reports `onnx` as its runtime backend
+
+#### Scenario: Rerank does not run
+- **WHEN** reranking is skipped, unavailable, or fails
+- **THEN** the profile does not report an effective runtime as if scoring had occurred
+
 ### Requirement: Explanation Fidelity Is Runtime-Tested
 Explanation tests SHALL compare public explained responses with isolated lane runs and known deterministic fusion/boost inputs. Returned lane membership, ranks, raw measurements, contributions, degradation, and final ordering MUST agree. Diagnostic metadata SHALL be bounded, SHALL avoid content-derived snippets, and SHALL use the same response schema across MCP, REST, CLI JSON, OpenAPI, and generated documentation.
 
