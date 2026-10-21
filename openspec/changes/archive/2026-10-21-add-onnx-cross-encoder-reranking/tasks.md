@@ -5,4 +5,4 @@
 - [x] 3. Report the effective reranker runtime in explanations and add focused configuration and profile tests.
 - [x] 4. Document install and selection steps without changing service settings or default policy.
 - [x] 5. Run scoped tests, privacy and OpenSpec validation under an allocated resource window.
-- [ ] 6. Complete exact-content independent review and required CI, then deliver the batch.
+- [x] 6. Complete exact-content independent review and required CI, then deliver the batch.
