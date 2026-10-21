@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.133.0](https://github.com/Artexis10/exomem/compare/v0.132.8...v0.133.0) (2026-10-21)
+
+
+### Features
+
+* add opt-in ONNX reranker backend ([#1971](https://github.com/Artexis10/exomem/issues/1971)) ([a080a94](https://github.com/Artexis10/exomem/commit/a080a947e4dc41d67bfc60e702fbc4b55c84b5d2))
+
 ## [0.132.8](https://github.com/Artexis10/exomem/compare/v0.132.7...v0.132.8) (2026-10-21)
 
 
