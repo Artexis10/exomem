@@ -134,10 +134,13 @@ class Service:
     root: Path
     manager: writer_lease.LeaseManager
 
-    def stop(self):
+    def stop(self, *, deadline=None):
         server = runtime._SERVERS.get(self.root)
         try:
-            self.manager.close()
+            if deadline is None:
+                self.manager.close()
+            else:
+                self.manager.close(deadline=deadline)
         finally:
             if server is not None:
                 server.thread.join(10)
