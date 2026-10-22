@@ -295,6 +295,8 @@ def test_every_continuation_outcome_follows_the_contract(vault: Path, monkeypatc
         _ask(vault, "exomem://map/topic/no-such-domain")
     assert str(miss.value) == plain_miss
     assert read("exomem://map/other") == "NOT_FOUND"
+    # A deprecated domain key reads the map of the key that replaced it.
+    assert read(cv.topic_ref("old-harbour"))["ref"] == cv.topic_ref("harbour")
 
     now[0] += cv.CONTINUATION_TTL_SECONDS + 1
     assert read(cv.MAP_REF, continuation=token) == "INVALID_CONTINUATION"
