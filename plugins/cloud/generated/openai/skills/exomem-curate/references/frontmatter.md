@@ -33,6 +33,22 @@ backward-compatible with legacy pages and resolve display titles in this order:
 frontmatter `title`, first H1, then a humanized filename stem. Unicode is stored
 losslessly; the server never guesses a language, pronunciation, or translation.
 
+## Context descriptions and topics
+
+`remember` accepts an optional `summary`: a scalar string of one line, at most
+1024 characters. It stores the description in the page's `summary` field.
+
+`topics` declares topic membership through a domain key or a list of domain
+keys. `remember` and `edit_memory` frontmatter patches resolve aliases and
+replace deprecated keys, then store a list of canonical keys. They register
+new keys in the same write and warn when a key resembles an existing domain.
+Invalid keys and directory collisions refuse the write.
+
+A page's project keys can also declare topics through their registry's `domain`
+field. The page's own `domain` field describes a source subject or experiment
+folder; it does not declare topic membership. Omit `summary` and `topics` to
+keep the writer's existing page and response shape.
+
 ## Per-type fields
 
 ### source
