@@ -688,6 +688,11 @@ _DECLARED_UNBOUNDED_JOINS = {
         "self.child.wait",
     ): "enclosed by asyncio.wait_for with the remaining migration/handoff deadline",
     (
+        "collection_store/admission.py",
+        "_offline_owner",
+        "renewer.join",
+    ): "offline producer teardown joins its stopped renewer before custody exits; serving owners refuse this operation",
+    (
         "epistemic_graph.py",
         "EpistemicGraphIndex._open_read_snapshot",
         "in_flight.wait",

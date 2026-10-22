@@ -897,6 +897,11 @@ def test_a_migrator_the_supervisor_stopped_after_it_published_leaves_the_vault_s
         "state": "ran", "outcome": "pending", "code": "timed_out",
         "first_attempt": {"outcome": "pending", "code": "timed_out"}}
     assert authority.read_marker(root) is None and (fence().enrolled, fence().generation) == (True, 1)
+    # The stopped migrator renewed until its exit; its last grant must expire before service admission.
+    deadline = time.monotonic() + 10
+    while lease().holder is not None:
+        assert time.monotonic() < deadline, "the stopped migrator's lease did not expire"
+        time.sleep(0.05)
     serving = Service(root, writer_lease.start_server_lifecycle())
     try:
         with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
