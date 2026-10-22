@@ -618,13 +618,15 @@ def classify(
                 turns=list(turn_records),
                 checks=checks,
             )
-        # The state stage hashed each handshake; compare the one this client sent.
-        expected = surface["server_instructions"].get(handshake.get("method"))
-        checks["server_instructions"] = sha256_text(handshake.get("instructions") or "") == expected
+        # The state stage captured each handshake; compare the one this client sent.
+        method = handshake.get("method")
         tools = sorted(listing.get("tools") or [], key=lambda tool: tool.get("name", ""))
-        checks["tool_descriptions"] = (
-            sha256_text(canonical_json(tools)) == surface["tool_descriptions"]
-        )
+        seen = {
+            "server_instructions": sha256_text(handshake.get("instructions") or ""),
+            "tool_descriptions": sha256_text(canonical_json(tools)),
+        }
+        for name, digest in seen.items():
+            checks[name] = digest == surface[name].get(method)
         for name in ("server_instructions", "tool_descriptions"):
             if checks.get(name) is False:
                 return AttemptResult(
