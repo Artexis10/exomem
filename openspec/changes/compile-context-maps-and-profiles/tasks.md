@@ -8,7 +8,7 @@
 
 ## 2. Catalogue and projections
 
-- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Read the raw-material, schema, governance and archive trees from the product's layout declaration that activation reads, so the two never disagree. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
+- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Read the raw-material, schema, governance and archive trees from the product's layout declaration that activation reads: activation walks archive trees and ranks them down, and the catalogue excludes them from notes. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
 - [ ] 2.2 Project the map and the domain maps with bounded output and pagination.
 - [ ] 2.3 Compile anchor and topic profiles through the role lanes, cached by generation.
 - [ ] 2.4 Resolve map, domain-map and profile refs in `read_memory` with missing and stale states, on every surface.
