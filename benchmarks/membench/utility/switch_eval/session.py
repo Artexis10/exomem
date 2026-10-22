@@ -521,11 +521,19 @@ def classify(
             kind = str(event["error"])
             if kind in _ABORT_ERRORS:
                 return AttemptResult(
-                    ABORT, kind, "the CLI refused the session's setup", turns=list(turn_records)
+                    ABORT,
+                    kind,
+                    "the CLI refused the session's setup",
+                    turns=list(turn_records),
+                    checks=checks,
                 )
             if kind in _FAULT_ERRORS:
                 return AttemptResult(
-                    HARNESS_FAULT, _FAULT_ERRORS[kind], kind, turns=list(turn_records)
+                    HARNESS_FAULT,
+                    _FAULT_ERRORS[kind],
+                    kind,
+                    turns=list(turn_records),
+                    checks=checks,
                 )
 
     if init is not None:
