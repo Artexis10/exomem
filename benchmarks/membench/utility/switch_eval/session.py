@@ -383,7 +383,10 @@ class AttemptResult:
     answer: str | None = None
     turns: list[dict] = field(default_factory=list)
     resets_at: object = None
+    #: Pass or fail, each ``True`` or ``False``, with the init facts they read.
     checks: dict = field(default_factory=dict)
+    #: What the executor observed around the client, never a pass or a fail.
+    facts: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -921,7 +924,7 @@ class ClaudeSessionExecutor:
             quota=quota,
             surface=self.surfaces.get((spec.arm_id, inputs.tree)),
         )
-        result.checks.update(
+        result.facts.update(
             returncode=proc.returncode,
             orphan_server_ended=orphan,
             user_state_writes=_user_state_writes(started_wall),
@@ -995,6 +998,7 @@ def run_session(inputs: SessionInputs, session_dir: Path, execute: Executor) -> 
             "answer": result.answer,
             "turns": result.turns,
             "checks": result.checks,
+            "facts": result.facts,
         }
         (session_dir / "session.json").write_text(
             json.dumps(final, indent=2, sort_keys=True), encoding="utf-8"
