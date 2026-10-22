@@ -980,7 +980,7 @@ def _acknowledge_derived_batches_timed(
                     # work that no longer belongs to this batch.
                     statuses.append(status)
                     continue
-                if status.state == "claimed":
+                if status.state == "claimed" and component not in derived_receipts.UNACKNOWLEDGED_COMPONENTS:
                     where["stage"] = "component_wait"
                     status = _wait_for_derived_component(
                         session.vault_root,

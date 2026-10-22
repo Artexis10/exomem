@@ -268,6 +268,7 @@ def test_derived_batch_records_every_closed_component_explicitly(vault: Path) ->
         "embeddings",
         "claims",
         "write_advisory",
+        "context_catalogue",
     ]
     assert {
         status.component: status.state for status in receipt.components
@@ -2246,7 +2247,9 @@ def test_accepted_parent_schema_migrates_without_losing_any_custody(
                             else "not_required"
                         ),
                     )
+                    # The release that wrote this store knew nine components.
                     for component in protocol.DerivedComponent
+                    if component is not protocol.DerivedComponent.CONTEXT_CATALOGUE
                 ),
             )
             connection.execute(
@@ -2299,6 +2302,17 @@ def test_accepted_parent_schema_migrates_without_losing_any_custody(
             "FROM derived_batch_components WHERE batch_id='accepted-parent' "
             "AND component='write_advisory'"
         ).fetchone() == (1, 7, 4)
+        # The component this release added is backfilled, and the rows the older
+        # release wrote are exactly as it left them.
+        assert connection.execute(
+            "SELECT state, revision, lease_revision, attempt_count "
+            "FROM derived_batch_components WHERE batch_id='accepted-parent' "
+            "AND component='context_catalogue'"
+        ).fetchone() == ("not_required", 1, 0, 0)
+        assert connection.execute(
+            "SELECT count(*) FROM derived_batch_components WHERE batch_id='accepted-parent' "
+            "AND state='not_required' AND revision=1 AND lease_revision=7 AND attempt_count=4"
+        ).fetchone() == (8,)
         assert connection.execute(
             "SELECT component_revision, canonical_generation, state "
             "FROM pending_recall_rows WHERE batch_id='accepted-parent'"
@@ -2314,6 +2328,62 @@ def test_accepted_parent_schema_migrates_without_losing_any_custody(
             "JOIN derived_batches AS b ON b.batch_id = p.batch_id "
             "WHERE p.batch_id = 'accepted-parent'"
         ).fetchone() == (1,)
+
+
+def _rewrite_as_prior_release(vault: Path) -> None:
+    """Leave the store as the release before the catalogue component wrote it.
+
+    That release's component table carried a CHECK that names nine components,
+    held no row for the catalogue, and kept no marker for the component set.
+    """
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute("DELETE FROM derived_batch_components WHERE component = 'context_catalogue'")
+        connection.execute("DELETE FROM maintenance_state WHERE key = ?", (deferred_index._COMPONENT_ROWS_KEY,))
+        ddl = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'derived_batch_components'"
+        ).fetchone()[0]
+        connection.execute("ALTER TABLE derived_batch_components RENAME TO newer_components")
+        connection.execute(ddl.replace("'context_catalogue', ", "").replace(", 'context_catalogue'", ""))
+        connection.execute("INSERT INTO derived_batch_components SELECT * FROM newer_components")
+        connection.execute("DROP TABLE newer_components")
+        connection.commit()
+
+
+def test_a_batch_prepared_before_the_catalogue_component_reads_drains_and_replays(vault: Path) -> None:
+    protocol = _protocol()
+    drain = _drain()
+    receipt, target, _before, after = _prepare_one(vault, batch_id="prior-release")
+    _write(target, after)
+    _rewrite_as_prior_release(vault)
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute("SELECT count(*) FROM derived_batch_components").fetchone() == (9,)
+
+    # The upgrade opens the store; before the migration this raised KeyError on every old batch.
+    opened = protocol._load_receipt(vault, "prior-release")
+    assert protocol.component_status(
+        vault, opened, protocol.DerivedComponent.CONTEXT_CATALOGUE
+    ).state == "not_required"
+    assert protocol.component_status(vault, opened, protocol.DerivedComponent.LEXSTORE).state == "prepared"
+
+    dispatched: list[object] = []
+    completed = drain.drain_once(
+        vault,
+        dispatch=lambda _root, status: dispatched.append(status.component) or True,
+        observe_current_generation=lambda _root: "generation-1",
+        visibility_publisher=lambda _root, current: current.batch_id == receipt.batch_id,
+        limit=10,
+        now=20.0,
+    )
+
+    assert completed == 1
+    assert dispatched == [protocol.DerivedComponent.LEXSTORE]  # the backfilled row asks for no work
+    replayed, target_again, *_ = _prepare_one(vault, batch_id="prior-release")
+    assert replayed.batch_id == receipt.batch_id and target_again == target
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute("SELECT count(*) FROM derived_batch_components").fetchone() == (10,)
+        assert connection.execute(
+            "SELECT state FROM derived_batches WHERE batch_id = 'prior-release'"
+        ).fetchone() == ("completed",)
 
 
 def test_frozen_protocol_fake_drives_the_store_consumer_lifecycle() -> None:

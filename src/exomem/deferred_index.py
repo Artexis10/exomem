@@ -29,6 +29,10 @@ _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
 #: debt at the same value".
 _GRAPH_FULL_REBUILD_MARKS_KEY = "graph_full_rebuild_marks"
 _PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
+#: Set, in the transaction that finishes it, when every stored batch holds a row
+#: for each component this release knows. Its value names that component set, so
+#: a release that adds a component re-runs the (idempotent) repair once.
+_COMPONENT_ROWS_KEY = "derived_batch_component_rows:v1"
 
 # Additive fields on the existing queue. Legacy writers may update revision
 # alone; retry_revision prevents their new input inheriting an old refusal.
@@ -58,6 +62,125 @@ _QUEUE_TABLES = {
 #: exactly the work rotation exists to unpin.  Rotation therefore takes the
 #: later of the wall clock and one epsilon past the queue's current maximum.
 _ROTATION_EPSILON_SECONDS = 1e-6
+
+
+_COMPONENT_SCHEDULE_INDEX = (
+    "CREATE INDEX IF NOT EXISTS derived_components_schedule "
+    "ON derived_batch_components(state, next_attempt_at, updated_at)"
+)
+
+
+def _known_components() -> tuple[str, ...]:
+    """The receipt component names this release knows, from the enum that defines them."""
+    # Imported here because derived_receipts imports this module.
+    from .derived_receipts import DerivedComponent
+
+    return tuple(component.value for component in DerivedComponent)
+
+
+def _components_table_ddl(name: str, *, if_not_exists: bool) -> str:
+    """The component table. Its CHECK is the enum's names, so the two cannot drift."""
+    names = ", ".join(f"'{component}'" for component in _known_components())
+    create = "CREATE TABLE IF NOT EXISTS" if if_not_exists else "CREATE TABLE"
+    return f"""
+        {create} {name} (
+            batch_id TEXT NOT NULL,
+            component TEXT NOT NULL CHECK(component IN ({names})),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            state TEXT NOT NULL CHECK(state IN (
+                'prepared', 'ready', 'claimed', 'retryable', 'completed',
+                'not_required', 'aborted', 'superseded', 'reconcile_required',
+                'failed'
+            )),
+            lease_revision INTEGER NOT NULL DEFAULT 0 CHECK(lease_revision >= 0),
+            claim_owner TEXT CHECK(
+                claim_owner IS NULL OR length(claim_owner) BETWEEN 1 AND 128
+            ),
+            claim_expires_at REAL,
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            next_attempt_at REAL NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            failure_code TEXT CHECK(
+                failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
+            ),
+            PRIMARY KEY(batch_id, component),
+            FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
+        )
+        """
+
+
+def derived_component_rows_current(conn: sqlite3.Connection) -> bool:
+    """Whether the component repair below already ran for this release's component set."""
+    row = conn.execute(
+        "SELECT value FROM maintenance_state WHERE key = ?", (_COMPONENT_ROWS_KEY,)
+    ).fetchone()
+    return row is not None and str(row[0]) == ",".join(_known_components())
+
+
+def _repair_component_rows(conn: sqlite3.Connection) -> None:
+    """Let a store made by an older release hold every component this release knows.
+
+    An older store has two gaps: its CHECK rejects a newer component's name, and
+    its batches have no row for it, so a receipt read raises on every old batch.
+    SQLite cannot widen a CHECK in place, so the table is rebuilt once with the
+    same rows copied across verbatim; then each batch missing a component gets a
+    `not_required` row, because that batch never owed the work. No existing row
+    changes. Running it again finds nothing to rebuild and nothing to insert.
+    """
+    if derived_component_rows_current(conn):
+        return
+    components = _known_components()
+    nested = conn.in_transaction
+    conn.execute("SAVEPOINT derived_component_rows" if nested else "BEGIN IMMEDIATE")
+    try:
+        # Another opener may have finished while this one waited for the write lock.
+        if not derived_component_rows_current(conn):
+            declared = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'derived_batch_components'"
+            ).fetchone()[0]
+            if any(f"'{component}'" not in declared for component in components):
+                conn.execute(
+                    _components_table_ddl("derived_batch_components_rebuilt", if_not_exists=False)
+                )
+                conn.execute(
+                    "INSERT INTO derived_batch_components_rebuilt(batch_id, component, "
+                    "revision, state, lease_revision, claim_owner, claim_expires_at, "
+                    "attempt_count, next_attempt_at, created_at, updated_at, failure_code) "
+                    "SELECT batch_id, component, revision, state, lease_revision, claim_owner, "
+                    "claim_expires_at, attempt_count, next_attempt_at, created_at, updated_at, "
+                    "failure_code FROM derived_batch_components"
+                )
+                conn.execute("DROP TABLE derived_batch_components")
+                conn.execute(
+                    "ALTER TABLE derived_batch_components_rebuilt RENAME TO derived_batch_components"
+                )
+                conn.execute(_COMPONENT_SCHEDULE_INDEX)
+            conn.executemany(
+                "INSERT OR IGNORE INTO derived_batch_components(batch_id, component, revision, "
+                "state, lease_revision, claim_owner, claim_expires_at, attempt_count, "
+                "next_attempt_at, created_at, updated_at, failure_code) "
+                "SELECT batch_id, ?, 1, 'not_required', 0, NULL, NULL, 0, created_at, "
+                "created_at, created_at, NULL FROM derived_batches",
+                [(component,) for component in components],
+            )
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_COMPONENT_ROWS_KEY, ",".join(components)),
+            )
+    except BaseException:
+        if nested:
+            conn.execute("ROLLBACK TO SAVEPOINT derived_component_rows")
+            conn.execute("RELEASE SAVEPOINT derived_component_rows")
+        else:
+            conn.rollback()
+        raise
+    if nested:
+        conn.execute("RELEASE SAVEPOINT derived_component_rows")
+    else:
+        conn.commit()
 
 
 def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
@@ -103,37 +226,7 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS derived_batch_components (
-            batch_id TEXT NOT NULL,
-            component TEXT NOT NULL CHECK(component IN (
-                'freshness', 'memory_refs', 'resolver', 'semantic_purge',
-                'lexstore', 'graph', 'embeddings', 'claims', 'write_advisory'
-            )),
-            revision INTEGER NOT NULL CHECK(revision >= 1),
-            state TEXT NOT NULL CHECK(state IN (
-                'prepared', 'ready', 'claimed', 'retryable', 'completed',
-                'not_required', 'aborted', 'superseded', 'reconcile_required',
-                'failed'
-            )),
-            lease_revision INTEGER NOT NULL DEFAULT 0 CHECK(lease_revision >= 0),
-            claim_owner TEXT CHECK(
-                claim_owner IS NULL OR length(claim_owner) BETWEEN 1 AND 128
-            ),
-            claim_expires_at REAL,
-            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-            next_attempt_at REAL NOT NULL,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
-            failure_code TEXT CHECK(
-                failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
-            ),
-            PRIMARY KEY(batch_id, component),
-            FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
-        )
-        """
-    )
+    conn.execute(_components_table_ddl("derived_batch_components", if_not_exists=True))
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS pending_recall_rows (
@@ -208,10 +301,7 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS derived_components_schedule "
-        "ON derived_batch_components(state, next_attempt_at, updated_at)"
-    )
+    conn.execute(_COMPONENT_SCHEDULE_INDEX)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS derived_paths_lookup "
         "ON derived_batch_paths(rel_path, batch_id)"
@@ -333,6 +423,7 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
     # existing transaction still owns its commit or rollback.
     if not caller_transaction:
         conn.commit()
+    _repair_component_rows(conn)
 
 
 def _ensure_vocabulary_provenance_schema(conn: sqlite3.Connection) -> None:

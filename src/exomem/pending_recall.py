@@ -69,15 +69,18 @@ _RETIREMENT_LANES: Final[dict[str, str]] = {
 #: The only components Design Decisions 4 and 6 allow to omit the pending
 #: generation: vector and graph lanes contribute proven-current generations
 #: only and disclose their pending coverage instead, and advisory work is
-#: noncanonical background review. Every OTHER required component -- including
-#: one added after this module was written -- must prove completion before the
-#: overlay stops shadowing, because ordinary recall reads through it.
+#: noncanonical background review. The context catalogue is a disposable
+#: sidecar that recall never reads, so a slow or failing fold must not keep a
+#: page shadowed. Every OTHER required component -- including one added after
+#: this module was written -- must prove completion before the overlay stops
+#: shadowing, because ordinary recall reads through it.
 _OMITTABLE_COMPONENTS: Final[frozenset[str]] = frozenset(
     {
         derived_receipts.DerivedComponent.GRAPH.value,
         derived_receipts.DerivedComponent.EMBEDDINGS.value,
         derived_receipts.DerivedComponent.CLAIMS.value,
         derived_receipts.DerivedComponent.WRITE_ADVISORY.value,
+        derived_receipts.DerivedComponent.CONTEXT_CATALOGUE.value,
     }
 )
 

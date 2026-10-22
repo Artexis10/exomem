@@ -79,6 +79,11 @@ STATUS_UNAVAILABLE = "unavailable"
 # the authored edges whose relation kind has it, never a list of relation names.
 MEMBERSHIP_FAMILY = "membership"
 
+# `RelationEdgeResult.status` when the graph answered with its authoritative edge set,
+# and when its sidecar is missing or still being built.
+EDGES_AVAILABLE = "available"
+EDGES_WARMING = "warming"
+
 #: Folds one write retries when another writer commits first. A resource bound.
 WRITE_ATTEMPTS = 3
 
@@ -581,6 +586,8 @@ class _Fold:
         self.entry_count = 0
         self.full = False
         self.edge_state = ""
+        self.edges_read = False
+        self.graph_token = ""
         self.expected: dict[str, freshness.FileSignature] = {}
         self.edges: list[tuple[str, str]] = []
         self._kinds: dict[str, tuple[str, str] | None] = {}
@@ -639,8 +646,31 @@ class _Fold:
                 entry_id for entry_id in self.stored if entry_id not in self.new and entry_id not in self.pending
             )
         self.removed.difference_update(self.new)
-        self.edge_state, self.edges = _membership_edges(self.root)
+        self._read_edges()
         self.entry_count = len((set(self.stored) - self.removed) | set(self.new))
+
+    def _read_edges(self) -> None:
+        """Pull the membership edges from the graph, unless it has not moved since the last pull.
+
+        The graph's generation token is read first, so a graph write between the
+        token and the pull leaves an older token stored and the next fold pulls
+        again. A page entry the catalogue does not hold yet is pulled for
+        whatever the token says: the graph may have indexed it before the
+        catalogue did.
+        """
+        token = _graph_token(self.root)
+        new_source = any(entry_id == entry.path and entry_id not in self.stored for entry_id, entry in self.new.items())
+        if (
+            token
+            and not new_source
+            and self.meta.get("graph_state") == EDGES_AVAILABLE
+            and self.meta.get("graph_token") == token
+        ):
+            self.edge_state, self.graph_token = EDGES_AVAILABLE, token
+            return  # the stored edges are the graph's edges at this token
+        self.edge_state, self.edges = _membership_edges(self.root)
+        self.edges_read = True
+        self.graph_token = token if self.edge_state == EDGES_AVAILABLE else ""
 
     def _basis_state(self) -> str:
         """Whether the status registry the stored classes came from still holds."""
@@ -849,7 +879,8 @@ class _Fold:
             digest = entry.digest()
             if digests.get(entry_id) == digest:
                 continue
-            _delete_entry(conn, entry_id)
+            # A replaced entry keeps its edges: the edge commit below diffs them against the graph, and a fold that did not read the graph must not drop them.
+            _delete_entry(conn, entry_id, keep_edges=True)
             _insert_entry(conn, entry, digest)
             moved = True
         moved |= self._commit_pending(conn)
@@ -868,8 +899,8 @@ class _Fold:
         return True
 
     def _commit_edges(self, conn: sqlite3.Connection) -> bool:
-        if self.edge_state != "available":
-            return False  # a graph miss leaves the stored edges as they were
+        if not self.edges_read or self.edge_state != EDGES_AVAILABLE:
+            return False  # a graph miss, or a graph that has not moved, leaves the stored edges as they were
         sources = {str(entry_id) for (entry_id,) in conn.execute("SELECT entry_id FROM entries WHERE entry_id = path")}
         desired = {(src, dst) for src, dst in self.edges if src in sources}
         stored = {(str(src), str(dst)) for src, dst in conn.execute("SELECT entry_id, target_path FROM membership_edges")}
@@ -886,6 +917,7 @@ class _Fold:
             "status_dependency": json.dumps(list(self.basis.dependency)),
             "activation_token": json.dumps(list(self.activation_token)),
             "graph_state": self.edge_state,
+            "graph_token": self.graph_token,
         }
         if freshness_stamp is not None:
             updates["freshness_key"] = freshness_stamp
@@ -930,6 +962,18 @@ def _collections(vault_root: Path, token: tuple[int, int, int]) -> dict[str, tup
     return out
 
 
+def _graph_token(vault_root: Path) -> str:
+    """The graph sidecar's content generation as a string, or "" when it has none to read."""
+    from . import epistemic_graph
+
+    try:
+        token = epistemic_graph.cache_token(vault_root)
+    except Exception:  # noqa: BLE001 - an unreadable graph token means the edges are pulled
+        log.debug("context catalogue: graph token unavailable", exc_info=True)
+        return ""
+    return json.dumps(list(token)) if token else ""
+
+
 def _membership_edges(vault_root: Path) -> tuple[str, list[tuple[str, str]]]:
     """The authored edges of every membership-family relation kind, or why there are none to read."""
     from . import epistemic_graph, relation_registry
@@ -957,8 +1001,10 @@ def _stored(conn: sqlite3.Connection) -> list[_Stored]:
     ]
 
 
-def _delete_entry(conn: sqlite3.Connection, entry_id: str) -> None:
+def _delete_entry(conn: sqlite3.Connection, entry_id: str, *, keep_edges: bool = False) -> None:
     for table in ("entries", "declared_topics_raw", "entry_projects", "membership_edges", "source_refs"):
+        if keep_edges and table == "membership_edges":
+            continue
         conn.execute(f"DELETE FROM {table} WHERE entry_id = ?", (entry_id,))
 
 
@@ -982,6 +1028,40 @@ def _insert_entry(conn: sqlite3.Connection, entry: Entry, digest: str) -> None:
 _LOCK = threading.Lock()
 _INLINE_LOCKS: dict[Path, threading.Lock] = {}
 _CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
+
+
+def keep_current(vault_root: Path) -> bool:
+    """Bring a built catalogue to the vault as it is now; False when a retry is owed.
+
+    The derived-sync component calls this once its batch's graph work is done.
+    It diffs the whole KB against the stored rows, not only the paths the batch
+    names: a move or a delete runs the synchronous fan-out and its old path is
+    in no receipt, so the diff is what drops the old entry, and a rename
+    arrives as a removed row plus a new one. The activation index comes up to
+    date first, because the fold mirrors its anchors and reads the collection
+    manifests it publishes. Nothing is owed when the catalogue is switched off
+    or was never built: the first read builds it from the vault, and a build in
+    flight is caught up by the read path's own freshness delta. The calling
+    drain is the background owner here, so this folds inline and schedules
+    nothing.
+    """
+    root = Path(vault_root)
+    if disabled() or not sidecar_path(root).exists():
+        return True
+    catalogue = ContextCatalogue(root)
+    try:
+        if not catalogue.built():
+            return True
+        refreshed = working_set_index.WorkingSetIndex(root).update()
+        if refreshed.get("unavailable"):
+            return False
+        result = catalogue.update()
+        if result.get("unavailable") or result.get("pending"):
+            return False
+        # A graph still being built owes the membership edges; its own pipeline publishes them and a retry reads them.
+        return catalogue.graph_state() != EDGES_WARMING
+    finally:
+        catalogue.close()
 
 
 def ensure(

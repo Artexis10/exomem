@@ -91,6 +91,7 @@ class DerivedComponent(StrEnum):
     EMBEDDINGS = "embeddings"
     CLAIMS = "claims"
     WRITE_ADVISORY = "write_advisory"
+    CONTEXT_CATALOGUE = "context_catalogue"
 
 
 _COMPONENT_DEPENDENCIES: Final[dict[DerivedComponent, tuple[DerivedComponent, ...]]] = {
@@ -141,7 +142,20 @@ _COMPONENT_DEPENDENCIES: Final[dict[DerivedComponent, tuple[DerivedComponent, ..
         DerivedComponent.LEXSTORE,
         DerivedComponent.EMBEDDINGS,
     ),
+    # The catalogue reads the corpus change `freshness` publishes and the
+    # membership edges the graph holds. Nothing else is an input: a page ref is
+    # computed from the page, so the memory-ref, resolver, purge and lexical
+    # stores do not feed it, and the graph's own chain already waits for them.
+    DerivedComponent.CONTEXT_CATALOGUE: (
+        DerivedComponent.FRESHNESS,
+        DerivedComponent.GRAPH,
+    ),
 }
+#: Components that a store made by an older release backfills as `not_required`.
+_BACKFILLED_COMPONENTS: Final = frozenset({DerivedComponent.CONTEXT_CATALOGUE})
+#: Components a write's acknowledgement neither reports nor waits for: the
+#: catalogue is a disposable sidecar, so a slow fold never delays a write.
+UNACKNOWLEDGED_COMPONENTS: Final = frozenset({DerivedComponent.CONTEXT_CATALOGUE})
 _COMPONENT_ORDER_SQL: Final = "CASE c.component " + " ".join(
     f"WHEN '{component.value}' THEN {index}"
     for index, component in enumerate(DerivedComponent)
@@ -642,6 +656,7 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
             "INDEXED BY derived_paths_missing_sequence "
             "WHERE batch_seq IS NULL LIMIT 1"
         ).fetchone() is None
+        and deferred_index.derived_component_rows_current(connection)
     )
 
 
@@ -699,7 +714,9 @@ def _exact_existing(
         for status in existing.components
         if status.state != "not_required"
     )
-    if actual_required != required_components:
+    # The store backfills this component as `not_required` for a batch prepared
+    # before it existed; a replay of that batch must still match what it owed.
+    if actual_required - _BACKFILLED_COMPONENTS != required_components - _BACKFILLED_COMPONENTS:
         return False
     advisory = connection.execute(
         "SELECT target_rel_path, target_fingerprint "
