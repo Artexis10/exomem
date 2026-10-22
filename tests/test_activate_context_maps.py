@@ -83,7 +83,7 @@ def test_an_empty_vault_returns_an_empty_map(vault: Path, monkeypatch: pytest.Mo
     if restricted:
         _world(vault, with_w=True)
         _built(vault).close()
-        caller = context_views.CallerView(lambda _path: False, None, "empty-view")
+        caller = context_views.CallerView(lambda _path: False, None, "empty-view", False)
         monkeypatch.setattr(context_views.CallerView, "current", lambda *_a, **_kw: caller)
     else:
         shutil.rmtree(vault / "Knowledge Base")
@@ -164,13 +164,13 @@ def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_pa
 
 @pytest.mark.parametrize("forgery", ["path", "description", "state"])
 def test_the_guard_drops_a_forged_map_item(vault: Path, monkeypatch: pytest.MonkeyPatch, forgery: str) -> None:
-    """The map uses the read-view display replacement and the same strict path and state decisions."""
+    """The map restores its caller's pinned items before the shared strict path and state decisions."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _world(vault, with_w=True)
     _write(vault, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# Restricted fixture\n\nHidden.\n")
     _withhold(vault, SECRET, ceiling=0)
     _built(vault).close()
-    packet = _activate(vault)
+    packet = _activate(vault, _external())
     if forgery == "path":
         forged = {"kind": "note", "path": SECRET, "ref": SECRET, "title": "Restricted fixture", "description": "Hidden."}
         packet["map"]["items"].append(forged)
