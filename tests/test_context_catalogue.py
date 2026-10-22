@@ -218,6 +218,19 @@ def _source_schema(vault: Path):
     return schema.load_source_schema(vault)
 
 
+def test_a_description_cut_inside_a_wikilink_does_not_serve_half_a_page_name(vault: Path) -> None:
+    """The egress guard reads a page name only inside a closed `[[link]]`; a cut link would reach a caller unguarded."""
+    run_up = "a" * 230 + " see [[Harbour wiki page]] now"
+    _page(vault, "authored-cut", f"summary: {run_up}\n")
+    _page(vault, "lede-cut", body=run_up + "\n")
+    catalogue = _built(vault)
+
+    descriptions = {entry.path.rsplit("/", 1)[-1]: entry.description for entry in catalogue.entries()}
+
+    assert descriptions["authored-cut.md"] == "a" * 230 + " see"
+    assert descriptions["lede-cut.md"] == "a" * 230 + " see"
+
+
 def test_the_kill_switch_builds_and_reads_nothing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(vault)
     monkeypatch.setenv("EXOMEM_DISABLE_WORKING_SET", "1")

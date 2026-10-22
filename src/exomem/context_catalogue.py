@@ -43,6 +43,7 @@ from . import (
     vault,
     working_set_index,
     working_set_runtime,
+    working_set_state,
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
@@ -369,8 +370,11 @@ class ContextCatalogue:
 
     # -- owner-only reads --------------------------------------------------- #
 
-    def memberships(self) -> Memberships:
-        """Resolve every entry's declarations through the registries as they stand now.
+    def memberships(self, among: Iterable[Entry] | None = None) -> Memberships:
+        """Resolve each entry's declarations through the registries as they stand now.
+
+        `among` limits the join to the entries a reader may see (default: every entry),
+        so a relation to an entry outside it adds nothing.
 
         An entry belongs to the topics its own `topics` values resolve to, the
         domains of its project keys, and the topics its membership-relation
@@ -382,7 +386,7 @@ class ContextCatalogue:
 
         taxonomy = source_taxonomy.load_taxonomy(self.vault_root)
         project_registry = project_keys.load_project_registry(self.vault_root)
-        entries = self.entries()
+        entries = tuple(self.entries() if among is None else among)
         edges = self.membership_edges()
         project_topics: dict[str, vocabulary_resolution.TopicResolution] = {}
 
@@ -925,10 +929,13 @@ def _describe(summary: object, body: str, rel: str) -> tuple[str, str]:
     """A one-line description and its origin: the authored `summary`, else the page's lede, else none."""
     from . import provenance
 
+    # A cut inside a `[[link` would serve part of a page name the egress guard cannot read as a link.
     if isinstance(summary, str) and summary.strip():
-        return " ".join(summary.split())[: working_set_index.LEDE_MAX_CHARS], ORIGIN_AUTHORED
+        cut = " ".join(summary.split())[: working_set_index.LEDE_MAX_CHARS]
+        return working_set_state.without_open_link(cut), ORIGIN_AUTHORED
     # Read withheld, as the activation signature does: an origin carrier is never a lede.
     lede = working_set_index.lede(provenance.withheld_prose(body, owner_path=rel)) if body else ""
+    lede = working_set_state.without_open_link(lede)
     return (lede, ORIGIN_LEDE) if lede else ("", ORIGIN_NONE)
 
 
