@@ -218,6 +218,17 @@ def write_arm_files(files: ArmFiles) -> None:
             path.write_text(text, encoding="utf-8")
 
 
+#: The client settings that every Claude child of the run carries, actor and judge.
+CLIENT_PINS: Mapping[str, str] = {
+    # The client's auto memory adds its own instructions and the operator's
+    # memory directory to every child; neither the actor nor the judge has them.
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    # The run pins the client binary; a child must not update the operator's
+    # installation underneath a run.
+    "DISABLE_AUTOUPDATER": "1",
+}
+
+
 def session_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[str, str]:
     """The child environment: the floor, no inherited product settings, the pins.
 
@@ -232,12 +243,7 @@ def session_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[st
     env = {key: value for key, value in floor.items() if not key.startswith(("EXOMEM_", "KB_"))}
     env.update(product_env(slot, spec))
     env["EXOMEM_RETRIEVE_INJECT_CLI"] = "1"
-    # The client's auto memory adds its own instructions and the operator's
-    # memory directory to every arm; the protocol's actor has neither.
-    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-    # The run pins the client binary; a session must not update the
-    # operator's installation underneath a run.
-    env["DISABLE_AUTOUPDATER"] = "1"
+    env.update(CLIENT_PINS)
     build_bin = str(Path(sys.executable).parent)
     rest = [
         entry for entry in floor.get("PATH", "").split(os.pathsep) if entry and entry != build_bin

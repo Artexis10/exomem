@@ -15,10 +15,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from epistemic.journeys.f27_replay import environment_floor
 
 from membench.judge.blinding import (
     SourceNumbering,
@@ -29,7 +32,7 @@ from membench.judge.blinding import (
 
 from . import protocol
 from .cases import Case
-from .session import launched_argv
+from .session import CLIENT_PINS, launched_argv
 from .state import Layout
 
 TEXTS = Path(__file__).resolve().parent / "texts"
@@ -61,7 +64,15 @@ ROUTE_LIMITATIONS: dict[str, tuple[str, ...]] = {
         "reasoning or an error is refused, so neither a tool call nor a spawned "
         "sub-agent can read the arm key into a verdict.",
     ),
-    "claude": ("Not measured: no rollout of this route was read.",),
+    "claude": (
+        "The judge receives the client's base system prompt and its environment "
+        "block; no flag of this version drops them. The text is the same for "
+        "every item.",
+        "Its only tool is the client's structured-output tool, so it can neither "
+        "read the arm key nor spawn a sub-agent. It loads no MCP server and no "
+        "memory file.",
+        "Its model is the actor's family.",
+    ),
 }
 
 #: Harness knob: attempts per item before the judge stage pauses, so a spent
@@ -310,7 +321,13 @@ def codex_argv(
 
 
 def claude_argv(
-    *, executable: str, model: str, schema: Mapping, prompt: str, mcp_config: Path
+    *,
+    executable: str,
+    model: str,
+    effort: str | None,
+    schema: Mapping,
+    prompt: str,
+    mcp_config: Path,
 ) -> list[str]:
     """The other family's judge: no tools, no MCP server, no persisted session."""
 
@@ -320,6 +337,7 @@ def claude_argv(
         prompt,
         "--model",
         model,
+        *(("--effort", effort) if effort else ()),
         "--tools",
         "",
         "--strict-mcp-config",
@@ -422,6 +440,9 @@ def run_judge(
         )
     manifest.write_text(json.dumps(record, indent=2), encoding="utf-8")
     log_path = out_dir.parent / f"{route}-attempts.jsonl"
+    # The launching agent session's variables would make the judge a nested
+    # child of that session; the judge starts as a plain headless run instead.
+    env = {**environment_floor(os.environ)[0], **CLIENT_PINS}
     judged = 0
     for item in items:
         target = out_dir / f"{item['item_id']}.json"
@@ -450,6 +471,7 @@ def run_judge(
                     claude_argv(
                         executable=claude,
                         model=model,
+                        effort=effort,
                         schema=judge_schema(),
                         prompt=prompt,
                         mcp_config=empty_mcp,
@@ -461,6 +483,7 @@ def run_judge(
                 capture_output=True,
                 text=True,
                 cwd=sandbox,
+                env=env,
                 timeout=1800,
             )
             try:

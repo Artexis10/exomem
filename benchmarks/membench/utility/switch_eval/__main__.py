@@ -764,7 +764,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--run", required=True)
     p.add_argument("--route", choices=ROUTES, default=ROUTES[0])
     p.add_argument("--judge-model", help="the judge model ID (required unless --items-only)")
-    p.add_argument("--judge-effort", help="the judge's reasoning effort (codex route)")
+    p.add_argument("--judge-effort", help="the judge's reasoning effort")
     p.add_argument("--items-only", action="store_true")
     p.set_defaults(func=cmd_judge)
 
