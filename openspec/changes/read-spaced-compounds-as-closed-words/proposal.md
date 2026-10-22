@@ -7,7 +7,9 @@ Speech-to-text and quick typing often split a closed compound with a space. A tu
 ## What Changes
 
 - Join two adjacent content tokens of one clause into a turn term. The join is a lead only, never a phrase, so it never earns `exact_alias` alone.
-- When a join equals an authored name term of an indexed anchor, the turn wrote that word: its two halves name nothing on their own. A half that the turn also writes on its own still counts.
+- When a join equals a name term of any indexed anchor the caller can see, the turn wrote that word: its two halves name nothing on their own. A half that the turn also writes on its own still counts.
+- Do not join two tokens when exactly one is capitalised inside a sentence: "the book Mark lent me" is a word and a name.
+- Read earlier conversation entries the same way, against the whole visible catalogue.
 - The audience decision reads the same turn words as candidate matching, so an anchor that the turn reaches only through a join is decided for a non-owner reader.
 
 ## Capabilities

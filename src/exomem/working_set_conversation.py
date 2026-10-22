@@ -372,7 +372,9 @@ class Analyzed:
             return analysis
         tokens = analysis.tokens + tuple(t for a in analyses for t in a.tokens)
         ngrams = tuple(dict.fromkeys((*analysis.ngrams, *(g for a in analyses for g in a.ngrams))))
-        return replace(analysis, tokens=tokens, ngrams=ngrams)
+        # No casing: the turn's capitals would wrongly veto a segment's spaced
+        # compounds, and the audience must decide every anchor any segment reaches.
+        return replace(analysis, tokens=tokens, ngrams=ngrams, capitalised=frozenset())
 
     def turn_tokens(self, analysis: Any) -> tuple[str, ...]:
         """The tokens `resolve` reads: the turn's, then `focus`'s behind a break."""

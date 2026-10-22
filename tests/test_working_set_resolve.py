@@ -1479,6 +1479,24 @@ def test_audience_decides_an_anchor_the_turn_reaches_only_by_a_spaced_compound()
     assert counts["kettlebrook"] == 0
 
 
+def test_audience_counts_a_focus_compound_whatever_the_turn_capitalises() -> None:
+    """The turn's capital "Brook" must not stop the focus line's "kettle brook"
+    from reaching, and so deciding, a withheld owner of "Kettlebrook"."""
+    from exomem import working_set_conversation as conversation_module
+
+    mill = _term_row("mill.md", "Kettlebrook Mill", terms=("kettlebrook", "mill"))
+    hidden = _term_row("hidden.md", "Kettlebrook Plan", terms=("kettlebrook", "plan"))
+    segments = conversation_module.analyze(
+        conversation_module.bound({"focus": "kettle brook status"})
+    )
+    analysis = segments.union(resolve_module.analyze_turn("I asked Brook about it"))
+    _rows, counts, _decided = resolve_module.audience_view(
+        analysis, (mill, hidden), {"kettlebrook": 2}, lambda path: path != "hidden.md"
+    )
+
+    assert counts["kettlebrook"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # fix/activation-competing-senses, R3: a named anchor carries the packet. When
 # some RESOLVED anchor holds a deciding-alone kind, a competing group of same-
