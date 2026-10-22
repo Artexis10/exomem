@@ -204,6 +204,37 @@ def resolve_topics(taxonomy: source_taxonomy.SourceTaxonomy, values: Iterable[ob
     return TopicResolution(tuple(resolved), tuple(unresolved))
 
 
+def plan_topic_registrations(
+    vault_root: Path, values: str | list[str]
+) -> tuple[list[str], source_taxonomy.TaxonomyPlan, list[str]]:
+    """Resolve page topics and fold all introductions into one capture-style plan."""
+    requested = [values] if isinstance(values, str) else values
+    if not isinstance(requested, list):
+        raise VocabularyResolutionError("INVALID_SOURCE", "topics must be a domain key or a list of domain keys")
+    taxonomy, _, snapshot = _strict_taxonomy(Path(vault_root))
+    try:
+        resolutions = [taxonomy.resolve_domain(value) for value in requested]
+    except source_taxonomy.TaxonomyError as error:
+        raise VocabularyResolutionError("INVALID_SOURCE", str(error)) from error
+    plan = source_taxonomy.plan_registrations(vault_root, domains=resolutions)
+    if plan.writes and registry_text_snapshot(plan.source_text) != snapshot:
+        raise VocabularyResolutionError(
+            "STALE_VOCABULARY_BINDING", "domain vocabulary changed while the topics resolved; retry the write"
+        )
+    topics = resolve_topics(plan.taxonomy, requested)
+    if topics.unresolved:
+        raise VocabularyResolutionError("INVALID_SOURCE", "topics must resolve to active domain keys")
+    warnings = [f"NEW_DOMAIN: registered {item.key!r}" for item in plan.introductions]
+    for resolution in resolutions:
+        if resolution.close_match:
+            warnings.append(
+                f"DOMAIN_NEAR_MISS: {resolution.key!r} closely resembles existing domain "
+                f"{resolution.close_match!r}. Kept as supplied — re-capture with the "
+                "existing domain if this was a typo."
+            )
+    return list(topics.resolved), plan, warnings
+
+
 def _require_bounded_destination(folder: str) -> None:
     try:
         encoded = folder.encode("utf-8")

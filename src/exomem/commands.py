@@ -74,7 +74,6 @@ from . import episode_memory as episode_memory_module
 from . import episode_nudge as episode_nudge_module
 from . import episode_workflow as episode_workflow_module
 from . import epistemic_graph as epistemic_graph_module
-from .viewer_map import op_viewer_map
 from . import evolution as evolution_module
 from . import find as find_module
 from . import (
@@ -173,6 +172,7 @@ from .vault import (
     VaultPathError,
     resolve_under_vault,
 )
+from .viewer_map import op_viewer_map
 
 log = logging.getLogger(__name__)
 
@@ -5278,6 +5278,8 @@ def op_note(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     vocabulary_decision: _DomainVocabularyDecisionArgument = None,
+    summary: str | None = None,
+    topics: str | list[str] | None = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -5316,6 +5318,8 @@ def op_note(
     suggested next actions. Treat it as write-shape feedback, not semantic truth.
 
     Args:
+        summary: Optional one-line page description, at most 1024 characters.
+        topics: Domain key or list of keys; new keys register with this write.
         content: Markdown body written after frontmatter. The writer adds or
             normalizes the leading `# <title>` H1, followed by the section
             conventions per type:
@@ -5437,6 +5441,8 @@ def op_note(
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
             vocabulary_decision=vocabulary_decision,
+            summary=summary,
+            topics=topics,
         )
     except note_module.NoteError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
@@ -7555,6 +7561,8 @@ def op_remember(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     vocabulary_decision: _DomainVocabularyDecisionArgument = None,
+    summary: str | None = None,
+    topics: str | list[str] | None = None,
 ) -> dict:
     """Remember a durable conclusion as compiled governed knowledge.
 
@@ -7568,6 +7576,8 @@ def op_remember(
     Details: references/writing.md.
 
     Args:
+        summary: Optional one-line page description, at most 1024 characters.
+        topics: Domain key or list of keys; new keys register with this write.
         content: Markdown body after frontmatter.
         note_type: research-note, insight, failure, pattern, experiment, or production-log.
         project: Required for research-note. __PROJECT_KEYS_HINT__
@@ -7624,6 +7634,8 @@ def op_remember(
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
         vocabulary_decision=vocabulary_decision,
+        summary=summary,
+        topics=topics,
     )
 
 

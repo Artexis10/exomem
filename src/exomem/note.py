@@ -1181,11 +1181,18 @@ def _render_note(
     bridge_of: list[str] | None = None,
     bridge_scope: str | None = None,
     bridge_review: str | None = None,
+    summary: str | None = None,
+    topics: list[str] | None = None,
 ) -> str:
     lines = ["---"]
     lines.append(f"type: {note_type}")
     lines.append(f"exomem_id: {exomem_id}")
     lines.append(f"title: {yaml_scalar(title.strip())}")
+
+    if summary is not None:
+        lines.append(f"summary: {yaml_scalar(summary)}")
+    if topics is not None:
+        lines.append("topics: [" + ", ".join(yaml_scalar(topic) for topic in topics) + "]")
 
     # Type-specific required fields, ordered per fixture convention.
     if note_type == "research-note":
@@ -1619,6 +1626,8 @@ def note(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     vocabulary_decision: dict[str, Any] | None = None,
+    summary: str | None = None,
+    topics: str | list[str] | None = None,
     _return_prepared: bool = False,
     _supersedes_target: str | None = None,
     _preflight_operation: str = "create",
@@ -1630,6 +1639,20 @@ def note(
     # write is attributable from service logs alone. Content-free by design.
     write_started = time.perf_counter()
     root = Path(vault_root)
+    if summary is not None and (
+        not isinstance(summary, str)
+        or len(summary) > 1_024
+        or (summary and summary.splitlines() != [summary])
+    ):
+        raise NoteError("INVALID_NOTE", ["summary"], "summary must be one line of at most 1024 characters")
+    topic_writes: tuple[PlannedWrite, ...] = ()
+    topic_warnings: list[str] = []
+    if topics is not None:
+        try:
+            topics, topic_plan, topic_warnings = vocabulary_resolution.plan_topic_registrations(root, topics)
+        except vocabulary_resolution.VocabularyResolutionError as error:
+            raise NoteError(error.code, ["topics"], error.reason, error.details) from error
+        topic_writes = topic_plan.writes
     try:
         filename_slug, slug_warnings = resolve_filename_slug(title, slug, vault_root=vault_root)
     except InvalidSlugError as error:
@@ -1807,6 +1830,8 @@ def note(
         bridge_of=bridge_refs,
         bridge_scope=bridge_scope,
         bridge_review=bridge_review,
+        summary=summary,
+        topics=topics,
     )
     if _supersedes_target is not None:
         marker = f'supersedes: "[[{_supersedes_target}]]"'
@@ -1840,7 +1865,7 @@ def note(
     preflight_ms = (time.perf_counter() - write_started) * 1000.0
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
-    warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings
+    warnings = list(slug_warnings) + list(source_warnings) + list(body_warnings) + tag_warnings + topic_warnings
     if not sources_norm:
         provenance_warning = _empty_sources_warning(note_type)
         if provenance_warning is not None:
@@ -1850,7 +1875,7 @@ def note(
             f"Auto-registered project key {item.key!r} (folder: {item.folder!r}, "
             f"category: {item.category!r})."
         )
-    auxiliary: list[PlannedWrite] = list(key_plan.writes)
+    auxiliary: list[PlannedWrite] = [*key_plan.writes, *topic_writes]
     # Source closure and the guarded source→note back-reference writes live in
     # the shared semantic commit boundary. Keeping that plan here would give
     # this facade a second resolver and let Tier-2 writers behave differently.

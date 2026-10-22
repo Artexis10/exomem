@@ -3156,6 +3156,24 @@
           ],
           "type": "object"
         },
+        "summary": {
+          "type": "string",
+          "description": "Optional one-line page description, at most 1024 characters."
+        },
+        "topics": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Domain key or list of keys; new keys register with this write."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",
