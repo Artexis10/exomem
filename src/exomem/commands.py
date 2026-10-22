@@ -6850,9 +6850,13 @@ def _op_activate_context_body(
             if token_now:
                 packet["continuity"] = token_now
             packet["generation"]["continuity_thread"] = state
+        if packet_mode == "maps":
+            # Maps never inherit an anchors token through the wrapper's abstention carry.
+            packet["generation"]["continuity_thread"] = "absent"
         return packet
 
-    if not turn.strip():
+    packet_mode = working_set_runtime_module.activation_packet_mode()
+    if packet_mode == "anchors" and not turn.strip():
         return _abstain(activation_result_module.UNRESOLVED)
     if working_set_index_module.disabled():
         # The tool stays on the surface under the kill switch so the published
@@ -7008,6 +7012,44 @@ def _op_activate_context_body(
         # would have nothing current to read against, so activation
         # abstains here rather than either reprojecting or cold-walking.
         return _abstain(working_set_runtime_module.WARMING)
+
+    if packet_mode == "maps":
+        if working_set_module.budget_exhausted("working_set.catalogue"):
+            return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+        try:
+            packet = context_views_module.activation_packet(
+                vault_root, budget, purpose=purpose, timings=timings,
+                generation={
+                    **generation_stub,
+                    "freshness_key": working_set_runtime_module._key_text(freshness_key),
+                    "index_generation": evidence_token[1] if evidence_token else 0,
+                },
+            )
+            if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
+                return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+            with find_types.timing_span(timings, "working_set.guard"):
+                guarded = egress_module.guard_working_set(
+                    vault_root, packet, egress_module.AnnotatedHits(hits=[]), purpose=purpose
+                )
+            if guarded is None:
+                return _abstain(activation_result_module.WITHHELD, generation=packet["generation"])
+            packet = guarded
+        except Exception:  # noqa: BLE001 - an unreadable map never grants disclosure
+            log.warning("activation map unavailable; abstaining", exc_info=True)
+            return _abstain(activation_result_module.UNAVAILABLE)
+        _withhold_vault_generation(vault_root, packet)
+        packet["generation"]["continuity_thread"] = "absent"
+        map_generation = packet["generation"].get("map_generation")
+        if map_generation is not None and not packet.get("abstained"):
+            # Maps carry no anchor refs or conversation thread. The visible digest is the token's whole subject.
+            packet["continuity"] = working_set_runtime_module.encode_continuity(
+                identity=map_generation, roles_hash=packet["generation"]["roles_hash"],
+                conventions_hash=packet["generation"]["conventions_hash"], generation=0,
+                refs=(), roles=(), map_generation=map_generation,
+            )
+        if include_timings and timings is not None:
+            packet["timings"] = timings.as_dict()
+        return packet
 
     if working_set_module.budget_exhausted("working_set.lexical"):
         return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)

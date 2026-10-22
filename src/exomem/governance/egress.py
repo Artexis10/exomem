@@ -3550,6 +3550,15 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
+    map_block = guarded.get("map")
+    if isinstance(map_block, dict) and isinstance(map_block.get("items"), list):
+        from .. import context_views
+
+        # Reuse the read-view guard's canonical display before collecting any prose references.
+        caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
+        mapped = [item for item in map_block["items"] if isinstance(item, Mapping)]
+        map_block["items"] = _with_view_display(mapped, context_views.entry_display(vault_root, mapped, caller))
+
     ctx = _packet_release(
         vault_root,
         guarded,
@@ -3578,8 +3587,15 @@ def guard_working_set(
             for item in witness.get("anchors", ())
         )):
             intent_resolution["status"] = "unavailable"
+    if isinstance(map_block, dict) and isinstance(map_block.get("items"), list):
+        guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
     if ctx is None:
         return guarded
+    if isinstance(map_block, dict) and isinstance(map_block.get("items"), list):
+        map_block["items"] = [kept for kept in (
+            _guarded_view_item(item, ctx) for item in map_block["items"]
+        ) if kept is not None]
+        guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
     decisions, withheld = ctx.decisions, ctx.withheld
     frozen, invalid_refs = ctx.frozen, ctx.invalid_refs
     #: Sections whose removals are reported. `ambiguity` and `missing` are
@@ -4203,6 +4219,12 @@ def _working_set_paths(
         elif isinstance(value, (list, tuple)):
             for item in value:
                 _collect(item, ref_strict=ref_strict)
+
+    map_block = packet.get("map")
+    if isinstance(map_block, Mapping):
+        for item in map_block.get("items") or ():
+            if isinstance(item, Mapping):
+                _collect(item, ref_strict=not _item_has_own_page_field(item))
 
     for section in (
         "recent_context",

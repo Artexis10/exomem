@@ -21,18 +21,24 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import (
+    activation_conventions,
     context_catalogue,
+    context_roles,
+    find_types,
     lifecycle_statuses,
     project_keys,
     source_taxonomy,
     vocabulary_resolution,
+    working_set,
     working_set_index,
     working_set_state,
 )
@@ -41,7 +47,7 @@ from .context_catalogue import KIND_ANCHOR, KIND_COLLECTION, KIND_THREAD
 from .governance import egress
 from .governance import principal as principal_module
 from .working_set_resolve import AnchorFacts, anchor_ref, anchor_visible
-from .working_set_runtime import READY, UNAVAILABLE
+from .working_set_runtime import CACHE_SIZE, READY, UNAVAILABLE
 
 MAP_REF = "exomem://map"
 UNFILED_REF = "exomem://map/unfiled"
@@ -429,7 +435,10 @@ class _Prepared:
     unlisted: bool
 
 
-def _prepare(vault_root: Path, path: str, caller: CallerView | None, purpose: str | None = None) -> _Prepared:
+def _prepare(
+    vault_root: Path, path: str, caller: CallerView | None, purpose: str | None = None,
+    freshness_stamp: str = "",
+) -> _Prepared:
     """Resolve the ref and bring the catalogue forward. Reads no entry."""
     target = parse_view_ref(path)
     if target is None:
@@ -443,7 +452,10 @@ def _prepare(vault_root: Path, path: str, caller: CallerView | None, purpose: st
         if resolved is None:
             raise not_found()
         key, ref = resolved, topic_ref(resolved)
-    state, catalogue, unlisted = context_catalogue.ensure_unlisted(root)
+    state, catalogue, unlisted = (
+        context_catalogue.ensure_unlisted(root, freshness_stamp=freshness_stamp)
+        if freshness_stamp else context_catalogue.ensure_unlisted(root)
+    )
     caller = caller or CallerView.current(root, purpose=purpose)
     return _Prepared(root, target, ref, key, registries, caller, state, catalogue, unlisted)
 
@@ -463,7 +475,7 @@ def _usable(prepared: _Prepared) -> View | None:
     return None
 
 
-def _compile(prepared: _Prepared) -> View:
+def _compile(prepared: _Prepared, *, timings: find_types.FindTimings | None = None) -> View:
     catalogue, caller = prepared.catalogue, prepared.caller
     assert catalogue is not None  # `_usable` returned None
     world = _world(catalogue, caller)
@@ -476,7 +488,8 @@ def _compile(prepared: _Prepared) -> View:
     state_available = True
     if prepared.target.kind == VIEW_MAP:
         try:
-            states = _states(prepared.root, rows, caller)
+            with find_types.timing_span(timings, "working_set.map_state"):
+                states = _states(prepared.root, rows, caller)
         except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
             states, state_available = {}, False
     # The generation covers every field an item is served, its state included, so a continuation
@@ -507,11 +520,26 @@ def compile_view(vault_root: Path, path: str, *, caller: CallerView | None = Non
 # --------------------------------------------------------------------------- #
 
 
-def _line(row: Row) -> str:
-    text = f"{row.kind} {row.title}"
-    if row.description:
-        text += f": {row.description}"
-    return f"{text} [{row.ref}]"
+def map_item_line(item: Mapping[str, Any]) -> str:
+    """Render one map item, including the current state's own date and source when present."""
+    text = f"{item['kind']} {item['title']}"
+    if item.get("description"):
+        text += f": {item['description']}"
+    state = item.get("state")
+    if isinstance(state, Mapping) and state.get("statement"):
+        text += f"; {state['statement']}"
+        # nosemgrep: ep-word-set -- The current-state resolver fixes these wire fields.
+        details = [f"{key}: {state[key]}" for key in ("as_of", "source", "path") if state.get(key)]
+        if details:
+            text += " (" + "; ".join(details) + ")"
+    return f"{text} [{item['ref']}]"
+
+
+def _map_item(view: View, row: Row) -> dict[str, Any]:
+    item = row.item()
+    if view.states is not None:
+        item["state"] = view.states.get(row.entry_id)
+    return item
 
 
 def map_within(view: View, max_chars: int) -> tuple[str, ...]:
@@ -535,7 +563,7 @@ def map_within(view: View, max_chars: int) -> tuple[str, ...]:
     budget = max_chars + 1 - reserve
     if budget < 0:
         return ()
-    lines = [_line(row) for row in rows]
+    lines = [map_item_line(_map_item(view, row)) for row in rows]
     chosen: set[int] = set()
     used = 0
     for kind, share in MAP_KIND_SHARES.items():
@@ -559,6 +587,95 @@ def map_within(view: View, max_chars: int) -> tuple[str, ...]:
         used += cost
     shown = [lines[index] for index in sorted(chosen)]
     return (*shown, tail(len(shown)))
+
+
+# The activation cache shares the existing packet cache's resource bound. Restricted builds never enter it.
+_OWNER_MAPS: OrderedDict[tuple[Any, ...], View] = OrderedDict()
+_OWNER_MAPS_LOCK = threading.Lock()
+
+
+def map_packet_chars(block: Mapping[str, Any]) -> int:
+    """The prose budget charged for a map, using the same rendering that selects its items."""
+    lines = [str(block.get("description") or "")]
+    lines.extend(map_item_line(item) for item in block.get("items", ()))
+    if block.get("overflow"):
+        lines.append(str(block["overflow"]))
+    return len("\n".join(line for line in lines if line))
+
+
+def activation_packet(
+    vault_root: Path, max_chars: int, *, purpose: str | None = None,
+    generation: Mapping[str, Any], timings: find_types.FindTimings | None = None,
+) -> dict[str, Any]:
+    """Serve the turn-independent map from the published catalogue for this caller."""
+    if purpose is not None:
+        with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
+            return _activation_packet(vault_root, max_chars, purpose, generation, timings)
+    return _activation_packet(vault_root, max_chars, purpose, generation, timings)
+
+
+def _activation_packet(
+    root: Path, max_chars: int, purpose: str | None, generation: Mapping[str, Any],
+    timings: find_types.FindTimings | None,
+) -> dict[str, Any]:
+    with find_types.timing_span(timings, "working_set.catalogue"):
+        prepared = _prepare(root, MAP_REF, None, purpose, str(generation.get("freshness_key") or ""))
+    catalogue = prepared.catalogue
+    try:
+        metadata = {
+            **generation,
+            **context_roles.load_roles(root).generation_block(),
+            **activation_conventions.load_conventions(root).generation_block(),
+        }
+        view = _usable(prepared)
+        if view is None:
+            assert catalogue is not None
+            key = (
+                Path(root).absolute(), catalogue.token(), prepared.registries.digest,
+                str(generation.get("freshness_key") or ""), prepared.caller.binding,
+                metadata.get("index_generation"), metadata["roles_hash"], metadata["conventions_hash"],
+                prepared.unlisted, tuple(catalogue.pending()),
+            )
+            with _OWNER_MAPS_LOCK:
+                view = None if prepared.caller.restricted else _OWNER_MAPS.get(key)
+                if view is not None:
+                    _OWNER_MAPS.move_to_end(key)
+            with find_types.timing_span(timings, "working_set.map", source="cache" if view else "computed"):
+                if view is None:
+                    view = _compile(prepared, timings=timings)
+                    if not prepared.caller.restricted and view.state_available and catalogue.token() == key[1]:
+                        with _OWNER_MAPS_LOCK:
+                            _OWNER_MAPS[key] = view
+                            _OWNER_MAPS.move_to_end(key)
+                            while len(_OWNER_MAPS) > CACHE_SIZE:
+                                _OWNER_MAPS.popitem(last=False)
+                else:
+                    with find_types.timing_span(timings, "working_set.map_state", source="cache"):
+                        pass
+        metadata["map_generation"] = view.generation
+        packet = working_set.abstained_packet(reason=view.state, max_chars=max_chars, generation=metadata)
+        if view.state != READY:
+            return packet
+        description = "Index of what exists."
+        lines = map_within(view, max_chars - len(description) - 1)
+        selected = frozenset(lines[:-1])
+        items = [_map_item(view, row) for row in view.rows if map_item_line(_map_item(view, row)) in selected]
+        block = _response(view, items, None)
+        block["description"] = description
+        if lines:
+            block["overflow"] = lines[-1]
+        if not view.rows:
+            block["reason"] = "empty"
+        if not view.state_available:
+            block["state_available"] = False
+        packet["map"] = block
+        packet["budget"]["used_chars"] = map_packet_chars(block)
+        packet["abstained"] = False
+        packet.pop("abstention", None)
+        return packet
+    finally:
+        if catalogue is not None:
+            catalogue.close()
 
 
 # --------------------------------------------------------------------------- #

@@ -713,9 +713,9 @@ def _measure_working_set(vault: Path) -> tuple[float, dict]:
             vault, turn=WORKING_SET_TURN, include_timings=True
         )
 
-    packet = call()
-    samples = [_compiler_ms(call()["timings"]) for _ in range(3)]
-    return statistics.median(samples), packet
+    call()  # startup warmup is outside the measured steady-state samples
+    packets = [call() for _ in range(3)]
+    return statistics.median(_compiler_ms(packet["timings"]) for packet in packets), packets[-1]
 
 
 @pytest.mark.timeout(300)
@@ -916,6 +916,30 @@ def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free
         f"context compiler scaled {small_ms:.1f}ms @ {N_NOTES} to "
         f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)"
     )
+
+
+@pytest.mark.timeout(600)
+def test_maps_packet_stays_bounded_at_scale(
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole maps request obeys the existing absolute and scale bounds, including its guard."""
+    from synth_vault import gen_entity_overlay
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    measured = {}
+    for notes, entities in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
+        vault = _build_dense_vault(tmp_path, notes)
+        gen_entity_overlay(vault, entities, seed=23)
+        compiler_ms, packet = _measure_working_set(vault)
+        assert packet["abstained"] is False, packet.get("abstention")
+        assert packet["map"]["items"]
+        assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+        measured[notes] = {"median_ms": compiler_ms, "stages": packet["timings"]["stages"]}
+        assert compiler_ms < CEIL_WORKING_SET_MS, measured
+    small_ms, large_ms = (measured[notes]["median_ms"] for notes in (N_NOTES, N_NOTES_LARGE))
+    bound = max(small_ms * CEIL_WORKING_SET_RATIO, small_ms + WORKING_SET_RATIO_SLACK_MS)
+    print("maps activation latency " + json.dumps({"measurements": measured, "ratio_bound_ms": bound}, sort_keys=True))
+    assert large_ms < bound, measured
 
 
 # --- Retrieval-carry bound (bound-request-latency-across-surfaces). A turn
@@ -1250,9 +1274,9 @@ def test_a_rule_admitting_a_large_folder_is_reported_not_gated(
     than against a slow-but-correct compile.
     """
     import yaml
+    from synth_vault import gen_entity_overlay
 
     from exomem import activation_conventions as ac_module
-    from synth_vault import gen_entity_overlay
 
     vault = _build_dense_vault(tmp_path, N_NOTES)
     gen_entity_overlay(vault, 500, seed=19)
