@@ -67,6 +67,12 @@ RERANKER_NAME = (
     or os.environ.get("EXOMEM_RERANKER_MODEL")
     or "BAAI/bge-reranker-base"
 )
+# The CrossEncoder runtime is separate from the bi-encoder runtime. Keep the
+# default unchanged; ONNX selection requires its explicit optional extra.
+RERANKER_BACKEND_ENV = "EXOMEM_RERANKER_BACKEND"
+RERANKER_BACKEND = (os.environ.get(RERANKER_BACKEND_ENV) or "torch").strip().lower()
+# This closed set mirrors the runtimes supported by the pinned CrossEncoder API.
+_RERANKER_BACKENDS = frozenset({"torch", "onnx"})
 # bge documentation recommends prefixing queries (not passages) for retrieval.
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 # Rough word-count cap per chunk. bge-base's tokenizer maxes at 512 tokens;
@@ -309,7 +315,7 @@ def get_model():
 
 
 def get_reranker():
-    """Lazy cross-encoder reranker sharing the configured text-path device."""
+    """Load the configured CrossEncoder backend lazily."""
     global _RERANKER
     with runtime_resources.model_execution():
         if _RERANKER is not None:
@@ -317,16 +323,60 @@ def get_reranker():
         with _RERANKER_LOCK:
             if _RERANKER is not None:
                 return _RERANKER
+            backend = RERANKER_BACKEND
+            if backend not in _RERANKER_BACKENDS:
+                raise ValueError(
+                    f"unknown {RERANKER_BACKEND_ENV}: {backend!r}; "
+                    f"valid: {sorted(_RERANKER_BACKENDS)}"
+                )
             # The tokenizer guard first, before any import a lean install lacks.
             embedding_backend.require_tokenizer(RERANKER_NAME)
             runtime_resources.configure_torch()
             from sentence_transformers import CrossEncoder
 
             device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
-            log.info("loading reranker %s on %s", RERANKER_NAME, device)
+            log.info("loading reranker %s with %s", RERANKER_NAME, backend)
+
+            def load_cross_encoder(**kwargs):
+                if backend == "onnx":
+                    # Do not auto-select CUDA: that would bypass Exomem's
+                    # explicit accelerator/headroom policy. ONNX Runtime has
+                    # no provider in the lean MPS profile, so MPS uses CPU.
+                    provider = (
+                        "CUDAExecutionProvider"
+                        if str(device).startswith("cuda")
+                        else "CPUExecutionProvider"
+                    )
+                    model_path = RERANKER_NAME
+                    if kwargs.get("local_files_only"):
+                        snapshot = model_cache.snapshot_path(RERANKER_NAME)
+                        if snapshot is not None:
+                            model_path = str(snapshot)
+                    return CrossEncoder(
+                        model_path,
+                        # SentenceTransformers probes torch.cuda when device is
+                        # omitted, even with an explicit ONNX Runtime provider.
+                        # Pass policy's resolved device to skip that probe.
+                        device=device,
+                        backend=backend,
+                        model_kwargs={
+                            "provider": provider,
+                            "export": False,
+                            "file_name": "model.onnx",
+                            "subfolder": "onnx",
+                        },
+                        **kwargs,
+                    )
+                return CrossEncoder(
+                    RERANKER_NAME,
+                    device=device,
+                    backend=backend,
+                    **kwargs,
+                )
+
             _RERANKER = model_cache.load_offline_first(
                 RERANKER_NAME,
-                lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
+                load_cross_encoder,
             )
         RERANKER_GUARD.touch()
         return _RERANKER
@@ -1112,15 +1162,14 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     """
     # Resolved before the encode span opens, and only on the MCP path: off it
     # the spans are no-ops and the frame walk would be the only cost paid.
-    caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
+    on_path = call_spans.MCP_CALL_TOKEN.get() is not None
+    caller = _encode_caller() if on_path else "off-path"
+    measurements = {"texts": len(texts), "chars": sum(len(text) for text in texts)} if on_path else None
     with (
-        call_spans.span(
-            "embeddings.encode",
-            {"texts": len(texts), "chars": sum(len(text) for text in texts)},
-        ),
+        call_spans.span("embeddings.encode", measurements),
         call_spans.span(f"encode.by.{caller}"),
     ):
-        return _embed_texts(texts, is_query=is_query)
+        return _embed_texts(texts, is_query=is_query, measurements=measurements)
 
 
 def _encode_caller() -> str:
@@ -1190,7 +1239,9 @@ def _encode_prepared(
     return vectors, identity
 
 
-def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
+def _embed_texts(
+    texts: list[str], *, is_query: bool = False, measurements: dict[str, int] | None = None
+) -> np.ndarray:
     if not texts:
         return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
     selected = recall_space.selected_model()
@@ -1202,7 +1253,7 @@ def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
             if model is None:
                 raise recall_space.ServingEncoderCold(f"{selected} is not resident")
             vectors = recall_space.encode_with_previous(
-                selected, texts, is_query=is_query, encoder=model
+                selected, texts, is_query=is_query, encoder=model, measurements=measurements
             )
             _record_producer(model, selected, vectors)
             return vectors
@@ -1217,6 +1268,7 @@ def _embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
             texts,
             admission=runtime_resources.model_admission,
             execution=runtime_resources.model_execution,
+            measurements=measurements,
         )
         _record_producer(model, model_name, vectors)
         return vectors
@@ -1262,7 +1314,22 @@ def _prefixes(model, model_name: str) -> tuple[str, str]:
     return query, passage
 
 
-def _encode_in_turns(model, texts: list[str], *, admission, execution) -> np.ndarray:
+@contextlib.contextmanager
+def _encode_interval(measurements: dict[str, int] | None, field: str):
+    """Add an attempted phase to its enclosing encode, including failed phases."""
+    if measurements is None:
+        yield
+        return
+    started = time.perf_counter_ns()
+    try:
+        yield
+    finally:
+        measurements[field] = measurements.get(field, 0) + (time.perf_counter_ns() - started) // 1000
+
+
+def _encode_in_turns(
+    model, texts: list[str], *, admission, execution, measurements: dict[str, int] | None = None
+) -> np.ndarray:
     """The background lane: a bulk encode, one batch per execution turn.
 
     One admission covers the whole encode, so it is one unit of admitted work,
@@ -1289,15 +1356,19 @@ def _encode_in_turns(model, texts: list[str], *, admission, execution) -> np.nda
             # A running native forward completes; an owned stop prevents the next one.
             foreground_priority.check_cancelled()
             batch = [texts[i] for i in order[start : start + size]]
-            with execution():
+            with contextlib.ExitStack() as turn:
+                manager = execution()
+                with _encode_interval(measurements, "execution_wait_us"):
+                    turn.enter_context(manager)
                 foreground_priority.check_cancelled()
-                vecs = model.encode(
-                    batch,
-                    batch_size=size,
-                    convert_to_numpy=True,
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                )
+                with _encode_interval(measurements, "model_encode_us"):
+                    vecs = model.encode(
+                        batch,
+                        batch_size=size,
+                        convert_to_numpy=True,
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    )
             parts.append(np.asarray(vecs, dtype=np.float32))
     stacked = parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0)
     out = np.empty_like(stacked)
@@ -1346,20 +1417,26 @@ def embed_query_if_loaded(text: str, *, max_tokens: int | None = None) -> np.nda
             return None
         query_prefix, _passage_prefix = _prefixes(model, MODEL_NAME)
         cap = {} if max_tokens is None else {"max_tokens": max_tokens}
-        caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
+        on_path = call_spans.MCP_CALL_TOKEN.get() is not None
+        caller = _encode_caller() if on_path else "off-path"
+        measurements = {"texts": 1, "chars": len(text)} if on_path else None
         with (
-            call_spans.span("embeddings.encode", {"texts": 1, "chars": len(text)}),
+            call_spans.span("embeddings.encode", measurements),
             call_spans.span(f"encode.by.{caller}"),
-            _interactive_execution(model, runtime_resources.model_execution),
+            contextlib.ExitStack() as turn,
         ):
-            vecs = model.encode(
-                [query_prefix + text],
-                batch_size=encode_batch_size(model),
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-                **cap,
-            )
+            manager = _interactive_execution(model, runtime_resources.model_execution)
+            with _encode_interval(measurements, "execution_wait_us"):
+                turn.enter_context(manager)
+            with _encode_interval(measurements, "model_encode_us"):
+                vecs = model.encode(
+                    [query_prefix + text],
+                    batch_size=encode_batch_size(model),
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                    **cap,
+                )
         return np.asarray(vecs, dtype=np.float32)[0]
 
 
@@ -1464,20 +1541,26 @@ def embed_activation_query_if_loaded(text: str) -> np.ndarray | None:
         if model is None:
             return None
         query_prefix, _passage_prefix = _prefixes(model, activation_model_name())
-        caller = _encode_caller() if call_spans.MCP_CALL_TOKEN.get() is not None else "off-path"
+        on_path = call_spans.MCP_CALL_TOKEN.get() is not None
+        caller = _encode_caller() if on_path else "off-path"
+        measurements = {"texts": 1, "chars": len(text)} if on_path else None
         with (
-            call_spans.span("embeddings.encode", {"texts": 1, "chars": len(text)}),
+            call_spans.span("embeddings.encode", measurements),
             call_spans.span(f"encode.by.{caller}"),
-            _interactive_execution(model, activation_execution),
+            contextlib.ExitStack() as turn,
         ):
-            vecs = model.encode(
-                [query_prefix + text],
-                batch_size=encode_batch_size(model),
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-                max_tokens=ACTIVATION_TURN_MAX_TOKENS,
-            )
+            manager = _interactive_execution(model, activation_execution)
+            with _encode_interval(measurements, "execution_wait_us"):
+                turn.enter_context(manager)
+            with _encode_interval(measurements, "model_encode_us"):
+                vecs = model.encode(
+                    [query_prefix + text],
+                    batch_size=encode_batch_size(model),
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                    max_tokens=ACTIVATION_TURN_MAX_TOKENS,
+                )
         return np.asarray(vecs, dtype=np.float32)[0]
 
 

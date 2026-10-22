@@ -533,19 +533,19 @@ def add(
         why_captured=why_captured,
     )
 
-    update = _compute_updates_with_counts(
-        vault_root=vault_root,
-        folder_name=folder_name,
+    update = indexes.compute_updates(
+        vault_root,
+        source_type=folder_name.lower(),
+        folder_title=folder_name,
         folder_description=taxonomy.category_description(folder_name),
-        rel_source_no_ext=rel_source_no_ext,
-        rel_index_path=(
+        rel_source_path=(
             f"{kb_prefix()}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
         ),
         date_iso=date_iso,
         stamp_iso=stamp_iso,
         activity_summary=activity_summary,
         log_entry_body=log_entry_body,
-        forced_counts=post_counts,
+        source_counts=post_counts,
     )
 
     kb = kb_root(vault_root)
@@ -921,9 +921,6 @@ def known_kind_counts(
     def visible(path: str) -> bool:
         return bool(keep(Path(path).relative_to(vault_root).as_posix()))
 
-    # Walks the folders itself rather than calling `indexes._count_sources`,
-    # which `_compute_updates_with_counts` swaps out process-wide while a
-    # capture in another thread computes its index.
     by_folder: dict[str, int | None] = {}
     sources = kb_root(vault_root) / source_taxonomy.SOURCES_ROOT
     listing_complete = False
@@ -967,43 +964,6 @@ def known_kind_counts(
     ]
     rows.sort(key=lambda row: (row[0] is None, -(row[0] or 0), row[1]))
     return [{"kind": key, "sources": count} for count, key in rows]
-
-
-def _compute_updates_with_counts(
-    *,
-    vault_root: Path,
-    folder_name: str,
-    folder_description: str,
-    rel_source_no_ext: str,
-    rel_index_path: str,
-    date_iso: str,
-    stamp_iso: str,
-    activity_summary: str,
-    log_entry_body: str,
-    forced_counts: dict[str, int],
-) -> indexes.IndexUpdate:
-    """Wrapper that overrides the disk-scan with forced counts.
-
-    indexes.compute_updates() reads from disk; for `add` we need the count to
-    reflect the source file we're *about* to write. We monkey-patch the count
-    function for this call.
-    """
-    original = indexes._count_sources
-    indexes._count_sources = lambda _sources_dir: dict(forced_counts)  # type: ignore[assignment]
-    try:
-        return indexes.compute_updates(
-            vault_root,
-            source_type=folder_name.lower(),
-            folder_title=folder_name,
-            folder_description=folder_description,
-            rel_source_path=rel_index_path,
-            date_iso=date_iso,
-            stamp_iso=stamp_iso,
-            activity_summary=activity_summary,
-            log_entry_body=log_entry_body,
-        )
-    finally:
-        indexes._count_sources = original  # type: ignore[assignment]
 
 
 def _episode_frontmatter_lines(

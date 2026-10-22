@@ -748,6 +748,7 @@ def submission_materials(root: Path, metadata: dict) -> dict:
         "identity": _identity(root),
         "claude_connector": {
             "name": definition["display_name"],
+            "tagline": definition["claude_tagline"],
             "resource": definition["resource"],
             "publisher": publisher,
             "website": definition["homepage"],

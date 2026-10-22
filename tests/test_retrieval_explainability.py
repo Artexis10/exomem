@@ -797,6 +797,7 @@ def test_rerank_hard_disabled_reason_is_exact(
 
     assert profile["rerank"]["decision"] == "skipped"
     assert profile["rerank"]["reason"] == "hard_disabled"
+    assert "runtime_backend" not in profile["rerank"]
 
 
 def test_rerank_warming_reason_is_exact(
@@ -841,6 +842,7 @@ def test_rerank_runtime_failure_reason_is_exact(
 
     assert profile["rerank"]["decision"] == "failed"
     assert profile["rerank"]["reason"] == "runtime_failure"
+    assert "runtime_backend" not in profile["rerank"]
 
 
 def test_rerank_score_count_mismatch_fails_instead_of_partially_explaining(
@@ -910,6 +912,8 @@ def test_rerank_explicit_false_and_no_hits_have_distinct_reasons(
 
     assert (explicit["decision"], explicit["reason"]) == ("skipped", "explicit_false")
     assert (empty["decision"], empty["reason"]) == ("skipped", "no_hits")
+    assert "runtime_backend" not in explicit
+    assert "runtime_backend" not in empty
 
 
 def test_rerank_dependency_unavailable_reason_is_distinct(
@@ -932,6 +936,7 @@ def test_rerank_dependency_unavailable_reason_is_distinct(
 
     assert profile["rerank"]["decision"] == "unavailable"
     assert profile["rerank"]["reason"] == "dependency_unavailable"
+    assert "runtime_backend" not in profile["rerank"]
 
 
 def test_temporal_lane_reports_rank_contribution_and_recency_multiplier(
@@ -1142,9 +1147,11 @@ def test_unit_lexical_fallback_has_raw_score_without_invented_fusion(
     ]
 
 
+@pytest.mark.parametrize("runtime_backend", ["torch", "onnx"])
 def test_reranker_explanation_preserves_raw_and_adjusted_ordering_chain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    runtime_backend: str,
 ) -> None:
     winner = _write_page(
         tmp_path, name="rerank-winner", updated="2026-07-14", priority=3
@@ -1158,6 +1165,7 @@ def test_reranker_explanation_preserves_raw_and_adjusted_ordering_chain(
         return [0.9 if "rerank-winner" in passage else 0.1 for passage in passages]
 
     monkeypatch.setattr(embeddings, "rerank_pairs", fake_rerank)
+    monkeypatch.setattr(embeddings, "RERANKER_BACKEND", runtime_backend)
     explained = commands.op_ask_memory(
         tmp_path,
         query="private page content",
@@ -1173,6 +1181,7 @@ def test_reranker_explanation_preserves_raw_and_adjusted_ordering_chain(
     profile = explained["retrieval_profile"]
     assert profile["rerank"]["ran"] is True
     assert profile["rerank"]["model"] == embeddings.RERANKER_NAME
+    assert profile["rerank"]["runtime_backend"] == runtime_backend
     assert profile["rerank"]["metric"]["direction"] == "higher"
     ranking = explained["hits"][0]["ranking_explanation"]
     assert ranking["reranker"]["raw_score"] == pytest.approx(0.9)

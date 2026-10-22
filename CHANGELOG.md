@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.133.0](https://github.com/Artexis10/exomem/compare/v0.132.8...v0.133.0) (2026-10-21)
+
+
+### Features
+
+* add opt-in ONNX reranker backend ([#1971](https://github.com/Artexis10/exomem/issues/1971)) ([a080a94](https://github.com/Artexis10/exomem/commit/a080a947e4dc41d67bfc60e702fbc4b55c84b5d2))
+
+## [0.132.8](https://github.com/Artexis10/exomem/compare/v0.132.7...v0.132.8) (2026-10-21)
+
+
+### Bug Fixes
+
+* distinguish encoder entry and encode timing ([#1966](https://github.com/Artexis10/exomem/issues/1966)) ([269ea4a](https://github.com/Artexis10/exomem/commit/269ea4aa529d4328b5770910b5d1f9d10fefa52a))
+
+## [0.132.7](https://github.com/Artexis10/exomem/compare/v0.132.6...v0.132.7) (2026-10-21)
+
+
+### Bug Fixes
+
+* keep source counts local to index planning ([#1964](https://github.com/Artexis10/exomem/issues/1964)) ([a9c8bf8](https://github.com/Artexis10/exomem/commit/a9c8bf8be83554a2702500aad8fafb7856175551))
+
+## [0.132.6](https://github.com/Artexis10/exomem/compare/v0.132.5...v0.132.6) (2026-10-20)
+
+
+### Bug Fixes
+
+* **compiler:** retain task-relevant facts in categorical context ([#1961](https://github.com/Artexis10/exomem/issues/1961)) ([b112b28](https://github.com/Artexis10/exomem/commit/b112b28fc90542e5b7cb72b08a52352a135cafb6))
+
+## [0.132.5](https://github.com/Artexis10/exomem/compare/v0.132.4...v0.132.5) (2026-10-20)
+
+
+### Bug Fixes
+
+* **collection-store:** preserve originals for compatible application rollback ([#1959](https://github.com/Artexis10/exomem/issues/1959)) ([1474f9a](https://github.com/Artexis10/exomem/commit/1474f9a3a7f4e3cc5d8cb8aa1058fb76a993dbea))
+
+
+### Performance
+
+* **file-ops:** measure semantic move preflight ([#1957](https://github.com/Artexis10/exomem/issues/1957)) ([744e65a](https://github.com/Artexis10/exomem/commit/744e65a553905625457a61718b8079268c9fbf4b))
+
 ## [0.132.4](https://github.com/Artexis10/exomem/compare/v0.132.3...v0.132.4) (2026-10-20)
 
 

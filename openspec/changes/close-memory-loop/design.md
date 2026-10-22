@@ -744,7 +744,7 @@ This applies to every `entity` anchor, including entity-backed projects; hubs an
 
 #### Open-category material without changing standing role knowledge
 
-Open semantic categories are valid knowledge, but the current categorical role filters can exclude every unit on a compiled page. Naming that page or resolving its project does not remove the exclusion. Preserve the earlier categorical-lane decision: standing constraints, preferences, current state and methods are not re-ranked by resemblance to the turn. Add one explicit `material` role with its own lane for query-matched knowledge no effective categorical role owns.
+Open semantic categories are valid knowledge, but categorical role filters can exclude every unit on a compiled page. Naming that page or resolving its project does not remove the exclusion. Standing knowledge retains precedence. The task-aware selection below refines candidate selection within a categorical role; it does not change role ownership. The explicit `material` role retains its own lane for query-matched knowledge no effective categorical role owns.
 
 Declare material after `active_plans` and `contact`, before `methods`, with defaults for entity, project, hub and the existing transient carried-page context. It has no shipped cues and counts within the six-role ceiling. Contact precedes material so entity material does not displace requested contact units. Entity material uses the existing admitted neighbourhood, including linked notes; it does not add candidates or infer their subject.
 
@@ -755,6 +755,88 @@ Exclude categories owned by any effective non-material role, selected or not, so
 Material searches only already admitted, caller-visible neighbourhoods or explicitly carried pages. It never supplies resolution evidence or runs on a recency-only context. Reuse existing lexical tokenisation and internal ranking, with its own finite query-unit and stem policy for both unit and prose-page lookup; require content evidence beyond the resolved name. Ordinary anchor resolution retains its separate smaller query budget. Apply parent and category predicates before the bounded candidate limit and retain relevance order through assembly. Do not pass a nonempty query to the ordinary semantic-find branch: that branch does not preserve this lane's read ceiling, parent restriction and repair prohibition. Extend the existing ready-catalogue query seam instead, with no new sidecar, model acquisition or foreground walk.
 
 Relevant authored prose lacking semantic coverage is a page pointer requiring a read, not a fabricated semantic unit or an arbitrary excerpt presented as compiled knowledge. Prose-only and mixed pages remain eligible for this bounded pointer path. Reuse the 200-unit candidate ceiling with its sentinel, at most three served material items, the shared character budget and request deadline; bound pointer candidates separately to three pages plus one sentinel for detecting truncation. Check coverage only on the selected current page bodies, using exact spans from the existing semantic parser on that same input, not approximate line removal or a parser inside a pre-limit SQL predicate. Covered-only candidates can exhaust the bounded window; preserve its truncation rather than retrying across the corpus. Preserve no-material, unavailable/failed, truncated and budget outcomes, including carried-page attempts. Existing lifecycle, source-currentness and final egress checks remain mandatory. A filtering correction is not proof of the original client incident or full-corpus quality; the existing benchmark, negative controls and ordinary later-response journey remain acceptance.
+
+#### Task-aware categorical selection and progressive investigation
+
+The closest maintained solution is activation followed by `ask_memory`, optional
+deep packing and `read_memory`. These operations already supply filtered units,
+qualified evidence bundles and exact sources. Another activation depth parameter
+would duplicate those controls while leaving initial candidate selection unchanged.
+Keep the public activation arguments and improve its default result.
+
+A public crowded-project diagnostic establishes a narrower engineering failure:
+the requested current fact is served in an open category but loses both its unit
+and read pointer when assigned to a selected categorical role. Ordinary recall
+finds it in either category. This is selection evidence, not answer-quality proof.
+
+For each selected units role of an unrestricted reader, supplement its categorical baseline with bounded
+task-matched candidates from the same effective categories and admitted context.
+Reuse the maintained ready-catalogue lexical query, exact hydration and parent-read
+cache. Apply scoped category and parent predicates before the task candidate cap.
+Do not query an already truncated recency prefix or use semantic find's unbounded
+metadata-seed branch. Add no sidecar, model acquisition or foreground repair.
+
+Reuse the material lane's bounded token preparation after removing anchor-name-only
+contact. A vague or name-only turn keeps categorical baseline selection. Preserve
+human-turn and agent-focus origin under the existing task-refresh contract.
+Task matching is lexical evidence, never identity, authority or proof of relevance.
+
+Read at most 201 supplemental candidates per role, including one sentinel, without
+refill. Hydrate only new exact unit identities and retain at most 200 task hits.
+Merge those with at most 200 baseline hits, without cutting the union before its
+standing and lifecycle ordering. Share parent hydration across roles. Preserve
+standing and lifecycle precedence, then task-match order, then existing recency.
+Registry role order, current-state and Planning priority, three text slots per role,
+the material reserve, promoted shares and exact dependency pointers remain in force.
+The material lane still excludes categories owned by unselected roles; task matching
+cannot bypass contact intent or owner narrowing.
+
+These bounds cover returned candidates and added hydration, not SQL posting work
+or wall time. Do not use the catalogue branch that builds an admitted-parent
+corpus. Measure additional query work, including long/common requests. Reserve
+measured optional-work cost and mandatory completion headroom before starting a
+supplement. Skip it when the request cannot afford both. The catalogue offers no
+hard cancellation, so keep tail latency an explicit limitation.
+
+A restricted reader retains the existing baseline without supplemental lookup.
+Report this request-derived limitation before inspecting extra content. A finite
+cap after unit filtering would let withheld rows change visible results; do not
+add another disclosure mechanism to obtain this optimisation. An unavailable task
+lookup also retains baseline context. Neither case creates a refusal or wait.
+
+Reuse `roles`, `missing` and `budget` for typed retrieval diagnostics. Add explicit
+supplemental unavailable, unsupported and budget-skipped reasons. Do not add a
+coverage block, neighbourhood paths or counts. These fields describe selected
+roles and bounded work, never complete task or corpus knowledge. Derive content-
+dependent diagnostics only from released material. Render a compact bounded-context
+cue through maintained hooks and instructions.
+
+The active agent uses the packet as working context and investigates remaining
+information needs through focused recall and relevant source reads. Use deep packs
+when an evidence bundle helps. Follow a directory pointer when the task requires
+the directory, and reconcile newer outcomes before repeating older advice. These
+are ordinary reasoning responsibilities, not a fixed tool-call quota or another
+server agent. No human approval or new action gate is added.
+
+Source support does not prove that a client offers an argument. Default improvements
+must work with the raw `turn` alone. Use task refresh only where the client actually
+offers it; retain ordinary recall and reads elsewhere. Record actual supported
+arguments and delivered context before claiming native parity. Do not infer a cache,
+authentication or schema repair from an observed interface difference.
+
+Verify the workflow in stages: the public selection failure and unchanged controls;
+bounded query and disclosure behaviour; then ordinary investigation and later answers
+on source-derived cases. Include a crowded current fact, an interrupted topic,
+a directory and an older action followed by a newer completion. Keep source truth,
+candidate admission, packet delivery, source expansion and answer use separate.
+Freeze expectations independently before treatment output and judge paired answers
+blind under the existing evaluation contract. Existing historical benchmark holds
+remain separate. Missing original inputs or unavailable runs remain unmeasured.
+
+Within-role selection cannot recover an omitted role or an out-of-neighbourhood page.
+A later role can also lose to earlier budget use. Keep these limits visible and use
+ordinary investigation. Change allocation only after a reproduced loss and matched
+answer-use evidence justify it; a shared reserve must not erase material's guarantee.
 
 Long, multi-topic material selection remains open independently of category reachability. A selected-page diagnostic shows the existing twelve-term, forty-stem query budget can favour earlier equal-frequency words over relevant later topics. A short focused query proves the knowledge is retrievable, not that an automatic allocator works. Do not remove ordinary resolution's latency protection, increase packet limits or implicitly prioritise conversation focus over the current turn. Before changing the material-only query-preparation seam, compare unchanged long turns and sentence-order permutations, relevant and irrelevant focus with separate origin attribution, and a larger synthetic distractor corpus; retain selected terms, requested-topic coverage and warm latency. This limitation does not block a verified category/freshness repair or establish the original client incident's cause.
 

@@ -83,6 +83,23 @@ Performance presets:
   timing output with the returned compute mode, embedding backend, cache state,
   rerank flag, and search profile.
 
+### Investigate what the packet leaves open
+
+Use relevant held context first. Activation selects bounded working context;
+`roles`, `missing` and `budget` describe its limits. An omitted role or skipped
+task lookup does not show that the vault lacks the answer. Restricted readers
+retain categorical baseline selection without supplemental task matching.
+
+Use focused `ask_memory` for a remaining question. Use `deep=true` when a bounded
+evidence pack helps compare sources. Read a selected source when its qualifications
+or complete contents matter. A directory requires `read_memory(path=<parent page>)`
+without `unit_ref`. A unit read is not the whole page or directory.
+
+Before recommending an older action, reconcile newer supported outcomes about that
+action. Keep event time separate from the page's edit time. Treat an unresolved
+conflict as unresolved; retrieval rank does not decide which claim is true.
+Do not repeat an unchanged search or treat delivered text as proof of answer use.
+
 **Semantic units are first-class.** A compact observation uses
 `- [category] content #tags (context) ^anchor`; its governed kind is always
 `observation`, while category remains open vocabulary. Rich `## Kind` blocks use

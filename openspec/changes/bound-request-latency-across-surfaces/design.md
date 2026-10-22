@@ -1,6 +1,6 @@
 # Design
 
-The programme uses one packaged MCP observer. The existing recall script delegates its MCP mode and retains its other diagnostics. Private positive cases declare read arguments, expected state, required references and material. FastMCP measures each call through parsed response validation. The observer reuses `latency_watch`, the packaged contract and one report schema.
+The programme uses one packaged MCP observer for positive `ask_memory`, `activate_context` and `read_memory` cases. The existing recall script delegates its MCP mode and retains its other diagnostics. Private positive cases declare read arguments, expected state, required references and material. FastMCP measures each call through parsed response validation. The observer reuses `latency_watch`, the packaged contract and one report schema.
 
 Case expectations retain the existing indexed-path representation and add a strict `response_schema` alternative. A case cannot mix the representations. The alternative uses the existing `jsonschema` dependency with Draft 2020-12 and validates the complete parsed response. The runner compiles validators before connecting and keeps response validation inside the measured interval. Schema resources use an empty `referencing` registry without retrieval; local references work, while unavailable external references fail locally. Conflicting dialect declarations in schema positions are invalid; dictionaries inside data-valued assertions retain their literal meaning.
 

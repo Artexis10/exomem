@@ -5478,6 +5478,7 @@ def _find_semantic(
                 bundle,
                 final_hits,
                 reranker_model=embeddings.RERANKER_NAME,
+                reranker_runtime=embeddings.RERANKER_BACKEND,
                 rerank_outcome=rerank_outcome,
                 scorer_input_count=scorer_input_count,
                 unscored_tail_count=unscored_tail_count,

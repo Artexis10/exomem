@@ -72,6 +72,10 @@ ACTIVATION_STAGE_RESERVE_SECONDS = 1.0
 #: so a request running short gives it up first and is compiled exactly as
 #: without a conversation, never failed over it.
 CONVERSATION_STAGE_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 0.06
+#: Provisional headroom for optional categorical task matching plus completion.
+#: Validate its task allowance against scoped query spans before delivery. Skipping
+#: this optimisation preserves baseline context instead of risking a late packet.
+TASK_UNITS_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 2.0
 
 #: Operators may lengthen or shorten the origin budget. Clients may not: the
 #: client that most needs the bound is the one that cannot be trusted to set

@@ -548,10 +548,12 @@ def test_media_sample_provenance_admits_no_file_added_beside_or_below_the_sample
         ]
 
 
-def test_cloud_icon_png_provenance_does_not_allow_unrelated_images(tmp_path: Path) -> None:
-    icon = REPO_ROOT / "plugins/cloud/assets/icon.png"
-    assert scan_artifact(icon, label="plugins/cloud/assets/icon.png") == ()
-    assert scan_artifact(icon, label="plugins/cloud/generated/openai/assets/icon.png") == ()
+@pytest.mark.parametrize("name", ["icon.png", "icon-small.png"])
+def test_cloud_icon_png_provenance_does_not_allow_unrelated_images(name: str) -> None:
+    icon = REPO_ROOT / "plugins/cloud/assets" / name
+    assert scan_artifact(icon, label=f"plugins/cloud/assets/{name}") == ()
+    assert scan_artifact(icon, label=f"plugins/cloud/generated/openai/assets/{name}") == ()
+    assert scan_artifact(icon, label=f"assets/{name}") == ()
     assert any(
         finding.rule == "format_provenance_missing"
         for finding in scan_artifact(icon, label="private/photo.png")

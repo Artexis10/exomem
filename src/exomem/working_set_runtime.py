@@ -2505,7 +2505,8 @@ def serve(
         return packet
     # A lane can recover without changing the vault or its catalogue token.
     # Retain this request's coverage, but never cache a transient lookup failure.
-    if any(entry.get("reason") == "lane_failed" for entry in packet.get("missing", ())):
+    if any(entry.get("reason") in {"lane_failed", "task_lookup_unavailable", "task_lookup_budget"}
+           for entry in packet.get("missing", ())):
         return packet
     if not cacheable:
         return packet

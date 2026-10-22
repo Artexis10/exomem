@@ -280,6 +280,7 @@ def test_a_writer_that_waits_for_the_boundary_during_a_rebuild_gets_it_after_one
     A request that awaits bulk work, such as a governed write joining a corpus build, lets every bulk pass
     run, so a step that asked only about foreground work missed the writer queued on the boundary."""
     root = service.root
+    cleanup_timeout = service.manager.config.mutation_timeout_seconds
     restarted, before, batches = _restart_into_a_slow_rebuild(service, monkeypatch)
     entered, release = threading.Event(), threading.Event()
 
@@ -302,7 +303,8 @@ def test_a_writer_that_waits_for_the_boundary_during_a_rebuild_gets_it_after_one
         assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(connection.store_path(root)))
     finally:
         release.set()
-        restarted.stop()
+        # The one-second budget tests writer fairness while cleanup retains the original fixture budget.
+        restarted.stop(deadline=time.monotonic() + cleanup_timeout)
 
 
 def test_a_request_in_flight_holds_the_rebuild_and_the_store_still_answers_at_once(

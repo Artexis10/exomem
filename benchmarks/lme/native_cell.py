@@ -106,6 +106,7 @@ class NativeCell:
         timeout: float = 60.0,
         model_cache: Path | None = None,
         clip_model_cache: Path | None = None,
+        lexical_backend: str | None = None,
     ) -> None:
         if profile not in _PROFILES:
             raise ValueError(f"unsupported native cell profile: {profile!r}")
@@ -117,6 +118,7 @@ class NativeCell:
         self.python = Path(python).absolute()
         self.product_root = Path(product_root).absolute()
         self.profile = profile
+        self.lexical_backend = lexical_backend
         self.timeout = timeout
         self.model_cache = Path(model_cache).absolute() if model_cache is not None else None
         self.clip_model_cache = (
@@ -385,6 +387,9 @@ class NativeCell:
             "EXOMEM_SURFACE": "openai",
         }
         environment.update(_profile_settings(self.profile))
+        if self.lexical_backend is not None:
+            # Indexed compiler diagnostics select the product backend explicitly.
+            environment["EXOMEM_LEXICAL_BACKEND"] = self.lexical_backend
         return environment
 
     def _verify_runtime_receipt(self) -> None:
@@ -400,6 +405,7 @@ class NativeCell:
             "torch_home": self.root / "cache" / "torch",
             "torchinductor_cache_root": self.root / "cache" / "torchinductor",
             "joblib_temp_root": self.root / "cache" / "joblib",
+            "lexical_backend_setting": self._environment()["EXOMEM_LEXICAL_BACKEND"],
         }
         mismatches = [
             key for key, path in expected.items() if self._runtime_receipt.get(key) != str(path)
@@ -621,7 +627,7 @@ def _read_no_follow(path: Path) -> bytes:
 
 
 def _actual_runtime_receipt(profile: str) -> dict[str, Any]:
-    from exomem import call_ledger, mode, state_paths
+    from exomem import call_ledger, lexstore, mode, state_paths
     from exomem.logging_config import resolve_log_dir
     from exomem.vault import resolve_vault
     from exomem.writer_lease import LeaseConfig
@@ -673,6 +679,8 @@ def _actual_runtime_receipt(profile: str) -> dict[str, Any]:
         "joblib_temp_root": os.environ["JOBLIB_TEMP_FOLDER"],
         "kmp_duplicate_lib_ok": os.environ["KMP_DUPLICATE_LIB_OK"],
         "kmp_init_at_fork": os.environ["KMP_INIT_AT_FORK"],
+        "lexical_backend_setting": os.environ["EXOMEM_LEXICAL_BACKEND"],
+        "lexical_backend": lexstore.backend(),
         "semantic_requested": profile == "semantic",
         "semantic_model_verified": semantic_verified,
         "semantic_probe": semantic_probe,
@@ -696,6 +704,8 @@ def _runtime_binding_fields(receipt: Mapping[str, Any]) -> dict[str, Any]:
         "joblib_temp_root",
         "kmp_duplicate_lib_ok",
         "kmp_init_at_fork",
+        "lexical_backend_setting",
+        "lexical_backend",
     )
     return {name: receipt.get(name) for name in names}
 
@@ -713,6 +723,7 @@ def _bindings_match_environment(receipt: Mapping[str, Any]) -> bool:
         "torch_home": os.environ["TORCH_HOME"],
         "torchinductor_cache_root": os.environ["TORCHINDUCTOR_CACHE_DIR"],
         "joblib_temp_root": os.environ["JOBLIB_TEMP_FOLDER"],
+        "lexical_backend_setting": os.environ["EXOMEM_LEXICAL_BACKEND"],
         "kmp_duplicate_lib_ok": "True",
         "kmp_init_at_fork": "FALSE",
     }

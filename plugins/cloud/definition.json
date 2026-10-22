@@ -1,12 +1,15 @@
 {
   "name": "exomem-cloud",
   "display_name": "Exomem",
-  "description": "Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.",
-  "release_notes": "Connect your Exomem account to keep useful knowledge across conversations. Save something for later, return to a project in a fresh chat, or ask about a past decision. Includes memory workflows for supported assistants and lifecycle hooks for supported Claude Code and Cowork installations.",
+  "description": "Exomem is a living knowledge base for your AI assistants, not a dump of chat history. It preserves decisions, sources, evidence, relationships, plans, and useful conclusions as organised knowledge you can revisit, correct, and build on.\n\nAs you work, Exomem helps your assistant bring relevant context forward, connect ideas, identify what has changed, and preserve lasting outcomes when your settings and assistant support it. Answers can point back to the notes and evidence behind them. Outdated information can be reviewed or superseded instead of silently piling up.\n\nPick up projects in another conversation or across supported AI assistants connected to the same Exomem account. Exomem does not automatically import your past conversations or access arbitrary files on your device. Connect an existing Exomem Cloud account; registration, invitations, and billing are handled separately on the website.",
+  "release_notes": {
+    "openai": "Updates the Dot E branding and memory workflow guidance. Connect an existing Exomem Cloud account through OAuth. Includes skills and the remote MCP connection, without lifecycle hooks or local service credentials.",
+    "claude": "Updates the Dot E branding and memory workflow guidance. Trusted lifecycle hooks support activation, governed capture and local continuation on supported Claude Code and Cowork installations. Claude Chat uses the MCP connection and skills without command hooks."
+  },
   "default_prompts": [
-    "Remember this for next time.",
-    "Where did we leave off with my project?",
-    "What did we decide, and why?"
+    "Where did we leave off on this project, and what changed?",
+    "What have we decided, and what evidence supports it?",
+    "Review this work and preserve the conclusions that matter."
   ],
   "resource": "https://exomem.substratesystems.io/mcp",
   "profile": "product-cloud",
@@ -21,5 +24,12 @@
   "support": "https://substratesystems.io/exomem/support",
   "documentation": "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md",
   "license": "AGPL-3.0-or-later",
-  "keywords": ["memory", "knowledge-base", "mcp", "notes"]
+  "keywords": [
+    "memory",
+    "knowledge-base",
+    "mcp",
+    "notes"
+  ],
+  "short_description": "Proactive, grounded AI memory",
+  "claude_tagline": "Living knowledge, proactively grounded in sources"
 }

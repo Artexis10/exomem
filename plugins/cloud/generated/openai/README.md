@@ -1,6 +1,10 @@
 # Exomem
 
-Keep what matters from your conversations and find it again when you need it. Exomem lets you save useful information, pick up a project in a new chat, and revisit what you decided and why. Ask in your own words; you do not need to organise folders or learn special commands. Connect your Exomem account to use the same saved knowledge across supported assistants. Answers can point back to the notes and sources they draw on, and you control how actively Exomem helps.
+Exomem is a living knowledge base for your AI assistants, not a dump of chat history. It preserves decisions, sources, evidence, relationships, plans, and useful conclusions as organised knowledge you can revisit, correct, and build on.
+
+As you work, Exomem helps your assistant bring relevant context forward, connect ideas, identify what has changed, and preserve lasting outcomes when your settings and assistant support it. Answers can point back to the notes and evidence behind them. Outdated information can be reviewed or superseded instead of silently piling up.
+
+Pick up projects in another conversation or across supported AI assistants connected to the same Exomem account. Exomem does not automatically import your past conversations or access arbitrary files on your device. Connect an existing Exomem Cloud account; registration, invitations, and billing are handled separately on the website.
 
 ## Getting started
 
@@ -8,9 +12,9 @@ Install the plugin and connect your Exomem account. Check the account shown on t
 
 For example:
 
-- "Remember this for next time."
-- "Where did we leave off with my project?"
-- "What did we decide, and why?"
+- "Where did we leave off on this project, and what changed?"
+- "What have we decided, and what evidence supports it?"
+- "Review this work and preserve the conclusions that matter."
 
 Give the assistant the information to save or name the project you mean. Exomem can also help during ordinary work according to your chosen settings. It does not automatically import every old conversation.
 
@@ -20,7 +24,11 @@ MCP tool arguments, including user turns sent to `activate_context`, reach the a
 
 ## Surface support
 
-Skills and the remote MCP connector carry the portable operating contract. Lifecycle hooks run only where the client supports and trusts them; they do not run in ordinary Claude Chat or ChatGPT conversations. The public OpenAI directory package deliberately contains no lifecycle hooks: current submission rules forbid them, although local Codex configurations support hooks. Local profile hook installation is a separate release-owned path. A delegated MCP activation is not a pre-injected context packet.
+Skills and the remote MCP connector carry the portable operating contract. This public directory package contains skills and a remote MCP connection, without lifecycle hooks.
+
+## Release notes
+
+Updates the Dot E branding and memory workflow guidance. Connect an existing Exomem Cloud account through OAuth. Includes skills and the remote MCP connection, without lifecycle hooks or local service credentials.
 
 Publisher: Substrate Systems OÜ.
 
