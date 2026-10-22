@@ -41,11 +41,11 @@ def test_initialize_requires_live_policy_before_sending_context() -> None:
     assert "requested" in server.SERVER_INSTRUCTIONS
 
 
-def test_initialize_limits_conversation_to_relevant_excerpts() -> None:
-    """The compiler's input bounds are not consent to send unrelated earlier turns."""
+def test_initialize_limits_conversation_to_focus_and_refs() -> None:
+    """The MCP door takes cues, never earlier turns: those travel only on hook doors."""
     # Clients may review initialize instructions without expanding the tool.
-    assert "relevant excerpts" in server.SERVER_INSTRUCTIONS
-    assert "never full history" in server.SERVER_INSTRUCTIONS
+    assert "focus and refs" in server.SERVER_INSTRUCTIONS
+    assert "never earlier turns" in server.SERVER_INSTRUCTIONS
 
 
 ENGAGEMENT = SCAFFOLD_SKILL.parent / "references" / "engagement.md"
@@ -56,10 +56,8 @@ def test_the_engagement_reference_states_bounds_attachments_origin_and_no_attach
     for required in (
         "conversation",
         "240",  # focus bound
-        "600",  # user entry bound
-        "300",  # assistant entry bound
-        "2,400",  # total bound
         "12",  # refs bound
+        "Never send earlier turns",
         "optional",
         "attachment",
         "origin",

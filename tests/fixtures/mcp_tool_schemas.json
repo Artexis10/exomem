@@ -39,18 +39,6 @@
           "description": "Stage timings.",
           "type": "boolean"
         },
-        "client": {
-          "type": "string",
-          "description": "Lowercase client label; invalid labels ignored."
-        },
-        "session": {
-          "type": "string",
-          "description": "Stable opaque conversation ID; max 256 chars."
-        },
-        "workspace": {
-          "type": "string",
-          "description": "Thread project key; max 256 chars."
-        },
         "conversation": {
           "additionalProperties": false,
           "properties": {
@@ -58,33 +46,6 @@
               "description": "Assistant-authored subject cue; separate from user words.",
               "maxLength": 240,
               "type": "string"
-            },
-            "recent": {
-              "description": "Relevant excerpts, newest last; 2,400 characters total.",
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "role": {
-                    "enum": [
-                      "user",
-                      "assistant"
-                    ],
-                    "type": "string"
-                  },
-                  "text": {
-                    "description": "Max 600 user or 300 assistant characters.",
-                    "maxLength": 600,
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "role",
-                  "text"
-                ],
-                "type": "object"
-              },
-              "maxItems": 6,
-              "type": "array"
             },
             "refs": {
               "description": "Canonical page references already read.",
@@ -97,7 +58,7 @@
             }
           },
           "type": "object",
-          "description": "All optional: focus (one line/240 chars; current subjects and attachment names/objects),\nrefs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history."
+          "description": "All optional: focus (one line/240 chars; current subjects and attachment names/objects),\nrefs (12 already-read pages); never earlier turns or full history."
         },
         "trigger": {
           "default": "user_turn",
@@ -128,6 +89,12 @@
         },
         "mode": {
           "default": "scan-only",
+          "enum": [
+            "scan-only",
+            "save-manifest",
+            "copy-as-sources",
+            "compile-selected"
+          ],
           "type": "string"
         },
         "max_depth": {
@@ -189,6 +156,18 @@
       "properties": {
         "action": {
           "description": "Lifecycle step.",
+          "enum": [
+            "start",
+            "status",
+            "select",
+            "plan",
+            "apply",
+            "cancel",
+            "finish",
+            "work-item",
+            "propose",
+            "apply-proposal"
+          ],
           "type": "string"
         },
         "run_id": {
@@ -786,6 +765,17 @@
         "operation": {
           "default": "suggest-links",
           "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-relation, resolve-entity, create-entity, accept-relation.",
+          "enum": [
+            "suggest-links",
+            "suggest-relations",
+            "context",
+            "graph-context",
+            "inbound-links",
+            "resolve-entity",
+            "create-entity",
+            "accept-relation",
+            "resolve-relation"
+          ],
           "type": "string"
         },
         "path": {
@@ -1967,6 +1957,18 @@
         "operation": {
           "default": "list",
           "description": "list, create, append, move, reclassify, propose-reclassification, revert-reclassification, delete, trash-list, or recover.",
+          "enum": [
+            "list",
+            "create",
+            "append",
+            "move",
+            "delete",
+            "trash-list",
+            "recover",
+            "reclassify",
+            "propose-reclassification",
+            "revert-reclassification"
+          ],
           "type": "string"
         },
         "path": {
@@ -2119,6 +2121,12 @@
         "operation": {
           "default": "add",
           "description": "add, update, remove, or validate.",
+          "enum": [
+            "add",
+            "update",
+            "remove",
+            "validate"
+          ],
           "type": "string"
         },
         "category": {
@@ -3418,6 +3426,26 @@
         "mode": {
           "default": "attention",
           "description": "vocabulary records questions; item/write-advisory-result need ref. No authority: apply through connect_memory accept-relation, adoption_studio apply-proposal or triage_memory. Modes: references/governance.md.",
+          "enum": [
+            "attention",
+            "activation",
+            "item",
+            "audit",
+            "dispositions",
+            "provenance",
+            "evolution",
+            "compilation",
+            "stale",
+            "contradiction",
+            "unprocessed-sources",
+            "relation-debt",
+            "relation-queue",
+            "adoption",
+            "upkeep",
+            "plan-progress",
+            "write-advisory-result",
+            "vocabulary"
+          ],
           "type": "string"
         },
         "categories": {
@@ -3517,6 +3545,27 @@
       "properties": {
         "operation": {
           "description": "Operation for the subject; see references/operation-routing.md.",
+          "enum": [
+            "infer",
+            "validate",
+            "diff",
+            "inventory",
+            "inspect",
+            "resolve",
+            "preview",
+            "save",
+            "refresh",
+            "save-entity-types",
+            "resolve-entity-type",
+            "propose-relation",
+            "save-relations",
+            "census",
+            "propose",
+            "save-roles",
+            "save-conventions",
+            "history",
+            "restore"
+          ],
           "type": "string"
         },
         "name": {

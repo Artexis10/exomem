@@ -397,9 +397,19 @@ def bind_vault(
         )
         for p in visible
     ]
+    if command is not None:
+        visible = [
+            _closed_selector(command.name, parameter, resolved, help_text)
+            for parameter in visible
+        ]
     if command is not None and command.name == "activate_context":
-        from .working_set_conversation import public_input_schema
+        from .working_set_conversation import MCP_WITHHELD_INPUTS, public_input_schema
 
+        # MCP is the model's door: caller labels and earlier turns travel only on
+        # the hook doors (CLI, REST), so this door neither advertises nor uses them.
+        visible = [
+            parameter for parameter in visible if parameter.name not in MCP_WITHHELD_INPUTS
+        ]
         # Discovery describes existing bounds; validation still uses the permissive dict.
         visible = [
             parameter.replace(
@@ -864,6 +874,42 @@ def compact_input_schema(schema: object, *, optional_property: bool = False) -> 
         else:
             out["anyOf"] = rest
     return out
+
+
+def _closed_selector(
+    command_name: str,
+    parameter: inspect.Parameter,
+    resolved: Mapping[str, object],
+    help_text: Mapping[str, str],
+) -> inspect.Parameter:
+    """Publish a registry-covered selector as the enum the selector registry holds."""
+    from .governance.egress import selector_for_command, selector_registry
+
+    selector = selector_for_command(command_name)
+    if selector != parameter.name:
+        return parameter
+    values = tuple(selector_registry()[(command_name, selector)])
+    annotation = resolved.get(parameter.name, parameter.annotation)
+    declared = _literal_string_values(annotation)
+    if declared:
+        if set(declared) != set(values):
+            raise RuntimeError(
+                f"selector Literal and selector registry disagree: {command_name}.{selector}"
+            )
+        return parameter
+    if parameter.default is not inspect.Parameter.empty and parameter.default not in (
+        None,
+        *values,
+    ):
+        raise RuntimeError(
+            f"selector default outside the selector registry: {command_name}.{selector}"
+        )
+    closed: object = typing.Literal[values]
+    if parameter.default is None:
+        closed = closed | None
+    return parameter.replace(
+        annotation=_annotate_description(closed, help_text.get(parameter.name, ""))
+    )
 
 
 def _annotate_description(annotation: object, description: str) -> object:

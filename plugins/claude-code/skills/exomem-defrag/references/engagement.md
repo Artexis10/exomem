@@ -227,8 +227,9 @@ earlier turns. Every field is optional:
 - `focus`: one line, at most 240 characters, naming the subjects now in play,
   including names or objects you read from the user's attachments.
 - `refs`: the pages you already read, at most 12.
-- `recent`: earlier turns, oldest first, as `{role, text}`: at most 6 entries,
-  user text cut at 600 characters, assistant text at 300, 2,400 in all.
+
+Never send earlier turns. An installed hook may pass a bounded tail of them
+through its own door; the MCP tool accepts only `focus` and `refs`.
 
 The server enforces every bound itself and never refuses over one:
 `generation.conversation` says `applied`, `truncated` or `absent`. A

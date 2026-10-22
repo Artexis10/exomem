@@ -6543,7 +6543,7 @@ def op_activate_context(
         session: Stable opaque conversation ID; max 256 chars.
         workspace: Thread project key; max 256 chars.
         conversation: All optional: focus (one line/240 chars; current subjects and attachment names/objects),
-            refs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history.
+            refs (12 already-read pages); never earlier turns or full history.
         trigger: user_turn: initial recall. task_refresh: keep turn; task in focus;
             intent_resolution qualifies human intent separately.
         initiator: Caller label; no authority. Invalid labels ignored.

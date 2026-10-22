@@ -91,8 +91,8 @@ def test_conversation_is_a_registered_evidence_kind() -> None:
 def test_public_conversation_argument_requests_bounded_context_not_full_history() -> None:
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "activate_context")
     parameter = next(p for p in command.params if p.name == "conversation")
-    assert "never full history" in parameter.help
-    assert "six" in parameter.help and "2,400" in parameter.help
+    assert "never earlier turns or full history" in parameter.help
+    assert "240" in parameter.help and "12" in parameter.help
 
 
 def test_conversation_never_resolves_alone_or_with_qualifiers_only() -> None:
