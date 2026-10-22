@@ -1381,6 +1381,32 @@ def test_launcher_refuses_an_actual_older_interpreter_on_a_migrated_fresh_root_c
 NESTED = "Knowledge Base/Records/Work/Items/Nested/_collection.md"
 
 
+def test_a_store_summary_excluded_from_release_does_not_block_relationship_labels(s1, capsys):
+    """A migration that refuses a file collection with relationship labels as COLLECTION_NOT_FOUND
+    because an unrelated store summary is excluded from release, which leaves the vault unmigratable."""
+    root = s1
+    (root / "Knowledge Base/_access.yaml").write_text("excluded: [Records/Daily]\n")
+    note = root / "Knowledge Base/Notes/Reference.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Reference label\n")
+    links = root / "Knowledge Base/Records/Links/_collection.md"
+    links_id = "77777777-7777-4777-8777-777777777777"
+    links.parent.mkdir(parents=True)
+    links.write_text(manifest_text("records").replace(CID, links_id).replace("title: Work", "title: Links").replace(
+        "item_schema:\n", "item_presentation:\n  version: 1\n  title: title\n  relationships: [related]\nitem_schema:\n").replace(
+        "    count: {type: integer}\n", "    count: {type: integer}\n    related: {type: link, link_kind: memory}\n"))
+    manifest = collections.load_manifest(root, links)
+    (links.parent / "Items").mkdir()
+    (links.parent / "Items/One.md").write_text(record_formats.render_markdown_item(
+        manifest, {"title": "One", "related": "[[Reference]]"}, KEY, "Body\n",
+        resolve_relationship=record_formats.presentation_relationship_resolver(root, manifest, None)))
+    assert migrate(root, "dry-run") == 0
+    assert printed(capsys)["verdict"] == "migratable"
+    assert migrate(root, "apply") == 0
+    assert printed(capsys)["status"] == "marker_admitted"
+    assert links_id in {entry["collection_id"] for entry in marker(root)["collections"]}
+
+
 def test_a_dry_run_blocks_collections_whose_marker_entries_would_overlap(env, capsys):
     """A dry run that calls a vault migratable although two of its collections would share one
     ownership namespace in the marker, which the apply then refuses."""

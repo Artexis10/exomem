@@ -959,7 +959,13 @@ def presentation_wikilinks(operation, *, fresh=False):
 
 def presentation_label(operation, path):
     """An owned target takes its title from canonical data, never its physical projection."""
-    subjects = operation.projection_subjects(path)
+    from .. import structured_collections as collections
+
+    try:
+        subjects = operation.projection_subjects(path)
+    except collections.CollectionError:
+        # An owned path this operation cannot release stays owned and unlabelled, as projection_decision treats it.
+        return True, None
     if subjects is None:
         return False, None
     if not subjects or not operation.allows_file(path):
