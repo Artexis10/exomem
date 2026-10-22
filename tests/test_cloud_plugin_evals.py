@@ -549,6 +549,8 @@ def test_materials_derives_exact_review_cases_and_does_not_claim_submission():
     result = checks.submission_materials(ROOT, {})
     assert not result["ok"]
     assert result["submission_state"] == "not_submitted"
+    definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
+    assert result["claude_connector"]["tagline"] == definition["claude_tagline"]
     extension = result["openai_extension"]
     assert len(extension["review"]["test_cases"]["positive"]) == 5
     assert len(extension["review"]["test_cases"]["negative"]) == 3
