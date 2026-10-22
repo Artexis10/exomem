@@ -8,7 +8,13 @@ The caller's view comes first. Every row is filtered by what the caller may
 see BEFORE it is ordered, counted, paged, hashed or compared with a pending
 change, so no entry the caller cannot see moves a byte the caller receives.
 `read_memory` serves a view through `read_view`; the activation packet will
-serve the map through `compile_view` and `map_within`.
+serve the map through `compile_view` and `map_within`. Every item a view serves
+is pinned under its generation (`served_items`), and the terminal guard serves
+the pinned item (`pinned_items`), so both of its passes serve the text that the
+generation was computed from.
+
+A caller that may not read the domain registry gets nothing from it: no topic,
+no topic key and no domain map. Every topic ref then reads as an unknown one.
 
 The refs, `exomem://map`, `exomem://map/topic/<domain key>` and
 `exomem://map/unfiled`, are the whole view namespace. `read_view` pages a view
@@ -18,10 +24,13 @@ generation.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import json
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,6 +161,8 @@ class CallerView:
     purpose: str | None
     #: Digest of (audience id, authorization session id, declared purpose): who a token is for.
     binding: str
+    #: Whether the caller may read the domain registry. Without it no view reads the registry.
+    domains_admitted: bool
 
     @property
     def restricted(self) -> bool:
@@ -171,14 +182,29 @@ class CallerView:
         """The view of `principal` (default: the bound one) under the `purpose` the request declared.
 
         The view's compile and the terminal guard both build it from the same two arguments, so
-        they decide under one purpose and one filter.
+        they decide under one purpose, one filter and one registry admission.
         """
+        root = Path(vault_root)
         who = principal if principal is not None else principal_module.effective_principal()
         # The purpose the release decision itself takes, so the filter and the binding agree.
-        declared = egress._declared_purpose(Path(vault_root), who, purpose)  # noqa: SLF001
-        visible = egress.restricted_release_filter(Path(vault_root), principal=principal, purpose=declared)
+        declared = egress._declared_purpose(root, who, purpose)  # noqa: SLF001
+        visible = egress.restricted_release_filter(root, principal=principal, purpose=declared)
         binding = _digest(json.dumps([who.audience_id, who.authorization_session_id, declared]))
-        return cls(visible, declared, binding)
+        return cls(visible, declared, binding, _domains_admitted(root, principal, purpose))
+
+
+def _domains_admitted(
+    vault_root: Path, principal: principal_module.RequestPrincipal | None, purpose: str | None
+) -> bool:
+    """Whether the caller may read the domain registry: the admission that `schema_memory` asks for."""
+    from .vocabulary.contract import selected_admission_refusal
+
+    if principal is None and purpose is None:
+        return selected_admission_refusal(vault_root, source_taxonomy.DOMAIN_SPEC) is None
+    # The admission reads the bound principal, so it is bound with the purpose, as `read_view` binds it.
+    who = principal if principal is not None else principal_module.effective_principal()
+    with principal_module.request_scope(who.with_purpose(purpose)):
+        return selected_admission_refusal(vault_root, source_taxonomy.DOMAIN_SPEC) is None
 
 
 def _digest(text: str) -> str:
@@ -370,7 +396,8 @@ class _World:
 def _world(catalogue: context_catalogue.ContextCatalogue, caller: CallerView) -> _World:
     entries = [entry for entry in catalogue.entries() if _admits(entry, caller.visible)]
     # The join runs over the visible entries only: a relation to an entry the caller cannot see adds nothing.
-    joined = catalogue.memberships(entries).topics
+    # It resolves through the domain registry, so a caller who may not read the registry joins no topic.
+    joined = catalogue.memberships(entries).topics if caller.domains_admitted else {}
     # An entry with no activity of its own (a project anchor) takes its project's newest visible page.
     project_activity: dict[str, str] = {}
     for entry in entries:
@@ -400,9 +427,13 @@ def _world(catalogue: context_catalogue.ContextCatalogue, caller: CallerView) ->
     return _World(tuple(rows), topic_activity)
 
 
-def _view_rows(target: ViewTarget, key: str, world: _World, registries: _Registries) -> list[Row]:
+def _view_rows(target: ViewTarget, key: str, world: _World, registries: _Registries | None) -> list[Row]:
     if target.kind == VIEW_MAP:
-        topics = _ordered(_topic_row(topic, registries, activity) for topic, activity in world.topic_activity.items())
+        topics = (
+            []
+            if registries is None
+            else _ordered(_topic_row(topic, registries, activity) for topic, activity in world.topic_activity.items())
+        )
         # The map lists the kinds that have a share of its budget; an ordinary note is reached through a domain map.
         return topics + _ordered(row for row in world.rows if row.kind in MAP_KIND_SHARES and _carryable(row))
     if target.kind == VIEW_UNFILED:
@@ -422,7 +453,8 @@ class _Prepared:
     #: The ref the view is known by: a deprecated or aliased topic key reads as its replacement.
     ref: str
     key: str
-    registries: _Registries
+    #: None when the caller may not read the domain registry: then no part of the view reads it.
+    registries: _Registries | None
     caller: CallerView
     state: str
     catalogue: context_catalogue.ContextCatalogue | None
@@ -435,16 +467,18 @@ def _prepare(vault_root: Path, path: str, caller: CallerView | None, purpose: st
     if target is None:
         raise not_found()
     root = Path(vault_root)
-    registries = _Registries(root)
+    caller = caller or CallerView.current(root, purpose=purpose)
+    # Admission comes before any definition is read, so a registered topic and an unknown one read
+    # the same to a caller who may not read the registry, whatever the catalogue's readiness.
+    registries = _Registries(root) if caller.domains_admitted else None
     key = ""
     ref = path
     if target.kind == VIEW_TOPIC:
-        resolved = registries.topic(target.key)
+        resolved = registries.topic(target.key) if registries is not None else None
         if resolved is None:
             raise not_found()
         key, ref = resolved, topic_ref(resolved)
     state, catalogue, unlisted = context_catalogue.ensure_unlisted(root)
-    caller = caller or CallerView.current(root, purpose=purpose)
     return _Prepared(root, target, ref, key, registries, caller, state, catalogue, unlisted)
 
 
@@ -481,7 +515,8 @@ def _compile(prepared: _Prepared) -> View:
             states, state_available = {}, False
     # The generation covers every field an item is served, its state included, so a continuation
     # minted before any of them changed is stale.
-    digest = hashlib.sha256(prepared.registries.digest.encode("ascii"))
+    registries = prepared.registries.digest if prepared.registries is not None else ""
+    digest = hashlib.sha256(registries.encode("ascii"))
     digest.update(json.dumps(state_available).encode("ascii"))
     for row in rows:
         digest.update(row.digest().encode("ascii"))
@@ -636,13 +671,19 @@ def _states(vault_root: Path, rows: Sequence[Row], caller: CallerView) -> dict[s
     finally:
         index.close()
     entry_of_ref = {anchor_ref(anchor): anchor.anchor_id for anchor in anchors}
-    return {
-        entry_of_ref[str(entry["anchor"])]: {
-            key: entry[key] for key in ("statement", "as_of", "source", "path") if entry.get(key) is not None
-        }
-        for entry in entries
-        if str(entry.get("anchor")) in entry_of_ref
-    }
+    return {entry_of_ref[str(entry["anchor"])]: _served_state(entry) for entry in entries if str(entry.get("anchor")) in entry_of_ref}
+
+
+def _served_state(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """A current state as a view serves it, its statement without wikilinks.
+
+    So whether a page that the statement links to exists, or is withheld, changes no byte of it.
+    The guard checks the page the state was read from, never the pages its statement mentions.
+    """
+    state = {key: entry[key] for key in ("statement", "as_of", "source", "path") if entry.get(key) is not None}
+    if isinstance(state.get("statement"), str):
+        state["statement"] = _unlinked(state["statement"])
+    return state
 
 
 def read_view(
@@ -686,18 +727,14 @@ def _read_view(root: Path, path: str, continuation: str | None, purpose: str | N
             return _response(_abstention(prepared, UNAVAILABLE), [], None)
         assert view.generation is not None
         token = _mint(secret, prepared.ref, caller, view.generation, following)
-    items = [row.item() for row in page]
     extra: dict[str, Any] = {}
-    if view.states is not None:
-        if not view.state_available:
-            extra["state_available"] = False
-        for row, item in zip(page, items, strict=True):
-            item["state"] = view.states.get(row.entry_id)
-    return _response(view, items, token, extra)
+    if view.states is not None and not view.state_available:
+        extra["state_available"] = False
+    return _response(view, served_items(root, view, page, caller), token, extra)
 
 
 # --------------------------------------------------------------------------- #
-# The display text an item is served
+# What the terminal guard serves
 # --------------------------------------------------------------------------- #
 
 
@@ -707,56 +744,86 @@ def _identity(item: Mapping[str, Any]) -> tuple[object, ...]:
     return tuple(value if isinstance(value, str) else None for value in values)
 
 
-#: The fields of an item that are display text. The terminal guard serves an entry's own (`entry_display`).
+#: The fields of an item that are display text: the catalogue's own, served without links.
 DISPLAY_FIELDS = ("title", "description", "description_origin")  # nosemgrep: ep-word-set -- `Row`'s own field names.
 
+#: Most items pinned at once, over every pinned page. A memory bound: the terminal guard reads a pin
+#: in the request that made it, moments later, so only an in-flight request needs its pin kept.
+PINNED_ITEMS_MAX = 4096
 
-def _display(row: Row) -> dict[str, str]:
-    return {field: getattr(row, field) for field in DISPLAY_FIELDS}
+
+class _Pins:
+    """The items lately served, by (vault, view ref, caller binding, generation), least recent first."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        #: For each key, the items served under it, by `_identity`, then by entry id.
+        self._pages: OrderedDict[tuple[str, ...], dict[tuple[object, ...], dict[str, dict[str, Any]]]] = OrderedDict()
+        self._count = 0
+
+    def add(self, key: tuple[str, ...], served: Iterable[tuple[str, dict[str, Any]]]) -> None:
+        with self.lock:
+            page = self._pages.pop(key, {})
+            for entry_id, item in served:
+                alike = page.setdefault(_identity(item), {})
+                self._count += entry_id not in alike
+                alike[entry_id] = copy.deepcopy(item)
+            self._pages[key] = page
+            while self._count > PINNED_ITEMS_MAX and len(self._pages) > 1:
+                _, dropped = self._pages.popitem(last=False)
+                self._count -= sum(len(alike) for alike in dropped.values())
+
+    def page(self, key: tuple[str, ...]) -> dict[tuple[object, ...], dict[str, dict[str, Any]]]:
+        """The items pinned under `key`. The caller holds `lock` while it reads them."""
+        page = self._pages.get(key)
+        if page is None:
+            return {}
+        self._pages.move_to_end(key)
+        return page
 
 
-def entry_display(
-    vault_root: Path, items: Sequence[Mapping[str, Any]], caller: CallerView
-) -> list[dict[str, str] | None]:
-    """The title and description each item's own entry is served with, or None when `caller` can see no such entry.
+_PINS = _Pins()
 
-    The terminal guard serves these in place of an item's own, so a description no entry has never
-    reaches the wire. An item is matched by the fields that name an entry: its kind, anchor kind, ref
-    and path. Only entries the caller may see are candidates, so a withheld entry never decides what
-    an item gets. Of visible entries alike in all four, the one with the item's own text is kept
-    when there is one, else the lowest entry id. A topic gets its domain's registry rendering.
+
+def _pin_key(vault_root: Path, ref: str, caller: CallerView, generation: str) -> tuple[str, ...]:
+    return (str(Path(vault_root)), ref, caller.binding, generation)
+
+
+def served_items(vault_root: Path, view: View, rows: Sequence[Row], caller: CallerView) -> list[dict[str, Any]]:
+    """The items `rows` are served as, each pinned under the view's generation for the terminal guard."""
+    items = [row.item() for row in rows]
+    if view.states is not None:
+        for row, item in zip(rows, items, strict=True):
+            item["state"] = view.states.get(row.entry_id)
+    if view.generation is not None:
+        _PINS.add(_pin_key(vault_root, view.ref, caller, view.generation), zip([row.entry_id for row in rows], items, strict=True))
+    return items
+
+
+def pinned_items(
+    vault_root: Path, ref: object, generation: object, items: Sequence[Mapping[str, Any]], caller: CallerView
+) -> list[dict[str, Any]]:
+    """Each item as the view `ref` served it to `caller` under `generation`. An item it never served is dropped.
+
+    The terminal guard serves these in place of the items it is given. So both of its passes serve the
+    text the generation was computed from, and a field that no compile served this caller never reaches
+    the wire. An item is matched by the fields that name an entry: its kind, anchor kind, ref and path.
+    Of served items alike in all four, the one equal to the given item is kept, else the lowest entry
+    id's. Registry admission is decided again, as it stands now: without it, no topic and no topic key.
     """
-    root = Path(vault_root)
-    candidates: dict[tuple[object, ...], list[Row]] | None = None
-    registries: _Registries | None = None
-    out: list[dict[str, str] | None] = []
-    for item in items:
-        ref = item.get("ref")
-        if item.get("kind") == KIND_TOPIC:
-            target = parse_view_ref(ref) if isinstance(ref, str) else None
-            if target is None or target.kind != VIEW_TOPIC:
-                out.append(None)
+    if not isinstance(ref, str) or not isinstance(generation, str):
+        return []
+    out: list[dict[str, Any]] = []
+    with _PINS.lock:
+        page = _PINS.page(_pin_key(vault_root, ref, caller, generation))
+        for item in items:
+            alike = page.get(_identity(item))
+            if not alike:
                 continue
-            registries = registries or _Registries(root)
-            out.append(_display(_topic_row(target.key, registries, "")))
-            continue
-        if candidates is None:
-            candidates = {}
-            catalogue = context_catalogue.ContextCatalogue(root)
-            try:
-                entries = catalogue.entries()
-            finally:
-                catalogue.close()
-            for entry in entries:
-                if _admits(entry, caller.visible):
-                    row = _row(entry, (), "")
-                    candidates.setdefault(_identity(row.item()), []).append(row)
-        alike = candidates.get(_identity(item), [])
-        if not alike:
-            out.append(None)
-            continue
-        own = [row for row in alike if (row.title, row.description) == (item.get("title"), item.get("description"))]
-        out.append(_display(min(own or alike, key=lambda row: row.entry_id)))
+            own = [served for served in alike.values() if served == item]
+            out.append(copy.deepcopy(own[0] if own else alike[min(alike)]))
+    if not caller.domains_admitted:
+        out = [{**item, "topics": []} if "topics" in item else item for item in out if item.get("kind") != KIND_TOPIC]
     return out
 
 

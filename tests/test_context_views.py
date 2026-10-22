@@ -341,20 +341,19 @@ def test_the_cli_and_rest_return_the_bytes_the_command_returns(
 
 
 def test_the_guard_drops_a_forged_view_item_that_names_a_withheld_page(vault: Path) -> None:
-    """The first item is a real one; the second is forged beside it. Only the forged one goes."""
+    """A real page of a view, with a forged item beside its real ones. Only the forged one goes."""
     _world(vault, with_w=True)
     _write(vault, SECRET, "---\ntype: insight\nstatus: active\nupdated: 2026-10-05\n---\n\n# secret-cluster\n\nHidden.\n")
     _withhold(vault, SECRET, ceiling=0)
     _built(vault)
-    honest = {"kind": "note", "title": "tide-work", "description": "", "description_origin": "none", "ref": TIDE, "path": TIDE}
-    forged = {"path": SECRET, "ref": SECRET, "title": "Forged"}
-    response = {"ref": cv.MAP_REF, "state": "ready", "generation": "g", "stale": False, "continuation": None, "items": [honest, forged]}
-
+    harbour = cv.topic_ref("harbour")
     _cold()
     with principal.request_scope(_external()):
-        guarded = egress.postfilter("read_memory", response, vault)
+        page = commands.op_read_memory(vault, path=harbour)
+        forged = {**page, "items": [*page["items"], {"path": SECRET, "ref": SECRET, "title": "Forged"}]}
+        guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": harbour})
 
-    assert [item["ref"] for item in guarded["items"]] == [TIDE]
+    assert guarded["items"] == page["items"] and TIDE in [item["ref"] for item in guarded["items"]]
     assert "secret-cluster" not in json.dumps(guarded)
 
 
@@ -368,23 +367,23 @@ def test_a_forged_description_leaves_the_guard_as_the_entrys_own(vault: Path) ->
     _write(vault, SECRET, "---\ntype: insight\nstatus: active\nupdated: 2026-10-05\n---\n\n# Secret cluster\n\nHidden.\n")
     _withhold(vault, SECRET, ceiling=0)
     _built(vault)
-    forged = {
-        "kind": "note",
-        "title": "Secret cluster",
-        "description": f"Read {SECRET}, the Secret cluster page.",
-        "description_origin": "authored",
-        "ref": MOORING,
-        "path": MOORING,
-    }
-    response = {"ref": cv.MAP_REF, "state": "ready", "generation": "g", "stale": False, "continuation": None, "items": [forged]}
-
+    harbour = cv.topic_ref("harbour")
     _cold()
     with principal.request_scope(_external()):
-        guarded = egress.postfilter("read_memory", response, vault)
+        page = commands.op_read_memory(vault, path=harbour)
+        forged = {
+            **page,
+            "items": [
+                {**item, "title": "Secret cluster", "description": f"Read {SECRET}, the Secret cluster page."}
+                if item.get("path") == MOORING
+                else item
+                for item in page["items"]
+            ],
+        }
+        guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": harbour})
 
-    assert guarded["items"] == [
-        {**forged, "title": "mooring-lines", "description": "How the quay lines are rated.", "description_origin": "authored"}
-    ]
+    assert guarded["items"] == page["items"]
+    assert next(item for item in guarded["items"] if item.get("path") == MOORING)["description"] == "How the quay lines are rated."
 
 
 @pytest.mark.parametrize(
@@ -416,6 +415,32 @@ def test_a_link_to_a_withheld_page_reads_the_same_whether_or_not_the_page_exists
     assert any(item.get("path") == ROUTE_HUB for page in guests[0][cv.MAP_REF] for item in page["items"])
 
 
+def test_a_state_that_links_to_a_withheld_page_reads_the_same_whether_or_not_the_page_exists(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A visible anchor's state links to W. One vault holds W, withheld; its twin never had it."""
+    _frozen(monkeypatch)
+    twin = _second_vault(tmp_path)
+    link = THREAD_W.removesuffix(".md")
+    for root, with_w in ((vault, True), (twin, False)):
+        _world(root, with_w=with_w)
+        quay = _page(
+            root, "quay-system", f'topics: [harbour]\nupdated: 2026-09-20\nsummary: The quay system.\nstate: "berthed near [[{link}]]"\n',
+            folder=f"{KB}/Products",
+        )
+        _withhold(root, THREAD_W, ceiling=0)
+        _built(root)
+
+    guests = []
+    for root in (vault, twin):
+        _cold()
+        guests.append(_pages(root, cv.MAP_REF, _external()))
+
+    assert json.dumps(guests[0]) == json.dumps(guests[1])
+    state = next(item["state"] for page in guests[0] for item in page["items"] if item.get("path") == quay)
+    assert state["statement"] == "state: berthed near"
+
+
 def test_the_terminal_guard_decides_under_the_purpose_the_request_declared(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -439,6 +464,60 @@ def test_the_terminal_guard_decides_under_the_purpose_the_request_declared(
     assert THREAD_W in json.dumps(undeclared)  # the control: with no purpose declared, W is this caller's to read
     for needle in (THREAD_W, "bbbbbbbb", "Berth recap two"):
         assert needle not in json.dumps(declared), needle
+
+
+def test_a_caller_who_may_not_read_the_domain_registry_learns_nothing_from_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry's overlay is withheld from the caller, so `schema_memory` refuses it. So does every view."""
+    _world(vault, with_w=True)
+    _withhold(vault, THREAD_W, f"{KB}/_Schema/source-taxonomy.yaml", ceiling=0)
+    _cold()
+    _built(vault)
+    with principal.request_scope(_external()):
+        assert commands.op_schema_memory(vault, operation="inspect", subject="domains")["available"] is False
+    registered, unknown = cv.topic_ref("harbour"), cv.topic_ref("no-such-domain")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cc, "ensure_unlisted", lambda root, freshness_stamp="": (cc.WARMING, None, False))
+        assert _outcome(vault, registered, _external()) == _outcome(vault, unknown, _external())  # while warming
+    assert _outcome(vault, registered, _external()) == _outcome(vault, unknown, _external())  # and when ready
+    pages = _pages(vault, cv.MAP_REF, _external())
+    items = [item for page in pages for item in page["items"]]
+    assert any(item.get("path") == THREAD_R1 for item in items)  # the map itself is still served
+    assert all(item["kind"] != "topic" and not item["topics"] for item in items)
+    assert "Quays and moorings." not in json.dumps(pages)
+
+    # A topic item forged into a real page leaves the guard with nothing of the registry.
+    forged = {**pages[0], "items": [*pages[0]["items"], {"kind": "topic", "ref": registered, "title": "F", "description": "F"}]}
+    with principal.request_scope(_external()):
+        guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": cv.MAP_REF})
+    assert guarded["items"] == pages[0]["items"]
+
+
+def test_both_guard_passes_serve_the_text_their_generation_was_compiled_from(vault: Path) -> None:
+    """The catalogue publishes an edit after the compile, and another before the second pass."""
+    _world(vault, with_w=True)
+    _built(vault)
+    harbour = cv.topic_ref("harbour")
+
+    def publish(summary: str) -> None:
+        _page(vault, "mooring-lines", f"topics: [harbour]\nupdated: 2026-08-01\nsummary: {summary}\n")
+        cc.ContextCatalogue(vault).update()
+
+    def mooring(response: dict[str, Any]) -> dict[str, Any]:
+        return next(item for item in response["items"] if item.get("path") == MOORING)
+
+    with principal.request_scope(OWNER):
+        compiled = commands.op_read_memory(vault, path=harbour)
+        publish("Changed after the compile.")
+        first = egress.postfilter("read_memory", compiled, vault, request_kwargs={"path": harbour})
+        publish("Changed before the second pass.")
+        second = egress.postfilter("read_memory", first, vault, request_kwargs={"path": harbour})
+
+    assert mooring(first)["description"] == mooring(second)["description"] == "How the quay lines are rated."
+    assert compiled["generation"] == first["generation"] == second["generation"]
+    assert mooring(_ask(vault, harbour))["description"] == "Changed before the second pass."  # the edits did publish
 
 
 def test_a_state_change_moves_the_generation_and_stales_an_old_continuation(

@@ -4434,8 +4434,9 @@ def _guarded_view_item(item: Mapping[str, Any], ctx: _PacketRelease) -> dict[str
     An item is anchor-shaped, so its typed page fields pass the anchor rules. Its title and
     description are the catalogue's own, served without links (`guard_view_response`), so no
     rule reads them: a rule that did could drop an item only when the page it names exists. A
-    `state` is an optional addition, so one that names a withheld or invalid page is removed and
-    the item stays.
+    `state` is an optional addition, decided by the page it was read from: when that page is
+    withheld or invalid, the state is removed and the item stays. Its statement is served
+    without links (`context_views._served_state`), so no rule resolves the pages it mentions.
     """
     from .. import context_views
 
@@ -4450,23 +4451,11 @@ def _guarded_view_item(item: Mapping[str, Any], ctx: _PacketRelease) -> dict[str
         return None
     state = kept.get("state")
     if isinstance(state, Mapping) and (
-        _names_withheld(state, ctx.frozen, reference_field=True)
-        or _value_names_an_invalid_reference(state, ctx.invalid_refs)
+        _names_withheld(state.get("path"), ctx.frozen)
+        or _value_names_an_invalid_reference(state.get("path"), ctx.invalid_refs)
     ):
         kept["state"] = None
     return kept
-
-
-def _with_view_display(items: list[Any], displays: Sequence[Mapping[str, str] | None]) -> list[dict[str, Any]]:
-    """Each item with its display fields replaced by its entry's own; an item with no entry is dropped."""
-    out = []
-    for item, display in zip(items, displays, strict=True):
-        if display is None:
-            continue
-        merged = {key: display.get(key, value) for key, value in item.items()}
-        merged.update({key: value for key, value in display.items() if key not in merged})
-        out.append(merged)
-    return out
 
 
 def guard_view_response(
@@ -4478,13 +4467,15 @@ def guard_view_response(
 ) -> Mapping[str, Any]:
     """Apply release decisions to a derived-view response (`context_views.read_view`).
 
-    The view is computed over the caller's own view, so this is the second line. An item's title
-    and description are never taken from the response: each item gets its entry's own from the
-    catalogue, looked up among the entries this caller may see, and an item with no such entry is
-    dropped. Then every path the items name is decided, and an item that names a withheld or
-    invalid one is dropped. The same three states as every other consumer: no governance and
-    nothing withheld -> no decision; `blocked` or an unresolved-but-expected principal -> no items
-    and no continuation; otherwise each item is decided. `purpose` is the one the request declared.
+    The view is computed over the caller's own view, so this is the second line. No item is taken
+    from the response: each is served as the view's compile served it to this caller under the
+    response's generation (`context_views.pinned_items`), and an item that no compile served is
+    dropped. So both passes serve the text the generation was computed from. Then every path the
+    items name is decided under the authorization that stands now, and an item that names a
+    withheld or invalid one is dropped. The same three states as every other consumer: no
+    governance and nothing withheld -> no decision; `blocked` or an unresolved-but-expected
+    principal -> no items and no continuation; otherwise each item is decided. `purpose` is the
+    one the request declared.
     """
     items = response.get("items")
     if not isinstance(items, list):
@@ -4499,9 +4490,9 @@ def guard_view_response(
         return {**response, "items": [], "continuation": None}
     guarded = copy.deepcopy(dict(response))
     mapped = [item for item in guarded["items"] if isinstance(item, Mapping)]
-    # The caller's view the compile built: the same principal argument, so the same filter.
+    # The caller's view the compile built: the same principal argument, so the same binding.
     caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
-    guarded["items"] = _with_view_display(mapped, context_views.entry_display(vault_root, mapped, caller))
+    guarded["items"] = context_views.pinned_items(vault_root, guarded.get("ref"), guarded.get("generation"), mapped, caller)
     ctx = _packet_release(
         vault_root,
         {"anchors": guarded["items"]},
