@@ -4460,9 +4460,26 @@ def guard_view_response(
         _record_blocked_outcome(who.audience_id)
         return {**response, "items": [], "continuation": None}
     guarded = copy.deepcopy(dict(response))
+    from .. import context_views
+
+    target = context_views.parse_view_ref(str(response.get("ref") or ""))
+    profile = target is not None and target.profile
+    # Profile kinds name the existing packet sections, whose path and prose rules stay authoritative.
+    packet = {
+        section: [item for item in guarded["items"] if isinstance(item, Mapping) and item.get("kind") == section]
+        for section in ("units", "pointers", "current_state")
+    } if profile else {"anchors": guarded["items"]}
+    if profile:
+        kept = guard_working_set(vault_root, packet, AnnotatedHits(hits=[]), principal=who, purpose=purpose)
+        guarded["items"] = [
+            item for section in ("current_state", "units", "pointers") for item in (kept or {}).get(section, ())
+        ]
+        if kept is None:
+            guarded["continuation"] = None
+        return guarded
     ctx = _packet_release(
         vault_root,
-        {"anchors": guarded["items"]},
+        packet,
         AnnotatedHits(hits=[]),
         policy=policy,
         release_gate_active=release_gate_active,
