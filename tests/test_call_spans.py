@@ -125,14 +125,23 @@ def test_recall_stages_record_cpu_and_counts_when_a_stage_refuses(token, monkeyp
     timings = FindTimings()
     measured = {"candidates": 3}
     for _ in range(2):
-        with pytest.raises(ValueError), timings.span("semantic.search", measured=measured):
+        with pytest.raises(ValueError), timings.span(
+            "semantic.search", measured=measured, elapsed_ms_field="entry_ms"
+        ):
+            time.sleep(0.01)
             raise ValueError("refused")
 
     row = call_spans.pop_call_spans(token)[0]
     assert row["name"] == "recall.semantic.search"
     assert row["count"] == 2
     fields = row["fields"]
-    assert {key: value for key, value in fields.items() if key != call_spans.PROCESS_CPU_US} == {
+    assert fields["entry_ms"] >= 18
+    assert fields["entry_ms"] <= row["ms"] < fields["entry_ms"] + 2
+    counts_and_thread_cpu = {
+        key: value for key, value in fields.items()
+        if key not in {call_spans.PROCESS_CPU_US, "entry_ms"}
+    }
+    assert counts_and_thread_cpu == {
         "candidates": 6, "thread_cpu_us": 4000,
     }
     assert measured == {"candidates": 3}
@@ -149,7 +158,7 @@ def test_recall_stage_outside_mcp_never_samples_thread_cpu(monkeypatch) -> None:
 
     monkeypatch.setattr(time, "thread_time_ns", unexpected_cpu_clock)
     monkeypatch.setattr(time, "process_time_ns", unexpected_cpu_clock)
-    with FindTimings().span("semantic.search"):
+    with FindTimings().span("semantic.search", elapsed_ms_field="entry_ms"):
         pass
 
     assert not call_spans._SPANS
