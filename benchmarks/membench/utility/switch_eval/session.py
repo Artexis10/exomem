@@ -8,7 +8,7 @@ fresh session and one Exomem server process for the whole case (design,
 
 Classification reads structured fields only: the CLI's event types, its
 documented error kinds and the tap's log. A crash of the server under test
-after it answered ``initialize`` is an actor failure and is never retried; a
+after it answered the client's handshake is an actor failure and is never retried; a
 rate limit, a transport error, a host fault or a server that never started is
 a harness fault and is retried with the same inputs, up to the protocol's
 limit; a spent quota pauses the run (design, "Runs and failures"). A server
@@ -85,7 +85,7 @@ API_KEY_VARIABLES: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN
 _FAULT_ERRORS = {"rate_limit": "rate_limit", "server_error": "transport", "unknown": "transport"}
 _ABORT_ERRORS = frozenset({"authentication_failed", "billing_error", "invalid_request"})
 
-#: The fault kind of a server that never answered ``initialize``.
+#: The fault kind of a server that never answered the client's handshake.
 SERVER_START = "server_start"
 #: The fault kind of a client that never reported its session (no init
 #: event): a launcher that refused, or a client that died before it started.
@@ -519,7 +519,7 @@ def classify(
             checks=checks,
         )
 
-    initialized = any(e.get("event") == "initialize" for e in tap_events)
+    initialized = any(e.get("event") == "handshake" for e in tap_events)
     crash = [
         e for e in tap_events if e.get("event") == "server_exit" and e.get("while_client_connected")
     ]
@@ -535,7 +535,7 @@ def classify(
         return AttemptResult(
             HARNESS_FAULT,
             SERVER_START,
-            f"server exited {crash[0].get('returncode')} before it answered initialize",
+            f"server exited {crash[0].get('returncode')} before it answered the handshake",
             turns=list(turn_records),
             checks=checks,
         )
@@ -594,17 +594,31 @@ def classify(
                 checks=checks,
             )
     if surface is not None:
-        initialize = next((e for e in tap_events if e.get("event") == "initialize"), None)
+        handshake = next((e for e in tap_events if e.get("event") == "handshake"), None)
         listing = next((e for e in tap_events if e.get("event") == "tools_list"), None)
-        if initialize is not None:
-            checks["server_instructions"] = (
-                sha256_text(initialize.get("instructions") or "") == surface["server_instructions"]
+        # A connected server whose answers the tap did not see: the client
+        # speaks a handshake the tap does not know, and no session's surface
+        # could be checked.
+        unseen = [
+            name
+            for name, seen in (("handshake", handshake), ("tools_list", listing))
+            if seen is None
+        ]
+        if unseen:
+            return AttemptResult(
+                ABORT,
+                "surface_unseen",
+                f"the tap saw no {' or '.join(unseen)} answer from a connected server",
+                turns=list(turn_records),
+                checks=checks,
             )
-        if listing is not None:
-            tools = sorted(listing.get("tools") or [], key=lambda tool: tool.get("name", ""))
-            checks["tool_descriptions"] = (
-                sha256_text(canonical_json(tools)) == surface["tool_descriptions"]
-            )
+        checks["server_instructions"] = (
+            sha256_text(handshake.get("instructions") or "") == surface["server_instructions"]
+        )
+        tools = sorted(listing.get("tools") or [], key=lambda tool: tool.get("name", ""))
+        checks["tool_descriptions"] = (
+            sha256_text(canonical_json(tools)) == surface["tool_descriptions"]
+        )
         for name in ("server_instructions", "tool_descriptions"):
             if checks.get(name) is False:
                 return AttemptResult(

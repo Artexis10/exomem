@@ -55,7 +55,7 @@ for line in sys.stdin:
     if "id" not in message:
         continue
     method = message["method"]
-    if method == "initialize":
+    if method in ("initialize", "server/discover"):
         result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
                   "serverInfo": {"name": "stand-in", "version": "0"}, "instructions": "stand-in"}
     elif method == "tools/list":
@@ -254,9 +254,11 @@ def test_a_harness_fault_is_retried_with_identical_inputs(tmp_path: Path) -> Non
     assert struck["outcome"] == HARNESS_FAULT and struck["attempts"] == 1 + protocol.HARNESS_FAULT_RETRIES
 
 
-def test_a_crash_of_the_server_under_test_is_an_actor_failure_and_not_retried(tmp_path: Path) -> None:
+# The stateless handshake is what the pinned client sends on the 2026-07-28 protocol.
+@pytest.mark.parametrize("handshake", ["initialize", "server/discover"])
+def test_a_crash_of_the_server_under_test_is_an_actor_failure_and_not_retried(tmp_path: Path, handshake: str) -> None:
     tap, log, _turn_file = _start_tap(tmp_path, "--crash-on-call")
-    _ask(tap, 1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
+    _ask(tap, 1, handshake, {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
     _ask(tap, 2, "tools/call", {"name": "read_memory", "arguments": {}})
     tap.wait(timeout=30)
     tap_events = _log(log)

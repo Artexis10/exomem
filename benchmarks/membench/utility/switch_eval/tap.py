@@ -39,6 +39,11 @@ BUDGET_REFUSAL = (
 #: The text a call to a tool outside the arm's filter receives.
 FILTER_REFUSAL = "Refused: this tool is not available in this session."
 
+#: The MCP handshakes whose answer carries the server instructions: the
+#: session-based ``initialize`` and the stateless ``server/discover`` that a
+#: client on the 2026-07-28 protocol sends instead. Protocol method names.
+HANDSHAKE_METHODS = frozenset({"initialize", "server/discover"})
+
 
 def process_start_ticks(pid: int) -> str | None:
     """The process's start time in clock ticks (``/proc/<pid>/stat`` field 22),
@@ -154,7 +159,7 @@ class Tap:
                 return
             with self._pending_lock:
                 self._pending[request_id] = ("tools/call", {**call, "started": time.monotonic()})
-        elif method in ("initialize", "tools/list") and request_id is not None:
+        elif (method in HANDSHAKE_METHODS or method == "tools/list") and request_id is not None:
             with self._pending_lock:
                 self._pending[request_id] = (method, {})
         self._forward(raw)
@@ -183,12 +188,16 @@ class Tap:
         if pending is not None:
             method, call = pending
             result = message.get("result")
-            if method == "initialize" and isinstance(result, dict):
+            if method in HANDSHAKE_METHODS and isinstance(result, dict):
+                meta = result.get("_meta") or {}
                 self.log.write(
-                    "initialize",
+                    "handshake",
+                    method=method,
                     instructions=result.get("instructions"),
-                    server_info=result.get("serverInfo"),
-                    protocol_version=result.get("protocolVersion"),
+                    server_info=result.get("serverInfo")
+                    or meta.get("io.modelcontextprotocol/serverInfo"),
+                    protocol_version=result.get("protocolVersion")
+                    or result.get("supportedVersions"),
                 )
             elif method == "tools/list" and isinstance(result, dict):
                 tools = result.get("tools") or []
