@@ -402,6 +402,20 @@ def rules(
     return out
 
 
+def decide(decided: Mapping, *, void: bool, split: str) -> str:
+    """What the rules decide. A switch needs all five, so one evaluable rule that
+    fails keeps anchors; otherwise a rule that is not evaluable leaves the
+    decision unknown and says why. The product default stays anchors either way."""
+
+    numbered = [decided[str(n)] for n in range(1, 6)]
+    if any(rule["evaluable"] and not rule["holds"] for rule in numbered):
+        return "keep anchors"
+    unknown = sorted({rule["reason"] for rule in numbered if not rule["evaluable"]})
+    if unknown:
+        return "not evaluable: " + "; ".join(unknown)
+    return "switch to maps" if not void and split == protocol.SPLIT_HELDOUT else "keep anchors"
+
+
 # --------------------------------------------------------------------------
 # Secondary measures and usage.
 # --------------------------------------------------------------------------
@@ -498,9 +512,7 @@ def score_run(
         "void": void,
         "struck": built["struck"],
         "rules": decided,
-        "decision": "switch to maps"
-        if decided["switch"] and not void and split == protocol.SPLIT_HELDOUT
-        else "keep anchors",
+        "decision": decide(decided, void=void, split=split),
         "secondary": secondary(cases=cases, table=built["cases"], arm_ids=arm_ids),
         "usage": usage(sessions, project_sessions=project_sessions),
         "cases": built["cases"],

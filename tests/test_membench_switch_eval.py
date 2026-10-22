@@ -26,6 +26,7 @@ from membench.utility.switch_eval.judge import (
     unblind,
     write_items,
 )
+from membench.utility.switch_eval.score import decide, rules
 from membench.utility.switch_eval.session import (
     ACTOR_FAILURE,
     HARNESS_FAULT,
@@ -151,6 +152,13 @@ def test_case_differences_sum_within_their_group() -> None:
     assert ungrouped["superiority"]["p_value"] == pytest.approx(0.125)
     # The statistic stays the mean over cases, not over groups.
     assert grouped["mean_difference"] == pytest.approx(1.0)
+
+
+def test_a_run_whose_rules_are_not_evaluable_decides_nothing() -> None:
+    # Arms A and P only: every rule needs M, so no rule is evaluable.
+    decided = rules(cases=[], table={}, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "P"])
+
+    assert decide(decided, void=False, split=protocol.SPLIT_HELDOUT).startswith("not evaluable: arms M and A")
 
 
 # -- the judge's view ---------------------------------------------------------

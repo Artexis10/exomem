@@ -453,7 +453,7 @@ def classify(
     scored_turn: int,
     timed_out: bool,
     quota: dict | None,
-    surface: Mapping[str, str] | None,
+    surface: Mapping | None,
 ) -> AttemptResult:
     """One attempt's outcome, from structured fields only. Pure, so it is tested
     on the tap's real log."""
@@ -612,9 +612,9 @@ def classify(
                 turns=list(turn_records),
                 checks=checks,
             )
-        checks["server_instructions"] = (
-            sha256_text(handshake.get("instructions") or "") == surface["server_instructions"]
-        )
+        # The state stage hashed each handshake; compare the one this client sent.
+        expected = surface["server_instructions"].get(handshake.get("method"))
+        checks["server_instructions"] = sha256_text(handshake.get("instructions") or "") == expected
         tools = sorted(listing.get("tools") or [], key=lambda tool: tool.get("name", ""))
         checks["tool_descriptions"] = (
             sha256_text(canonical_json(tools)) == surface["tool_descriptions"]
@@ -806,7 +806,7 @@ class ClaudeSessionExecutor:
     specs: Mapping[str, ArmSpec]
     model: str
     client_version: str
-    surfaces: Mapping[tuple[str, str], Mapping[str, str]]
+    surfaces: Mapping[tuple[str, str], Mapping]
     launcher: tuple[str, ...] = ()
     turn_timeout: float = protocol.TURN_TIMEOUT_SECONDS
 

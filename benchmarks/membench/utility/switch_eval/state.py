@@ -28,6 +28,7 @@ from epistemic.journeys.f27_replay import REPO_ROOT, refuse_unsafe_out_dir
 
 from . import protocol
 from .arms import ArmSpec, canonical_json, profile_settings, sha256_text
+from .tap import HANDSHAKE_METHODS
 from .tap import __file__ as TAP_SCRIPT
 
 SERVER_NAME = "exomem"
@@ -232,8 +233,9 @@ def mcp_server_entry(slot: Slot, spec: ArmSpec, *, log: Path, server_stderr: Pat
 def capture_surface(slot: Slot, spec: ArmSpec, *, env: Mapping[str, str], out: Path) -> dict:
     """Ask the server, through the tap, what the arm's actor will be shown.
 
-    One ``initialize`` and one ``tools/list`` with no model in the loop. The
-    hashes cover the instructions and the filtered tools exactly as relayed.
+    Each handshake the tap knows, then one ``tools/list``, with no model in the
+    loop. The hashes cover each handshake's instructions and the filtered tools
+    exactly as relayed, so a session is compared on the handshake its client sent.
     """
 
     out.mkdir(parents=True, exist_ok=True)
@@ -272,32 +274,51 @@ def capture_surface(slot: Slot, spec: ArmSpec, *, env: Mapping[str, str], out: P
             f"the server closed before answering {method} (see {out / 'surface-server.stderr'})"
         )
 
+    client_info = {"name": "switch-eval", "version": "1"}
+    # One request per handshake in the tap's HANDSHAKE_METHODS. The protocol
+    # versions are the MCP revisions that each handshake belongs to.
     params = {
+        "server/discover": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": client_info,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }
+        },
         "initialize": {
             "protocolVersion": "2025-06-18",
             "capabilities": {},
-            "clientInfo": {"name": "switch-eval", "version": "1"},
+            "clientInfo": client_info,
         },
         "tools/list": {},
     }
+    if set(params) - {"tools/list"} != HANDSHAKE_METHODS:
+        raise StateError("the surface capture does not ask every handshake that the tap knows")
     try:
-        initialized = ask(1, "initialize")
+        # The stateless handshake first: it opens no session for initialize to collide with.
+        discovered = ask(1, "server/discover")
+        initialized = ask(2, "initialize")
         proc.stdin.write(
             json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
         )
         proc.stdin.flush()
-        tools = ask(2, "tools/list")["tools"]
+        tools = ask(3, "tools/list")["tools"]
     finally:
         proc.stdin.close()
         proc.wait(timeout=60)
-    instructions = initialized.get("instructions") or ""
+    instructions = {
+        "server/discover": discovered.get("instructions") or "",
+        "initialize": initialized.get("instructions") or "",
+    }
     by_name = {tool["name"]: tool for tool in tools}
     if sorted(by_name) != sorted(spec.tools):
         raise StateError(
             f"arm {spec.arm_id}: the server offers {sorted(by_name)}, the arm needs {sorted(spec.tools)}"
         )
     surface = {
-        "server_instructions": sha256_text(instructions),
+        "server_instructions": {
+            method: sha256_text(text) for method, text in sorted(instructions.items())
+        },
         "tool_descriptions": sha256_text(
             canonical_json([by_name[name] for name in sorted(by_name)])
         ),
