@@ -4,7 +4,7 @@
 
 `activate_context` today runs freshness, readiness and a lexical BM25 over anchor pages, then `compile_packet`: it analyses the raw turn, builds categorical anchor evidence, resolves anchors and fills role lanes from their neighbourhood. When nothing resolves, a gated lexical carry over the raw turn may serve one uncontested page; otherwise the turn abstains with no units. Activation also embeds the raw turn against anchor signatures (title, lede, headings) for `vector_band` evidence. It never calls the hybrid recall engine behind `ask_memory`. Client instructions tell agents to pass the user's words verbatim and rely on the packet.
 
-A replay of twelve private field reports, with an answer key written by an independent lane, measured where context is lost. The cases are development evidence; they do not decide a switch.
+A replay of twelve private field reports, with an answer key written by an independent lane, measured where context is lost. Its run files stay outside this repository, so the figures are not reproducible here. The cases are development evidence; they do not decide a switch. The map arm used about a third fewer memory calls than the query arm (22 against 33).
 
 | Arm | Expected page served or selected | Expected page reached |
 |---|---|---|
@@ -33,8 +33,8 @@ The strongest result is an agent that sees what exists and pulls. A server-side 
 
 ## Shape
 
-1. **Catalogue.** One searchable set of entries: topics, anchors, threads and trackers. Each entry has a one-line description, its memberships, its source refs and the generation it was built from.
-2. **Map.** A bounded projection of the catalogue: live topics, threads, key anchors and trackers, one line each with what it is, its state from the current-state authority with its as-of date when known, and a ref. Activation in `maps` mode returns it. It does not depend on the turn.
+1. **Context catalogue.** One searchable set of entries, distinct from the existing anchor catalogue. Its entry kinds are topics, anchors, threads (the newest episode revision per episode identity) and collections (Records and Planning). Each entry has a one-line description, its memberships, its source refs and the generation it was built from.
+2. **Map.** A bounded projection of the context catalogue, labelled as an index of what exists, not as material relevant to the turn: live topics, threads, key anchors and collections, one line each with what it is, its state from the current-state authority with its as-of date when known, and a ref. Activation in `maps` mode returns it. It does not depend on the turn.
 3. **Domain map.** The projection of one topic's entries, read by ref. It is how cold material stays reachable when it is not on the map.
 4. **Profiles, read by ref.**
    - An **anchor profile** is what the role lanes compile for one anchor today when an agent passes `anchor`: units by role with currency and refs, current state from Records first, typed relations, related pages and evidence pointers.
@@ -51,7 +51,7 @@ The evidence supports an agent that sees what exists and pulls. Activation in `m
 
 ### D2. One catalogue, many projections
 
-The map and the domain maps are projections of one catalogue, not separately maintained documents. Profiles are compiled from the existing role lanes, not stored as a second copy of the units. This keeps one source for each fact and one place to invalidate.
+The map and the domain maps are projections of one context catalogue, not separately maintained documents. Profiles are compiled from the existing role lanes, not stored as a second copy of the units. This keeps one source for each fact and one place to invalidate.
 
 ### D3. Topic membership is a declared contract
 
@@ -59,7 +59,7 @@ A topic is a domain from the vocabulary registry. An entry belongs to a topic wh
 
 ### D4. Current state has one authority
 
-Map lines and profiles take state from the existing current-state resolver: Records first, then declared state pages, then observations. Units keep their own authored dates; a page's modification date does not become a unit's as-of date. An entry with no known state shows none.
+Map lines and profiles take state from the existing current-state resolver: Records first, then declared state pages (as the pending `add-activation-temporal-currency` change defines them, which lands first), then observations. Units keep their own authored dates; a page's modification date does not become a unit's as-of date. An entry with no known state shows none.
 
 ### D5. Descriptions are written at write time and invalidated by generation
 
@@ -69,9 +69,9 @@ When a write creates or changes a catalogue entry, the writing agent may supply 
 
 Existing entries get descriptions before any evaluation of the map. The backfill is resumable, records its provenance and cost, reports coverage, and leaves uncovered entries visibly undescribed.
 
-### D7. The reader's view applies before compilation
+### D7. The caller's view applies before compilation
 
-The catalogue, map, domain maps and profiles are computed over the reader's view: hidden inputs never reach synthesis, selection, ranking, ordering, caps, counts, activity scores, staleness marks or generation tokens. A restricted reader's projections are compiled for that view and bypass any shared cache. Counterfactual twins prove it: adding or changing a withheld entry leaves a reader's map, domain maps, profiles and their ordering unchanged. The egress guard learns the new blocks and fields.
+The catalogue, map, domain maps and profiles are computed over the caller's view: hidden inputs never reach synthesis, selection, ranking, ordering, caps, counts, activity scores, staleness marks or generation tokens. A restricted caller's projections are compiled for that view and bypass any shared cache. Counterfactual twins prove it: adding or changing a withheld entry leaves a caller's map, domain maps, profiles and their ordering unchanged. The egress guard learns the new blocks and fields.
 
 ### D8. Refs to derived views resolve through one read contract
 
@@ -79,11 +79,11 @@ The catalogue, map, domain maps and profiles are computed over the reader's view
 
 ### D9. One packet budget
 
-The map and any slice share the existing packet character cap. Pulls have their own budget per answer. Overflow becomes bounded, paginated refs, never cut claims.
+The map and any slice share the request's `max_chars` cap. Pulls have their own budget per answer. Overflow becomes bounded, paginated refs, never cut claims.
 
 ### D10. The `anchors` mode stays until a frozen evaluation decides
 
-A setting selects `anchors` (default) or `maps`. Existing activation requirements apply to `anchors` mode. The default changes only through the frozen evaluation below and the normal release line; the setting is the undo.
+The process setting `EXOMEM_ACTIVATION_PACKET` selects `anchors` (default) or `maps`. Requirements that cover read-only operation, governance, freshness, latency and surface parity bind both modes; anchor resolution and the anchors packet shape bind `anchors` mode only. The default changes only through the frozen evaluation below and the normal release line; the setting is the undo.
 
 ## Evaluation
 
@@ -94,6 +94,7 @@ The protocol is frozen before any held-out generation:
   - The `anchors` packet, with the same pull tools and pull budget as the other arms.
   - The map with pulls.
   - The map plus the turn slice, with pulls.
+  - Pull instructions with no map, with pulls, so the context catalogue must earn its cost.
   Every arm uses the same agent, vault snapshot, tool permissions and pre-answer budget. The raw-turn arms receive no conversation, refs or prior session state.
 - **Primary measure.** Whether the first answer uses the required current facts and constraints, graded blind against source-derived references. A newer successor or equivalent valid evidence counts under a rule fixed before generation.
 - **Secondary measures.**
@@ -102,18 +103,19 @@ The protocol is frozen before any held-out generation:
   - Contamination of answers on cases without relevant memory, including contamination from the map.
   - Full-workflow tokens, calls and latency.
   - Failures, kept in the denominator.
-- **Decision.** Report the paired per-case difference with its interval. The switch needs the primary measure's lower bound above zero, and non-inferiority within a fixed tolerance on contamination and on the activation-audit twins. Small samples can show only large effects; the report says so.
+- **Decision.** Report the paired per-case difference with its interval. The switch needs the primary measure's lower bound above zero against `anchors` and against the pull-instructions arm, and non-inferiority within a fixed tolerance on contamination and on the activation-audit twins. Small samples can show only large effects; the report says so.
 
 ## Risks
 
 - **A description is stale or poor.** Each line carries its generation, a derived description is marked, and stale projections are served marked.
 - **The map grows with the vault.** The map is a bounded projection, and domain maps and recall hold the rest.
 - **Invalidation fans out.** A highly connected anchor can invalidate many projections. Refresh coalesces and rebuilds lazily on read when cheaper.
-- **Hidden material leaks through aggregates.** D7 computes over the reader's view before synthesis, and the counterfactual twins check it.
+- **Hidden material leaks through aggregates.** D7 computes over the caller's view before synthesis, and the counterfactual twins check it.
 - **The evaluation flatters an arm.** The protocol fixes agent, budget, snapshot and scoring before generation.
 
 ## Open questions
 
 - The backfill method: a model pass, derived descriptions, or both, and its cost.
 - Whether a turn slice adds value over the map alone.
+- Whether the context catalogue earns its build and upkeep cost over pull instructions alone.
 - Whether `ask_memory` queries before the first answer are enough, or a combined call saves latency.
