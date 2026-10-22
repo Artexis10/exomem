@@ -1995,7 +1995,7 @@
       "properties": {
         "operation": {
           "default": "list",
-          "description": "list, trash-list and propose-reclassification read; the others write.",
+          "description": "list, trash-list and propose-reclassification read; create and append read with validate_only; the others write.",
           "enum": [
             "list",
             "create",

@@ -29,7 +29,7 @@ import re
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
@@ -12035,7 +12035,8 @@ def op_manage_memory_file(
     flags.
 
     Args:
-        operation: list, trash-list and propose-reclassification read; the others write.
+        operation: list, trash-list and propose-reclassification read; create and append
+            read with validate_only; the others write.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
@@ -13280,6 +13281,14 @@ def _build_product_commands() -> tuple[Command, ...]:
         # every renderer and runtime publishes the same tool contract.
         desc = inspect.cleandoc(leaf.__doc__ or "")
         params = _derive_params(leaf, skip=skip, positional=positional)
+        # A registry-covered selector lists the registry's values on every door.
+        selector = egress_module.selector_for_command(name)
+        if selector is not None:
+            values = tuple(egress_module.selector_registry()[(name, selector)])
+            params = tuple(
+                replace(param, choices=values) if param.name == selector else param
+                for param in params
+            )
         response_detail = "full" if name == "govern_memory" else "compact" if writes else None
         if name == "edit_memory":
             params = tuple(

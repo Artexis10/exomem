@@ -887,6 +887,8 @@ def _closed_selector(
     annotation = resolved.get(parameter.name, parameter.annotation)
     declared = _literal_string_values(annotation)
     if declared:
+        # Fail the build: a schema that disagrees with the lease and egress registry
+        # would advertise values the dispatcher refuses, or hide ones it accepts.
         if set(declared) != set(values):
             raise RuntimeError(
                 f"selector Literal and selector registry disagree: {command_name}.{selector}"
@@ -896,6 +898,7 @@ def _closed_selector(
         None,
         *values,
     ):
+        # Fail the build: an enum that excludes the default makes the default call invalid.
         raise RuntimeError(
             f"selector default outside the selector registry: {command_name}.{selector}"
         )

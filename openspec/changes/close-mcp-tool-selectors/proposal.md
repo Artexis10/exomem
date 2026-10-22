@@ -9,7 +9,7 @@ Five of those tools publish their operation selector as a free string: `connect_
 - Every MCP selector of a product command that the selector registry covers publishes the registry's values as a JSON Schema `enum`. Seven tools gain an enum: the five above, plus `observe_memory` and `adopt_vault`.
 - A selector whose leaf signature already declares a `Literal` keeps it. The server build fails if that `Literal` disagrees with the registry.
 - Two selector descriptions that repeated the value list now say which values write: `connect_memory.operation` and `manage_memory_file.operation`.
-- The tool-schema byte budget rises by 600 bytes for the enums.
+- The tool-schema byte budget rises by 650 bytes for the enums.
 
 Nothing else changes: no tool is added, removed or renamed, and no capability is removed. `activate_context` keeps every input. Whether to split operations into separate tools, and whether to change `activate_context`, stays open until OpenAI answers a manual review.
 
