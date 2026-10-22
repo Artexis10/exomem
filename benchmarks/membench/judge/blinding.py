@@ -148,6 +148,16 @@ class SourceNumbering:
         return f"[ctx:{number}]"
 
 
+def tokenize_exomem_refs(text: str, numbering: SourceNumbering) -> str:
+    """Replace every ``exomem://`` ref in ``text`` with its ``[ctx:N]`` token.
+
+    The one rewrite a judge view needs when the rest of the text must reach the
+    judge unchanged; :func:`normalize_for_judge` applies it first.
+    """
+
+    return _EXOMEM_URI_RE.sub(lambda match: numbering.token(match.group(0)), text)
+
+
 def normalize_for_judge(text: str, numbering: SourceNumbering | None = None) -> str:
     """Rewrite provider-identifying shapes in ``text`` into neutral tokens.
 
@@ -164,7 +174,7 @@ def normalize_for_judge(text: str, numbering: SourceNumbering | None = None) -> 
     def _ctx_sentinel(match: re.Match[str]) -> str:
         return numbers.token(match.group(1))
 
-    out = _EXOMEM_URI_RE.sub(_ctx_whole, text)
+    out = tokenize_exomem_refs(text, numbers)
     out = SENTINEL_RE.sub(_ctx_sentinel, out)
     out = _VAULT_PATH_RE.sub(_ctx_whole, out)
     out = _MD_PATH_RE.sub(_ctx_whole, out)

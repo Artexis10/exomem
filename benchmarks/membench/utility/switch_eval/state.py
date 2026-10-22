@@ -1,0 +1,401 @@
+"""Run layout, per-arm state builds and the captured server surface.
+
+Exomem keys a vault's machine-local state by the vault's resolved path
+(``state_paths.vault_state_dir``), so state built for one path is not found
+under another. Every build and every session therefore runs in one fixed slot
+inside the run directory: ``slot/vault`` and ``slot/state``. A build leaves its
+result in ``arms/<arm>/<tree>/`` with a digest; a session copies that result
+back into the slot, checks the digest, runs, and the slot is wiped. Nothing
+here reads or writes the user's own state root or a running service: every
+product location is pinned under the slot (see :func:`product_env`).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from epistemic.journeys.f27_replay import REPO_ROOT, refuse_unsafe_out_dir
+from membench.adapters.exomem_local import lexical_profile
+
+from . import protocol
+from .arms import ArmSpec, canonical_json, sha256_text
+from .tap import __file__ as TAP_SCRIPT
+
+SERVER_NAME = "exomem"
+
+
+class StateError(RuntimeError):
+    """A build or a slot that cannot be trusted; the run stops before a session."""
+
+
+def tree_digest(root: Path) -> str:
+    """Digest of every regular file and symlink under ``root``: path, kind and bytes."""
+
+    root = Path(root)
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+        rel = path.relative_to(root).as_posix()
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            digest.update(b"L\0" + rel.encode() + b"\0" + os.readlink(path).encode() + b"\0")
+        elif stat.S_ISREG(info.st_mode):
+            digest.update(b"F\0" + rel.encode() + b"\0")
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class Layout:
+    """Every path the run writes, all under one run directory."""
+
+    run: Path
+
+    @classmethod
+    def at(cls, run: Path) -> Layout:
+        # The agent CLI discovers memory files by walking up from its cwd, which
+        # is the slot; the shared refusal keeps the run outside any repository.
+        return cls(refuse_unsafe_out_dir(Path(run)))
+
+    @property
+    def slot(self) -> Path:
+        return self.run / "slot"
+
+    def arm_tree(self, arm: str, tree: str) -> Path:
+        return self.run / "arms" / arm / tree
+
+    def arm_dir(self, arm: str) -> Path:
+        return self.run / "arms" / arm
+
+    @property
+    def sessions(self) -> Path:
+        return self.run / "sessions"
+
+    @property
+    def judge(self) -> Path:
+        return self.run / "judge"
+
+    @property
+    def unblinding(self) -> Path:
+        return self.run / "unblinding"
+
+    @property
+    def score(self) -> Path:
+        return self.run / "score"
+
+
+@dataclass(frozen=True)
+class Slot:
+    root: Path
+
+    @property
+    def vault(self) -> Path:
+        return self.root / "vault"
+
+    @property
+    def state(self) -> Path:
+        return self.root / "state"
+
+    @property
+    def runtime(self) -> Path:
+        return self.root / "runtime"
+
+    @property
+    def cwd(self) -> Path:
+        return self.root / "cwd"
+
+    @property
+    def hook_home(self) -> Path:
+        return self.root / "hook-home"
+
+    @property
+    def turn_file(self) -> Path:
+        return self.runtime / "turn"
+
+    def wipe(self) -> None:
+        if self.root.exists():
+            shutil.rmtree(self.root)
+
+
+def product_env(slot: Slot, *, packet_mode: str) -> dict[str, str]:
+    """Every Exomem location pinned under the slot, plus the arm's packet mode.
+
+    The lexical profile is the existing harnesses' deterministic profile. The
+    service-credential file points at a path that never exists, so the hook's
+    REST and local rungs find no key and cannot reach a running service.
+    """
+
+    rt = slot.runtime
+    return {
+        "EXOMEM_VAULT_PATH": str(slot.vault),
+        "EXOMEM_STATE_ROOT": str(slot.state),
+        "EXOMEM_CONFIG_PATH": str(rt / "exomem-config.json"),
+        "EXOMEM_LOG_DIR": str(rt / "logs"),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(rt / "leases"),
+        "EXOMEM_CALL_LEDGER_DIR": str(rt / "call-ledger"),
+        "EXOMEM_LEASE_COORDINATOR_DB": str(rt / "lease-coordinator.sqlite"),
+        "EXOMEM_SERVICE_ENV": str(rt / "no-service.env"),
+        "EXOMEM_HOOK_HOME": str(slot.hook_home),
+        protocol.PACKET_SETTING: packet_mode,
+        **lexical_profile().settings,
+    }
+
+
+def python_executable() -> str:
+    """The build's interpreter: the server, the tap and the builder all run on it."""
+
+    return sys.executable
+
+
+def _child_env(parent: Mapping[str, str], slot: Slot, packet_mode: str) -> dict[str, str]:
+    env = {key: value for key, value in parent.items() if not key.startswith("EXOMEM_")}
+    env.update(product_env(slot, packet_mode=packet_mode))
+    env["PYTHONPATH"] = str(REPO_ROOT / "benchmarks")
+    return env
+
+
+def prepare_build_slot(layout: Layout, source_vault: Path) -> Slot:
+    slot = Slot(layout.slot)
+    slot.wipe()
+    for path in (slot.runtime, slot.cwd, slot.hook_home):
+        path.mkdir(parents=True)
+    shutil.copytree(source_vault, slot.vault, symlinks=True)
+    return slot
+
+
+def build_state(vault: Path) -> dict:
+    """Runs in the builder child: the product's own fresh bootstrap, then the
+    derived indexes the existing harness publishes, then the context catalogue.
+
+    The same build for every arm: the arms differ in packet mode at serve time,
+    not in what the vault holds.
+    """
+
+    from membench.utility.context_activation_product import publish
+
+    from exomem import state_migration
+    from exomem.context_catalogue import ContextCatalogue
+
+    started = time.monotonic()
+    state_migration.require_vault_state_ready(vault)
+    publication = publish(vault)
+    catalogue = ContextCatalogue(vault).rebuild()
+    return {
+        "anchors": len(publication.anchors),
+        "indexed_pages": publication.indexed_pages,
+        "catalogue": {
+            key: value for key, value in catalogue.items() if isinstance(value, (int, str))
+        },
+        "seconds": round(time.monotonic() - started, 2),
+    }
+
+
+def mcp_server_entry(slot: Slot, spec: ArmSpec, *, log: Path, server_stderr: Path) -> dict:
+    """The ``--mcp-config`` server entry: the tap in front of the stdio server."""
+
+    return {
+        "command": python_executable(),
+        "args": [
+            TAP_SCRIPT,
+            "--log",
+            str(log),
+            "--turn-file",
+            str(slot.turn_file),
+            "--budget",
+            str(protocol.PULL_BUDGET_PER_TURN),
+            "--allow",
+            ",".join(spec.tools),
+            "--server-stderr",
+            str(server_stderr),
+            "--",
+            python_executable(),
+            "-m",
+            "exomem",
+            "--transport",
+            "stdio",
+        ],
+        "env": product_env(slot, packet_mode=spec.packet_mode),
+    }
+
+
+def capture_surface(slot: Slot, spec: ArmSpec, *, env: Mapping[str, str], out: Path) -> dict:
+    """Ask the server, through the tap, what the arm's actor will be shown.
+
+    One ``initialize`` and one ``tools/list`` with no model in the loop. The
+    hashes cover the instructions and the filtered tools exactly as relayed.
+    """
+
+    out.mkdir(parents=True, exist_ok=True)
+    slot.turn_file.write_text("-1", encoding="utf-8")
+    entry = mcp_server_entry(
+        slot, spec, log=out / "surface-tap.jsonl", server_stderr=out / "surface-server.stderr"
+    )
+    child_env = {**env, **entry["env"]}
+    proc = subprocess.Popen(  # noqa: S603 - the harness's own tap and server
+        [entry["command"], *entry["args"]],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=child_env,
+        cwd=slot.cwd,
+    )
+
+    def ask(request_id: int, method: str) -> dict:
+        proc.stdin.write(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params[method]}
+            )
+            + "\n"
+        )
+        proc.stdin.flush()
+        for line in proc.stdout:
+            message = json.loads(line)
+            if message.get("id") == request_id:
+                if "error" in message:
+                    raise StateError(
+                        f"{method} failed while capturing the surface: {message['error']}"
+                    )
+                return message["result"]
+        raise StateError(
+            f"the server closed before answering {method} (see {out / 'surface-server.stderr'})"
+        )
+
+    params = {
+        "initialize": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "switch-eval", "version": "1"},
+        },
+        "tools/list": {},
+    }
+    try:
+        initialized = ask(1, "initialize")
+        proc.stdin.write(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        )
+        proc.stdin.flush()
+        tools = ask(2, "tools/list")["tools"]
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=60)
+    instructions = initialized.get("instructions") or ""
+    by_name = {tool["name"]: tool for tool in tools}
+    if sorted(by_name) != sorted(spec.tools):
+        raise StateError(
+            f"arm {spec.arm_id}: the server offers {sorted(by_name)}, the arm needs {sorted(spec.tools)}"
+        )
+    surface = {
+        "server_instructions": sha256_text(instructions),
+        "tool_descriptions": sha256_text(
+            canonical_json([by_name[name] for name in sorted(by_name)])
+        ),
+        "per_tool": {name: sha256_text(canonical_json(by_name[name])) for name in sorted(by_name)},
+    }
+    (out / "surface.json").write_text(
+        json.dumps(
+            {
+                "hashes": surface,
+                "instructions": instructions,
+                "tools": [by_name[n] for n in sorted(by_name)],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return surface
+
+
+def build_arm(
+    layout: Layout, spec: ArmSpec, *, tree: str, source_vault: Path, parent_env: Mapping[str, str]
+) -> dict:
+    """Build one arm's state for one tree once, capture its surface, record digests."""
+
+    target = layout.arm_tree(spec.arm_id, tree)
+    if (target / "state.json").exists():
+        return json.loads((target / "state.json").read_text(encoding="utf-8"))
+    snapshot_digest = tree_digest(source_vault)
+    slot = prepare_build_slot(layout, source_vault)
+    env = _child_env(parent_env, slot, spec.packet_mode)
+    target.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    completed = subprocess.run(  # noqa: S603 - the harness's own builder entry point
+        [
+            python_executable(),
+            "-m",
+            "membench.utility.switch_eval",
+            "build-state",
+            "--vault",
+            str(slot.vault),
+        ],
+        env=env,
+        cwd=slot.cwd,
+        capture_output=True,
+        text=True,
+        timeout=None,
+    )
+    (target / "build.stdout").write_text(completed.stdout, encoding="utf-8")
+    (target / "build.stderr").write_text(completed.stderr, encoding="utf-8")
+    if completed.returncode != 0:
+        raise StateError(
+            f"arm {spec.arm_id} tree {tree}: the state build exited {completed.returncode}; see {target}"
+        )
+    build = json.loads(completed.stdout.strip().splitlines()[-1])
+    surface = capture_surface(slot, spec, env=env, out=target)
+    for name in ("vault", "state"):
+        if (target / name).exists():
+            shutil.rmtree(target / name)
+        shutil.move(str(slot.root / name), str(target / name))
+    record = {
+        "arm": spec.arm_id,
+        "tree": tree,
+        "source_vault": str(source_vault),
+        "snapshot_digest": snapshot_digest,
+        "vault_digest": tree_digest(target / "vault"),
+        "state_digest": tree_digest(target / "state"),
+        "build": build,
+        "build_seconds": round(time.monotonic() - started, 2),
+        "surface": surface,
+    }
+    slot.wipe()
+    (target / "state.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return record
+
+
+def load_arm_state(layout: Layout, arm: str, tree: str) -> dict | None:
+    path = layout.arm_tree(arm, tree) / "state.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def prepare_session_slot(layout: Layout, arm: str, tree: str) -> Slot:
+    """A fresh copy of the arm's built state in the slot, checked against its digest."""
+
+    record = load_arm_state(layout, arm, tree)
+    if record is None:
+        raise StateError(f"arm {arm} tree {tree} has no built state; run the state stage first")
+    slot = Slot(layout.slot)
+    slot.wipe()
+    for path in (slot.runtime, slot.cwd, slot.hook_home):
+        path.mkdir(parents=True)
+    source = layout.arm_tree(arm, tree)
+    shutil.copytree(source / "vault", slot.vault, symlinks=True)
+    shutil.copytree(source / "state", slot.state, symlinks=True)
+    for name, key in (("vault", "vault_digest"), ("state", "state_digest")):
+        if tree_digest(slot.root / name) != record[key]:
+            raise StateError(
+                f"arm {arm} tree {tree}: the session copy of {name} does not match its build digest"
+            )
+    slot.turn_file.write_text("-1", encoding="utf-8")
+    return slot
