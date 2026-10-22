@@ -25,10 +25,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import REPO_ROOT, refuse_unsafe_out_dir
-from membench.adapters.exomem_local import lexical_profile
 
 from . import protocol
-from .arms import ArmSpec, canonical_json, sha256_text
+from .arms import ArmSpec, canonical_json, profile_settings, sha256_text
 from .tap import __file__ as TAP_SCRIPT
 
 SERVER_NAME = "exomem"
@@ -129,10 +128,11 @@ class Slot:
             shutil.rmtree(self.root)
 
 
-def product_env(slot: Slot, *, packet_mode: str) -> dict[str, str]:
-    """Every Exomem location pinned under the slot, plus the arm's packet mode.
+def product_env(slot: Slot, spec: ArmSpec) -> dict[str, str]:
+    """Every Exomem location pinned under the slot, plus the arm's packet mode
+    and the run's retrieval profile.
 
-    The lexical profile is the existing harnesses' deterministic profile. The
+    The profiles are the existing harnesses' own (see ``profile_settings``). The
     service-credential file points at a path that never exists, so the hook's
     REST and local rungs find no key and cannot reach a running service.
     """
@@ -148,8 +148,8 @@ def product_env(slot: Slot, *, packet_mode: str) -> dict[str, str]:
         "EXOMEM_LEASE_COORDINATOR_DB": str(rt / "lease-coordinator.sqlite"),
         "EXOMEM_SERVICE_ENV": str(rt / "no-service.env"),
         "EXOMEM_HOOK_HOME": str(slot.hook_home),
-        protocol.PACKET_SETTING: packet_mode,
-        **lexical_profile().settings,
+        protocol.PACKET_SETTING: spec.packet_mode,
+        **profile_settings(spec.profile),
     }
 
 
@@ -159,9 +159,9 @@ def python_executable() -> str:
     return sys.executable
 
 
-def _child_env(parent: Mapping[str, str], slot: Slot, packet_mode: str) -> dict[str, str]:
+def _child_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[str, str]:
     env = {key: value for key, value in parent.items() if not key.startswith("EXOMEM_")}
-    env.update(product_env(slot, packet_mode=packet_mode))
+    env.update(product_env(slot, spec))
     env["PYTHONPATH"] = str(REPO_ROOT / "benchmarks")
     return env
 
@@ -183,10 +183,9 @@ def build_state(vault: Path) -> dict:
     not in what the vault holds.
     """
 
-    from membench.utility.context_activation_product import publish
-
     from exomem import state_migration
     from exomem.context_catalogue import ContextCatalogue
+    from membench.utility.context_activation_product import publish
 
     started = time.monotonic()
     state_migration.require_vault_state_ready(vault)
@@ -226,7 +225,7 @@ def mcp_server_entry(slot: Slot, spec: ArmSpec, *, log: Path, server_stderr: Pat
             "--transport",
             "stdio",
         ],
-        "env": product_env(slot, packet_mode=spec.packet_mode),
+        "env": product_env(slot, spec),
     }
 
 
@@ -328,7 +327,7 @@ def build_arm(
         return json.loads((target / "state.json").read_text(encoding="utf-8"))
     snapshot_digest = tree_digest(source_vault)
     slot = prepare_build_slot(layout, source_vault)
-    env = _child_env(parent_env, slot, spec.packet_mode)
+    env = _child_env(parent_env, slot, spec)
     target.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     completed = subprocess.run(  # noqa: S603 - the harness's own builder entry point

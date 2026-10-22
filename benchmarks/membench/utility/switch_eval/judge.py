@@ -243,8 +243,16 @@ def judge_prompt(item: Mapping) -> str:
 def codex_argv(
     *, model: str, effort: str, schema: Path, out: Path, sandbox: Path, prompt: str
 ) -> list[str]:
-    """``codex exec`` with no user config, rules, hooks or plugins, read-only, in an
-    empty directory; stdin is closed by the caller."""
+    """``codex exec`` with no user config, rules, hooks, plugins, project docs,
+    skill list or tools, read-only, in an empty directory; stdin is closed by
+    the caller.
+
+    A read-only shell still reads the whole disk, the arm key included, so the
+    shell, its exec successor and the code-mode host are disabled by their
+    feature names. The global ``AGENTS.md`` under the Codex home still reaches
+    the judge: no flag of this version drops it, and it is the same text for
+    every item (a named limitation of the route).
+    """
 
     return [
         "codex",
@@ -259,6 +267,12 @@ def codex_argv(
         "plugins",
         "--disable",
         "apps",
+        "--disable",
+        "shell_tool",
+        "--disable",
+        "unified_exec",
+        "--disable",
+        "code_mode_host",
         "-s",
         "read-only",
         "-C",
@@ -267,6 +281,10 @@ def codex_argv(
         model,
         "-c",
         f'model_reasoning_effort="{effort}"',
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "skills.include_instructions=false",
         "--output-schema",
         str(schema),
         "-o",
@@ -331,6 +349,24 @@ def validate_verdict(item: Mapping, verdict: object) -> dict:
         else None,
         "span": no_memory.get("span") if not item["expects_memory"] else None,
     }
+
+
+#: The ``codex exec --json`` item types a judge with no tools emits: its
+#: messages, its reasoning and the CLI's own notices. Any other type is a tool.
+_JUDGE_ITEM_TYPES = frozenset({"agent_message", "reasoning", "error"})
+
+
+def _refuse_tool_use(stdout: str) -> None:
+    """Refuse a verdict whose judge ran a tool: a tool could read the arm key."""
+
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if isinstance(item, dict) and item.get("type") not in _JUDGE_ITEM_TYPES:
+            raise JudgeError(f"the judge ran a tool ({item.get('type')}); its verdict is not blind")
 
 
 def run_judge(
@@ -404,6 +440,9 @@ def run_judge(
                         f"exit {completed.returncode}: {completed.stderr.strip()[-300:]}"
                     )
                 if route == "codex":
+                    events = raw_path.with_name(f"{item['item_id']}.events-{attempt}.jsonl")
+                    events.write_text(completed.stdout, encoding="utf-8")
+                    _refuse_tool_use(completed.stdout)
                     payload = json.loads(raw_path.read_text(encoding="utf-8"))
                 else:
                     raw_path.write_text(completed.stdout, encoding="utf-8")

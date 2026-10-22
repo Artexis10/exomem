@@ -18,7 +18,9 @@ from membench.utility.switch_eval.arms import arm_specs
 from membench.utility.switch_eval.cases import load_cases
 from membench.utility.switch_eval.judge import (
     ITEM_FIELDS,
+    JudgeError,
     UnblindingError,
+    _refuse_tool_use,
     build_items,
     tie_break,
     unblind,
@@ -30,6 +32,7 @@ from membench.utility.switch_eval.session import (
     OK,
     AttemptResult,
     PlannedSession,
+    RunAborted,
     SessionInputs,
     classify,
     run_session,
@@ -38,10 +41,13 @@ from membench.utility.switch_eval.state import Layout
 from membench.utility.switch_eval.tap import BUDGET_REFUSAL
 from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 
-# A stand-in MCP server: answers initialize, tools/list and tools/call, and
-# with --crash-on-call exits mid-call, as a crashing server under test would.
+# A stand-in MCP server: answers initialize, tools/list and tools/call; with
+# --crash-on-call exits mid-call, as a crashing server under test would, and
+# with --exit-at-start exits before it reads a message, as a broken build would.
 FAKE_SERVER = """
 import json, sys
+if "--exit-at-start" in sys.argv:
+    sys.exit(2)
 crash = "--crash-on-call" in sys.argv
 served = 0
 for line in sys.stdin:
@@ -267,6 +273,58 @@ def test_a_crash_of_the_server_under_test_is_an_actor_failure_and_not_retried(tm
 
     assert (record["outcome"], record["kind"]) == (ACTOR_FAILURE, "server_crash")
     assert len(calls) == 1
+
+
+def test_a_server_that_never_starts_is_retried_then_stops_the_run(tmp_path: Path) -> None:
+    tap, log, _turn_file = _start_tap(tmp_path, "--exit-at-start")
+    tap.wait(timeout=30)
+    tap_events = _log(log)
+    calls: list[int] = []
+
+    def never_started(inputs: SessionInputs, attempt_dir: Path) -> AttemptResult:
+        calls.append(1)
+        return classify(
+            spec=arm_specs()["P"], model="m", client_version="v", events=[], turn_records=[],
+            tap_events=tap_events, scored_turn=0, timed_out=False, quota=None, surface=None,
+        )  # fmt: skip
+
+    with pytest.raises(RunAborted):
+        run_session(_inputs(), tmp_path / "never-started", never_started)
+
+    assert len(calls) == 1 + protocol.HARNESS_FAULT_RETRIES
+    assert not (tmp_path / "never-started" / "session.json").exists()
+
+
+@pytest.mark.parametrize(
+    "leak",
+    [
+        # Otherwise the arm's own surface, so only the extra server is wrong.
+        {"type": "system", "subtype": "init", "apiKeySource": "none", "plugins": [],
+         "model": "m", "claude_code_version": "v",
+         "tools": [f"mcp__exomem__{tool}" for tool in protocol.READ_TOOLS],
+         "mcp_servers": [{"name": "exomem", "status": "connected"}, {"name": "other", "status": "connected"}]},
+        {"type": "system", "subtype": "hook_started", "hook_id": "h1", "hook_name": "SessionStart:startup",
+         "hook_event": "SessionStart"},
+    ],
+    ids=["an MCP server the arm does not name", "a hook the arm does not wire"],
+)  # fmt: skip
+def test_a_client_surface_beyond_the_arm_stops_the_run(leak: dict) -> None:
+    result = classify(
+        spec=arm_specs()["A"], model="m", client_version="v", events=[leak], turn_records=[],
+        tap_events=[], scored_turn=0, timed_out=False, quota=None, surface=None,
+    )  # fmt: skip
+
+    assert result.outcome == "abort"
+
+
+def test_a_judge_that_ran_a_tool_gives_no_verdict() -> None:
+    # The `codex exec --json` shapes: a read-only shell still reads the arm key.
+    answered = json.dumps({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "{}"}})
+    looked = json.dumps({"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": "cat ../arm-key.json"}})  # fmt: skip
+
+    _refuse_tool_use(answered)
+    with pytest.raises(JudgeError):
+        _refuse_tool_use(looked + "\n" + answered)
 
 
 # -- unblinding and the tie-break ---------------------------------------------

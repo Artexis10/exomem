@@ -9,9 +9,10 @@ captures from the server itself (see :mod:`.state`).
 - A runs the server in ``anchors`` mode, pushes what the deployed retrieve hook
   pushes, sees the four read tools and gets the current client instructions,
   read from the doc that publishes them.
-- M runs the server in ``maps`` mode, pushes what the retrieve hook pushes in
-  working-set mode over a ``maps`` server (the map), sees the four read tools
-  and is told to read the map and pull before the answer.
+- M runs the server in ``maps`` mode, pushes what the same retrieve hook, in the
+  same mode, pushes over a ``maps`` server, sees the four read tools and is
+  told to read the map and pull before the answer. So A and M differ only in
+  the packet and the instruction lines.
 - P runs the server in ``anchors`` mode, pushes nothing, sees the read tools
   without ``activate_context`` and shares M's pull instruction without the map
   line.
@@ -30,20 +31,45 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import Arm, custom_instructions_block
 
+from membench.adapters.exomem_local import embeddings_profile, lexical_profile
+
 from . import protocol
 from .tap import BUDGET_REFUSAL, FILTER_REFUSAL
+
+#: The benchmark adapter's two retrieval profiles, by the names the adapter
+#: gives them: a closed set the adapter defines, recorded as a run input.
+RETRIEVAL_PROFILES = {
+    "neutral-lexical": lexical_profile,
+    "recommended-embeddings": embeddings_profile,
+}
+DEFAULT_PROFILE = "neutral-lexical"
+
+
+def profile_settings(name: str) -> dict[str, str]:
+    """The profile's settings as every server of the run gets them.
+
+    The adapter pins the python lexical backend, which is the lexical store's
+    kill switch: the context catalogue and the working set then report
+    ``unsupported``, a state no deployment runs. The harness pins FTS5 instead,
+    not ``auto``, so a host without FTS5 fails the state build loudly.
+    """
+
+    settings = dict(RETRIEVAL_PROFILES[name]().settings)
+    settings["EXOMEM_LEXICAL_BACKEND"] = "fts5"
+    return settings
+
 
 TEXTS = Path(__file__).resolve().parent / "texts"
 
 #: The retrieve hook modes the installer supports (``install_hook.
-#: SUPPORTED_ACTIVATION_MODES``); A's is a run input, M's is fixed.
+#: SUPPORTED_ACTIVATION_MODES``). The mode is a run input shared by A and M.
 HOOK_MODE_MCP = "mcp"
 HOOK_MODE_WORKING_SET = "working-set"
 
-#: A's push. The operator's profile installs bind the retrieve hook with
-#: ``--activation-mode mcp``; a run that measures a different deployment says
-#: so with ``--a-hook-mode`` and the arm hash records it.
-DEFAULT_A_HOOK_MODE = HOOK_MODE_MCP
+#: The deployed push. The operator's profile installs bind the retrieve hook
+#: with ``--activation-mode mcp``; a run that measures a different deployment
+#: says so with ``--hook-mode`` and the arm hash records it.
+DEFAULT_HOOK_MODE = HOOK_MODE_MCP
 
 
 @dataclass(frozen=True)
@@ -55,21 +81,27 @@ class ArmSpec:
     tools: tuple[str, ...]
     #: ``("doc", level)`` for the published prominence block, else text files.
     instruction_source: tuple[str, ...]
+    #: The retrieval profile, the same on every arm: a run input, carried here
+    #: because every server environment of the arm is built from its spec.
+    profile: str = DEFAULT_PROFILE
 
     def allowed_tools_flag(self, server_name: str) -> str:
         return " ".join(f"mcp__{server_name}__{tool}" for tool in self.tools)
 
 
-def arm_specs(*, a_hook_mode: str = DEFAULT_A_HOOK_MODE) -> Mapping[str, ArmSpec]:
-    if a_hook_mode not in (HOOK_MODE_MCP, HOOK_MODE_WORKING_SET):
-        raise ValueError(f"unsupported hook mode for A: {a_hook_mode!r}")
+def arm_specs(
+    *, hook_mode: str = DEFAULT_HOOK_MODE, profile: str = DEFAULT_PROFILE
+) -> Mapping[str, ArmSpec]:
+    if hook_mode not in (HOOK_MODE_MCP, HOOK_MODE_WORKING_SET):
+        raise ValueError(f"unsupported hook mode: {hook_mode!r}")
+    if profile not in RETRIEVAL_PROFILES:
+        raise ValueError(f"unknown retrieval profile: {profile!r}")
     p_tools = tuple(tool for tool in protocol.READ_TOOLS if tool != protocol.P_FILTERED_TOOL)
+    read, pull, maps = protocol.READ_TOOLS, ("pull.md",), ("pull.md", "map.md")
     return {
-        "A": ArmSpec("A", "anchors", a_hook_mode, protocol.READ_TOOLS, ("doc", "balanced")),
-        "M": ArmSpec(
-            "M", "maps", HOOK_MODE_WORKING_SET, protocol.READ_TOOLS, ("pull.md", "map.md")
-        ),
-        "P": ArmSpec("P", "anchors", None, p_tools, ("pull.md",)),
+        "A": ArmSpec("A", "anchors", hook_mode, read, ("doc", "balanced"), profile),
+        "M": ArmSpec("M", "maps", hook_mode, read, maps, profile),
+        "P": ArmSpec("P", "anchors", None, p_tools, pull, profile),
     }
 
 

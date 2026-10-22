@@ -7,10 +7,13 @@ fresh session and one Exomem server process for the whole case (design,
 "Session"), behind the tap that enforces the pull budget.
 
 Classification reads structured fields only: the CLI's event types, its
-documented error kinds and the tap's log. A crash of the server under test is
-an actor failure and is never retried; a rate limit, a transport error or a
-host fault is a harness fault and is retried with the same inputs, up to the
-protocol's limit; a spent quota pauses the run (design, "Runs and failures").
+documented error kinds and the tap's log. A crash of the server under test
+after it answered ``initialize`` is an actor failure and is never retried; a
+rate limit, a transport error, a host fault or a server that never started is
+a harness fault and is retried with the same inputs, up to the protocol's
+limit; a spent quota pauses the run (design, "Runs and failures"). A server
+that still does not start after the retries stops the run: every later session
+would share the fault, and a struck case would hide it.
 """
 
 from __future__ import annotations
@@ -34,11 +37,20 @@ from epistemic.journeys.f27_replay import (
     environment_delta,
     environment_floor,
 )
+
 from membench.trackc.witness_join import parse_stream_json_transcript
 from membench.utility.context_activation_arms import rotate_arm_order
 
 from . import protocol
-from .arms import ArmSpec, canonical_json, client_instructions, f27_arm, hook_settings, sha256_text
+from .arms import (
+    HOOK_MODE_WORKING_SET,
+    ArmSpec,
+    canonical_json,
+    client_instructions,
+    f27_arm,
+    hook_settings,
+    sha256_text,
+)
 from .cases import Case
 from .state import (
     SERVER_NAME,
@@ -71,6 +83,31 @@ API_KEY_VARIABLES: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN
 #: billing errors, and a refused request, are the harness's setup.
 _FAULT_ERRORS = {"rate_limit": "rate_limit", "server_error": "transport", "unknown": "transport"}
 _ABORT_ERRORS = frozenset({"authentication_failed", "billing_error", "invalid_request"})
+
+#: The fault kind of a server that never answered ``initialize``.
+SERVER_START = "server_start"
+
+#: The hook event of the protocol's push, the only hook an arm wires.
+PUSH_HOOK_EVENT = "UserPromptSubmit"
+
+#: The init event's fields recorded with every attempt: what the session's
+#: client loaded, so a report can show the surface it ran on.
+_INIT_FACTS = (
+    "apiKeySource",
+    "model",
+    "claude_code_version",
+    "cwd",
+    "permissionMode",
+    "output_style",
+    "tools",
+    "mcp_servers",
+    "plugins",
+    "plugin_errors",
+    "memory_paths",
+    "skills",
+    "agents",
+    "slash_commands",
+)
 
 #: Seconds the harness waits for the CLI to exit after the scored turn before
 #: it ends the process group. Not a protocol value: the session is over.
@@ -186,10 +223,15 @@ def session_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[st
 
     floor, _removed = environment_floor(parent)
     env = {key: value for key, value in floor.items() if not key.startswith(("EXOMEM_", "KB_"))}
-    env.update(product_env(slot, packet_mode=spec.packet_mode))
+    env.update(product_env(slot, spec))
     env["EXOMEM_RETRIEVE_INJECT_CLI"] = "1"
+    # The client's auto memory adds its own instructions and the operator's
+    # memory directory to every arm; the protocol's actor has neither.
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     build_bin = str(Path(sys.executable).parent)
-    rest = [entry for entry in floor.get("PATH", "").split(os.pathsep) if entry and entry != build_bin]
+    rest = [
+        entry for entry in floor.get("PATH", "").split(os.pathsep) if entry and entry != build_bin
+    ]
     env["PATH"] = os.pathsep.join([build_bin, *rest])
     return env
 
@@ -402,15 +444,76 @@ def classify(
             turns=list(turn_records),
         )
 
+    init = next(
+        (e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), None
+    )
+    if init is not None:
+        checks["init"] = {name: init.get(name) for name in _INIT_FACTS if name in init}
+        servers = {
+            s.get("name"): s.get("status")
+            for s in init.get("mcp_servers") or []
+            if isinstance(s, dict)
+        }
+        # What the client loaded beyond the arm: each would reach every
+        # session of the run, so the setup is wrong and the run stops.
+        loaded = {
+            "api_key": init.get("apiKeySource") if init.get("apiKeySource") != "none" else None,
+            # The client's bundled plugins (``path`` "builtin") ship with the
+            # pinned version and load alike for every arm; any other is not.
+            "plugins": [
+                plugin
+                for plugin in init.get("plugins") or []
+                if not (isinstance(plugin, dict) and plugin.get("path") == "builtin")
+            ],
+            "memory": init.get("memory_paths"),
+            "mcp_servers": sorted(set(servers) - {SERVER_NAME}),
+        }
+        checks.update(api_key_source=init.get("apiKeySource") == "none")
+        for name, found in loaded.items():
+            if found:
+                return AttemptResult(
+                    ABORT,
+                    f"surface_{name}",
+                    f"the client loaded {name} beyond the arm: {found!r}",
+                    turns=list(turn_records),
+                    checks=checks,
+                )
+    hooks = [
+        e
+        for e in events
+        if e.get("type") == "system" and e.get("subtype") in ("hook_started", "hook_response")
+    ]
+    foreign = [e for e in hooks if spec.hook_mode is None or e.get("hook_event") != PUSH_HOOK_EVENT]
+    pushes = [record.get("hook_responses") or [] for record in turn_records]
+    if foreign or any(len(responses) > 1 for responses in pushes):
+        return AttemptResult(
+            ABORT,
+            "surface_hooks",
+            "a hook ran that the arm does not wire: "
+            + json.dumps([(e.get("hook_name"), e.get("hook_event")) for e in foreign or hooks]),
+            turns=list(turn_records),
+            checks=checks,
+        )
+
+    initialized = any(e.get("event") == "initialize" for e in tap_events)
     crash = [
         e for e in tap_events if e.get("event") == "server_exit" and e.get("while_client_connected")
     ]
-    if crash:
+    if crash and initialized:
         return AttemptResult(
             ACTOR_FAILURE,
             "server_crash",
             f"server exited {crash[0].get('returncode')}",
             turns=list(turn_records),
+            checks=checks,
+        )
+    if crash:
+        return AttemptResult(
+            HARNESS_FAULT,
+            SERVER_START,
+            f"server exited {crash[0].get('returncode')} before it answered initialize",
+            turns=list(turn_records),
+            checks=checks,
         )
 
     for event in events:
@@ -425,40 +528,23 @@ def classify(
                     HARNESS_FAULT, _FAULT_ERRORS[kind], kind, turns=list(turn_records)
                 )
 
-    init = next(
-        (e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), None
-    )
     if init is not None:
         expected_tools = sorted(f"mcp__{SERVER_NAME}__{tool}" for tool in spec.tools)
-        servers = {
-            s.get("name"): s.get("status")
-            for s in init.get("mcp_servers") or []
-            if isinstance(s, dict)
-        }
         checks.update(
             tools=sorted(init.get("tools") or []) == expected_tools,
             model=init.get("model") == model,
             client_version=str(init.get("claude_code_version")) == client_version,
-            api_key_source=init.get("apiKeySource") == "none",
             server_connected=servers.get(SERVER_NAME) == "connected",
         )
-        if not checks["api_key_source"]:
-            return AttemptResult(
-                ABORT,
-                "api_key",
-                f"apiKeySource {init.get('apiKeySource')!r}",
-                turns=list(turn_records),
-            )
         if not checks["server_connected"]:
             started = any(e.get("event") == "server_started" for e in tap_events)
-            # The tap never ran, or never reached the server: the transport.
-            kind = "transport" if not started else "server_start"
-            outcome = HARNESS_FAULT if kind == "transport" else ACTOR_FAILURE
             return AttemptResult(
-                outcome,
-                kind,
-                f"server status {servers.get(SERVER_NAME)!r}",
+                HARNESS_FAULT,
+                SERVER_START,
+                f"server status {servers.get(SERVER_NAME)!r}"
+                + ("" if started else "; the tap never started the server"),
                 turns=list(turn_records),
+                checks=checks,
             )
         for name in ("tools", "model", "client_version"):
             if not checks[name]:
@@ -490,7 +576,7 @@ def classify(
                 )
 
     if spec.hook_mode is not None:
-        fallback = _fallback_push() if spec.hook_mode == "working-set" else None
+        fallback = _fallback_push() if spec.hook_mode == HOOK_MODE_WORKING_SET else None
         for record in turn_records:
             responses = record.get("hook_responses") or []
             if not responses:
@@ -552,17 +638,34 @@ def _turn_record(
     index: int,
     lines: Sequence[str],
     events: Sequence[dict],
+    times: Sequence[float],
     tap_events: Sequence[dict],
     wall: float,
 ) -> dict:
+    """One turn's facts. ``times`` holds each event's arrival, in seconds after
+    the turn was sent; a push's ``seconds`` is its response's arrival minus its
+    start's, so it bounds the hook's own wall time from above."""
+
     transcript = parse_stream_json_transcript(lines)
     result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    started = {
+        e.get("hook_id"): t
+        for e, t in zip(events, times, strict=True)
+        if e.get("type") == "system" and e.get("subtype") == "hook_started"
+    }
     hooks = [
-        {"exit_code": e.get("exit_code"), "outcome": e.get("outcome"), "push": hook_push(e)}
-        for e in events
+        {
+            "exit_code": e.get("exit_code"),
+            "outcome": e.get("outcome"),
+            "push": hook_push(e),
+            "seconds": round(t - started[e.get("hook_id")], 3)
+            if e.get("hook_id") in started
+            else None,
+        }
+        for e, t in zip(events, times, strict=True)
         if e.get("type") == "system"
         and e.get("subtype") == "hook_response"
-        and e.get("hook_event") == "UserPromptSubmit"
+        and e.get("hook_event") == PUSH_HOOK_EVENT
     ]
     calls = [e for e in tap_events if e.get("event") == "call" and e.get("turn") == index]
     usage = transcript.usage or {}
@@ -675,20 +778,22 @@ class ClaudeSessionExecutor:
             env=dict(inputs.env),
             start_new_session=True,
         )
-        lines: queue.Queue[str | None] = queue.Queue()
+        # Each line with the time it arrived: the hook events carry no timing,
+        # and the push's wall time is the gap between its start and response.
+        lines: queue.Queue[tuple[float, str] | None] = queue.Queue()
 
         def pump() -> None:
             with open(transcript_path, "w", encoding="utf-8") as sink:
                 for line in proc.stdout:
                     sink.write(line)
                     sink.flush()
-                    lines.put(line.rstrip("\n"))
+                    lines.put((time.monotonic(), line.rstrip("\n")))
             lines.put(None)
 
         reader = threading.Thread(target=pump, daemon=True)
         reader.start()
         all_events: list[dict] = []
-        turn_slices: list[tuple[int, list[str], list[dict], float]] = []
+        turn_slices: list[tuple[int, list[str], list[dict], list[float], float]] = []
         timed_out = False
         quota: dict | None = None
         ended = False
@@ -704,6 +809,7 @@ class ClaudeSessionExecutor:
                     break
                 turn_lines: list[str] = []
                 turn_events: list[dict] = []
+                turn_times: list[float] = []
                 deadline = sent + self.turn_timeout
                 got_result = False
                 while not got_result:
@@ -712,13 +818,14 @@ class ClaudeSessionExecutor:
                         timed_out = True
                         break
                     try:
-                        line = lines.get(timeout=remaining)
+                        item = lines.get(timeout=remaining)
                     except queue.Empty:
                         timed_out = True
                         break
-                    if line is None:
+                    if item is None:
                         ended = True
                         break
+                    received, line = item
                     turn_lines.append(line)
                     try:
                         event = json.loads(line)
@@ -727,6 +834,7 @@ class ClaudeSessionExecutor:
                     if not isinstance(event, dict):
                         continue
                     turn_events.append(event)
+                    turn_times.append(received - sent)
                     all_events.append(event)
                     info = (
                         event.get("rate_limit_info")
@@ -737,7 +845,9 @@ class ClaudeSessionExecutor:
                         quota = info
                         break
                     got_result = event.get("type") == "result"
-                turn_slices.append((index, turn_lines, turn_events, time.monotonic() - sent))
+                turn_slices.append(
+                    (index, turn_lines, turn_events, turn_times, time.monotonic() - sent)
+                )
                 if timed_out or ended or quota is not None:
                     break
         finally:
@@ -760,7 +870,9 @@ class ClaudeSessionExecutor:
             shutil.copytree(slot.hook_home, attempt_dir / "hook-home", dirs_exist_ok=True)
         tap_events = _read_jsonl(runtime_copy / "tap.jsonl")
         orphan = _end_orphan_server(tap_events, slot)
-        records = [_turn_record(i, tl, te, tap_events, wall) for i, tl, te, wall in turn_slices]
+        records = [
+            _turn_record(i, tl, te, tt, tap_events, wall) for i, tl, te, tt, wall in turn_slices
+        ]
         result = classify(
             spec=spec,
             model=self.model,
@@ -824,6 +936,11 @@ def run_session(inputs: SessionInputs, session_dir: Path, execute: Executor) -> 
             raise RunAborted(f"session {inputs.planned.session_id}: {result.kind}: {result.detail}")
         if result.outcome == HARNESS_FAULT and faults + 1 <= protocol.HARNESS_FAULT_RETRIES:
             continue
+        if result.outcome == HARNESS_FAULT and result.kind == SERVER_START:
+            raise RunAborted(
+                f"session {inputs.planned.session_id}: the server did not start after "
+                f"{protocol.HARNESS_FAULT_RETRIES} retries: {result.detail}"
+            )
         final = {
             "session_id": inputs.planned.session_id,
             "case_id": inputs.planned.case_id,

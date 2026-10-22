@@ -294,12 +294,22 @@ def rules(
     in_split = [c for c in cases if c.split == split and c.case_id in table]
     miss = [c.case_id for c in in_split if c.kind == KIND_MISS]
     ordinary = [c.case_id for c in in_split if c.kind == KIND_ORDINARY]
+    # Rule 4's set (design, "Cases and key"): the split's miss cases and
+    # ordinary turns whose key expects no memory, plus the negative twins.
     no_memory = [
         c.case_id
         for c in cases
-        if c.case_id in table and c.no_memory and (c.split == split or c.kind == SYNTHETIC_TWIN)
+        if c.case_id in table
+        and c.no_memory
+        and (
+            (c.split == split and c.kind in (KIND_MISS, KIND_ORDINARY)) or c.kind == SYNTHETIC_TWIN
+        )
     ]
-    positives = [c.case_id for c in cases if c.case_id in table and c.kind == SYNTHETIC_POSITIVE]
+    # A positive with no required item has no gold to lose, so rule 5 cannot
+    # read it; the output names it rather than counting it as kept.
+    synthetic = [c for c in cases if c.case_id in table and c.kind == SYNTHETIC_POSITIVE]
+    positives = [c.case_id for c in synthetic if c.required]
+    no_gold = sorted(c.case_id for c in synthetic if not c.required)
     has = set(arm_ids).__contains__
     out: dict[str, dict] = {}
 
@@ -370,7 +380,10 @@ def rules(
     if not (has("M") and has("A")):
         out["5"] = _not_evaluable("arms M and A are not both in the run")
     elif not positives:
-        out["5"] = _not_evaluable("no synthetic positive cases")
+        out["5"] = {
+            **_not_evaluable("no synthetic positive cases with gold"),
+            "excluded_no_gold": no_gold,
+        }
     else:
         losses = [
             c
@@ -382,6 +395,7 @@ def rules(
             "holds": not losses,
             "cases": len(positives),
             "losses": sorted(losses),
+            "excluded_no_gold": no_gold,
         }
 
     out["switch"] = all(out[str(n)]["holds"] for n in range(1, 6))

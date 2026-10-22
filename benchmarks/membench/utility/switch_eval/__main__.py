@@ -111,7 +111,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         discover_agent_envelope,
     )
 
-    from .arms import arm_specs
+    from .arms import arm_specs, profile_settings
     from .cases import load_cases
     from .session import arm_files, plan_sessions, session_argv
     from .state import Layout, tree_digest
@@ -153,7 +153,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     else:
         envelope = discover_agent_envelope()
     declared = declared_cli_options(envelope)
-    specs = arm_specs(a_hook_mode=args.a_hook_mode)
+    specs = arm_specs(hook_mode=args.hook_mode, profile=args.profile)
     undeclared = sorted(
         {
             token
@@ -179,7 +179,8 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             "actor_model": args.actor_model,
             "client": {"executable": str(envelope.executable), "version": envelope.version},
             "arms": list(arm_ids),
-            "a_hook_mode": args.a_hook_mode,
+            "hook_mode": args.hook_mode,
+            "retrieval_profile": {"name": args.profile, "settings": profile_settings(args.profile)},
             "repeats": args.repeats,
             "seed": args.seed,
             "keys": [
@@ -224,7 +225,7 @@ def _context(run: Path):
     inputs = _load(layout.run, "inputs.json")
     cases = [Case.from_dict(c) for c in _load(layout.run, "cases.json")]
     plan = _load(layout.run, "plan.json")
-    specs = arm_specs(a_hook_mode=inputs["a_hook_mode"])
+    specs = arm_specs(hook_mode=inputs["hook_mode"], profile=inputs["retrieval_profile"]["name"])
     return layout, inputs, cases, plan, specs
 
 
@@ -568,6 +569,9 @@ def cmd_score(args: argparse.Namespace) -> int:
             else ("fails" if verdict["evaluable"] else f"not evaluable: {verdict['reason']}")
         )
         print(f"rule {rule}: {state}")
+    excluded = result["rules"]["5"].get("excluded_no_gold")
+    if excluded:
+        print(f"rule 5 excludes positives with no gold to lose: {', '.join(excluded)}")
     print(f"written to {target}")
     return 0
 
@@ -612,6 +616,14 @@ def cmd_power(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from .arms import (
+        DEFAULT_HOOK_MODE,
+        DEFAULT_PROFILE,
+        HOOK_MODE_MCP,
+        HOOK_MODE_WORKING_SET,
+        RETRIEVAL_PROFILES,
+    )
+
     parser = argparse.ArgumentParser(
         prog="python -m membench.utility.switch_eval", description=__doc__.splitlines()[0]
     )
@@ -641,10 +653,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--repeats", type=int, default=protocol.REPEATS)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
-        "--a-hook-mode",
-        default="mcp",
-        choices=("mcp", "working-set"),
-        help="the deployed retrieve hook's mode for A",
+        "--hook-mode",
+        default=DEFAULT_HOOK_MODE,
+        choices=(HOOK_MODE_MCP, HOOK_MODE_WORKING_SET),
+        help="the deployed retrieve hook's mode, shared by A and M",
+    )
+    p.add_argument(
+        "--profile",
+        default=DEFAULT_PROFILE,
+        choices=tuple(RETRIEVAL_PROFILES),
+        help="the retrieval profile every arm's server runs with",
     )
     p.add_argument("--case-ids", help="comma-separated subset of the key's cases")
     p.add_argument("--claude", help="the agent CLI executable (default: the first on PATH)")
