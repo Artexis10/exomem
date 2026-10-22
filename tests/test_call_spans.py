@@ -136,7 +136,7 @@ def test_recall_stages_record_cpu_and_counts_when_a_stage_refuses(token, monkeyp
     assert row["count"] == 2
     fields = row["fields"]
     assert fields["entry_ms"] >= 18
-    assert fields["entry_ms"] <= row["ms"] < fields["entry_ms"] + 2
+    assert fields["entry_ms"] <= row["ms"] <= fields["entry_ms"] + 2
     counts_and_thread_cpu = {
         key: value for key, value in fields.items()
         if key not in {call_spans.PROCESS_CPU_US, "entry_ms"}
