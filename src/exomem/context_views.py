@@ -1,4 +1,4 @@
-"""Maps and profiles: read-time views over the context catalogue.
+"""The map and the domain maps: read-time views over the context catalogue.
 
 A view is a ranked list of catalogue entries that one caller may see. It is
 computed per request from the catalogue's raw rows and the registries as they
@@ -8,9 +8,16 @@ The caller's view comes first. Every row is filtered by what the caller may
 see BEFORE it is ordered, counted, paged, hashed or compared with a pending
 change, so no entry the caller cannot see moves a byte the caller receives.
 `read_memory` serves a view through `read_view`; the activation packet will
-serve the map through `compile_view` and `map_within`.
+serve the map through `compile_view` and `map_within`. Every item a view serves
+is pinned under its generation (`served_items`), and the terminal guard serves
+the pinned item (`pinned_items`), so both of its passes serve the text that the
+generation was computed from.
 
-Map and profile refs share one namespace contract. `read_view` pages a view
+A caller that may not read the domain registry gets nothing from it: no topic,
+no topic key and no domain map. Every topic ref then reads as an unknown one.
+
+The refs, `exomem://map`, `exomem://map/topic/<domain key>` and
+`exomem://map/unfiled`, are the whole view namespace. `read_view` pages a view
 with a signed continuation token that binds the view, the caller and the
 generation.
 """
@@ -24,46 +31,35 @@ import json
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote
 
 from . import (
-    activation_conventions,
     context_catalogue,
-    context_roles,
     lifecycle_statuses,
     project_keys,
     source_taxonomy,
     vocabulary_resolution,
-    working_set,
     working_set_index,
-    working_set_resolve,
     working_set_state,
 )
 from .activation_result import INDEX_WARMING
 from .context_catalogue import KIND_ANCHOR, KIND_COLLECTION, KIND_THREAD
 from .governance import egress
 from .governance import principal as principal_module
-from .working_set_resolve import AnchorFacts, ResolvedAnchor, anchor_ref, anchor_visible
+from .working_set_resolve import AnchorFacts, anchor_ref, anchor_visible
 from .working_set_runtime import READY, UNAVAILABLE
 
 MAP_REF = "exomem://map"
 UNFILED_REF = "exomem://map/unfiled"
 TOPIC_REF_PREFIX = "exomem://map/topic/"
-PROFILE_REF_PREFIX = "exomem://profile/"
-ANCHOR_PROFILE_PREFIX = PROFILE_REF_PREFIX + "anchor/"
-TOPIC_PROFILE_PREFIX = PROFILE_REF_PREFIX + "topic/"
 
-#: The map kinds, a closed set the refs above fix.
+#: The three kinds of view, a closed set the refs above fix.
 VIEW_MAP = "map"
 VIEW_TOPIC = "topic"
 VIEW_UNFILED = "unfiled"
-# Profile kinds are the two ref shapes fixed by the read contract.
-PROFILE_ANCHOR = "anchor_profile"
-PROFILE_TOPIC = "topic_profile"
 
 #: The row kind of a topic. The other row kinds are the catalogue's entry kinds.
 KIND_TOPIC = "topic"
@@ -80,14 +76,6 @@ CONTINUATION_TTL_SECONDS = 900
 CONTINUATION_MAX_CHARS = 1024
 #: Longest topic key a ref may carry. A resource bound on untrusted input; registry keys are short slugs.
 TOPIC_KEY_MAX_CHARS = 128
-#: Bound encoded anchor refs before decoding untrusted input; long vault paths still fit.
-ANCHOR_REF_MAX_CHARS = 8192
-#: Bound topic lane fan-in so one topic cannot run lanes over the whole anchor catalogue.
-PROFILE_MAX_ANCHORS = 12
-#: Bound topic note reads while keeping cold declared members reachable by domain map.
-PROFILE_MAX_NOTES = 80
-#: Bound resident owner profiles, including their last published generations during refresh.
-PROFILE_CACHE_SIZE = 32
 
 #: Each row kind's share of a map budget, so one kind cannot crowd the others out of the
 #: lines `map_within` returns. A tunable split of a character budget, keyed by the closed
@@ -115,55 +103,32 @@ def _clock() -> float:
 
 @dataclass(frozen=True, slots=True)
 class ViewTarget:
-    """What a ref names: a view kind and its topic key or anchor ref as written."""
+    """What a ref names: a view kind, and for a topic its domain key as written."""
 
     kind: str
     key: str = ""
 
-    @property
-    def profile(self) -> bool:
-        return self.kind in (PROFILE_ANCHOR, PROFILE_TOPIC)
-
 
 def in_view_namespace(ref: str) -> bool:
     """Whether `ref` belongs to the views. A ref that does but names no view is NOT_FOUND."""
-    return ref == MAP_REF or ref.startswith((MAP_REF + "/", PROFILE_REF_PREFIX))
+    return ref == MAP_REF or ref.startswith(MAP_REF + "/")
 
 
 def parse_view_ref(ref: str) -> ViewTarget | None:
-    """The view a ref names, or None when it matches none of the supported ref shapes."""
+    """The view a ref names, or None when it is not exactly one of the three."""
     if ref == MAP_REF:
         return ViewTarget(VIEW_MAP)
     if ref == UNFILED_REF:
         return ViewTarget(VIEW_UNFILED)
-    for prefix, kind in ((TOPIC_REF_PREFIX, VIEW_TOPIC), (TOPIC_PROFILE_PREFIX, PROFILE_TOPIC)):
-        if not ref.startswith(prefix):
-            continue
-        key = ref[len(prefix):]
+    if ref.startswith(TOPIC_REF_PREFIX):
+        key = ref[len(TOPIC_REF_PREFIX):]
         if key and len(key) <= TOPIC_KEY_MAX_CHARS and "/" not in key:
-            return ViewTarget(kind, key)
-    if ref.startswith(ANCHOR_PROFILE_PREFIX):
-        encoded = ref[len(ANCHOR_PROFILE_PREFIX):]
-        if encoded and len(encoded) <= ANCHOR_REF_MAX_CHARS and "/" not in encoded:
-            try:
-                key = unquote(encoded, errors="strict")
-            except UnicodeError:
-                return None
-            if key and "\0" not in key:
-                return ViewTarget(PROFILE_ANCHOR, key)
+            return ViewTarget(VIEW_TOPIC, key)
     return None
 
 
 def topic_ref(key: str) -> str:
     return TOPIC_REF_PREFIX + key
-
-
-def anchor_profile_ref(ref: str) -> str:
-    return ANCHOR_PROFILE_PREFIX + quote(ref, safe="")
-
-
-def topic_profile_ref(key: str) -> str:
-    return TOPIC_PROFILE_PREFIX + key
 
 
 def not_found() -> ValueError:
@@ -196,6 +161,8 @@ class CallerView:
     purpose: str | None
     #: Digest of (audience id, authorization session id, declared purpose): who a token is for.
     binding: str
+    #: Whether the caller may read the domain registry. Without it no view reads the registry.
+    domains_admitted: bool
 
     @property
     def restricted(self) -> bool:
@@ -205,13 +172,39 @@ class CallerView:
         return self.visible is None or bool(self.visible(path))
 
     @classmethod
-    def current(cls, vault_root: Path) -> CallerView:
-        who = principal_module.effective_principal()
+    def current(
+        cls,
+        vault_root: Path,
+        *,
+        purpose: str | None = None,
+        principal: principal_module.RequestPrincipal | None = None,
+    ) -> CallerView:
+        """The view of `principal` (default: the bound one) under the `purpose` the request declared.
+
+        The view's compile and the terminal guard both build it from the same two arguments, so
+        they decide under one purpose, one filter and one registry admission.
+        """
+        root = Path(vault_root)
+        who = principal if principal is not None else principal_module.effective_principal()
         # The purpose the release decision itself takes, so the filter and the binding agree.
-        purpose = egress._declared_purpose(Path(vault_root), who, None)  # noqa: SLF001
-        visible = egress.restricted_release_filter(Path(vault_root), purpose=purpose)
-        binding = _digest(json.dumps([who.audience_id, who.authorization_session_id, purpose]))
-        return cls(visible, purpose, binding)
+        declared = egress._declared_purpose(root, who, purpose)  # noqa: SLF001
+        visible = egress.restricted_release_filter(root, principal=principal, purpose=declared)
+        binding = _digest(json.dumps([who.audience_id, who.authorization_session_id, declared]))
+        return cls(visible, declared, binding, _domains_admitted(root, principal, purpose))
+
+
+def _domains_admitted(
+    vault_root: Path, principal: principal_module.RequestPrincipal | None, purpose: str | None
+) -> bool:
+    """Whether the caller may read the domain registry: the admission that `schema_memory` asks for."""
+    from .vocabulary.contract import selected_admission_refusal
+
+    if principal is None and purpose is None:
+        return selected_admission_refusal(vault_root, source_taxonomy.DOMAIN_SPEC) is None
+    # The admission reads the bound principal, so it is bound with the purpose, as `read_view` binds it.
+    who = principal if principal is not None else principal_module.effective_principal()
+    with principal_module.request_scope(who.with_purpose(purpose)):
+        return selected_admission_refusal(vault_root, source_taxonomy.DOMAIN_SPEC) is None
 
 
 def _digest(text: str) -> str:
@@ -291,16 +284,6 @@ class Row:
 
 
 @dataclass(frozen=True, slots=True)
-class ProfileLine:
-    """One lane result in the paged read contract; its kind names the packet section."""
-
-    fields: dict[str, Any]
-
-    def item(self) -> dict[str, Any]:
-        return copy.deepcopy(self.fields)
-
-
-@dataclass(frozen=True, slots=True)
 class View:
     """A compiled view. `state` is READY, or why there is none; then `generation` is None and `rows` empty."""
 
@@ -308,9 +291,13 @@ class View:
     state: str
     generation: str | None
     stale: bool
-    rows: tuple[Row | ProfileLine, ...]
+    rows: tuple[Row, ...]
     #: How far the membership graph is built. Owner-only: a restricted caller is never told.
     graph: str | None = None
+    #: The map's current state of each anchor and collection, by entry id, over the caller's view.
+    states: dict[str, dict[str, Any]] | None = None
+    #: False when the map's states could not be read; its items then carry none.
+    state_available: bool = True
 
 
 def _recency(activity: str) -> tuple[int, object]:
@@ -368,18 +355,24 @@ def _row(entry: context_catalogue.Entry, topics: tuple[str, ...], activity: str)
     )
 
 
+def _unlinked(text: str) -> str:
+    """Registry text as a view serves it: without its wikilinks, as the catalogue stores an entry's."""
+    return " ".join(egress.without_wikilinks(text).split())
+
+
 def _topic_row(key: str, registries: _Registries, activity: str) -> Row:
     definition = registries.taxonomy.domains.get(key)
     description = (
-        working_set_state.bounded_statement(definition.description, working_set_index.LEDE_MAX_CHARS)
+        working_set_state.bounded_statement(_unlinked(definition.description), working_set_index.LEDE_MAX_CHARS)
         if definition is not None
         else ""
     )
+    label = _unlinked(definition.label) if definition is not None and definition.label else ""
     return Row(
         entry_id=f"{KIND_TOPIC}:{key}",
         kind=KIND_TOPIC,
         anchor_kind="",
-        title=(definition.label if definition is not None and definition.label else key),
+        title=label or key,
         description=description,
         description_origin=ORIGIN_REGISTRY if description else context_catalogue.ORIGIN_NONE,
         ref=topic_ref(key),
@@ -403,7 +396,8 @@ class _World:
 def _world(catalogue: context_catalogue.ContextCatalogue, caller: CallerView) -> _World:
     entries = [entry for entry in catalogue.entries() if _admits(entry, caller.visible)]
     # The join runs over the visible entries only: a relation to an entry the caller cannot see adds nothing.
-    joined = catalogue.memberships(entries).topics
+    # It resolves through the domain registry, so a caller who may not read the registry joins no topic.
+    joined = catalogue.memberships(entries).topics if caller.domains_admitted else {}
     # An entry with no activity of its own (a project anchor) takes its project's newest visible page.
     project_activity: dict[str, str] = {}
     for entry in entries:
@@ -433,9 +427,13 @@ def _world(catalogue: context_catalogue.ContextCatalogue, caller: CallerView) ->
     return _World(tuple(rows), topic_activity)
 
 
-def _view_rows(target: ViewTarget, key: str, world: _World, registries: _Registries) -> list[Row]:
+def _view_rows(target: ViewTarget, key: str, world: _World, registries: _Registries | None) -> list[Row]:
     if target.kind == VIEW_MAP:
-        topics = _ordered(_topic_row(topic, registries, activity) for topic, activity in world.topic_activity.items())
+        topics = (
+            []
+            if registries is None
+            else _ordered(_topic_row(topic, registries, activity) for topic, activity in world.topic_activity.items())
+        )
         # The map lists the kinds that have a share of its budget; an ordinary note is reached through a domain map.
         return topics + _ordered(row for row in world.rows if row.kind in MAP_KIND_SHARES and _carryable(row))
     if target.kind == VIEW_UNFILED:
@@ -450,36 +448,38 @@ def _view_rows(target: ViewTarget, key: str, world: _World, registries: _Registr
 
 @dataclass(frozen=True, slots=True)
 class _Prepared:
+    root: Path
     target: ViewTarget
     #: The ref the view is known by: a deprecated or aliased topic key reads as its replacement.
     ref: str
     key: str
-    registries: _Registries
+    #: None when the caller may not read the domain registry: then no part of the view reads it.
+    registries: _Registries | None
     caller: CallerView
     state: str
     catalogue: context_catalogue.ContextCatalogue | None
     unlisted: bool
 
 
-def _prepare(vault_root: Path, path: str, caller: CallerView | None) -> _Prepared:
+def _prepare(vault_root: Path, path: str, caller: CallerView | None, purpose: str | None = None) -> _Prepared:
     """Resolve the ref and bring the catalogue forward. Reads no entry."""
     target = parse_view_ref(path)
     if target is None:
         raise not_found()
     root = Path(vault_root)
-    registries = _Registries(root)
+    caller = caller or CallerView.current(root, purpose=purpose)
+    # Admission comes before any definition is read, so a registered topic and an unknown one read
+    # the same to a caller who may not read the registry, whatever the catalogue's readiness.
+    registries = _Registries(root) if caller.domains_admitted else None
     key = ""
     ref = path
-    if target.kind in (VIEW_TOPIC, PROFILE_TOPIC):
-        resolved = registries.topic(target.key)
+    if target.kind == VIEW_TOPIC:
+        resolved = registries.topic(target.key) if registries is not None else None
         if resolved is None:
             raise not_found()
-        key = resolved
-        ref = topic_profile_ref(resolved) if target.profile else topic_ref(resolved)
-    elif target.kind == PROFILE_ANCHOR:
-        key, ref = target.key, anchor_profile_ref(target.key)
+        key, ref = resolved, topic_ref(resolved)
     state, catalogue, unlisted = context_catalogue.ensure_unlisted(root)
-    return _Prepared(target, ref, key, registries, caller or CallerView.current(root), state, catalogue, unlisted)
+    return _Prepared(root, target, ref, key, registries, caller, state, catalogue, unlisted)
 
 
 def _abstention(prepared: _Prepared, state: str) -> View:
@@ -498,21 +498,34 @@ def _usable(prepared: _Prepared) -> View | None:
 
 
 def _compile(prepared: _Prepared) -> View:
-    if prepared.target.profile:
-        return _compile_profile(prepared)
     catalogue, caller = prepared.catalogue, prepared.caller
     assert catalogue is not None  # `_usable` returned None
     world = _world(catalogue, caller)
     rows = _view_rows(prepared.target, prepared.key, world, prepared.registries)
-    if not rows:
+    if not rows and prepared.target.kind == VIEW_TOPIC:
+        # A domain with nothing this caller can see reads as one that does not exist. The map and
+        # the unfiled map always exist, so an empty one is served, empty.
         raise not_found()
-    digest = hashlib.sha256(prepared.registries.digest.encode("ascii"))
+    states: dict[str, dict[str, Any]] | None = None
+    state_available = True
+    if prepared.target.kind == VIEW_MAP:
+        try:
+            states = _states(prepared.root, rows, caller)
+        except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
+            states, state_available = {}, False
+    # The generation covers every field an item is served, its state included, so a continuation
+    # minted before any of them changed is stale.
+    registries = prepared.registries.digest if prepared.registries is not None else ""
+    digest = hashlib.sha256(registries.encode("ascii"))
+    digest.update(json.dumps(state_available).encode("ascii"))
     for row in rows:
         digest.update(row.digest().encode("ascii"))
+        if states is not None:
+            digest.update(_digest(json.dumps(states.get(row.entry_id), sort_keys=True)).encode("ascii"))
     pending = catalogue.pending()
     stale = prepared.unlisted or any(caller.sees(path) for path in pending)
     graph = None if caller.restricted else catalogue.graph_state()
-    return View(prepared.ref, READY, digest.hexdigest(), stale, tuple(rows), graph)
+    return View(prepared.ref, READY, digest.hexdigest(), stale, tuple(rows), graph, states, state_available)
 
 
 def compile_view(vault_root: Path, path: str, *, caller: CallerView | None = None) -> View:
@@ -522,155 +535,6 @@ def compile_view(vault_root: Path, path: str, *, caller: CallerView | None = Non
     """
     prepared = _prepare(vault_root, path, caller)
     return _usable(prepared) or _compile(prepared)
-
-
-# --------------------------------------------------------------------------- #
-# Profiles through the existing role lanes
-# --------------------------------------------------------------------------- #
-
-
-_PROFILE_CACHE: OrderedDict[tuple, View] = OrderedDict()
-_PROFILE_LOCK = threading.RLock()
-
-
-def _cached_profile(prefix: tuple, basis: lifecycle_statuses.Basis) -> View | None:
-    """Find an owner build whose lifecycle witnesses still hold. The caller holds the lock."""
-    for key in reversed(_PROFILE_CACHE):
-        if key[:len(prefix)] == prefix and basis.matches(key[-1]):
-            _PROFILE_CACHE.move_to_end(key)
-            return copy.deepcopy(_PROFILE_CACHE[key])
-    return None
-
-
-def _profile_anchors(
-    root: Path, rows: Sequence[Row], caller: CallerView
-) -> tuple[ResolvedAnchor, ...]:
-    """Use the activation index's facts, with an explicit ref read resolving each chosen anchor."""
-    index = working_set_index.WorkingSetIndex(root)
-    try:
-        indexed = {row.anchor_id: row for row in index.anchors()}
-        return tuple(
-            ResolvedAnchor(
-                anchor_id=row.anchor_id, path=row.path, ref=row.ref, title=row.title,
-                kind=row.kind, lifecycle=row.lifecycle, status="resolved", evidence=(),
-                categories=row.categories,
-                neighbourhood=frozenset(path for path in row.neighbourhood if caller.sees(path)),
-                anchor_neighbourhood=frozenset(path for path in row.anchor_neighbourhood if caller.sees(path)),
-                entity_type=row.entity_type,
-            )
-            for chosen in rows
-            if (row := indexed.get(chosen.entry_id)) is not None
-        )
-    finally:
-        index.close()
-
-
-def _compile_profile(prepared: _Prepared) -> View:
-    from . import find
-
-    catalogue, caller = prepared.catalogue, prepared.caller
-    assert catalogue is not None
-    root = catalogue.vault_root
-    token = catalogue.token()
-    world = _world(catalogue, caller)
-    if prepared.target.kind == PROFILE_ANCHOR:
-        members = _ordered(
-            row for row in world.rows
-            if row.kind in (KIND_ANCHOR, KIND_COLLECTION) and prepared.key in (row.ref, row.path, row.entry_id)
-        )
-    else:
-        members = _ordered(row for row in world.rows if prepared.key in row.topics)
-    if not members:
-        raise not_found()
-    pending = catalogue.pending()
-    stale = prepared.unlisted or any(caller.sees(path) for path in pending)
-    basis = lifecycle_statuses.Basis(root)
-    # Restricted callers never inspect or fill the owner's cache, even for a stale build.
-    if stale and not caller.restricted:
-        with _PROFILE_LOCK:
-            previous = _cached_profile((str(root.absolute()), prepared.ref), basis)
-        if previous is not None:
-            return replace(previous, stale=True)
-
-    registry = context_roles.load_roles(root)
-    conventions = activation_conventions.load_conventions(root)
-    snapshot = find.FreshnessSnapshot(root)
-    prefix = (
-        str(root.absolute()), prepared.ref, token, snapshot.projection_key("kb"),
-        registry.roles_hash, conventions.conventions_hash,
-    )
-    if not stale and not caller.restricted:
-        with _PROFILE_LOCK:
-            previous = _cached_profile(prefix, basis)
-        if previous is not None:
-            return previous
-
-    anchor_rows = [row for row in members if row.kind in (KIND_ANCHOR, KIND_COLLECTION)]
-    neighbourhood = None
-    if prepared.target.kind == PROFILE_TOPIC:
-        anchor_rows = [row for row in anchor_rows if _carryable(row)][:PROFILE_MAX_ANCHORS]
-        # Members were filtered and ordered before either resource bound applies.
-        neighbourhood = frozenset(
-            [row.path for row in members if row.kind == context_catalogue.KIND_NOTE][:PROFILE_MAX_NOTES]
-        )
-    anchors = _profile_anchors(root, anchor_rows, caller)
-    analysis = working_set_resolve.analyze_turn("", vocabulary=conventions.conventions.referential)
-    roles = context_roles.select_roles(registry, anchor_kinds=[row.kind for row in anchors], analysis=analysis)
-    if prepared.target.kind == PROFILE_TOPIC and not anchors:
-        # Declared notes have no anchor kind; the existing page selector uses their visible categories.
-        by_page = working_set._unit_categories(root, tuple(neighbourhood or ()), caller.visible)
-        categories = None if by_page is None else frozenset(category for found in by_page.values() for category in found)
-        roles = working_set._carry_roles(registry, analysis, categories)
-    state = working_set_state.current_state_for(
-        root, anchors=anchors, visible=caller.visible, purpose=caller.purpose, status_basis=basis,
-        state_fields=conventions.conventions.state_fields, date_fields=conventions.conventions.date_fields,
-    )
-    items, missing = working_set.run_lanes(
-        root, anchors=anchors, roles=roles, registry=registry, current_state=state,
-        visible=caller.visible, neighbourhood=neighbourhood, freshness_snapshot=snapshot,
-        analysis=analysis, status_basis=basis,
-    )
-    if any(entry.get("reason") == "lane_failed" for entry in missing):
-        # A failed lane leaves knowledge unknown; warming costs a retry instead of silently serving omissions.
-        return _abstention(prepared, INDEX_WARMING)
-    # The packet builder owns currency, deduplication, role caps and whole-unit budgets.
-    packet = working_set.build_packet(
-        # A profile serves page candidates by ref; only semantic units carry authored prose and dates.
-        items=tuple(replace(item, text="") if item.level == "page" else item for item in items),
-        anchors=(), roles=roles, current_state=state, ambiguity=(), missing=missing,
-        max_chars=working_set.MAX_BUDGET_CHARS, generation={}, status="resolved",
-        status_basis=basis, visible=caller.visible,
-    )
-    if packet.get("abstained"):
-        return _abstention(prepared, UNAVAILABLE)
-    pages = {item.ref for item in items if item.level == "page"}
-    for pointer in packet["pointers"]:
-        if pointer["ref"] in pages:
-            pointer["reason"] = "requires_read"
-    rows = tuple(
-        ProfileLine({"kind": section, **item})
-        for section in ("current_state", "units", "pointers")
-        for item in packet[section]
-    )
-    generation = _digest(json.dumps([prepared.ref, prepared.registries.digest, [row.item() for row in rows]], sort_keys=True))
-    view = View(prepared.ref, READY, generation, stale, rows)
-    with _PROFILE_LOCK:
-        current = catalogue.token()
-        if current != token:
-            # A concurrent write owns publication now; the losing build never reaches a caller or the cache.
-            previous = None if caller.restricted else _cached_profile(
-                (str(root.absolute()), prepared.ref, current), basis
-            )
-            if previous is not None:
-                return previous
-            previous = None if caller.restricted else _cached_profile((str(root.absolute()), prepared.ref), basis)
-            return replace(previous, stale=True) if previous is not None else _abstention(prepared, INDEX_WARMING)
-        if not stale and not caller.restricted:
-            _PROFILE_CACHE[(*prefix, basis.dependency)] = copy.deepcopy(view)
-            _PROFILE_CACHE.move_to_end((*prefix, basis.dependency))
-            while len(_PROFILE_CACHE) > PROFILE_CACHE_SIZE:
-                _PROFILE_CACHE.popitem(last=False)
-    return view
 
 
 # --------------------------------------------------------------------------- #
@@ -789,10 +653,7 @@ def _open(secret: bytes, token: str, ref: str, caller: CallerView) -> tuple[str,
 
 
 def _states(vault_root: Path, rows: Sequence[Row], caller: CallerView) -> dict[str, dict[str, Any]]:
-    """Current state for the anchors and collections among `rows`, by entry id.
-
-    Only the rows served are asked, and each is asked over the caller's own view.
-    """
+    """Current state for the anchors and collections among `rows`, by entry id, each over the caller's own view."""
     wanted = {row.entry_id for row in rows if row.kind in (KIND_ANCHOR, KIND_COLLECTION)}
     if not wanted:
         return {}
@@ -810,24 +671,39 @@ def _states(vault_root: Path, rows: Sequence[Row], caller: CallerView) -> dict[s
     finally:
         index.close()
     entry_of_ref = {anchor_ref(anchor): anchor.anchor_id for anchor in anchors}
-    return {
-        entry_of_ref[str(entry["anchor"])]: {
-            key: entry[key] for key in ("statement", "as_of", "source", "path") if entry.get(key) is not None
-        }
-        for entry in entries
-        if str(entry.get("anchor")) in entry_of_ref
-    }
+    return {entry_of_ref[str(entry["anchor"])]: _served_state(entry) for entry in entries if str(entry.get("anchor")) in entry_of_ref}
 
 
-def read_view(vault_root: Path, path: str, *, continuation: str | None = None) -> dict[str, Any]:
-    """Serve one page of a view, for the bound principal.
+def _served_state(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """A current state as a view serves it, its statement without wikilinks.
+
+    So whether a page that the statement links to exists, or is withheld, changes no byte of it.
+    The guard checks the page the state was read from, never the pages its statement mentions.
+    """
+    state = {key: entry[key] for key in ("statement", "as_of", "source", "path") if entry.get(key) is not None}
+    if isinstance(state.get("statement"), str):
+        state["statement"] = _unlinked(state["statement"])
+    return state
+
+
+def read_view(
+    vault_root: Path, path: str, *, continuation: str | None = None, purpose: str | None = None
+) -> dict[str, Any]:
+    """Serve one page of a view, for the bound principal under the `purpose` the request declared.
 
     The response carries the ref, the generation, a stale flag, at most `VIEW_PAGE_SIZE` items and a
     continuation for the next page. A view that cannot be served yet answers with its readiness state
     and no items. Raises NOT_FOUND, INVALID_CONTINUATION or CONTINUATION_STALE.
     """
-    root = Path(vault_root)
-    prepared = _prepare(root, path, None)
+    if purpose is None:
+        return _read_view(Path(vault_root), path, continuation, None)
+    # The readers under the view (a record's current state) take the purpose from the bound principal.
+    with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
+        return _read_view(Path(vault_root), path, continuation, purpose)
+
+
+def _read_view(root: Path, path: str, continuation: str | None, purpose: str | None) -> dict[str, Any]:
+    prepared = _prepare(root, path, None, purpose)
     abstained = _usable(prepared)
     if abstained is not None:
         return _response(abstained, [], None)
@@ -851,17 +727,104 @@ def read_view(vault_root: Path, path: str, *, continuation: str | None = None) -
             return _response(_abstention(prepared, UNAVAILABLE), [], None)
         assert view.generation is not None
         token = _mint(secret, prepared.ref, caller, view.generation, following)
-    items = [row.item() for row in page]
     extra: dict[str, Any] = {}
-    if prepared.target.kind == VIEW_MAP:
-        try:
-            states = _states(root, page, caller)
-        except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
-            states = {}
-            extra["state_available"] = False
-        for row, item in zip(page, items, strict=True):
-            item["state"] = states.get(row.entry_id)
-    return _response(view, items, token, extra)
+    if view.states is not None and not view.state_available:
+        extra["state_available"] = False
+    return _response(view, served_items(root, view, page, caller), token, extra)
+
+
+# --------------------------------------------------------------------------- #
+# What the terminal guard serves
+# --------------------------------------------------------------------------- #
+
+
+def _identity(item: Mapping[str, Any]) -> tuple[object, ...]:
+    """The fields that name an entry on the wire. A value that is not a string matches no entry."""
+    values = (item.get("kind"), item.get("anchor_kind") or "", item.get("ref"), item.get("path") or "")
+    return tuple(value if isinstance(value, str) else None for value in values)
+
+
+#: The fields of an item that are display text: the catalogue's own, served without links.
+DISPLAY_FIELDS = ("title", "description", "description_origin")  # nosemgrep: ep-word-set -- `Row`'s own field names.
+
+#: Most items pinned at once, over every pinned page. A memory bound: the terminal guard reads a pin
+#: in the request that made it, moments later, so only an in-flight request needs its pin kept.
+PINNED_ITEMS_MAX = 4096
+
+
+class _Pins:
+    """The items lately served, by (vault, view ref, caller binding, generation), least recent first."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        #: For each key, the items served under it, by `_identity`, then by entry id.
+        self._pages: OrderedDict[tuple[str, ...], dict[tuple[object, ...], dict[str, dict[str, Any]]]] = OrderedDict()
+        self._count = 0
+
+    def add(self, key: tuple[str, ...], served: Iterable[tuple[str, dict[str, Any]]]) -> None:
+        with self.lock:
+            page = self._pages.pop(key, {})
+            for entry_id, item in served:
+                alike = page.setdefault(_identity(item), {})
+                self._count += entry_id not in alike
+                alike[entry_id] = copy.deepcopy(item)
+            self._pages[key] = page
+            while self._count > PINNED_ITEMS_MAX and len(self._pages) > 1:
+                _, dropped = self._pages.popitem(last=False)
+                self._count -= sum(len(alike) for alike in dropped.values())
+
+    def page(self, key: tuple[str, ...]) -> dict[tuple[object, ...], dict[str, dict[str, Any]]]:
+        """The items pinned under `key`. The caller holds `lock` while it reads them."""
+        page = self._pages.get(key)
+        if page is None:
+            return {}
+        self._pages.move_to_end(key)
+        return page
+
+
+_PINS = _Pins()
+
+
+def _pin_key(vault_root: Path, ref: str, caller: CallerView, generation: str) -> tuple[str, ...]:
+    return (str(Path(vault_root)), ref, caller.binding, generation)
+
+
+def served_items(vault_root: Path, view: View, rows: Sequence[Row], caller: CallerView) -> list[dict[str, Any]]:
+    """The items `rows` are served as, each pinned under the view's generation for the terminal guard."""
+    items = [row.item() for row in rows]
+    if view.states is not None:
+        for row, item in zip(rows, items, strict=True):
+            item["state"] = view.states.get(row.entry_id)
+    if view.generation is not None:
+        _PINS.add(_pin_key(vault_root, view.ref, caller, view.generation), zip([row.entry_id for row in rows], items, strict=True))
+    return items
+
+
+def pinned_items(
+    vault_root: Path, ref: object, generation: object, items: Sequence[Mapping[str, Any]], caller: CallerView
+) -> list[dict[str, Any]]:
+    """Each item as the view `ref` served it to `caller` under `generation`. An item it never served is dropped.
+
+    The terminal guard serves these in place of the items it is given. So both of its passes serve the
+    text the generation was computed from, and a field that no compile served this caller never reaches
+    the wire. An item is matched by the fields that name an entry: its kind, anchor kind, ref and path.
+    Of served items alike in all four, the one equal to the given item is kept, else the lowest entry
+    id's. Registry admission is decided again, as it stands now: without it, no topic and no topic key.
+    """
+    if not isinstance(ref, str) or not isinstance(generation, str):
+        return []
+    out: list[dict[str, Any]] = []
+    with _PINS.lock:
+        page = _PINS.page(_pin_key(vault_root, ref, caller, generation))
+        for item in items:
+            alike = page.get(_identity(item))
+            if not alike:
+                continue
+            own = [served for served in alike.values() if served == item]
+            out.append(copy.deepcopy(own[0] if own else alike[min(alike)]))
+    if not caller.domains_admitted:
+        out = [{**item, "topics": []} if "topics" in item else item for item in out if item.get("kind") != KIND_TOPIC]
+    return out
 
 
 def _response(

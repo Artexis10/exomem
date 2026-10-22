@@ -43,7 +43,6 @@ from . import (
     vault,
     working_set_index,
     working_set_runtime,
-    working_set_state,
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
@@ -53,7 +52,8 @@ from .working_set_runtime import READY
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+#: 2: titles and descriptions are stored without their wikilinks.
+SCHEMA_VERSION = 2
 SIDECAR_NAME = ".context-catalogue.sqlite"
 
 # The catalogue's entry kinds. A closed set the schema declares; topics are the
@@ -832,11 +832,12 @@ class _Fold:
         entry_kind, anchor_kind = kind
         stem = rel.rpartition("/")[2].removesuffix(".md")
         manifest = self.collections.get(rel)
-        title = str(frontmatter.get("title") or page.title or stem).strip()
+        titles = [frontmatter.get("title"), page.title, stem]
         status = str(page.status or "").strip()
         if manifest is not None:
-            title = str(getattr(manifest[0], "title", "") or title).strip()
+            titles.insert(0, getattr(manifest[0], "title", ""))
             status = str(getattr(manifest[0], "lifecycle", "") or status).strip()
+        title = _title(*titles)
         description, origin = _describe(frontmatter.get("summary"), page.body, rel)
         thread_key = thread_order = ""
         if entry_kind == KIND_THREAD:
@@ -874,7 +875,7 @@ class _Fold:
                 anchor_kind=row.kind,
                 path=row.path,
                 ref=row.ref,
-                title=row.title,
+                title=_title(row.title),
                 description="",
                 description_origin=ORIGIN_NONE,
                 status=row.lifecycle,
@@ -957,17 +958,38 @@ def _sorted_values(value: object) -> tuple[str, ...]:
     return tuple(sorted(set(working_set_index._strings(value))))  # noqa: SLF001 - activation's frontmatter string reader
 
 
-def _describe(summary: object, body: str, rel: str) -> tuple[str, str]:
-    """A one-line description and its origin: the authored `summary`, else the page's lede, else none."""
-    from . import provenance
+def _title(*candidates: object) -> str:
+    """The first candidate that has text once its wikilinks are removed, else empty.
 
-    # A cut inside a `[[link` would serve part of a page name the egress guard cannot read as a link.
-    if isinstance(summary, str) and summary.strip():
-        cut = " ".join(summary.split())[: working_set_index.LEDE_MAX_CHARS]
-        return working_set_state.without_open_link(cut), ORIGIN_AUTHORED
+    A title is stored without its links, as a description is (`_describe`).
+    """
+    from .governance import egress
+
+    for candidate in candidates:
+        title = " ".join(egress.without_wikilinks(str(candidate)).split()) if candidate else ""
+        if title:
+            return title
+    return ""
+
+
+def _describe(summary: object, body: str, rel: str) -> tuple[str, str]:
+    """A one-line description and its origin: the authored `summary`, else the page's lede, else none.
+
+    Every wikilink is removed whole before the text is normalised and cut, so no cut
+    can fall inside one. A link the egress guard reads would make the description's
+    fate depend on whether the linked page exists and is withheld, which tells a
+    caller that it exists.
+    """
+    from . import provenance
+    from .governance import egress
+
+    if isinstance(summary, str):
+        summary = " ".join(egress.without_wikilinks(summary).split())
+        if summary:
+            return summary[: working_set_index.LEDE_MAX_CHARS], ORIGIN_AUTHORED
     # Read withheld, as the activation signature does: an origin carrier is never a lede.
-    lede = working_set_index.lede(provenance.withheld_prose(body, owner_path=rel)) if body else ""
-    lede = working_set_state.without_open_link(lede)
+    prose = egress.without_wikilinks(provenance.withheld_prose(body, owner_path=rel)) if body else ""
+    lede = " ".join(working_set_index.lede(prose).split())
     return (lede, ORIGIN_LEDE) if lede else ("", ORIGIN_NONE)
 
 

@@ -10,6 +10,7 @@ names a page the caller may not read.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 from pathlib import Path
@@ -19,7 +20,7 @@ import pytest
 from conftest import FIXTURE_VAULT, initialize_vault_state_offline
 from test_activate_context_surface import _rest_client, _run_cli
 from test_context_catalogue import INSIGHTS, KB, _built, _page, _seed, _write
-from test_governance_egress import _external, _reset_caches
+from test_governance_egress import _external, _reset_caches, write_rule
 from test_working_set_withheld_twins import _withhold
 
 from exomem import commands
@@ -27,6 +28,7 @@ from exomem import context_catalogue as cc
 from exomem import context_views as cv
 from exomem.activation_result import INDEX_WARMING
 from exomem.governance import egress, principal
+from exomem.writer_lease import invoke_command
 
 THREADS = f"{KB}/Sources/Episodes"
 THREAD_R1 = f"{THREADS}/berth-planning-ep0123456789ab-20260910t090000000000-aaaaaaaa.md"
@@ -38,6 +40,7 @@ CREW = f"{INSIGHTS}/crew-log.md"
 LOOSE = f"{INSIGHTS}/loose-end.md"
 OLD = f"{INSIGHTS}/old-berths.md"
 OLD_MOORING = f"{INSIGHTS}/old-moorings.md"
+ROUTE_HUB = f"{INSIGHTS}/route-hub.md"
 
 OWNER = principal.owner_principal(surface="library")
 REFS = (cv.MAP_REF, cv.topic_ref("harbour"), cv.UNFILED_REF)
@@ -86,7 +89,8 @@ def _cold() -> None:
 def _ask(vault: Path, ref: str, caller: Any = None, **options: Any) -> dict[str, Any]:
     """One read through the command path and the terminal egress filter, as `caller` (default: the owner)."""
     with principal.request_scope(caller or OWNER):
-        return egress.postfilter("read_memory", commands.op_read_memory(vault, path=ref, **options), vault)
+        result = commands.op_read_memory(vault, path=ref, **options)
+        return egress.postfilter("read_memory", result, vault, request_kwargs={"path": ref, **options})
 
 
 def _pages(vault: Path, ref: str, caller: Any = None) -> list[dict[str, Any]]:
@@ -336,29 +340,232 @@ def test_the_cli_and_rest_return_the_bytes_the_command_returns(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "forged",
-    [
-        {"path": SECRET, "ref": SECRET, "title": "Forged"},
-        {"ref": f"{INSIGHTS}/mooring-lines.md", "title": "Forged", "description": "Read [[secret-cluster]] first."},
-    ],
-    ids=["names the page in a path field", "names the page in its description"],
-)
-def test_the_guard_drops_a_forged_view_item_that_names_a_withheld_page(vault: Path, forged: dict[str, str]) -> None:
-    """The first item is a real one; the second is forged beside it. Only the forged one goes."""
+def test_the_guard_drops_a_forged_view_item_that_names_a_withheld_page(vault: Path) -> None:
+    """A real page of a view, with a forged item beside its real ones. Only the forged one goes."""
     _world(vault, with_w=True)
     _write(vault, SECRET, "---\ntype: insight\nstatus: active\nupdated: 2026-10-05\n---\n\n# secret-cluster\n\nHidden.\n")
     _withhold(vault, SECRET, ceiling=0)
-    _built(vault)  # the guard resolves a prose link through the activation index
-    honest = {"kind": "note", "title": "Tide work", "description": "", "description_origin": "none", "ref": TIDE, "path": TIDE}
-    response = {"ref": cv.MAP_REF, "state": "ready", "generation": "g", "stale": False, "continuation": None, "items": [honest, forged]}
-
+    _built(vault)
+    harbour = cv.topic_ref("harbour")
     _cold()
     with principal.request_scope(_external()):
-        guarded = egress.postfilter("read_memory", response, vault)
+        page = commands.op_read_memory(vault, path=harbour)
+        forged = {**page, "items": [*page["items"], {"path": SECRET, "ref": SECRET, "title": "Forged"}]}
+        guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": harbour})
 
-    assert [item["ref"] for item in guarded["items"]] == [TIDE]
+    assert guarded["items"] == page["items"] and TIDE in [item["ref"] for item in guarded["items"]]
     assert "secret-cluster" not in json.dumps(guarded)
+
+
+def test_a_forged_description_leaves_the_guard_as_the_entrys_own(vault: Path) -> None:
+    """A real item carries a description its entry never had, naming a withheld page by path and by title.
+
+    The guard serves the entry's own description instead, and keeps the item: scanning the text
+    for withheld names could only drop it when the named page exists.
+    """
+    _world(vault, with_w=True)
+    _write(vault, SECRET, "---\ntype: insight\nstatus: active\nupdated: 2026-10-05\n---\n\n# Secret cluster\n\nHidden.\n")
+    _withhold(vault, SECRET, ceiling=0)
+    _built(vault)
+    harbour = cv.topic_ref("harbour")
+    _cold()
+    with principal.request_scope(_external()):
+        page = commands.op_read_memory(vault, path=harbour)
+        forged = {
+            **page,
+            "items": [
+                {**item, "title": "Secret cluster", "description": f"Read {SECRET}, the Secret cluster page."}
+                if item.get("path") == MOORING
+                else item
+                for item in page["items"]
+            ],
+        }
+        guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": harbour})
+
+    assert guarded["items"] == page["items"]
+    assert next(item for item in guarded["items"] if item.get("path") == MOORING)["description"] == "How the quay lines are rated."
+
+
+@pytest.mark.parametrize(
+    "linked",
+    [
+        f"summary: Read [[{THREAD_W.removesuffix('.md')}]] first.\n",
+        f"title: Route via [[{THREAD_W.removesuffix('.md')}]]\n",
+    ],
+    ids=["in its description", "in its title"],
+)
+def test_a_link_to_a_withheld_page_reads_the_same_whether_or_not_the_page_exists(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: str
+) -> None:
+    """A visible hub links to W. One vault holds W, withheld; its twin never had it."""
+    _frozen(monkeypatch)
+    twin = _second_vault(tmp_path)
+    for root, with_w in ((vault, True), (twin, False)):
+        _world(root, with_w=with_w)
+        _page(root, "route-hub", f"tags: [hub]\ntopics: [harbour]\nupdated: 2026-09-20\n{linked}")
+        _withhold(root, THREAD_W, ceiling=0)
+        _built(root)
+
+    guests = []
+    for root in (vault, twin):
+        _cold()
+        guests.append({ref: _outcome(root, ref, _external()) for ref in REFS})
+
+    assert json.dumps(guests[0]) == json.dumps(guests[1])
+    assert any(item.get("path") == ROUTE_HUB for page in guests[0][cv.MAP_REF] for item in page["items"])
+
+
+def test_a_state_that_links_to_a_withheld_page_reads_the_same_whether_or_not_the_page_exists(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A visible anchor's state links to W. One vault holds W, withheld; its twin never had it."""
+    _frozen(monkeypatch)
+    twin = _second_vault(tmp_path)
+    link = THREAD_W.removesuffix(".md")
+    for root, with_w in ((vault, True), (twin, False)):
+        _world(root, with_w=with_w)
+        quay = _page(
+            root, "quay-system", f'topics: [harbour]\nupdated: 2026-09-20\nsummary: The quay system.\nstate: "berthed near [[{link}]]"\n',
+            folder=f"{KB}/Products",
+        )
+        _withhold(root, THREAD_W, ceiling=0)
+        _built(root)
+
+    guests = []
+    for root in (vault, twin):
+        _cold()
+        guests.append(_pages(root, cv.MAP_REF, _external()))
+
+    assert json.dumps(guests[0]) == json.dumps(guests[1])
+    state = next(item["state"] for page in guests[0] for item in page["items"] if item.get("path") == quay)
+    assert state["statement"] == "state: berthed near"
+
+
+def test_the_terminal_guard_decides_under_the_purpose_the_request_declared(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W is withheld only for `marketing`. The compile is made to ignore the caller's view, so the terminal
+    guard alone stands between W and the wire, and it must decide under the purpose the request declared."""
+    _world(vault, with_w=True)
+    _withhold(vault, THREAD_W, ceiling=0)
+    write_rule(vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+    _cold()
+    _built(vault)
+    compile_world = cv._world
+    monkeypatch.setattr(
+        cv, "_world", lambda catalogue, caller: compile_world(catalogue, dataclasses.replace(caller, visible=None))
+    )
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
+
+    with principal.request_scope(_external()):
+        undeclared = invoke_command(command, vault, path=cv.topic_ref("harbour"))
+        declared = invoke_command(command, vault, path=cv.topic_ref("harbour"), purpose="marketing")
+
+    assert THREAD_W in json.dumps(undeclared)  # the control: with no purpose declared, W is this caller's to read
+    for needle in (THREAD_W, "bbbbbbbb", "Berth recap two"):
+        assert needle not in json.dumps(declared), needle
+
+
+def test_a_caller_who_may_not_read_the_domain_registry_learns_nothing_from_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry's overlay is withheld from the caller, so `schema_memory` refuses it. So does every view."""
+    _world(vault, with_w=True)
+    _withhold(vault, THREAD_W, f"{KB}/_Schema/source-taxonomy.yaml", ceiling=0)
+    _cold()
+    _built(vault)
+    with principal.request_scope(_external()):
+        assert commands.op_schema_memory(vault, operation="inspect", subject="domains")["available"] is False
+    registered, unknown = cv.topic_ref("harbour"), cv.topic_ref("no-such-domain")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cc, "ensure_unlisted", lambda root, freshness_stamp="": (cc.WARMING, None, False))
+        assert _outcome(vault, registered, _external()) == _outcome(vault, unknown, _external())  # while warming
+    assert _outcome(vault, registered, _external()) == _outcome(vault, unknown, _external())  # and when ready
+    pages = _pages(vault, cv.MAP_REF, _external())
+    items = [item for page in pages for item in page["items"]]
+    assert any(item.get("path") == THREAD_R1 for item in items)  # the map itself is still served
+    assert all(item["kind"] != "topic" and not item["topics"] for item in items)
+    assert "Quays and moorings." not in json.dumps(pages)
+
+    # A topic item forged into a real page leaves the guard with nothing of the registry.
+    forged = {**pages[0], "items": [*pages[0]["items"], {"kind": "topic", "ref": registered, "title": "F", "description": "F"}]}
+    with principal.request_scope(_external()):
+        guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": cv.MAP_REF})
+    assert guarded["items"] == pages[0]["items"]
+
+
+def test_both_guard_passes_serve_the_text_their_generation_was_compiled_from(vault: Path) -> None:
+    """The catalogue publishes an edit after the compile, and another before the second pass."""
+    _world(vault, with_w=True)
+    _built(vault)
+    harbour = cv.topic_ref("harbour")
+
+    def publish(summary: str) -> None:
+        _page(vault, "mooring-lines", f"topics: [harbour]\nupdated: 2026-08-01\nsummary: {summary}\n")
+        cc.ContextCatalogue(vault).update()
+
+    def mooring(response: dict[str, Any]) -> dict[str, Any]:
+        return next(item for item in response["items"] if item.get("path") == MOORING)
+
+    with principal.request_scope(OWNER):
+        compiled = commands.op_read_memory(vault, path=harbour)
+        publish("Changed after the compile.")
+        first = egress.postfilter("read_memory", compiled, vault, request_kwargs={"path": harbour})
+        publish("Changed before the second pass.")
+        second = egress.postfilter("read_memory", first, vault, request_kwargs={"path": harbour})
+
+    assert mooring(first)["description"] == mooring(second)["description"] == "How the quay lines are rated."
+    assert compiled["generation"] == first["generation"] == second["generation"]
+    assert mooring(_ask(vault, harbour))["description"] == "Changed before the second pass."  # the edits did publish
+
+
+def test_a_state_change_moves_the_generation_and_stales_an_old_continuation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the anchor's `state` changes: its summary and its `updated` date stay as they were."""
+    _world(vault, with_w=True)
+
+    def anchor(state: str) -> str:
+        return _page(
+            vault, "quay-system", f"topics: [harbour]\nupdated: 2026-09-20\nsummary: The quay system.\nstate: {state}\n",
+            folder=f"{KB}/Products",
+        )
+
+    path = anchor("ready")
+    _built(vault)
+    monkeypatch.setattr(cv, "VIEW_PAGE_SIZE", 1)
+
+    def state_now() -> tuple[str, str]:
+        pages = _pages(vault, cv.MAP_REF)
+        served = next(item["state"] for page in pages for item in page["items"] if item.get("path") == path)
+        return served["statement"], pages[0]["generation"]
+
+    first = _ask(vault, cv.MAP_REF)
+    before, generation_before = state_now()
+    anchor("paused")
+    after, generation_after = state_now()
+
+    assert (before, after) == ("state: ready", "state: paused")
+    assert generation_after != generation_before
+    with pytest.raises(ValueError, match="^CONTINUATION_STALE"):
+        _ask(vault, cv.MAP_REF, continuation=first["continuation"])
+
+
+def test_an_empty_unfiled_map_is_ready_with_no_items(vault: Path) -> None:
+    """Every entry has a topic, so the unfiled map names a projection with nothing in it."""
+    for page in list(vault.rglob("*.md")):
+        page.unlink()
+    _write(vault, f"{KB}/_Schema/source-taxonomy.yaml", "schema_version: 1\ndomains:\n  harbour: {label: Harbour, path_label: Harbour}\n")
+    _write(vault, f"{KB}/_Schema/project-keys.yaml", "projects:\n  harbour-ops: {folder: Harbour Ops, category: domain, domain: harbour}\n")
+    _page(vault, "mooring-lines", "topics: [harbour]\nupdated: 2026-08-01\n")
+    _built(vault)
+
+    for caller in (OWNER, _external()):
+        _cold()
+        unfiled = _ask(vault, cv.UNFILED_REF, caller)
+        assert (unfiled["ref"], unfiled["state"], unfiled["items"], unfiled["continuation"]) == (cv.UNFILED_REF, "ready", [], None)
+        assert unfiled["generation"]
 
 
 # --------------------------------------------------------------------------- #
