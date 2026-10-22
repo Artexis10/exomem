@@ -327,3 +327,36 @@ def test_audit_flags_unregistered_project_key(vault: Path) -> None:
         f"audit should flag the unknown project key; findings: {report.findings}"
     )
     assert "completely-unknown-key" in drift_findings[0].detail
+
+
+def test_a_registry_without_domains_keeps_its_pre_field_content_hash() -> None:
+    """The activation index keys on this hash; a changed digest rebuilds every vault on upgrade."""
+    registry = project_keys_module._registry_from_data(
+        {
+            "projects": {
+                "northern-corridor": {"folder": "Northern Corridor", "category": "logistics"},
+                "personal": "Personal",
+                "work": {"folder": "Work", "category": "uncategorized", "tenant_scoped": True},
+            }
+        }
+    )
+    assert registry is not None
+    assert registry.content_hash == "2a27fcb608a0a5e2789df7472f1414168d69c8c0fa302725bd327cb1d24c7118"
+    assert (
+        project_keys_module._fallback_registry().content_hash
+        == "f5f6ddbd925d9b38b27948a514bdb11123db43733357bbd065ae30ba1eb4d948"
+    )
+
+
+def test_a_declared_domain_changes_the_hash_and_reads_as_a_list() -> None:
+    plain = project_keys_module._registry_from_data({"projects": {"harbour": {"folder": "Harbour"}}})
+    single = project_keys_module._registry_from_data(
+        {"projects": {"harbour": {"folder": "Harbour", "domain": "logistics"}}}
+    )
+    several = project_keys_module._registry_from_data(
+        {"projects": {"harbour": {"folder": "Harbour", "domain": ["logistics", "ops", "ops", " "]}}}
+    )
+    assert single is not None and several is not None and plain is not None
+    assert single.domains_for("harbour") == ("logistics",)
+    assert several.domains_for("harbour") == ("logistics", "ops")
+    assert len({plain.content_hash, single.content_hash, several.content_hash}) == 3

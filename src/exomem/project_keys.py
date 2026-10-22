@@ -18,7 +18,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -59,6 +59,10 @@ class ProjectRegistry:
     # Keys whose registry entry declares `tenant_scoped: true`: the only
     # projects whose pages may carry a `tenant:` field.
     tenant_scoped: frozenset[str] = frozenset()
+    # The domain keys a registry entry declares for its pages (`domain:`, a
+    # value or a list), as written: the domains resolver reads them, not this
+    # loader. Only keys that set the field appear.
+    project_to_domains: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def keys(self) -> tuple[str, ...]:
@@ -70,13 +74,22 @@ class ProjectRegistry:
     def category_for(self, key: str) -> str:
         return self.project_to_category.get(key, "uncategorized")
 
+    def domains_for(self, key: str) -> tuple[str, ...]:
+        return self.project_to_domains.get(key, ())
+
     @property
     def content_hash(self) -> str:
-        """Identity of the effective keys, folders and categories, not YAML formatting."""
-        entries = [
-            (key, self.folder_for(key), self.category_for(key))
-            for key in sorted(self.keys)
-        ]
+        """Identity of the effective keys, folders, categories and domains, not YAML formatting.
+
+        A key's domains join its tuple only when it sets some, so a registry
+        that never uses the field hashes exactly as it did before the field
+        existed and an upgrade alone rebuilds nothing keyed on this hash.
+        """
+        entries: list[tuple] = []
+        for key in sorted(self.keys):
+            entry = (key, self.folder_for(key), self.category_for(key))
+            domains = self.domains_for(key)
+            entries.append((*entry, sorted(domains)) if domains else entry)
         return hashlib.sha256(
             json.dumps(entries, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -164,6 +177,7 @@ def _registry_from_data(data: object) -> ProjectRegistry | None:
     project_to_folder: dict[str, str] = {}
     project_to_category: dict[str, str] = {}
     tenant_scoped: set[str] = set()
+    project_to_domains: dict[str, tuple[str, ...]] = {}
     for key, entry in projects.items():
         if not isinstance(key, str):
             continue
@@ -172,6 +186,8 @@ def _registry_from_data(data: object) -> ProjectRegistry | None:
             category = entry.get("category") or "uncategorized"
             if entry.get("tenant_scoped") is True:
                 tenant_scoped.add(key)
+            if domains := _declared_domains(entry.get("domain")):
+                project_to_domains[key] = domains
         elif isinstance(entry, str):
             # Tolerate short form `key: FolderName`.
             folder = entry
@@ -186,6 +202,15 @@ def _registry_from_data(data: object) -> ProjectRegistry | None:
         project_to_folder=project_to_folder,
         project_to_category=project_to_category,
         tenant_scoped=frozenset(tenant_scoped),
+        project_to_domains=project_to_domains,
+    )
+
+
+def _declared_domains(value: object) -> tuple[str, ...]:
+    """The distinct non-empty strings of a `domain:` value or list, in written order."""
+    items = value if isinstance(value, (list, tuple)) else (value,)
+    return tuple(
+        dict.fromkeys(item.strip() for item in items if isinstance(item, str) and item.strip())
     )
 
 

@@ -819,6 +819,7 @@ def plan_registrations(
     *,
     kind: Resolution | None = None,
     domain: Resolution | None = None,
+    domains: Iterable[Resolution] = (),
 ) -> TaxonomyPlan:
     """Plan a folded registry update for any unregistered resolution.
 
@@ -826,17 +827,23 @@ def plan_registrations(
     write at all. When something is new the returned `PlannedWrite` is folded
     into the caller's existing atomic batch, exactly as `plan_project_keys`
     does, so a capture and its vocabulary land together or not at all.
+
+    `domains` adds more domain resolutions beside `domain`, so a write that
+    names several topics registers every new one in this one plan. Two new
+    domains that would share a directory segment refuse as a collision, the
+    same refusal two separate captures would meet.
     """
     root = Path(vault_root)
+    used = (kind, domain, *domains)
     pending = [
         resolution
-        for resolution in (kind, domain)
+        for resolution in used
         if resolution is not None and resolution.status == "unregistered"
     ]
     from .vocabulary import instances
 
     # Resolutions retain the first consumed binding; planning must never repin them.
-    observed = [resolution.selected_spec for resolution in (kind, domain)
+    observed = [resolution.selected_spec for resolution in used
                 if resolution is not None and resolution.selected_spec is not None]
     selected = observed[0] if observed else instances.select(root, KIND_SPEC)
     for previous in observed:

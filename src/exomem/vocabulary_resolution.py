@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -162,6 +163,45 @@ def resolve_notes_domain(
         registry_guard=registry_guard,
         parent_guard=parent_guard,
     )
+
+
+@dataclass(frozen=True)
+class TopicResolution:
+    """The topics a list of declared values names, and the values that name none.
+
+    `resolved` holds canonical domain keys in declaration order, deduplicated;
+    a deprecated value contributes its replacement. `unresolved` holds the raw
+    values the registry does not know, plus values that cannot become a key.
+    """
+
+    resolved: tuple[str, ...]
+    unresolved: tuple[str, ...]
+
+
+def resolve_topics(taxonomy: source_taxonomy.SourceTaxonomy, values: Iterable[object]) -> TopicResolution:
+    """Resolve declared topic values against the domain registry.
+
+    A topic is a domain key. Per value, the resolver's `builtin`, `registered`
+    and `alias` statuses resolve to the canonical key and `deprecated` resolves
+    to its replacement. `unregistered` does not resolve: the open vocabulary
+    still accepts the key at capture, but a map never invents a topic from it.
+    The caller supplies the taxonomy, so a read path stays lenient and a
+    write path can pass the strict one.
+    """
+    resolved: dict[str, None] = {}
+    unresolved: dict[str, None] = {}
+    for value in values:
+        try:
+            resolution = taxonomy.resolve_domain(value)
+        except source_taxonomy.TaxonomyError:
+            unresolved.setdefault(str(value), None)
+            continue
+        key = resolution.replaced_by if resolution.status == "deprecated" else resolution.key
+        if resolution.status == "unregistered" or not key:
+            unresolved.setdefault(resolution.raw, None)
+        else:
+            resolved.setdefault(key, None)
+    return TopicResolution(tuple(resolved), tuple(unresolved))
 
 
 def _require_bounded_destination(folder: str) -> None:
