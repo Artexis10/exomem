@@ -110,7 +110,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 ### Decision and arms
 
 - **Decision.** Change the default of `EXOMEM_ACTIVATION_PACKET` from `anchors` to `maps`, or keep `anchors`.
-- **Arms.** Three arms. Each arm's server mode, tool list and instruction text are frozen with a hash.
+- **Arms.** Three arms. For each arm, the full text the actor sees is frozen with a hash: the server instructions, the tool descriptions, the client instructions and the hook output format. P gets a pull variant of the server instructions that does not mention `activate_context`.
 
   | Arm | Server mode | Pushed at each user turn | Tools | Instruction lines |
   |---|---|---|---|---|
@@ -127,49 +127,52 @@ This protocol is frozen before any held-out generation. A later change is a numb
 ### Cases and key
 
 - **Miss cases.** Field reports of activation misses, turned into cases under the corpus split rule. The development split is for iteration. The held-out split is fixed at freeze as a hashed list of case ids and stays unread while iterating.
-- **Ordinary turns.** First user turns of real sessions, sampled at random from the operator's local session records over a fixed window before freeze, without regard to any arm's outcome. They are keyed like miss cases, and some expect no memory. They guard against harm, because miss cases were selected for A's failure. The sample splits into development and held-out halves, and the held-out half holds at least 24.
+- **Ordinary turns.** First user turns of real sessions, sampled at random from the operator's local session records over a fixed window before freeze, without regard to any arm's outcome. They are keyed like miss cases, and some expect no memory. They guard against harm, because miss cases were selected for A's failure. The sample splits into development and held-out halves. The held-out half holds at least 24, and the power step below may raise that number.
 - **Synthetic cases.** The deterministic activation audit's positive cases and negative twins, on its synthetic vault, through the agent-in-the-loop arm harness. Gold maps to required facts, and poison maps to forbidden claims. The harness implements A, M and P, and a dry run passes before freeze.
-- **No-memory cases.** Held-out ordinary turns and miss cases whose key expects no memory, and the negative twins.
+- **No-memory cases.** Held-out ordinary turns and held-out miss cases whose key expects no memory, and the negative twins.
 - **Groups.** The key writer fixes the groups before generation: cases from one incident thread form one group, and each negative twin joins its positive.
 - **Key.** An independent key writer keys every field case against the snapshot only, with refs into it, at the snapshot's time. For each case it records the required current facts and constraints with their source refs, the forbidden claims, the accepted successors of each required fact, and the excluded refs (pages that record the miss itself). The measured session never writes or reads the held-out key.
 
 ### Vault and state
 
-1. Take one digest-pinned snapshot copy of the vault.
-2. Remove the incident records, the evaluation pages and every excluded ref from the copy.
+1. Take one digest-pinned snapshot copy of the vault. The key writer writes the key on this copy.
+2. Remove the incident records, the evaluation pages and every excluded ref from the copy. For each ordinary turn, the excluded refs include, selected by provenance and not by wording, every page and episode revision that the sampled session wrote: its session id, its episode key and its write receipts. They also include any later page that records that session's outcome.
 3. Search the copy for every case id and every quoted turn string, and record zero hits per case. A page with a hit is removed or its case is struck before freeze.
-4. Run the description coverage pass (D6) on the copy.
-5. Build each arm's state once from the copy and record its digest. Every session starts from a fresh copy of that state.
+4. Check every source ref in the key against the copy. A case whose required source was removed is struck before freeze.
+5. Run the description coverage pass (D6) on the copy.
+6. Build each arm's state once from the copy and record its digest. Every session starts from a fresh copy of that state.
 
 ### Measures and judging
 
 - **Primary measure.** The scored answer uses every required fact and constraint, and asserts no forbidden claim as current. A newer fact passes for a required item only when the key lists it as an accepted successor. A different page that states the same required fact counts. A case's score is the mean over its repeats.
-- **Secondary measures.** Expected material reached before the answer; off-target share of pushed and pulled refs; Exomem calls, tokens and wall time per case; failures by kind. Complete-turn and partially quoted cases are reported separately.
-- **Contamination.** On no-memory cases, the answer asserts user-specific facts that the turns do not supply.
+- **Secondary measures.** Expected material reached before the answer; off-target share of pushed and pulled refs; Exomem calls, total input tokens including pushed bytes, and wall time per case; failures by kind. The report names the tilt in call counts: M's map arrives by push, which costs no call. Complete-turn and partially quoted cases are reported separately.
+- **Contamination.** On no-memory cases, the answer asserts user-specific facts that the turns do not supply. An arm contaminates a case when the judge finds contamination in a majority of the case's repeats.
 - **Judge.** The newest Codex `-sol` model at its highest effort, on the Codex subscription, because the actor is a Claude model. The judge is chosen before judging starts, and one judge judges every item. If that route has no quota, a fresh Opus lane judges, and the report names the same-family limitation. For every arm the judge sees the same view: the user turns, the key's required items, forbidden claims and successors, and the answer under an opaque shuffled id, with `exomem://` refs replaced by opaque tokens. It never sees the arm key. It answers through a structured-output schema:
   - each required item: used, missing or contradicted;
   - each forbidden claim: asserted as current, mentioned as past, or absent;
   - on a no-memory case: whether the answer asserts user-specific facts that the turns do not supply, with the span.
-- **Judge noise.** The judge re-judges a random fifth of the items. The report gives agreement per verdict kind. Agreement below 0.8 on required-item verdicts voids the run.
+- **Judge noise.** The judge re-judges a random fifth of the items. The report gives agreement per verdict kind. Agreement below 0.8 on required-item verdicts triggers the recovery path: a second judge from the other model family re-judges every item blind, with the re-judged items mixed in. An item's verdict stands where both judges agree. Where they disagree, the verdict that weighs against the switch stands.
 
 ### Runs and failures
 
 - **Repeats.** Three per case per arm.
 - **Timeouts.** 300 seconds per user turn.
-- **Harness faults.** A rate limit, transport error or server crash is a harness fault. The session is retried with the same inputs up to twice, and every attempt is logged. A case that still faults is struck for every arm. More than two struck cases void the run.
-- **Actor failures.** An actor that gives no answer within the turn limit, or exceeds the timeout, scores 0, and the case stays in the denominator.
+- **Harness faults.** A rate limit, a transport error or a host fault is a harness fault. A crash of the Exomem server under test is not: it is an actor failure. The session is retried with the same inputs up to twice, and every attempt is logged. A case that still faults is struck for every arm. More than two struck cases void the run.
+- **Actor failures.** An actor that gives no answer within the turn limit, exceeds the timeout, or loses its Exomem server to a crash scores 0, and the case stays in the denominator.
 - **Usage.** Before the run, measure two cases end to end and report the projected usage. The actor and the judge run on subscriptions, so the run has no metered spend. When a quota runs out, the run pauses and resumes with unchanged inputs.
 
 ### Statistic and decision rule
 
-- **Test.** For each pair of arms, the per-case score difference, averaged over cases. Superiority is a one-sided sign-flip permutation test over groups at 0.025. Non-inferiority within a tolerance δ uses the same test on the difference plus δ. The report also gives a 95% interval from inverting the test.
-- **Power.** With a dozen held-out miss cases scored 0 or 1, M must win at least 6 cases with no loss to show superiority over A, or 8 with one loss. The smallest effect the rule can detect is therefore about +0.5. Development evidence puts M − A above that at retrieval level (+0.67) and M − P close to zero.
+- **Test.** For each pair of arms, the per-case score difference, averaged over cases. Within a group, case differences sum, so the statistic stays the mean over cases. Superiority is a one-sided sign-flip permutation test over groups at 0.025. Non-inferiority within a tolerance δ uses the same test on the difference plus δ. The report also gives a 95% interval from inverting the test.
+- **Power.**
+  - Rule 1: with a dozen held-out miss cases scored 0 or 1, each its own group, M must win at least 6 cases with no loss to show superiority over A, or 8 with one loss. Fewer groups than cases need more wins. The smallest effect the rule can detect is therefore about +0.5. Development evidence puts M − A above that at retrieval level (+0.67) and M − P close to zero.
+  - Rule 2: before freeze, measure the per-case spread between repeats on the development ordinary turns. Simulate equal arms with that spread, and set the held-out size (at least 24) and δ (at least 0.10) so that equal arms pass rule 2 at least 80% of the time. The freeze commit records the spread, the size, δ and the simulated pass rate.
 - **Rule.** Switch only when all of these hold:
   1. On held-out miss cases, M beats A.
-  2. On held-out ordinary turns, M is non-inferior to A within δ = 0.10.
+  2. On held-out ordinary turns, M is non-inferior to A within δ, as the power step sets it.
   3. M pays over P on held-out miss cases and ordinary turns together: M beats P, or M is non-inferior to P within δ = 0.10 and M beats P on Exomem calls per case under the same test.
   4. On no-memory cases, M contaminates no more cases than A does, plus at most one.
-  5. M loses no synthetic positive case that A passes in a majority of its repeats.
+  5. M loses no synthetic positive case that A passes in a majority of its repeats. M loses a case when it fails that case in a majority of its own repeats.
 - **Expected outcome.** Rule 3 most likely passes, if at all, through fewer calls. If P beats A and M does not pay over P, the default stays `anchors`, and the report proposes a follow-up change for pull-first instructions without the map.
 - **Chain checks.** Before judging, check the snapshot digest and the removals, each arm's captured inputs against its frozen hashes, every case present in the outputs with failures named, and the judge inputs against the captured inputs. After judging, check the unblinding key against the item ids and recompute the scores from the raw verdicts.
 
@@ -181,7 +184,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 4. The held-out key written, the groups fixed, and the held-out ids hashed.
 5. The harness implementing A, M and P, with a dry run passed.
 6. A judge route with quota.
-7. A freeze commit that records the protocol, each arm's hashes, the hashed held-out ids and the groups, made before the first held-out session.
+7. A freeze commit that records the protocol, each arm's hashes, the hashed held-out ids, the groups and the power step's figures, made before the first held-out session.
 
 ## Risks
 

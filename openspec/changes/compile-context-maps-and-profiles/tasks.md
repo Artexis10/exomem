@@ -8,7 +8,7 @@
 
 ## 2. Catalogue and projections
 
-- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
+- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Read the raw-material, governance and archive trees from the same declaration that activation uses, so the two never disagree. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
 - [ ] 2.2 Project the map and the domain maps with bounded output and pagination.
 - [ ] 2.3 Compile anchor and topic profiles through the role lanes, cached by generation.
 - [ ] 2.4 Resolve map, domain-map and profile refs in `read_memory` with missing and stale states, on every surface.
@@ -16,7 +16,7 @@
 
 ## 3. Write side
 
-- [ ] 3.1 Accept an agent-supplied description on the write tools and store it in the page's `summary` field. Resolve `topics` through the source-capture domain resolver and policy on every write that sets it. Document `summary` and `topics` in the scaffold's frontmatter reference, and the project-key `domain` field in the format comment of `project-keys.yaml`.
+- [ ] 3.1 Add `summary` and `topics` parameters to the write tools that create or edit pages, stored in the page's `summary` and `topics` fields; read edits made outside Exomem from the raw frontmatter. Resolve `topics` through the source-capture domain resolver and policy on every write that sets it. Document `summary` and `topics` in the scaffold's frontmatter reference, and the project-key `domain` field in the format comment of `project-keys.yaml`.
 - [ ] 3.2 Add reverse dependencies and generation-bound invalidation to derived sync for the catalogue, projections and profiles.
 - [ ] 3.3 Report description coverage by origin on the first catalogue build. If a development round shows that lede descriptions lose against authored ones, register the derived-description store as a reserved internal-state path with its own owner, and have a maintenance agent run a resumable model backfill into it, with provenance, cost and coverage reported. The server makes no model call.
 
@@ -27,7 +27,7 @@
 
 ## 5. Evaluation and switch
 
-- [ ] 5.1 Build the evaluation inputs: extend the agent-in-the-loop harness with arms A, M and P and pass a dry run; sample the ordinary turns; have an independent key writer key the cases against the snapshot; fix the groups.
+- [ ] 5.1 Build the evaluation inputs: extend the agent-in-the-loop harness with arms A, M and P and pass a dry run; sample the ordinary turns; have an independent key writer key the cases against the snapshot; fix the groups; run the power step on the development ordinary turns.
 - [ ] 5.2 Iterate on the development cases and development ordinary turns with arms A, M and P. Probe the turn slice here only.
 - [ ] 5.3 Make the freeze commit: protocol, arm hashes, hashed held-out ids and groups.
 - [ ] 5.4 Run the frozen held-out evaluation once, blind.
