@@ -53,15 +53,18 @@ The compiler SHALL maintain a context catalogue, distinct from the anchor catalo
   - its source refs;
   - the generation it was built from.
 
-The context catalogue SHALL be a derived sidecar of its own: disposable, machine-local, rebuildable from the vault alone, and never read by recall. Descriptions SHALL persist as follows:
-- an agent-supplied description of a page, in the page field that the catalogue contract names;
-- a collection's description, in that field of its `_collection.md` page;
-- a topic's description, in the description attribute of its domain's registry entry;
-- a derived description, in a vault-held derived-description store.
+The context catalogue SHALL be a derived sidecar of its own: disposable, machine-local, rebuildable from the vault alone, and never read by recall. An entry's description SHALL be the first of these that exists:
+1. an authored description: the page's `summary` field; for a collection, the `summary` field of its `_collection.md` page; for a topic, the `description` field of its domain's registry entry;
+2. a model-made derived description for the page's current content, from the vault-held derived-description store;
+3. the page's structural lede, cut to one line;
+4. none, shown as undescribed.
 
-Recall, `find` and `read_memory` SHALL NOT serve the derived-description store directly. A derived description SHALL be visible only to callers who can see the page it describes.
+Each entry SHALL say which of these its description came from. The derived-description store SHALL be a reserved internal-state path, so that no surface that lists, searches or reads vault files serves it directly. A derived description SHALL be visible only to callers who can see the page it describes.
 
-The map SHALL be a projection of the catalogue that does not depend on the turn. It SHALL fit within the request's `max_chars` cap. Which entries the map lists SHALL be decided by registry-declared lifecycle classes and by entry activity as the catalogue contract defines it, not by lists in code. Each topic SHALL have a domain map: a projection of its entries, paginated at the read contract's page size. Entries with no topic SHALL be listed in an unfiled domain map. The map SHALL describe itself as an index of what exists, not as material relevant to the turn.
+The map SHALL be a projection of the catalogue that does not depend on the turn. It SHALL fit within the request's `max_chars` cap. Which entries the map lists SHALL be decided by registry-declared lifecycle classes and by entry activity, not by lists in code:
+- An entry's lifecycle class SHALL be the status registry's `class` attribute of the entry's status.
+- An entry's activity SHALL be the newest authored date, visible to the caller, among its page's `updated` field, its units' authored dates and, for a thread, its newest revision.
+- Entries whose lifecycle class is `superseded`, `retired` or `abandoned` SHALL appear only in domain maps. Each topic SHALL have a domain map: a projection of its entries, paginated at the read contract's page size. Entries with no topic SHALL be listed in an unfiled domain map. The map SHALL describe itself as an index of what exists, not as material relevant to the turn.
 
 #### Scenario: The map does not depend on the turn
 - **WHEN** two turns activate in `maps` mode with no catalogue change between them
@@ -73,15 +76,23 @@ The map SHALL be a projection of the catalogue that does not depend on the turn.
 
 ### Requirement: Topic membership is declared
 A topic SHALL be a domain that the vocabulary registry declares. An entry SHALL belong to a topic only through one of these:
-- its page names the domain in the page field that the membership contract declares;
-- its project key carries a registry attribute that maps it to the domain;
-- an authored relation from the entry to a topic member is of a relation kind whose registry family is `membership`.
+- its page's `domain` field, a value or a list, names the domain;
+- one of its page's project keys (its `project` and `projects` fields) maps to the domain through that key's `domain` field in the project-key registry; a project anchor belongs to its own key's domains;
+- an authored relation from the entry to a page is of a relation kind whose registry family is `membership`, and that page declares the domain through its own `domain` field or project key.
 
-Membership SHALL run from the entry to the topic and SHALL NOT be transitive. A mention of an anchor SHALL NOT give the mentioning page that anchor's topics. Notes that are not anchors SHALL be catalogue entries in the topics they declare.
+A declared value SHALL resolve through the domains registry by key, label or alias. A value that does not resolve SHALL give no membership, and the catalogue SHALL count it as an unresolved declaration. Membership SHALL run from the entry to the topic and SHALL NOT be transitive: an entry SHALL NOT join a topic that its relation's target reaches only through its own relations. A mention of an anchor SHALL NOT give the mentioning page that anchor's topics. Notes that are not anchors SHALL be catalogue entries in the topics they declare.
 
 #### Scenario: A vault-added domain gets a domain map
 - **WHEN** the vault overlay adds a domain and pages declare it
 - **THEN** the context catalogue holds a topic and a domain map for it without a code change
+
+#### Scenario: A project key gives its pages a topic
+- **WHEN** the project-key registry maps a key to a domain and a note names that key in its `project` field
+- **THEN** the note is an entry of that domain's topic
+
+#### Scenario: An unresolved domain is counted, not guessed
+- **WHEN** a page's `domain` field names a value that the domains registry does not resolve
+- **THEN** the page joins no topic through that value and the catalogue counts one unresolved declaration
 
 #### Scenario: A mention does not spread membership
 - **WHEN** a note mentions an anchor of another topic and has no relation of the membership family to it
@@ -90,7 +101,7 @@ Membership SHALL run from the entry to the topic and SHALL NOT be transitive. A 
 ### Requirement: Profiles read by ref
 A caller SHALL be able to read an anchor profile and a topic profile by ref. A profile SHALL be compiled through the role lanes over the anchor or over the topic's members, with the categories and roles that the registries declare. Each profile line SHALL be one of these:
 - a semantic unit with its category, role, currency and ref;
-- a current-state line from the current-state authority;
+- a current-state line from the current-state authority, with its as-of date and the source of that date;
 - a ref to a page or a unit.
 
 A unit that does not fit SHALL become a ref and SHALL NOT be cut. A unit's as-of date SHALL be its own authored date. A page's modification date SHALL NOT stand in for a unit's date.
@@ -104,14 +115,19 @@ A unit that does not fit SHALL become a ref and SHALL NOT be cut. A unit's as-of
 - **THEN** its profile line carries no as-of date
 
 ### Requirement: Derived views resolve through one read contract
-`read_memory` SHALL resolve map, domain-map and profile refs, on every surface that serves `read_memory`. Each response SHALL return at most one page of the page size that the read contract defines. Further pages SHALL be reachable by a continuation token. A missing ref SHALL report missing. When a view's inputs changed and the rebuilt view has not been published yet, the response SHALL serve the last published view marked stale.
+`read_memory` SHALL resolve these refs on every surface that serves `read_memory`:
+- `exomem://map`, the map;
+- `exomem://map/topic/<domain key>` and `exomem://map/unfiled`, the domain maps;
+- `exomem://profile/topic/<domain key>` and `exomem://profile/anchor/<percent-encoded anchor ref>`, the profiles.
+
+Each response SHALL carry the ref, the view's generation, a stale flag and at most 40 items. Further items SHALL be reachable by an opaque continuation token that is bound to the view, the caller's view and the generation. A token from another generation SHALL return `CONTINUATION_STALE`, and the caller restarts from the first page. A ref that names no view visible to the caller SHALL return `NOT_FOUND`. When a view's inputs changed and the rebuilt view has not been published yet, the response SHALL serve the last published view marked stale.
 
 #### Scenario: A stale profile is marked
 - **WHEN** a member of a profile changed and no newer build of the profile is published
 - **THEN** reading the profile returns the last published build marked stale
 
 ### Requirement: Descriptions and projections stay current on write
-A write that creates or changes a context-catalogue entry SHALL accept a one-line description from the writing agent. A description that the agent did not supply SHALL be stored as derived and marked as derived. It SHALL NOT be stored under Sources or Evidence. A write SHALL invalidate every projection and profile whose inputs it changed, including old and new memberships and incoming relations. Publishing a projection SHALL mean replacing the current one. A build from a generation older than the current published one SHALL NOT be published.
+A write that creates or changes a context-catalogue entry SHALL accept a one-line description from the writing agent and store it in the page's `summary` field. A description that the agent did not supply SHALL be derived and marked as derived. A stored derived description SHALL NOT be stored under Sources or Evidence. A write that sets a page's `domain` field SHALL resolve the value through the domains registry, as source capture does. A write SHALL invalidate every projection and profile whose inputs it changed, including old and new memberships and incoming relations. Publishing a projection SHALL mean replacing the current one. A build from a generation older than the current published one SHALL NOT be published.
 
 #### Scenario: A capture reaches the profile it touches
 - **WHEN** an agent records a new decision about an anchor and derived sync reports the profile refresh complete
