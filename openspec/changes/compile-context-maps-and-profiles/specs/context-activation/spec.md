@@ -166,7 +166,7 @@ The default SHALL change to `maps` only after an evaluation passes. These parts 
 - the tolerances and the decision rule.
 
 The arms SHALL include a pull-instructions arm with no map. The cases SHALL include ordinary turns sampled without regard to any arm's outcome, beside the cases of known misses. The primary measure SHALL be whether the answer to each case's scored turn uses the required current facts and constraints and asserts no forbidden claim as current. The switch SHALL require all of these:
-- on held-out miss cases, `maps` is superior to `anchors` on the primary measure;
+- on held-out cases that expect memory, miss cases and ordinary turns pooled, `maps` is superior to `anchors` on the primary measure, with each stratum also reported;
 - on held-out ordinary turns, `maps` is non-inferior to `anchors` within the fixed tolerance;
 - `maps` is superior to the pull-instructions arm, or non-inferior to it within the fixed tolerance and superior on memory calls per case;
 - contamination on cases without relevant memory is non-inferior within the fixed tolerance;
