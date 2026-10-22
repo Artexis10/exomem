@@ -130,10 +130,14 @@ This protocol is frozen before any held-out generation. A later change is a numb
 - **Ordinary turns.** First typed user turns of interactive sessions, sampled at random from the operator's local session records over a fixed window before freeze, without regard to any arm's outcome. The frame is structural; it reads client metadata, the clients' wrapper formats and file-path shapes, never the turn's meaning:
   - Only interactive, non-subagent sessions count: Claude Code sessions whose entrypoint is the interactive CLI and that are not sidechains, and Codex sessions from the TUI started from the CLI or the editor. Headless and exec sessions do not count.
   - Client-work homes are outside the frame, to keep engagement data out of the evaluation.
-  - The first typed turn skips messages that open with one of the two clients' wrapper formats: command wrappers, local-command output, pasted-content blocks, agent-message prefixes, system reminders, skill bodies, hook feedback, interruption markers, and Codex's injected instruction and environment blocks.
+  - A session counts only when its first prompt came from the operator. Claude Code's origin fields (`promptSource`, `origin`, `turnOrigin`) decide where a record carries them; otherwise the clients' wrapper formats decide.
+  - A session that opens with an injected turn is excluded: an agent message, a task notification or hook feedback.
+  - The first typed turn skips command wrappers, local-command input and output, system reminders, skill bodies, interruption markers, and Codex's injected instruction and environment blocks. A turn that is only pasted content is the operator's own turn.
+  - A session is excluded when its first typed turn carries an image, because the replay supplies text only.
   - A session is excluded when its first typed turn contains a path into the handoff store or a task-brief directory, or the handoff skill's invocation token. Such a turn hands its substance to a file the actor cannot open. This removes resume turns, which are memory-heavy, and the report names that bias.
   - Duplicate turn texts are dropped, the pool is shuffled with seed 20261022, and it splits into development and held-out halves of 24 with the rest as a reserve in fixed order. Reserve turns are drawn in that order to replace a held-out turn that the iterating session has read, and to grow a split for the power step.
   - No turn that the iterating session has read enters the held-out split, and the freeze commit records that intersection as zero.
+  - A correction to the frame applies by session id. It drops the rows that the corrected frame excludes and refreshes a first turn that changed, and it moves no row between splits. Reserve turns then refill held-out first, then development.
   - The held-out ordinary turns form one set across rules 1 to 4, so a reserve turn added for any rule enters all of them, with its key and vault steps 2 to 6.
   - They are keyed like miss cases, and some expect no memory. They guard against harm, because miss cases were selected for A's failure.
 - **Synthetic cases.** The deterministic activation audit's positive cases and negative twins, on its synthetic vault, through the agent-in-the-loop arm harness. Gold maps to required facts, and poison maps to forbidden claims. The harness implements A, M and P, and a dry run passes before freeze.
@@ -144,10 +148,15 @@ This protocol is frozen before any held-out generation. A later change is a numb
 ### Vault and state
 
 1. Take one digest-pinned snapshot copy of the vault. The key writer writes the key on this copy.
-2. Remove the incident items (not their collection's definition page), the evaluation pages and every excluded ref from the copy. Removals apply to the one shared copy, so a page removed for one case is gone for every case, and no key cites a page that another case excludes. Removal by provenance follows these rules:
+2. Remove the incident items (not their collection's definition page), the evaluation pages and every excluded ref from the copy. The evaluation pages include the iterating session's own episode thread and every audit or replay record of a case. Removals apply to the one shared copy, so a page removed for one case is gone for every case, and no key cites a page that another case excludes. Removal by provenance follows these rules:
    - A linked session is the miss session or the sampled session itself, or any later session that cites the incident record, the field report, or one of that session's episode keys under any scheme. Links are read from provenance, never from wording.
-   - From every page that a linked session edited, remove the lines it wrote, including `summary`, lede and `topics` fields, as the page's revision history or the session's write provenance attributes them.
-   - If a page's lines cannot be attributed, remove the page.
+   - From every page that a linked session edited, remove the lines it wrote, including `summary`, lede and `topics` fields. Attribute a line by these sources, in order:
+     1. the page's revision history;
+     2. the linked session's own client transcript, whose Exomem write calls name the page and the text written;
+     3. only for a linked session with no transcript on the operator's machines, such as a web-client session: a write-log entry or a dated unit on the case's pages or the incident's pages, dated on that session's local date.
+   - Subject or topic similarity is never a basis for attribution.
+   - If a page's lines cannot be attributed by these sources, remove the page.
+   - Registry and schema entries that a linked session added stay, because other pages depend on them. A case whose required item is such an entry is struck.
    - Every page and episode revision that a linked session created is an excluded ref.
    - A case whose required item exists only in removed lines or removed pages is struck.
    - A later edit that restates an answer without any provenance link escapes this step, and the step-3 sweep catches only verbatim text. The report names that residual leak as a limitation.
@@ -198,6 +207,10 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - Hook-derived episode keys missed other key schemes, so provenance covers all of them.
    - Only 5 keyed held-out miss groups remained, below the 6 that a one-sided sign-flip test at 0.025 needs. Rule 1 now pools the miss cases with the ordinary turns that expect memory. This changes the decision rule, before any held-out generation.
    - Removals act on one shared copy, and template text produced spurious sweep hits, so both are now stated, with a time-based template rule.
+2. **Amendment 2 (2026-10-22, before any held-out generation).** Keying under amendment 1 exposed these faults, and this amendment fixes them:
+   - The prefix frame still admitted client injections: 11 of 24 held-out and 8 of 24 development turns were task notifications, agent hand-backs, local-command wrappers or image turns. The frame now reads the client's origin fields and excludes sessions that open with an injected turn or an image. The correction applied by session id, and the read intersection stayed zero.
+   - The vault's write log names no session, so a key writer attributed lines by date and subject. Step 2 now names its attribution sources: revision history, then the linked session's own transcript, then dated writes on the case's pages only for a session with no transcript. Subject similarity is never a basis.
+   - A linked session added a schema entry that later pages use. Registry and schema entries stay.
 
 ### Ready before held-out generation
 
