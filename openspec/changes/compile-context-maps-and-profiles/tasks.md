@@ -27,8 +27,8 @@
 
 ## 5. Evaluation and switch
 
-- [ ] 5.1 Build the evaluation inputs: extend the agent-in-the-loop harness with arms A, M and P and pass a dry run; sample the ordinary turns; have an independent key writer key the cases against the snapshot; fix the groups; run the power step on the development ordinary turns.
-- [ ] 5.2 Iterate on the development cases and development ordinary turns with arms A, M and P. Probe the turn slice here only.
+- [ ] 5.1 Build the evaluation inputs: extend the agent-in-the-loop harness with arms A, M and P and pass a dry run; sample the ordinary turns; have an independent key writer key the cases against the snapshot; fix the groups.
+- [ ] 5.2 Iterate on the development cases and development ordinary turns with arms A, M and P. Probe the turn slice here only. End with the power step on the build that will be frozen.
 - [ ] 5.3 Make the freeze commit: protocol, arm hashes, hashed held-out ids, groups, and the power step's spread, sizes, δ values and simulated pass rates.
 - [ ] 5.4 Run the frozen held-out evaluation once, blind.
 - [ ] 5.5 If it passes, modify the "Packet modes" requirement's default, switch the default through the release line, then replay field reports on the installed release.
