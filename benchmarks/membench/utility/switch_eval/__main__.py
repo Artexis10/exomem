@@ -47,6 +47,54 @@ def _harness_digest() -> str:
     return digest.hexdigest()
 
 
+#: The stages whose records a chain check reads: each must have run on the
+#: harness code that prepare recorded.
+_STAGES_BEFORE_JUDGING = ("state", "run")
+
+
+def _stage(layout, inputs: dict, stage: str | None) -> None:
+    """Refuse a stage whose harness code is not the code prepare recorded, then
+    record the digest the stage ran on; ``stage`` ``None`` checks only."""
+
+    from datetime import UTC, datetime
+
+    digest = _harness_digest()
+    if digest != inputs["harness_digest"]:
+        raise SystemExit(
+            f"refused: the harness code is {digest[:16]}, the run was prepared on "
+            f"{inputs['harness_digest'][:16]}; prepare a new run directory"
+        )
+    if stage is None:
+        return
+    record = {
+        "stage": stage,
+        "harness_digest": digest,
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    with open(layout.run / "stages.jsonl", "a", encoding="utf-8") as log:
+        log.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _stage_problems(layout, inputs: dict, needed: Sequence[str]) -> list[str]:
+    path = layout.run / "stages.jsonl"
+    records = (
+        [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        if path.exists()
+        else []
+    )
+    problems = [
+        f"the {r['stage']} stage ran on harness {r['harness_digest'][:16]}, "
+        f"not prepare's {inputs['harness_digest'][:16]}"
+        for r in records
+        if r["harness_digest"] != inputs["harness_digest"]
+    ]
+    ran = {r["stage"] for r in records}
+    problems += [
+        f"no harness digest recorded for the {stage} stage" for stage in needed if stage not in ran
+    ]
+    return problems
+
+
 def _pairs(values: Sequence[str], what: str) -> list[tuple[str, str]]:
     pairs = []
     for value in values:
@@ -152,6 +200,11 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         envelope = AgentEnvelope(executable=Path(args.claude), version=version)
     else:
         envelope = discover_agent_envelope()
+    # The native binary itself, not a link an update moves: the run pins it.
+    envelope = AgentEnvelope(executable=envelope.executable.resolve(), version=envelope.version)
+    import shlex
+
+    launcher = shlex.split(args.claude_launcher or "")
     declared = declared_cli_options(envelope)
     specs = arm_specs(hook_mode=args.hook_mode, profile=args.profile)
     undeclared = sorted(
@@ -177,7 +230,11 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             },
             "harness_digest": _harness_digest(),
             "actor_model": args.actor_model,
-            "client": {"executable": str(envelope.executable), "version": envelope.version},
+            "client": {
+                "executable": str(envelope.executable),
+                "version": envelope.version,
+                "launcher": launcher,
+            },
             "arms": list(arm_ids),
             "hook_mode": args.hook_mode,
             "retrieval_profile": {"name": args.profile, "settings": profile_settings(args.profile)},
@@ -213,6 +270,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         f"prepared {layout.run}: {len(cases)} cases, arms {','.join(arm_ids)}, {args.repeats} repeats, {len(plan)} sessions"
     )
     print(f"client {envelope.executable} {envelope.version}; actor model {args.actor_model}")
+    print(f"launched through: {shlex.join(launcher) or 'nothing (the client itself)'}")
     return 0
 
 
@@ -260,6 +318,7 @@ def cmd_state(args: argparse.Namespace) -> int:
     from .state import build_arm
 
     layout, inputs, cases, _plan, specs = _context(Path(args.run))
+    _stage(layout, inputs, "state")
     needed = sorted({case.tree for case in cases})
     for arm in inputs["arms"]:
         for tree in needed:
@@ -329,6 +388,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     layout, inputs, cases, plan, specs = _context(Path(args.run))
+    _stage(layout, inputs, None if args.dry_run else "run")
     parent = dict(os.environ)
     _refuse_api_key(parent)
     trees = sorted({case.tree for case in cases})
@@ -339,6 +399,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(
             f"client {inputs['client']['executable']} {inputs['client']['version']}; actor model {inputs['actor_model']}"
         )
+        print(f"launched through: {' '.join(inputs['client']['launcher']) or 'nothing'}")
         print(
             f"account home: CLAUDE_CONFIG_DIR={parent.get('CLAUDE_CONFIG_DIR', '(unset: the CLI default)')}"
         )
@@ -393,6 +454,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         model=inputs["actor_model"],
         client_version=client_version,
         surfaces=surfaces,
+        launcher=tuple(inputs["client"]["launcher"]),
     )
     struck: set[str] = set()
     limit = args.max_sessions or len(plan)
@@ -463,6 +525,7 @@ def _chain_before_judging(layout, inputs, cases, plan, specs):
     problems = check_trees(layout, cases=cases, trees=inputs["trees"], arm_ids=inputs["arms"])
     session_problems, sessions = check_sessions(layout, plan=plan, arm_hashes=hashes)
     problems += session_problems
+    problems += _stage_problems(layout, inputs, _STAGES_BEFORE_JUDGING)
     if problems:
         raise SystemExit("chain check failed before judging:\n  " + "\n  ".join(problems))
     return sessions
@@ -473,6 +536,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
     from .score import check_judge_inputs
 
     layout, inputs, cases, plan, specs = _context(Path(args.run))
+    _stage(layout, inputs, None if args.items_only else "judge")
     sessions = _chain_before_judging(layout, inputs, cases, plan, specs)
     digest = _inputs_digest(inputs)
     if not (layout.judge / "items.jsonl").exists():
@@ -499,6 +563,7 @@ def cmd_judge(args: argparse.Namespace) -> int:
             model=args.judge_model,
             effort=args.judge_effort,
             claude=inputs["client"]["executable"],
+            launcher=inputs["client"]["launcher"],
         )
     except JudgeError as error:
         print(f"paused: {error}; rerun this stage to resume", file=sys.stderr)
@@ -517,6 +582,9 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
     from .score import check_sessions, score_run
 
     routes = args.routes.split(",")
+    problems = _stage_problems(layout, inputs, (*_STAGES_BEFORE_JUDGING, "judge"))
+    if problems:
+        raise SystemExit("chain check failed after judging:\n  " + "\n  ".join(problems))
     try:
         unblinded = unblind(layout, routes=routes)
     except UnblindingError as error:
@@ -540,6 +608,7 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
 
 def cmd_score(args: argparse.Namespace) -> int:
     layout, inputs, cases, plan, specs = _context(Path(args.run))
+    _stage(layout, inputs, None if args.check else "score")
     result = _score(layout, inputs, cases, plan, specs, args)
     target = layout.score / "score.json"
     text = json.dumps(result, indent=2, sort_keys=True, default=str)
@@ -666,6 +735,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p.add_argument("--case-ids", help="comma-separated subset of the key's cases")
     p.add_argument("--claude", help="the agent CLI executable (default: the first on PATH)")
+    p.add_argument(
+        "--claude-launcher",
+        help="a command that execs the client, called as LAUNCHER CLIENT -- ARGS "
+        "(a subscription's credential launcher); recorded with the run",
+    )
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("state", help="build each arm's state once per tree")

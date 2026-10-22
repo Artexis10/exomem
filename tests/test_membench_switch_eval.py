@@ -275,10 +275,19 @@ def test_a_crash_of_the_server_under_test_is_an_actor_failure_and_not_retried(tm
     assert len(calls) == 1
 
 
-def test_a_server_that_never_starts_is_retried_then_stops_the_run(tmp_path: Path) -> None:
-    tap, log, _turn_file = _start_tap(tmp_path, "--exit-at-start")
-    tap.wait(timeout=30)
-    tap_events = _log(log)
+@pytest.mark.parametrize(
+    "server_starts",
+    [True, False],
+    # A launcher that refuses to deliver the credential starts neither the
+    # client nor the server: no init event, no tap log.
+    ids=["a server that exits before initialize", "a client that never reports its session"],
+)
+def test_a_session_that_never_starts_is_retried_then_stops_the_run(tmp_path: Path, server_starts: bool) -> None:
+    tap_events: list[dict] = []
+    if server_starts:
+        tap, log, _turn_file = _start_tap(tmp_path, "--exit-at-start")
+        tap.wait(timeout=30)
+        tap_events = _log(log)
     calls: list[int] = []
 
     def never_started(inputs: SessionInputs, attempt_dir: Path) -> AttemptResult:

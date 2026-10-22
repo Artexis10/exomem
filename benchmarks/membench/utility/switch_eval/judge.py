@@ -29,6 +29,7 @@ from membench.judge.blinding import (
 
 from . import protocol
 from .cases import Case
+from .session import launched_argv
 from .state import Layout
 
 TEXTS = Path(__file__).resolve().parent / "texts"
@@ -48,6 +49,20 @@ ITEM_FIELDS: tuple[str, ...] = (
 #: The judge routes the protocol names: the Codex ``-sol`` judge, and the
 #: other family's judge for the recovery path (or when Codex has no quota).
 ROUTES: tuple[str, ...] = ("codex", "claude")
+
+#: What each route's judge sees beyond its item, recorded with the route so a
+#: run report names it. Measured from the judge's own rollout (Codex 0.163.0).
+ROUTE_LIMITATIONS: dict[str, tuple[str, ...]] = {
+    "codex": (
+        "The judge receives the Codex home's global AGENTS.md, the client's base, "
+        "permissions and multi-agent instructions and its environment context; no "
+        "flag of this version drops them. The text is the same for every item.",
+        "A verdict whose event stream holds any item other than a message, "
+        "reasoning or an error is refused, so neither a tool call nor a spawned "
+        "sub-agent can read the arm key into a verdict.",
+    ),
+    "claude": ("Not measured: no rollout of this route was read.",),
+}
 
 #: Harness knob: attempts per item before the judge stage pauses, so a spent
 #: judge quota stops the stage and a rerun resumes it.
@@ -370,7 +385,13 @@ def _refuse_tool_use(stdout: str) -> None:
 
 
 def run_judge(
-    layout: Layout, *, route: str, model: str, effort: str | None, claude: str = "claude"
+    layout: Layout,
+    *,
+    route: str,
+    model: str,
+    effort: str | None,
+    claude: str = "claude",
+    launcher: Sequence[str] = (),
 ) -> dict:
     """Judge every item not yet judged on ``route``; resumable item by item.
 
@@ -389,7 +410,12 @@ def run_judge(
     empty_mcp = layout.judge / "no-mcp.json"
     empty_mcp.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
     manifest = out_dir.parent / f"{route}-judge.json"
-    record = {"route": route, "model": model, "effort": effort}
+    record = {
+        "route": route,
+        "model": model,
+        "effort": effort,
+        "limitations": list(ROUTE_LIMITATIONS[route]),
+    }
     if manifest.exists() and json.loads(manifest.read_text(encoding="utf-8")) != record:
         raise JudgeError(
             f"route {route} was started with another judge; one judge judges every item"
@@ -419,12 +445,15 @@ def run_judge(
                     prompt=prompt,
                 )
             else:
-                argv = claude_argv(
-                    executable=claude,
-                    model=model,
-                    schema=judge_schema(),
-                    prompt=prompt,
-                    mcp_config=empty_mcp,
+                argv = launched_argv(
+                    launcher,
+                    claude_argv(
+                        executable=claude,
+                        model=model,
+                        schema=judge_schema(),
+                        prompt=prompt,
+                        mcp_config=empty_mcp,
+                    ),
                 )
             completed = subprocess.run(  # noqa: S603 - fixed judge argv
                 argv,

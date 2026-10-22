@@ -40,6 +40,19 @@ BUDGET_REFUSAL = (
 FILTER_REFUSAL = "Refused: this tool is not available in this session."
 
 
+def process_start_ticks(pid: int) -> str | None:
+    """The process's start time in clock ticks (``/proc/<pid>/stat`` field 22),
+    or ``None`` off Linux or once the process is gone. A pid with the same start
+    time is the same process, so a reused pid is never mistaken for it."""
+
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except OSError:
+        return None
+    # The command name, field 2, is in parentheses and may hold spaces.
+    return stat.rpartition(")")[2].split()[19]
+
+
 class TapLog:
     """Append-only JSONL log; one line per event, flushed as written."""
 
@@ -229,7 +242,12 @@ def main(argv: list[str] | None = None) -> int:
         bufsize=1,
         env=os.environ,
     )
-    log.write("server_started", pid=server.pid, argv=server_argv)
+    log.write(
+        "server_started",
+        pid=server.pid,
+        start_ticks=process_start_ticks(server.pid),
+        argv=server_argv,
+    )
     tap = Tap(
         server=server,
         log=log,

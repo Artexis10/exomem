@@ -61,6 +61,7 @@ from .state import (
     prepare_session_slot,
     product_env,
 )
+from .tap import process_start_ticks
 
 # Outcomes of one attempt. ``ok`` and ``actor_failure`` are final; a
 # ``harness_fault`` is retried; ``quota`` pauses the run; ``abort`` stops it,
@@ -86,6 +87,12 @@ _ABORT_ERRORS = frozenset({"authentication_failed", "billing_error", "invalid_re
 
 #: The fault kind of a server that never answered ``initialize``.
 SERVER_START = "server_start"
+#: The fault kind of a client that never reported its session (no init
+#: event): a launcher that refused, or a client that died before it started.
+CLIENT_START = "client_start"
+#: Setup faults: retried like any harness fault, and one that outlasts the
+#: retries stops the run, because every later session would meet it too.
+_START_FAULTS = frozenset({SERVER_START, CLIENT_START})
 
 #: The hook event of the protocol's push, the only hook an arm wires.
 PUSH_HOOK_EVENT = "UserPromptSubmit"
@@ -228,6 +235,9 @@ def session_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[st
     # The client's auto memory adds its own instructions and the operator's
     # memory directory to every arm; the protocol's actor has neither.
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    # The run pins the client binary; a session must not update the
+    # operator's installation underneath a run.
+    env["DISABLE_AUTOUPDATER"] = "1"
     build_bin = str(Path(sys.executable).parent)
     rest = [
         entry for entry in floor.get("PATH", "").split(os.pathsep) if entry and entry != build_bin
@@ -300,6 +310,17 @@ def session_argv(
         plugin_dir=None,
         settings_file=files.settings,
     )
+
+
+def launched_argv(launcher: Sequence[str], argv: Sequence[str]) -> list[str]:
+    """The command that starts a session: ``argv`` itself, or the launcher
+    called as ``LAUNCHER CLIENT -- ARGS``, the exec-wrapper shape of a launcher
+    that adds the subscription's credential at exec. The credential then never
+    passes through the harness or its records."""
+
+    if not launcher:
+        return list(argv)
+    return [*launcher, argv[0], "--", *argv[1:]]
 
 
 def session_inputs(
@@ -536,32 +557,39 @@ def classify(
                     checks=checks,
                 )
 
-    if init is not None:
-        expected_tools = sorted(f"mcp__{SERVER_NAME}__{tool}" for tool in spec.tools)
-        checks.update(
-            tools=sorted(init.get("tools") or []) == expected_tools,
-            model=init.get("model") == model,
-            client_version=str(init.get("claude_code_version")) == client_version,
-            server_connected=servers.get(SERVER_NAME) == "connected",
+    if init is None:
+        return AttemptResult(
+            HARNESS_FAULT,
+            CLIENT_START,
+            "the client never reported its session",
+            turns=list(turn_records),
+            checks=checks,
         )
-        if not checks["server_connected"]:
-            started = any(e.get("event") == "server_started" for e in tap_events)
+    expected_tools = sorted(f"mcp__{SERVER_NAME}__{tool}" for tool in spec.tools)
+    checks.update(
+        tools=sorted(init.get("tools") or []) == expected_tools,
+        model=init.get("model") == model,
+        client_version=str(init.get("claude_code_version")) == client_version,
+        server_connected=servers.get(SERVER_NAME) == "connected",
+    )
+    if not checks["server_connected"]:
+        started = any(e.get("event") == "server_started" for e in tap_events)
+        return AttemptResult(
+            HARNESS_FAULT,
+            SERVER_START,
+            f"server status {servers.get(SERVER_NAME)!r}"
+            + ("" if started else "; the tap never started the server"),
+            turns=list(turn_records),
+            checks=checks,
+        )
+    for name in ("tools", "model", "client_version"):
+        if not checks[name]:
             return AttemptResult(
-                HARNESS_FAULT,
-                SERVER_START,
-                f"server status {servers.get(SERVER_NAME)!r}"
-                + ("" if started else "; the tap never started the server"),
-                turns=list(turn_records),
+                ABORT,
+                f"surface_{name}",
+                "the session's surface is not the arm's",
                 checks=checks,
             )
-        for name in ("tools", "model", "client_version"):
-            if not checks[name]:
-                return AttemptResult(
-                    ABORT,
-                    f"surface_{name}",
-                    "the session's surface is not the arm's",
-                    checks=checks,
-                )
     if surface is not None:
         initialize = next((e for e in tap_events if e.get("event") == "initialize"), None)
         listing = next((e for e in tap_events if e.get("event") == "tools_list"), None)
@@ -713,18 +741,17 @@ def _end_process_group(proc: subprocess.Popen) -> None:
             continue
 
 
-def _end_orphan_server(tap_events: Sequence[dict], slot: Slot) -> bool:
+def _end_orphan_server(tap_events: Sequence[dict]) -> bool:
     """End the session's own server if it outlived the CLI; never any other process."""
 
     started = next((e for e in tap_events if e.get("event") == "server_started"), None)
     if started is None:
         return False
     pid = int(started["pid"])
-    try:
-        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-    except OSError:
-        return False
-    if f"EXOMEM_STATE_ROOT={slot.state}".encode() not in environ:
+    # The start time, not the environment: the server inherits the client's
+    # environment, the subscription's delivered credential included.
+    ticks = started.get("start_ticks")
+    if ticks is None or process_start_ticks(pid) != ticks:
         return False
     try:
         os.kill(pid, signal.SIGKILL)
@@ -763,6 +790,7 @@ class ClaudeSessionExecutor:
     model: str
     client_version: str
     surfaces: Mapping[tuple[str, str], Mapping[str, str]]
+    launcher: tuple[str, ...] = ()
     turn_timeout: float = protocol.TURN_TIMEOUT_SECONDS
 
     def __call__(self, inputs: SessionInputs, attempt_dir: Path) -> AttemptResult:
@@ -776,7 +804,7 @@ class ClaudeSessionExecutor:
         transcript_path = attempt_dir / "transcript.jsonl"
         stderr = open(attempt_dir / "claude.stderr", "w", encoding="utf-8")  # noqa: SIM115 - closed below
         proc = subprocess.Popen(  # noqa: S603 - argv built by the harness from the shared builder
-            list(inputs.argv),
+            launched_argv(self.launcher, inputs.argv),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=stderr,
@@ -877,7 +905,7 @@ class ClaudeSessionExecutor:
         if slot.hook_home.exists():
             shutil.copytree(slot.hook_home, attempt_dir / "hook-home", dirs_exist_ok=True)
         tap_events = _read_jsonl(runtime_copy / "tap.jsonl")
-        orphan = _end_orphan_server(tap_events, slot)
+        orphan = _end_orphan_server(tap_events)
         records = [
             _turn_record(i, tl, te, tt, tap_events, wall) for i, tl, te, tt, wall in turn_slices
         ]
@@ -898,6 +926,10 @@ class ClaudeSessionExecutor:
             orphan_server_ended=orphan,
             user_state_writes=_user_state_writes(started_wall),
         )
+        if result.kind == CLIENT_START:
+            # A launcher's refusal reaches only its stderr.
+            said = (attempt_dir / "claude.stderr").read_text(encoding="utf-8", errors="replace")
+            result.detail += f"; stderr: {said.strip()[-400:] or '(empty)'}"
         slot.wipe()
         return result
 
@@ -944,9 +976,9 @@ def run_session(inputs: SessionInputs, session_dir: Path, execute: Executor) -> 
             raise RunAborted(f"session {inputs.planned.session_id}: {result.kind}: {result.detail}")
         if result.outcome == HARNESS_FAULT and faults + 1 <= protocol.HARNESS_FAULT_RETRIES:
             continue
-        if result.outcome == HARNESS_FAULT and result.kind == SERVER_START:
+        if result.outcome == HARNESS_FAULT and result.kind in _START_FAULTS:
             raise RunAborted(
-                f"session {inputs.planned.session_id}: the server did not start after "
+                f"session {inputs.planned.session_id}: {result.kind} after "
                 f"{protocol.HARNESS_FAULT_RETRIES} retries: {result.detail}"
             )
         final = {

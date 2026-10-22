@@ -31,27 +31,47 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import Arm, custom_instructions_block
 
+from membench.adapters.base import Profile
 from membench.adapters.exomem_local import embeddings_profile, lexical_profile
 
 from . import protocol
 from .tap import BUDGET_REFUSAL, FILTER_REFUSAL
 
-#: The benchmark adapter's two retrieval profiles, by the names the adapter
-#: gives them: a closed set the adapter defines, recorded as a run input.
+
+def deployed_profile(name: str = "deployed") -> Profile:
+    """Arm A's "deployed configuration": every retrieval setting at the
+    product's default, embeddings, the relevance check, the ranking config and
+    the corpus cache included.
+
+    It sets nothing itself. What determinism needs is pinned elsewhere: every
+    location the product reads or writes is under the session's own slot
+    (``state.product_env``), so a log, a watcher or a cache sees only that
+    session's copy, and ``profile_settings`` pins the lexical backend.
+    """
+
+    return Profile(name=name, settings={})
+
+
+#: The run's retrieval profiles: the deployed configuration that the real run
+#: measures, and the benchmark adapter's two model-free and embedding profiles
+#: under the adapter's names. A closed set this module and the adapter define,
+#: recorded with its resolved settings as a run input.
 RETRIEVAL_PROFILES = {
+    "deployed": deployed_profile,
     "neutral-lexical": lexical_profile,
     "recommended-embeddings": embeddings_profile,
 }
-DEFAULT_PROFILE = "neutral-lexical"
+DEFAULT_PROFILE = "deployed"
 
 
 def profile_settings(name: str) -> dict[str, str]:
     """The profile's settings as every server of the run gets them.
 
-    The adapter pins the python lexical backend, which is the lexical store's
-    kill switch: the context catalogue and the working set then report
-    ``unsupported``, a state no deployment runs. The harness pins FTS5 instead,
-    not ``auto``, so a host without FTS5 fails the state build loudly.
+    Every profile runs on one lexical backend, FTS5, so two hosts never
+    measure different backends. The adapter's profiles pin the python backend,
+    which is the lexical store's kill switch: the context catalogue and the
+    working set then report ``unsupported``, a state no deployment runs. FTS5,
+    not ``auto``, makes a host without it fail the state build loudly.
     """
 
     settings = dict(RETRIEVAL_PROFILES[name]().settings)
