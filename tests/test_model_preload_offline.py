@@ -33,6 +33,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "EXOMEM_RELEASE_GPU_WHEN_IDLE",
         "EXOMEM_MODEL_OFFLINE",
         "HF_HUB_OFFLINE",
+        "EXOMEM_RERANKER_BACKEND",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(Path(__file__).parent / "_no_such_config.json"))
@@ -56,9 +57,13 @@ def hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _cache(hub: Path, model_name: str) -> None:
     """Materialize a plausible snapshot for `model_name` in the fake hub cache."""
-    snap = hub / model_cache.snapshot_dirname(model_name) / "snapshots" / "deadbeef"
+    model_root = hub / model_cache.snapshot_dirname(model_name)
+    snap = model_root / "snapshots" / "deadbeef"
     snap.mkdir(parents=True)
     (snap / "config.json").write_text("{}", encoding="utf-8")
+    refs = model_root / "refs"
+    refs.mkdir()
+    (refs / "main").write_text("deadbeef", encoding="ascii")
 
 
 class _Spy:
@@ -66,9 +71,11 @@ class _Spy:
 
     def __init__(self, *, fail_offline: bool = False) -> None:
         self.calls: list[dict] = []
+        self.args: list[tuple] = []
         self.fail_offline = fail_offline
 
     def __call__(self, *args, **kwargs):
+        self.args.append(args)
         self.calls.append(dict(kwargs))
         if self.fail_offline and kwargs.get("local_files_only"):
             raise OSError("snapshot incomplete")
@@ -102,6 +109,15 @@ def test_is_cached_is_a_pure_directory_check(hub: Path) -> None:
     assert model_cache.is_cached("BAAI/bge-base-en-v1.5") is False
     _cache(hub, "BAAI/bge-base-en-v1.5")
     assert model_cache.is_cached("BAAI/bge-base-en-v1.5") is True
+
+
+def test_snapshot_path_follows_the_cached_main_ref(hub: Path) -> None:
+    model = "BAAI/bge-base-en-v1.5"
+    _cache(hub, model)
+
+    assert model_cache.snapshot_path(model) == (
+        hub / model_cache.snapshot_dirname(model) / "snapshots" / "deadbeef"
+    )
 
 
 def test_cached_weights_load_without_touching_the_network(hub: Path) -> None:
@@ -195,13 +211,79 @@ def test_reranker_loads_cached_weights_offline(
 ) -> None:
     _cache(hub, embeddings.RERANKER_NAME)
     spy = _Spy()
+    monkeypatch.setattr(embeddings, "RERANKER_BACKEND", "torch")
     monkeypatch.setitem(sys.modules, "sentence_transformers", _fake_sentence_transformers(spy))
     monkeypatch.setattr(accel, "select_device", lambda **_: "cpu")
     monkeypatch.setattr(embedding_backend, "require_tokenizer", lambda _name: "tokenizer.json")
+    monkeypatch.setattr(embeddings.runtime_resources, "configure_torch", lambda: None)
 
     embeddings.get_reranker()
 
     assert spy.offline_flags == [True]
+    assert spy.args == [(embeddings.RERANKER_NAME,)]
+    assert spy.calls == [{"device": "cpu", "backend": "torch", "local_files_only": True}]
+
+
+@pytest.mark.parametrize(
+    ("device", "provider"),
+    [
+        ("cpu", "CPUExecutionProvider"),
+        ("cuda:0", "CUDAExecutionProvider"),
+        ("mps", "CPUExecutionProvider"),
+    ],
+)
+def test_onnx_reranker_uses_policy_provider_without_runtime_export(
+    hub: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    provider: str,
+) -> None:
+    _cache(hub, embeddings.RERANKER_NAME)
+    spy = _Spy()
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _fake_sentence_transformers(spy))
+    monkeypatch.setattr(accel, "select_device", lambda **_: device)
+    monkeypatch.setattr(embedding_backend, "require_tokenizer", lambda _name: "tokenizer.json")
+    monkeypatch.setattr(embeddings.runtime_resources, "configure_torch", lambda: None)
+    monkeypatch.setattr(embeddings, "RERANKER_BACKEND", "onnx")
+
+    embeddings.get_reranker()
+
+    assert spy.args == [
+        (str(hub / model_cache.snapshot_dirname(embeddings.RERANKER_NAME) / "snapshots" / "deadbeef"),)
+    ]
+    assert spy.calls == [
+        {
+            "backend": "onnx",
+            "device": device,
+            "model_kwargs": {
+                "provider": provider,
+                "export": False,
+                "file_name": "model.onnx",
+                "subfolder": "onnx",
+            },
+            "local_files_only": True,
+        }
+    ]
+
+
+def test_onnx_reranker_falls_back_to_the_hub_id_when_cache_load_fails(
+    hub: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cache(hub, embeddings.RERANKER_NAME)
+    spy = _Spy(fail_offline=True)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _fake_sentence_transformers(spy))
+    monkeypatch.setattr(accel, "select_device", lambda **_: "cpu")
+    monkeypatch.setattr(embedding_backend, "require_tokenizer", lambda _name: "tokenizer.json")
+    monkeypatch.setattr(embeddings.runtime_resources, "configure_torch", lambda: None)
+    monkeypatch.setattr(embeddings, "RERANKER_BACKEND", "onnx")
+
+    embeddings.get_reranker()
+
+    cached_path = str(
+        hub / model_cache.snapshot_dirname(embeddings.RERANKER_NAME) / "snapshots" / "deadbeef"
+    )
+    assert spy.args == [(cached_path,), (embeddings.RERANKER_NAME,)]
+    assert spy.offline_flags == [True, False]
 
 
 def test_clip_loads_cached_weights_offline(hub: Path, monkeypatch: pytest.MonkeyPatch) -> None:

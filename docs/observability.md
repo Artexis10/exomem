@@ -609,7 +609,8 @@ neither a ceiling nor a release.
 
 ## Recall availability
 
-The packaged MCP canary checks private cases through the existing public tools.
+The packaged MCP canary checks private cases through `ask_memory`,
+`activate_context` and `read_memory`.
 On a schema mismatch, the attempt can retain `schema_failure` with the validator
 keyword and `schema_path_sha256`. The hash covers the first rejected schema
 path encoded with compact JSON separators. It comes from the same validation

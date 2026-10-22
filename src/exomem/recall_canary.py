@@ -49,7 +49,7 @@ def _compile_response_schema(schema):
 def _canary_cases(raw: bytes):
     from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
-    # These two tools are the canary protocol's closed read-only API, not vocabulary.
+    # These three tools are the canary protocol's closed read-only API, not vocabulary.
     class Reference(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
         path: list[str | int] = Field(min_length=1)
@@ -94,7 +94,7 @@ def _canary_cases(raw: bytes):
     class Case(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
         id: str = Field(min_length=1)
-        tool: Literal["ask_memory", "activate_context"]
+        tool: Literal["ask_memory", "activate_context", "read_memory"]
         arguments: dict[str, JsonValue]
         expected: Expected | SchemaExpected
 

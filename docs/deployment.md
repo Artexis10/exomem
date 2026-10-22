@@ -1324,6 +1324,16 @@ The cross-encoder reranker reorders a query's top candidates. It runs on explici
 `rerank=True`, or automatically in performance mode on an accelerated device; CPU
 services leave it off by default. `EXOMEM_DISABLE_RANKING` turns it off entirely.
 
+The default CrossEncoder backend is PyTorch. To use ONNX, install
+`uv sync --extra embeddings --extra reranker-onnx` and set
+`EXOMEM_RERANKER_BACKEND=onnx` before starting the service. This uses the
+model's published ONNX export; Exomem does not export the model during a request.
+The first load may download that export if it is not already in the model cache.
+The ONNX provider follows Exomem's device policy: CPU is the default, CUDA is
+used only when that policy selects it, and MPS uses CPU. This setting changes
+the scorer runtime, not candidate retrieval or the automatic reranking policy.
+It does not establish a recall, latency, or memory improvement.
+
 Each reranker declares what it can judge, and recall keeps the fused order outside
 it, explicit `rerank=True` included (`retrieval_profile.rerank.reason` says why).
 Governed projected recall applies the same gate.

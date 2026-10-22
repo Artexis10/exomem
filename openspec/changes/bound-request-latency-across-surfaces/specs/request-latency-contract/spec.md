@@ -8,7 +8,7 @@ Define comparable latency evidence across public requests, inner operations and 
 
 ### Requirement: One shared canary measures live public calls and recall availability
 
-One packaged observer SHALL provide a read-only MCP canary mode for configured positive recall and activation cases. It SHALL measure the caller round trip through the parsed terminal response, retain every attempted outcome, and use the packaged warm programme bar. Warm public calls SHALL meet p95 below one second on the installed real-vault deployment. The report SHALL bind the deployment, contract, cases and measurement window. It SHALL identify warmth, contention and incomplete evidence. Natural write observations and isolated write acceptance SHALL remain separate from read-only production probes.
+One packaged observer SHALL provide a read-only MCP canary mode for configured positive `ask_memory`, `activate_context` and `read_memory` cases. It SHALL measure the caller round trip through the parsed terminal response, retain every attempted outcome, and use the packaged warm programme bar. Warm public calls SHALL meet p95 below one second on the installed real-vault deployment. The report SHALL bind the deployment, contract, cases and measurement window. It SHALL identify warmth, contention and incomplete evidence. Natural write observations and isolated write acceptance SHALL remain separate from read-only production probes.
 
 The canary SHALL report availability separately from latency. A timeout, unavailable response, malformed terminal, missing expected reference or missing expected material SHALL fail a positive case. A fast refusal SHALL NOT pass availability. The runner SHALL emit content-free JSON, a failing exit status and a structured warning for failed evidence. A standard systemd user timer SHALL run availability checks through an independently selected installed observer. The existing script SHALL delegate its MCP mode to that observer. The canary SHALL NOT change admission, initiate repairs or add an application scheduler. Local failed-unit, journal and doctor status SHALL NOT claim delivered notifications. Unmeasured operations, missing authorization and unverified notification delivery SHALL remain visible as incomplete work.
 
@@ -130,6 +130,15 @@ A bar without an established threshold SHALL carry a null threshold and an expli
 ### Requirement: Measurement boundaries remain distinct
 
 Reports SHALL distinguish public dispatch, public leaf, caller elapsed time, inner operations, canonical-commit-to-response, immediate read, paired write-plus-read and background freshness. Each interval SHALL state its start and end. Inner spans and response timing fields MUST NOT substitute for complete public requests. A paired percentile SHALL use paired elapsed samples, never added percentiles.
+
+The existing `embeddings.encode` span SHALL report `execution_wait_us` for elapsed time entering the execution context, and `model_encode_us` for elapsed time evaluating and executing the `model.encode(...)` call expression after context entry. The latter includes argument evaluation and the backend call, and ends before context exit. The producer SHALL sum integer microseconds across batches in the same encode invocation. It SHALL record an interval when that interval starts, including when the interval raises, and SHALL omit a field when its interval does not start. These nested durations SHALL NOT be added as exclusive time or treated as native-kernel time.
+
+#### Scenario: An encode exposes entered intervals without inventing skipped time
+
+- **WHEN** an encode enters the execution context and calls `model.encode`
+- **THEN** `execution_wait_us` covers execution-context entry and `model_encode_us` covers evaluation and execution of the call expression
+- **AND** a failed entered interval remains reported while an interval never entered is absent
+- **AND** the span retains its existing count and caller attribution
 
 #### Scenario: A short validation span conceals a slow acknowledgement
 

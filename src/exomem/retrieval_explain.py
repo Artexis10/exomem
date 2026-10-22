@@ -133,6 +133,7 @@ class RetrievalTrace:
         hits: list[Any],
         *,
         reranker_model: str,
+        reranker_runtime: str,
         rerank_outcome: dict[str, Any],
         scorer_input_count: int,
         unscored_tail_count: int,
@@ -188,6 +189,7 @@ class RetrievalTrace:
                 {
                     "model": reranker_model,
                     "backend": "cross_encoder",
+                    "runtime_backend": reranker_runtime,
                     "metric": {
                         "name": "cross_encoder_score",
                         "direction": "higher",
