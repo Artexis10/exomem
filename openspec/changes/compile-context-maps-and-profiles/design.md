@@ -33,7 +33,7 @@ The strongest result is an agent that sees what exists and pulls. A server-side 
 
 ## Shape
 
-1. **Context catalogue.** One searchable set of entries, distinct from the existing anchor catalogue. Its entry kinds are topics, anchors, notes (pages that are none of the other kinds), threads (the newest episode revision per `ep-` key) and collections (Records and Planning). It is part of the derived activation index: recall does not read it, and it rebuilds from the vault alone. Agent-supplied descriptions persist in a named page field; derived descriptions persist in a vault-held store. Each entry has a one-line description, its memberships, its source refs and the generation it was built from.
+1. **Context catalogue.** One searchable set of entries, distinct from the existing anchor catalogue. Its entry kinds are topics, anchors, notes (pages that are none of the other kinds), threads (the newest episode revision per `ep-` key) and collections (Records and Planning). It is a derived sidecar of its own: disposable, machine-local, rebuildable from the vault alone, and never read by recall. Notes exclude Sources, Evidence, `_Schema` and archived pages. Agent-supplied descriptions persist in a named page field (for a collection, on its `_collection.md` page); a topic's description is an attribute of its registry entry; derived descriptions persist in a vault-held store that recall does not serve and that follows the described page's visibility. Each entry has a one-line description, its memberships, its source refs and the generation it was built from.
 2. **Map.** A bounded projection of the context catalogue, labelled as an index of what exists, not as material relevant to the turn: live topics, threads, key anchors and collections, one line each with what it is, its state from the current-state authority with its as-of date when known, and a ref. Activation in `maps` mode returns it. It does not depend on the turn.
 3. **Domain map.** The projection of one topic's entries, read by ref. It is how cold material stays reachable when it is not on the map.
 4. **Profiles, read by ref.**
@@ -55,7 +55,7 @@ The map and the domain maps are projections of one context catalogue, not separa
 
 ### D3. Topic membership is a declared contract
 
-A topic is a domain from the vocabulary registry. An entry belongs to a topic when its page declares the domain, when a project key maps to it, or when an authored typed relation of a registry-declared membership kind links it to a member. A mention of an anchor does not import the anchor's topics. Ordinary notes become catalogue entries in the topics they declare, so a domain map reaches notes that are not anchors. Membership rules live in the registries; code branches only on the closed attributes they declare.
+A topic is a domain from the vocabulary registry. An entry belongs to a topic when its page declares the domain, when a project key maps to it, or when an authored typed relation of a registry-declared membership kind links it to a member. Membership runs from the entry to the topic and is not transitive. A mention of an anchor does not import the anchor's topics. Ordinary notes become context-catalogue entries in the topics they declare, so a domain map reaches notes that are not anchors. Membership rules live in the registries; code branches only on the closed attributes they declare.
 
 ### D4. Current state has one authority
 
@@ -63,7 +63,7 @@ Map lines and profiles take state from the existing current-state resolver: Reco
 
 ### D5. Descriptions are written at write time and invalidated by generation
 
-When a write creates or changes a context-context-catalogue entry, the writing agent may supply its one-line description. Otherwise a derived description is stored, marked as derived, outside Sources and Evidence. Refresh runs through derived sync with explicit reverse dependencies: old and new memberships, incoming relations, deletion, rename, supersession, registry changes and external edits. Refresh coalesces per entry and never publishes a projection built from an obsolete generation. A projection whose inputs changed and are not yet rebuilt is served marked stale.
+When a write creates or changes a context-catalogue entry, the writing agent may supply its one-line description. Otherwise a derived description is stored, marked as derived, outside Sources and Evidence. Refresh runs through derived sync with explicit reverse dependencies: old and new memberships, incoming relations, deletion, rename, supersession, registry changes and external edits. Refresh coalesces per entry and never publishes a projection built from an obsolete generation. A projection whose inputs changed and are not yet rebuilt is served marked stale.
 
 ### D6. Backfill is a launch dependency
 

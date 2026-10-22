@@ -44,7 +44,7 @@ In `maps` mode, activation SHALL return the map, its generation, the budget repo
 
 ### Requirement: A context catalogue with bounded projections
 The compiler SHALL maintain a context catalogue, distinct from the anchor catalogue. Its entry kinds SHALL be the closed set that its schema declares: topic, anchor, note, thread and collection.
-- A note SHALL be a page that is not an anchor, a thread or a collection.
+- A note SHALL be a page that is not an anchor, a thread or a collection, and is not under Sources, Evidence or `_Schema` and not archived.
 - A thread SHALL be the newest episode revision for one episode identity: the `ep-` key of the episode model.
 - A collection SHALL be a Records or Planning collection.
 - Each entry SHALL carry:
@@ -53,7 +53,13 @@ The compiler SHALL maintain a context catalogue, distinct from the anchor catalo
   - its source refs;
   - the generation it was built from.
 
-The context catalogue SHALL be part of the derived activation index: recall SHALL NOT read it, and it SHALL be rebuildable from the vault alone. Agent-supplied descriptions SHALL persist in the page field that the catalogue contract names. Derived descriptions SHALL persist in a vault-held derived-description store.
+The context catalogue SHALL be a derived sidecar of its own: disposable, machine-local, rebuildable from the vault alone, and never read by recall. Descriptions SHALL persist as follows:
+- an agent-supplied description of a page, in the page field that the catalogue contract names;
+- a collection's description, in that field of its `_collection.md` page;
+- a topic's description, in the description attribute of its domain's registry entry;
+- a derived description, in a vault-held derived-description store.
+
+Recall, `find` and `read_memory` SHALL NOT serve the derived-description store directly. A derived description SHALL be visible only to callers who can see the page it describes.
 
 The map SHALL be a projection of the catalogue that does not depend on the turn. It SHALL fit within the request's `max_chars` cap. Which entries the map lists SHALL be decided by registry-declared lifecycle classes and by entry activity as the catalogue contract defines it, not by lists in code. Each topic SHALL have a domain map: a projection of its entries, paginated at the read contract's page size. Entries with no topic SHALL be listed in an unfiled domain map. The map SHALL describe itself as an index of what exists, not as material relevant to the turn.
 
