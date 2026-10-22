@@ -33,7 +33,7 @@ The strongest result is an agent that sees what exists and pulls. A server-side 
 
 ## Shape
 
-1. **Context catalogue.** One searchable set of entries, distinct from the existing anchor catalogue. Its entry kinds are topics, anchors, notes (pages that are none of the other kinds), threads (the newest episode revision per `ep-` key) and collections (Records and Planning). It is a derived sidecar of its own: disposable, machine-local, rebuildable from the vault alone, and never read by recall. Notes exclude the raw-material trees (Sources and Evidence), the schema and governance trees, and the archive trees that the product layout declares. Each entry has a one-line description, its memberships, its source refs and the generation it was built from. D11 fixes where descriptions come from.
+1. **Context catalogue.** One searchable set of entries, distinct from the existing anchor catalogue. Its entry kinds are topics, anchors, notes (pages that are none of the other kinds), threads (the newest episode revision per `ep-` key) and collections (Records and Planning). It is a derived sidecar of its own: disposable, machine-local, rebuildable from the vault alone, and never read by recall. Notes exclude the trees that the product's layout declaration names as raw material, schema, governance or archive. Activation and the catalogue read that one declaration. Each entry has a one-line description, its memberships, its source refs and the generation it was built from. D11 fixes where descriptions come from.
 2. **Map.** A bounded projection of the context catalogue, labelled as an index of what exists, not as material relevant to the turn: live topics, threads, live or pending anchors and collections, one line each with what it is, its state from the current-state authority with its as-of date and that date's source when known, and a ref. Activation in `maps` mode returns it. It does not depend on the turn.
 3. **Domain map.** The projection of one topic's entries, read by ref. It is how cold material stays reachable when it is not on the map.
 4. **Profiles, read by ref.**
@@ -127,7 +127,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 ### Cases and key
 
 - **Miss cases.** Field reports of activation misses, turned into cases under the corpus split rule. The development split is for iteration. The held-out split is fixed at freeze as a hashed list of case ids and stays unread while iterating.
-- **Ordinary turns.** First user turns of real sessions, sampled at random from the operator's local session records over a fixed window before freeze, without regard to any arm's outcome. They are keyed like miss cases, and some expect no memory. They guard against harm, because miss cases were selected for A's failure. The sample splits into development and held-out halves. The held-out half holds at least 24, and the power step below may raise that number.
+- **Ordinary turns.** First user turns of real sessions, sampled at random from the operator's local session records over a fixed window before freeze, without regard to any arm's outcome. They are keyed like miss cases, and some expect no memory. They guard against harm, because miss cases were selected for A's failure. The sample splits into development and held-out halves. The held-out half holds at least 24. If the power step below needs more, the extra held-out turns come from a fresh random draw from the same window, made before freeze.
 - **Synthetic cases.** The deterministic activation audit's positive cases and negative twins, on its synthetic vault, through the agent-in-the-loop arm harness. Gold maps to required facts, and poison maps to forbidden claims. The harness implements A, M and P, and a dry run passes before freeze.
 - **No-memory cases.** Held-out ordinary turns and held-out miss cases whose key expects no memory, and the negative twins.
 - **Groups.** The key writer fixes the groups before generation: cases from one incident thread form one group, and each negative twin joins its positive.
@@ -136,7 +136,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 ### Vault and state
 
 1. Take one digest-pinned snapshot copy of the vault. The key writer writes the key on this copy.
-2. Remove the incident records, the evaluation pages and every excluded ref from the copy. For each ordinary turn, the excluded refs include, selected by provenance and not by wording, every page and episode revision that the sampled session wrote: its session id, its episode key and its write receipts. They also include any later page that records that session's outcome.
+2. Remove the incident records, the evaluation pages and every excluded ref from the copy. For each ordinary turn, the excluded refs include, selected by provenance and not by wording, every page and episode revision that the sampled session wrote: its session id, its episode key and its write receipts. They also include any later page that records that session's outcome: the key writer lists those by ref, and the step-3 sweep confirms them.
 3. Search the copy for every case id and every quoted turn string, and record zero hits per case. A page with a hit is removed or its case is struck before freeze.
 4. Check every source ref in the key against the copy. A case whose required source was removed is struck before freeze.
 5. Run the description coverage pass (D6) on the copy.
@@ -151,7 +151,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
   - each required item: used, missing or contradicted;
   - each forbidden claim: asserted as current, mentioned as past, or absent;
   - on a no-memory case: whether the answer asserts user-specific facts that the turns do not supply, with the span.
-- **Judge noise.** The judge re-judges a random fifth of the items. The report gives agreement per verdict kind. Agreement below 0.8 on required-item verdicts triggers the recovery path: a second judge from the other model family re-judges every item blind, with the re-judged items mixed in. An item's verdict stands where both judges agree. Where they disagree, the verdict that weighs against the switch stands.
+- **Judge noise.** The judge re-judges a random fifth of the items. The report gives agreement per verdict kind. Agreement below 0.8 on required-item verdicts triggers the recovery path: a second judge from the other model family re-judges every item blind, with the re-judged items mixed in. An item's verdict stands where both judges agree. Where they disagree, the verdict that weighs against the switch stands. A script applies this tie-break after unblinding; no judge lane does it.
 
 ### Runs and failures
 
@@ -166,11 +166,11 @@ This protocol is frozen before any held-out generation. A later change is a numb
 - **Test.** For each pair of arms, the per-case score difference, averaged over cases. Within a group, case differences sum, so the statistic stays the mean over cases. Superiority is a one-sided sign-flip permutation test over groups at 0.025. Non-inferiority within a tolerance δ uses the same test on the difference plus δ. The report also gives a 95% interval from inverting the test.
 - **Power.**
   - Rule 1: with a dozen held-out miss cases scored 0 or 1, each its own group, M must win at least 6 cases with no loss to show superiority over A, or 8 with one loss. Fewer groups than cases need more wins. The smallest effect the rule can detect is therefore about +0.5. Development evidence puts M − A above that at retrieval level (+0.67) and M − P close to zero.
-  - Rule 2: before freeze, measure the per-case spread between repeats on the development ordinary turns. Simulate equal arms with that spread, and set the held-out size (at least 24) and δ (at least 0.10) so that equal arms pass rule 2 at least 80% of the time. The freeze commit records the spread, the size, δ and the simulated pass rate.
+  - Rules 2 and 3: the largest acceptable loss is policy, fixed now: δ is at most 0.15 for both rules. Before freeze, measure the per-case spread between repeats on the development ordinary turns and miss cases. Simulate equal arms with that spread: M and A on held-out ordinary turns for rule 2, and M and P on held-out miss cases and ordinary turns pooled for rule 3. For each rule, raise the held-out size first, and raise δ above 0.10, up to 0.15, only when the available turns cannot reach an 80% pass rate for equal arms. The freeze commit records the spread, the sizes, each rule's δ and the simulated pass rates.
 - **Rule.** Switch only when all of these hold:
   1. On held-out miss cases, M beats A.
-  2. On held-out ordinary turns, M is non-inferior to A within δ, as the power step sets it.
-  3. M pays over P on held-out miss cases and ordinary turns together: M beats P, or M is non-inferior to P within δ = 0.10 and M beats P on Exomem calls per case under the same test.
+  2. On held-out ordinary turns, M is non-inferior to A within rule 2's δ, as the power step sets it.
+  3. M pays over P on held-out miss cases and ordinary turns together: M beats P, or M is non-inferior to P within rule 3's δ, as the power step sets it, and M beats P on Exomem calls per case under the same test.
   4. On no-memory cases, M contaminates no more cases than A does, plus at most one.
   5. M loses no synthetic positive case that A passes in a majority of its repeats. M loses a case when it fails that case in a majority of its own repeats.
 - **Expected outcome.** Rule 3 most likely passes, if at all, through fewer calls. If P beats A and M does not pay over P, the default stays `anchors`, and the report proposes a follow-up change for pull-first instructions without the map.

@@ -44,7 +44,7 @@ In `maps` mode, activation SHALL return the map, its generation, the budget repo
 
 ### Requirement: A context catalogue with bounded projections
 The compiler SHALL maintain a context catalogue, distinct from the anchor catalogue. Its entry kinds SHALL be the closed set that its schema declares: topic, anchor, note, thread and collection.
-- A note SHALL be a page that is not an anchor, a thread or a collection, and is outside the raw-material trees (Sources and Evidence), the schema and governance trees, and the archive trees that the product layout declares. A page whose lifecycle class is `retired` stays a note.
+- A note SHALL be a page that is not an anchor, a thread or a collection, and is outside the trees that the product's layout declaration names as raw material (Sources and Evidence), schema, governance or archive. Activation and the catalogue SHALL read that one declaration. A page whose lifecycle class is `retired` stays a note.
 - A thread SHALL be the newest episode revision for one episode identity: the `ep-` key of the episode model.
 - A collection SHALL be a Records or Planning collection.
 - Each entry SHALL carry:

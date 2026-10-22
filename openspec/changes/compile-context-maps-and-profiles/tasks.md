@@ -8,7 +8,7 @@
 
 ## 2. Catalogue and projections
 
-- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Read the raw-material, governance and archive trees from the same declaration that activation uses, so the two never disagree. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
+- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Read the raw-material, schema, governance and archive trees from the product's layout declaration that activation reads, so the two never disagree. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
 - [ ] 2.2 Project the map and the domain maps with bounded output and pagination.
 - [ ] 2.3 Compile anchor and topic profiles through the role lanes, cached by generation.
 - [ ] 2.4 Resolve map, domain-map and profile refs in `read_memory` with missing and stale states, on every surface.
@@ -23,12 +23,12 @@
 ## 4. Activation and clients
 
 - [ ] 4.1 Serve the `maps` packet mode behind the setting, with `anchors` as the default and one packet budget; register its stages under instrumentation and extend the latency gate to `maps` mode.
-- [ ] 4.2 Update the server instructions (within their 900-character bound, keeping the user's words verbatim as `turn`), the `activate_context` description, the skill scaffold, and the retrieve hook's rendering of a map, for map-assisted pulls before the first answer. Regenerate the surface pins: schema fidelity fixture, digests, `docs/capabilities.md`, README table and plugin trees.
+- [ ] 4.2 Update the server instructions (within their 900-character bound, keeping the user's words verbatim as `turn`), the `activate_context` description, the skill scaffold, and the retrieve hook's rendering of a map, for map-assisted pulls before the first answer. Regenerate the surface pins, including the write-tool parameters from 3.1: schema fidelity fixture, digests, `docs/capabilities.md`, README table and plugin trees.
 
 ## 5. Evaluation and switch
 
 - [ ] 5.1 Build the evaluation inputs: extend the agent-in-the-loop harness with arms A, M and P and pass a dry run; sample the ordinary turns; have an independent key writer key the cases against the snapshot; fix the groups; run the power step on the development ordinary turns.
 - [ ] 5.2 Iterate on the development cases and development ordinary turns with arms A, M and P. Probe the turn slice here only.
-- [ ] 5.3 Make the freeze commit: protocol, arm hashes, hashed held-out ids and groups.
+- [ ] 5.3 Make the freeze commit: protocol, arm hashes, hashed held-out ids, groups, and the power step's spread, sizes, δ values and simulated pass rates.
 - [ ] 5.4 Run the frozen held-out evaluation once, blind.
 - [ ] 5.5 If it passes, modify the "Packet modes" requirement's default, switch the default through the release line, then replay field reports on the installed release.
