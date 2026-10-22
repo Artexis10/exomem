@@ -1429,17 +1429,54 @@ def test_a_compound_half_the_turn_also_writes_alone_still_names_its_anchor() -> 
     assert "exact_alias" in {c.path: c for c in candidates}["home.md"].evidence
 
 
+def test_a_capitalised_name_beside_a_compound_half_keeps_its_anchor() -> None:
+    mark = _row("mark.md", "Mark", kind="entity", terms=("mark",))
+    sync = _term_row("sync.md", "Bookmark Sync", terms=("bookmark", "sync"))
+    analysis = resolve_module.analyze_turn("Did you read the book Mark lent me?")
+    candidates = resolve_module.candidates_for(
+        analysis, (mark, sync), term_anchor_counts={"mark": 1, "bookmark": 1, "sync": 1}
+    )
+
+    assert "exact_alias" in {c.path: c for c in candidates}["mark.md"].evidence
+
+
+def test_an_earlier_entry_reads_its_compound_against_the_whole_catalogue() -> None:
+    """The current turn reached only "Home"; the earlier entry wrote "home
+    work", so it must not qualify that project as named in the conversation."""
+    from exomem import working_set_conversation as conversation_module
+
+    home = _row("home.md", "Home", kind="project", terms=("home",))
+    tracker = _term_row("tracker.md", "Homework Tracker", terms=("homework", "tracker"))
+    conversation = conversation_module.bound(
+        {"recent": [{"role": "user", "text": "is this another home work tracker case?"}]}
+    )
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("any news on this?"),
+        (home, tracker),
+        retrieval_paths=frozenset({"home.md"}),
+    )
+    merged, _origins, _entries = conversation_module.apply(
+        candidates,
+        conversation_module.analyze(conversation),
+        conversation,
+        rows=(home, tracker),
+    )
+
+    assert "conversation" not in {c.path: c for c in merged}["home.md"].evidence
+
+
 def test_audience_decides_an_anchor_the_turn_reaches_only_by_a_spaced_compound() -> None:
-    """A reader who may not see "Kettlebrook" must not get it back undecided
-    because the turn wrote it as "kettle brook"."""
+    """A reader who may not see "Kettlebrook" must not get it back undecided,
+    or counted as an owner of the word, because the turn wrote "kettle brook"."""
     hidden = _term_row("hidden.md", "Kettlebrook", terms=("kettlebrook",))
     analysis = resolve_module.analyze_turn("what changed at kettle brook")
-    rows, _counts, decided = resolve_module.audience_view(
+    rows, counts, decided = resolve_module.audience_view(
         analysis, (hidden,), {"kettlebrook": 1}, lambda _path: False
     )
 
     assert rows == ()
     assert decided == {"hidden.md"}
+    assert counts["kettlebrook"] == 0
 
 
 # --------------------------------------------------------------------------- #

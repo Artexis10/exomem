@@ -1319,15 +1319,19 @@ def _spaced_compounds(
 
     Speech-to-text and quick typing split a closed compound with a space. A
     join counts only where the vault holds it as a word, so no word list
-    decides which pairs are compounds.
+    decides which pairs are compounds. A pair whose casing differs inside a
+    sentence ("the book Mark lent me") is a word and a name, never one word.
     """
     tokens = analysis.tokens
+    capitalised = analysis.capitalised
     return tuple(
         (joined, index)
         for index in range(len(tokens) - 1)
         if tokens[index] not in stopwords
         and tokens[index + 1] not in stopwords
         and index + 1 not in analysis.run_breaks
+        and (_fold_lexical_term(tokens[index]) in capitalised)
+        == (_fold_lexical_term(tokens[index + 1]) in capitalised)
         and (joined := _fold_lexical_term(tokens[index] + tokens[index + 1])) is not None
     )
 
@@ -1416,6 +1420,24 @@ def _consumed_compound_halves(
     return frozenset(phrases), frozenset(terms)
 
 
+def _consumed_turn_words(
+    analysis: TurnAnalysis,
+    rows: Sequence[AnchorFacts],
+    lexicons: Iterable[RowLexicon],
+    stopwords: frozenset[str],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """The phrases and folded terms the turn wrote only inside a longer word
+    some indexed name spells: an embedded head (`_consumed_embedded_words`) or
+    a spaced compound's half (`_consumed_compound_halves`).
+
+    `rows` and `lexicons` must cover the whole catalogue the caller can see,
+    not only the rows it matches: the longer word may belong to a row the
+    turn never reached.
+    """
+    halves, half_terms = _consumed_compound_halves(analysis, lexicons, stopwords)
+    return _consumed_embedded_words(analysis, rows) | halves, half_terms
+
+
 def _exact_alias_phrases(
     lexicon: RowLexicon, phrases: frozenset[str], consumed: frozenset[str]
 ) -> frozenset[str]:
@@ -1452,7 +1474,10 @@ def title_names(
     terms = frozenset(
         folded for term in tokens_of(title) if (folded := _fold_lexical_term(term)) is not None
     )
-    turn_terms = _turn_terms_folded(analysis, stopwords)
+    _halves, half_terms = _consumed_compound_halves(
+        analysis, (_row_lexicon("", title, (), ()),), stopwords
+    )
+    turn_terms = _turn_terms_folded(analysis, stopwords) - half_terms
     return _lexical_overlap(
         turn_terms & terms, turn_terms & terms, _min_lexical_terms(DEFAULT_RANKING)
     )
@@ -1566,10 +1591,9 @@ def candidates_for(
     row_exact_phrases: dict[str, frozenset[str]] = {}
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
-    halves, half_terms = _consumed_compound_halves(
-        analysis, [lexicon_of(row) for row in rows], stopwords
+    consumed_words, half_terms = _consumed_turn_words(
+        analysis, rows, (lexicon_of(row) for row in rows), stopwords
     )
-    consumed_words = _consumed_embedded_words(analysis, rows) | halves
     turn_terms_folded -= half_terms
     # A word that is a whole name of ANY anchor is a name for every anchor it
     # reaches: two people share a first name, and only one is stored under it.
@@ -1893,6 +1917,7 @@ def entry_named_anchors(
     row_lexicons: Mapping[str, RowLexicon] | None = None,
     stopwords: frozenset[str] = _STOPWORDS,
     config: RankingConfig | None = None,
+    vocabulary_rows: Sequence[AnchorFacts] | None = None,
 ) -> frozenset[str]:
     """The ids of the rows ANY analysis reaches by `exact_alias` or
     `lexical_overlap` -- exactly the anchors `candidates_for` would return with
@@ -1900,6 +1925,10 @@ def entry_named_anchors(
     spans) for each. A qualifier that only asks "does an earlier turn name
     this anchor?" over a whole candidate set reads this instead of
     `candidates_for_each`. Words only: no band, recall, routing or recency.
+
+    A caller that matches only some rows passes the whole catalogue as
+    `vocabulary_rows`: the longer word that consumes a half or a head
+    (`_consumed_turn_words`) may belong to a row it does not match.
     """
     if not analyses:
         return frozenset()
@@ -1919,15 +1948,17 @@ def entry_named_anchors(
         frozenset().union(*(phrases for _terms, phrases in worded)),
         runs=False,
     )
-    reachable_rows = [row for row, _lexicon in reachable]
+    vocabulary = rows if vocabulary_rows is None else vocabulary_rows
+    known = row_lexicons or {}
     entries = []
     for analysis, (terms, phrases) in zip(analyses, worded, strict=True):
-        halves, half_terms = _consumed_compound_halves(
-            analysis, (lexicon for _row, lexicon in reachable), stopwords
+        consumed, half_terms = _consumed_turn_words(
+            analysis,
+            vocabulary,
+            (known.get(row.anchor_id) or row_lexicon(row) for row in vocabulary),
+            stopwords,
         )
-        entries.append(
-            (terms - half_terms, phrases, _consumed_embedded_words(analysis, reachable_rows) | halves)
-        )
+        entries.append((terms - half_terms, phrases, consumed))
     return frozenset(
         row.anchor_id
         for row, lexicon in reachable

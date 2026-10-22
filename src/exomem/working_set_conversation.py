@@ -482,19 +482,20 @@ def apply(
         # One scan of the catalogue for every read entry, not one per entry.
         return resolve_module.candidates_for_each(analyses, over, row_lexicons=lexicons, **keywords)
 
-    # The qualifier needs only the anchors the turn or `focus` reached: an
-    # entry's worded kinds on a row never depend on another row's words,
-    # except through an embedded word (`candidates_for`'s consumption), where
-    # the whole catalogue is read. It asks only whether an entry names the
-    # anchor, so it never builds each reached row's full facts: a focus that
-    # reaches the whole candidate set would pay that per row per entry.
-    embedded = any(set(analysis.words) - set(analysis.tokens) for analysis in analyses)
-    reached = rows if embedded else [row for row in rows if row.anchor_id in merged]
+    # The qualifier needs only the anchors the turn or `focus` reached. An
+    # entry's worded kinds on a row depend on another row's words only through
+    # consumption (an embedded head or a spaced compound's half), which reads
+    # the whole catalogue as `vocabulary_rows`. It asks only whether an entry
+    # names the anchor, so it never builds each reached row's full facts: a
+    # focus that reaches the whole candidate set would pay that per row per
+    # entry.
+    reached = [row for row in rows if row.anchor_id in merged]
     named.update(
         resolve_module.entry_named_anchors(
             analyses,
             reached,
             row_lexicons=lexicons,
+            vocabulary_rows=rows,
             **({"stopwords": stopwords} if stopwords is not None else {}),
         )
     )
