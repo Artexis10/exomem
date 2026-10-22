@@ -155,7 +155,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - From every page that a linked session edited, remove the lines it wrote, including `summary`, lede and `topics` fields. A line is removed when any of these sources attributes it to a linked session:
      1. the page's revision history;
      2. the transcripts of the linked session and of every subagent or lane it spawned: their Exomem write calls and their file edits on vault paths;
-     3. only for a linked session with no transcript on the operator's machines, such as a web-client session: every write-log entry in the session's active span that no transcript attributes to another session. The span runs from the session's first to its last recorded activity; when the records give no times, it is the incident's local day and the day after.
+     3. only for a linked session with no transcript on the operator's machines, such as a web-client session: every write-log entry in the session's active span that no transcript attributes to another session. The span runs from the session's first to its last recorded activity; when the records give no times, it is the local day of the session's earliest provenance record and the day after.
    - A page that source 3 names counts as edited by that session. Its dated units in the span are removed, and if its other lines cannot be attributed, the page is removed.
    - Subject or topic similarity is never a basis for attribution.
    - If a page's lines cannot be attributed by these sources, remove the page.
