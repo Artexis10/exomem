@@ -486,7 +486,7 @@ def _begin(session, manager, fence_client, *, plan_id, why):
 
 
 def _renew(session, token):
-    """Renew the store-bound lease between steps, as replica publication does: no renewer runs offline."""
+    """Renew the store-bound lease between steps of this synchronous offline export."""
     if session.manager._collection_store is not None:
         session.manager._renew_collection_store(token, due_only=True)
     session.require(token)

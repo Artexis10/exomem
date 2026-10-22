@@ -1024,6 +1024,43 @@ def s1(env, tmp_path, monkeypatch, capsys):
     return root
 
 
+@pytest.mark.parametrize("existing_store", [False, True])
+def test_offline_migration_keeps_its_lease_through_a_slow_final_proof(
+        env, capsys, monkeypatch, request, existing_store):
+    """A final source proof beyond one lease TTL must preserve authority and every collection."""
+    root = request.getfixturevalue("s1") if existing_store else legacy_vault(env)
+    expected = {cid: rows(root, path) for cid, path in MIGRATED.items()}
+    stop_writer()
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    capture = legacy_import.capture_legacy_collection
+    delayed = False
+    owners = []
+
+    def slow_capture(*args, **kwargs):
+        nonlocal delayed
+        if writer_lease._ACTIVE_WRITE_FENCE.get() is None:
+            assert client.status().holder is None
+        elif not delayed:
+            delayed = True
+            owners.append(writer_lease._ACTIVE_WRITE_FENCE.get()[0])
+            time.sleep(writer_lease.LeaseConfig.from_env().ttl_seconds + 0.5)
+        return capture(*args, **kwargs)
+
+    monkeypatch.setattr(legacy_import, "capture_legacy_collection", slow_capture)
+    assert migrate(root, "apply") == 0
+    assert printed(capsys)["status"] == "marker_admitted" and delayed
+    assert owners[0].status()["renewer_alive"] is False
+    assert client.status().holder is None
+    service = start_service(root)
+    try:
+        assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == expected
+        if existing_store:
+            assert [row["title"] for row in call(root, "record_memory", action="query", collection=DAILY)["rows"]] == [
+                "Summary row"]
+    finally:
+        service.stop()
+
+
 def test_a_failed_proof_on_an_s1_vault_reports_it_and_leaves_the_store_marker_and_fence(s1, capsys, monkeypatch):
     """An apply on a vault with a live S1 store that fails a proof, then loses the report that
     names the collection and the check behind a lease it cannot hand back."""
