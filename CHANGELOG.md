@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.134.1](https://github.com/Artexis10/exomem/compare/v0.134.0...v0.134.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **activation:** read a spaced closed compound as its closed word ([#1978](https://github.com/Artexis10/exomem/issues/1978)) ([25dc5e0](https://github.com/Artexis10/exomem/commit/25dc5e03d9f7dce841581cabb6974d5d96ee9001))
+
 ## [0.134.0](https://github.com/Artexis10/exomem/compare/v0.133.0...v0.134.0) (2026-10-22)
 
 
