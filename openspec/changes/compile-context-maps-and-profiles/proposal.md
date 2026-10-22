@@ -14,7 +14,7 @@ A private replay of twelve field reports measured the gap on one live vault. Its
 - Define **topic membership** from registry domains, project keys and explicit page declarations, with direction rules, so that ordinary notes are reachable through their topic and not only through anchors.
 - Keep descriptions current on write with generation-bound invalidation, and backfill descriptions for existing entries before evaluation.
 - Filter by the caller's view **before** any synthesis, selection, ranking or budget.
-- Test a **turn slice** (profiles selected by meaning from the turn) as a separate arm; ship it only if it adds value over the map alone. Test a pull-instructions arm with no map, so the context catalogue must earn its cost.
+- Probe a **turn slice** (profiles selected by meaning from the turn) on development cases only; it ships only through its own frozen evaluation. Test a pull-instructions arm with no map, so the context catalogue must earn its cost, and sample ordinary turns beside known misses, so the switch cannot win only on cases the current packet failed.
 - Tell clients to read the map, pull profiles, pages and units by ref or by their own `ask_memory` queries, and cite refs.
 - Keep the anchor-first packet as the default until a frozen, paired evaluation of first answers decides the switch.
 

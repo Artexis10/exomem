@@ -44,26 +44,28 @@ In `maps` mode, activation SHALL return the map, its generation, the budget repo
 
 ### Requirement: A context catalogue with bounded projections
 The compiler SHALL maintain a context catalogue, distinct from the anchor catalogue. Its entry kinds SHALL be the closed set that its schema declares: topic, anchor, note, thread and collection.
-- A note SHALL be a page that is not an anchor, a thread or a collection, and is not under Sources, Evidence or `_Schema` and not archived.
+- A note SHALL be a page that is not an anchor, a thread or a collection, and is outside the raw-material trees (Sources and Evidence), the schema and governance trees, and the archive trees that the product layout declares. A page whose lifecycle class is `retired` stays a note.
 - A thread SHALL be the newest episode revision for one episode identity: the `ep-` key of the episode model.
 - A collection SHALL be a Records or Planning collection.
 - Each entry SHALL carry:
-  - a one-line description;
+  - a one-line description, or none, and the origin of that description;
   - its topic memberships;
   - its source refs;
   - the generation it was built from.
 
-The context catalogue SHALL be a derived sidecar of its own: disposable, machine-local, rebuildable from the vault alone, and never read by recall. An entry's description SHALL be the first of these that exists:
-1. an authored description: the page's `summary` field; for a collection, the `summary` field of its `_collection.md` page; for a topic, the `description` field of its domain's registry entry;
-2. a model-made derived description for the page's current content, from the vault-held derived-description store;
-3. the page's structural lede, cut to one line;
-4. none, shown as undescribed.
+The context catalogue SHALL be a derived sidecar of its own: disposable, machine-local, rebuildable from the vault alone, and never read by recall. An entry's description SHALL be the first of these that exists, and its origin SHALL be the name in front of it:
+1. `authored`: the page's `summary` field, or for a collection the `summary` field of its `_collection.md` page;
+2. `registry`: for a topic, the `description` field of its domain's registry entry;
+3. `model`: a model-made description of the page's current content, when a derived-description store exists;
+4. `lede`: the page's structural lede, cut to one line;
+5. `none`: the entry is shown as undescribed.
 
-Each entry SHALL say which of these its description came from. The derived-description store SHALL be a reserved internal-state path, so that no surface that lists, searches or reads vault files serves it directly. A derived description SHALL be visible only to callers who can see the page it describes.
+The server SHALL NOT call a model to make a description. When a derived-description store exists, it SHALL be a reserved internal-state path, so that no surface that lists, searches or reads vault files serves it directly. A derived description SHALL be visible only to callers who can see the page it describes.
 
 The map SHALL be a projection of the catalogue that does not depend on the turn. It SHALL fit within the request's `max_chars` cap. Which entries the map lists SHALL be decided by registry-declared lifecycle classes and by entry activity, not by lists in code:
 - An entry's lifecycle class SHALL be the status registry's `class` attribute of the entry's status.
-- An entry's activity SHALL be the newest authored date, visible to the caller, among its page's `updated` field, its units' authored dates and, for a thread, its newest revision.
+- An entry's activity SHALL be the newest date, visible to the caller, among its page's `updated` field, its units' authored dates and, for a thread, its newest revision.
+- The map SHALL order entries totally: by these rules, then by activity, newest first, then by ref. `exomem://map` SHALL page through the whole ordered projection, and activation SHALL return its first part within the budget.
 - Entries whose lifecycle class is `superseded`, `retired` or `abandoned` SHALL appear only in domain maps. Each topic SHALL have a domain map: a projection of its entries, paginated at the read contract's page size. Entries with no topic SHALL be listed in an unfiled domain map. The map SHALL describe itself as an index of what exists, not as material relevant to the turn.
 
 #### Scenario: The map does not depend on the turn
@@ -76,11 +78,11 @@ The map SHALL be a projection of the catalogue that does not depend on the turn.
 
 ### Requirement: Topic membership is declared
 A topic SHALL be a domain that the vocabulary registry declares. An entry SHALL belong to a topic only through one of these:
-- its page's `domain` field, a value or a list, names the domain;
+- its page's `topics` field, a value or a list, names the domain;
 - one of its page's project keys (its `project` and `projects` fields) maps to the domain through that key's `domain` field in the project-key registry; a project anchor belongs to its own key's domains;
-- an authored relation from the entry to a page is of a relation kind whose registry family is `membership`, and that page declares the domain through its own `domain` field or project key.
+- an authored relation from the entry to a page is of a relation kind whose registry family is `membership`, and that page declares the domain through its own `topics` field or project key.
 
-A declared value SHALL resolve through the domains registry by key, label or alias. A value that does not resolve SHALL give no membership, and the catalogue SHALL count it as an unresolved declaration. Membership SHALL run from the entry to the topic and SHALL NOT be transitive: an entry SHALL NOT join a topic that its relation's target reaches only through its own relations. A mention of an anchor SHALL NOT give the mentioning page that anchor's topics. Notes that are not anchors SHALL be catalogue entries in the topics they declare.
+A declared value SHALL resolve when the domains resolver returns it as a built-in, registered or alias key; a deprecated key SHALL resolve to its replacement. A value that does not resolve SHALL give no membership, and the catalogue SHALL count it as an unresolved declaration. A page's `domain` field SHALL NOT declare membership, because it names a source's subject or an experiment's folder. Membership SHALL run from the entry to the topic and SHALL NOT be transitive: an entry SHALL NOT join a topic that its relation's target reaches only through its own relations. A mention of an anchor SHALL NOT give the mentioning page that anchor's topics. Notes that are not anchors SHALL be catalogue entries in the topics they declare.
 
 #### Scenario: A vault-added domain gets a domain map
 - **WHEN** the vault overlay adds a domain and pages declare it
@@ -90,9 +92,13 @@ A declared value SHALL resolve through the domains registry by key, label or ali
 - **WHEN** the project-key registry maps a key to a domain and a note names that key in its `project` field
 - **THEN** the note is an entry of that domain's topic
 
-#### Scenario: An unresolved domain is counted, not guessed
-- **WHEN** a page's `domain` field names a value that the domains registry does not resolve
+#### Scenario: An unresolved topic is counted, not guessed
+- **WHEN** a page edited outside Exomem names a value in its `topics` field that the domains registry does not hold
 - **THEN** the page joins no topic through that value and the catalogue counts one unresolved declaration
+
+#### Scenario: An experiment's folder domain is not a topic
+- **WHEN** an experiment page carries `domain: ops` and no `topics` field
+- **THEN** it joins no topic through its `domain` field
 
 #### Scenario: A mention does not spread membership
 - **WHEN** a note mentions an anchor of another topic and has no relation of the membership family to it
@@ -120,14 +126,14 @@ A unit that does not fit SHALL become a ref and SHALL NOT be cut. A unit's as-of
 - `exomem://map/topic/<domain key>` and `exomem://map/unfiled`, the domain maps;
 - `exomem://profile/topic/<domain key>` and `exomem://profile/anchor/<percent-encoded anchor ref>`, the profiles.
 
-Each response SHALL carry the ref, the view's generation, a stale flag and at most 40 items. Further items SHALL be reachable by an opaque continuation token that is bound to the view, the caller's view and the generation. A token from another generation SHALL return `CONTINUATION_STALE`, and the caller restarts from the first page. A ref that names no view visible to the caller SHALL return `NOT_FOUND`. When a view's inputs changed and the rebuilt view has not been published yet, the response SHALL serve the last published view marked stale.
+Each response SHALL carry the ref, the view's generation, a stale flag and at most 40 items. Further items SHALL be reachable by an opaque continuation token that is bound to the view, the caller's view and the generation. A malformed, unknown, expired or differently bound token SHALL return the existing `INVALID_CONTINUATION` refusal. A token bound to the same view and caller but an older generation SHALL return `CONTINUATION_STALE`, and the caller restarts from the first page. A ref that names no view visible to the caller SHALL return `NOT_FOUND`. When a view's inputs changed and the rebuilt view has not been published yet, the response SHALL serve the last published view marked stale.
 
 #### Scenario: A stale profile is marked
 - **WHEN** a member of a profile changed and no newer build of the profile is published
 - **THEN** reading the profile returns the last published build marked stale
 
 ### Requirement: Descriptions and projections stay current on write
-A write that creates or changes a context-catalogue entry SHALL accept a one-line description from the writing agent and store it in the page's `summary` field. A description that the agent did not supply SHALL be derived and marked as derived. A stored derived description SHALL NOT be stored under Sources or Evidence. A write that sets a page's `domain` field SHALL resolve the value through the domains registry, as source capture does. A write SHALL invalidate every projection and profile whose inputs it changed, including old and new memberships and incoming relations. Publishing a projection SHALL mean replacing the current one. A build from a generation older than the current published one SHALL NOT be published.
+A write that creates or changes a context-catalogue entry SHALL accept a one-line description from the writing agent and store it in the page's `summary` field. A description that the agent did not supply SHALL be derived and marked as derived. A stored derived description SHALL NOT be stored under Sources or Evidence. A write that sets a page's `topics` field SHALL resolve each value through the domains resolver that source capture uses, and SHALL register a new value as capture does, with a warning on a near-miss. A write SHALL invalidate every projection and profile whose inputs it changed, including old and new memberships and incoming relations. Publishing a projection SHALL mean replacing the current one. A build from a generation older than the current published one SHALL NOT be published.
 
 #### Scenario: A capture reaches the profile it touches
 - **WHEN** an agent records a new decision about an anchor and derived sync reports the profile refresh complete
@@ -153,17 +159,18 @@ The egress guard SHALL cover every new packet block and field.
 
 ### Requirement: The mode switch follows a frozen paired evaluation
 The default SHALL change to `maps` only after an evaluation passes. These parts of the evaluation SHALL be fixed before any held-out generation:
-- the cases and arms;
+- the cases, their groups and the arms, with each arm's server mode, tools and instructions;
 - the agent and its pull budget;
-- the scoring rule;
-- the contamination tolerance;
-- the decision rule.
+- the scoring rule and the judge's verdict schema;
+- the retry and failure policy;
+- the tolerances and the decision rule.
 
-The arms SHALL include a pull-instructions arm with no map. The primary measure SHALL be whether the first answer uses the required current facts and constraints. The switch SHALL require all of these:
-- the lower bound of the paired difference against `anchors` on the primary measure is above zero;
-- the same lower bound against the pull-instructions arm is above zero;
+The arms SHALL include a pull-instructions arm with no map. The cases SHALL include ordinary turns sampled without regard to any arm's outcome, beside the cases of known misses. The primary measure SHALL be whether the answer to each case's scored turn uses the required current facts and constraints and asserts no forbidden claim as current. The switch SHALL require all of these:
+- on held-out miss cases, `maps` is superior to `anchors` on the primary measure;
+- on held-out ordinary turns, `maps` is non-inferior to `anchors` within the fixed tolerance;
+- `maps` is superior to the pull-instructions arm, or non-inferior to it within the fixed tolerance and superior on memory calls per case;
 - contamination on cases without relevant memory is non-inferior within the fixed tolerance;
-- the activation-audit twins are non-inferior within the fixed tolerance.
+- `maps` loses no activation-audit positive case that `anchors` passes.
 
 #### Scenario: The default stays until the evaluation passes
 - **WHEN** the frozen evaluation has not passed

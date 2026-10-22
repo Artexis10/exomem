@@ -2,13 +2,13 @@
 
 ## 1. Contracts
 
-- [x] 1.1 Define the topic-membership contract: the page's `domain` field, the project-key `domain` field, the `membership` relation family, resolution through the domains registry, direction and non-transitivity (design D3).
+- [x] 1.1 Define the topic-membership contract: the page's `topics` field, the project-key `domain` field, the `membership` relation family, resolution through the domains registry, direction and non-transitivity (design D3).
 - [x] 1.2 Define the context-catalogue entry, the description order and the `summary` field, the derived-description store, lifecycle class and activity, map selection, refs, and the read contract with page size and continuation (design D11).
-- [x] 1.3 Freeze the evaluation protocol: cases, arms (including pull instructions with no map), agent, pull budget, scoring rule for successors and equivalent evidence, contamination tolerance and decision rule (design, Evaluation).
+- [x] 1.3 Define the evaluation protocol: cases, arms (including pull instructions with no map), agent, pull budget, scoring rule for successors and equivalent evidence, contamination tolerance and decision rule (design, Evaluation).
 
 ## 2. Catalogue and projections
 
-- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync.
+- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
 - [ ] 2.2 Project the map and the domain maps with bounded output and pagination.
 - [ ] 2.3 Compile anchor and topic profiles through the role lanes, cached by generation.
 - [ ] 2.4 Resolve map, domain-map and profile refs in `read_memory` with missing and stale states, on every surface.
@@ -16,9 +16,9 @@
 
 ## 3. Write side
 
-- [ ] 3.1 Accept an agent-supplied description on the write tools and store it in the page's `summary` field. Resolve `domain` through the source-capture resolver on every write that sets it.
+- [ ] 3.1 Accept an agent-supplied description on the write tools and store it in the page's `summary` field. Resolve `topics` through the source-capture domain resolver and policy on every write that sets it. Document `summary` and `topics` in the scaffold's frontmatter reference, and the project-key `domain` field in the format comment of `project-keys.yaml`.
 - [ ] 3.2 Add reverse dependencies and generation-bound invalidation to derived sync for the catalogue, projections and profiles.
-- [ ] 3.3 Report description coverage by origin on the first catalogue build. If a development round shows that lede descriptions lose against authored ones, register the derived-description store as a reserved internal-state path with its own owner, and run a resumable model backfill into it with provenance, cost and coverage reported.
+- [ ] 3.3 Report description coverage by origin on the first catalogue build. If a development round shows that lede descriptions lose against authored ones, register the derived-description store as a reserved internal-state path with its own owner, and have a maintenance agent run a resumable model backfill into it, with provenance, cost and coverage reported. The server makes no model call.
 
 ## 4. Activation and clients
 
@@ -27,6 +27,8 @@
 
 ## 5. Evaluation and switch
 
-- [ ] 5.1 Iterate on the development cases: map with pulls, map plus turn slice with pulls, and pull instructions with no map, against `anchors` with the same pulls.
-- [ ] 5.2 Run the frozen held-out evaluation once, blind.
-- [ ] 5.3 If it passes, modify the "Packet modes" requirement's default, switch the default through the release line, then replay field reports on the installed release.
+- [ ] 5.1 Build the evaluation inputs: extend the agent-in-the-loop harness with arms A, M and P and pass a dry run; sample the ordinary turns; have an independent key writer key the cases against the snapshot; fix the groups.
+- [ ] 5.2 Iterate on the development cases and development ordinary turns with arms A, M and P. Probe the turn slice here only.
+- [ ] 5.3 Make the freeze commit: protocol, arm hashes, hashed held-out ids and groups.
+- [ ] 5.4 Run the frozen held-out evaluation once, blind.
+- [ ] 5.5 If it passes, modify the "Packet modes" requirement's default, switch the default through the release line, then replay field reports on the installed release.
