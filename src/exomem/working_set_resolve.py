@@ -1299,11 +1299,36 @@ def _turn_terms_folded(analysis: TurnAnalysis, stopwords: frozenset[str]) -> fro
     possessive fold alone lands on a STOPWORD ("it's" -> "it") is dropped
     rather than folded, so an ordinary contraction of a common pronoun or
     auxiliary verb can never manufacture a turn term that was never typed.
+
+    A closed compound the turn writes with a space ("home work" for
+    "homework") is a term too (`_spaced_compounds`): a lead only, never a
+    phrase, so it can never earn `exact_alias` on its own.
     """
     return frozenset(
         folded
         for term in frozenset((*analysis.tokens, *analysis.words)) - stopwords
         if (folded := _fold_lexical_term(term)) is not None
+    ) | frozenset(joined for joined, _start in _spaced_compounds(analysis, stopwords))
+
+
+def _spaced_compounds(
+    analysis: TurnAnalysis, stopwords: frozenset[str]
+) -> tuple[tuple[str, int], ...]:
+    """Each pair of adjacent content tokens in one clause, joined and folded,
+    with the first token's position: "home work" -> ("homework", i).
+
+    Speech-to-text and quick typing split a closed compound with a space. A
+    join counts only where the vault holds it as a word, so no word list
+    decides which pairs are compounds.
+    """
+    tokens = analysis.tokens
+    return tuple(
+        (joined, index)
+        for index in range(len(tokens) - 1)
+        if tokens[index] not in stopwords
+        and tokens[index + 1] not in stopwords
+        and index + 1 not in analysis.run_breaks
+        and (joined := _fold_lexical_term(tokens[index] + tokens[index + 1])) is not None
     )
 
 
@@ -1350,6 +1375,45 @@ def _consumed_embedded_words(analysis: TurnAnalysis, rows: Sequence[AnchorFacts]
     return frozenset(
         word for word in embedded_only if _inside_longer_words(word, matched_words, analysis.tokens)
     )
+
+
+def _consumed_compound_halves(
+    analysis: TurnAnalysis, lexicons: Iterable[RowLexicon], stopwords: frozenset[str]
+) -> tuple[frozenset[str], frozenset[str]]:
+    """The phrases and folded terms the turn wrote only as half of a spaced
+    compound that an indexed name spells as one word.
+
+    "another home work tracker" against a name "Homework Tracker" wrote the
+    word "homework", so its halves name nothing on their own, the same way a
+    longer embedded word consumes its head (`_consumed_embedded_words`). It
+    is positional: a half the turn also writes on its own is kept.
+    """
+    joins = _spaced_compounds(analysis, stopwords)
+    if not joins:
+        return frozenset(), frozenset()
+    names = frozenset().union(*(lexicon.name_terms for lexicon in lexicons))
+    inside = {
+        position
+        for joined, start in joins
+        if joined in names
+        for position in (start, start + 1)
+    }
+    if not inside:
+        return frozenset(), frozenset()
+    tokens = analysis.tokens
+    outside = [position for position in range(len(tokens)) if position not in inside]
+
+    def spellings(position: int) -> set[str]:
+        return {tokens[position], fold_possessive(tokens[position])}
+
+    kept_phrases = set(analysis.words).union(*(spellings(position) for position in outside))
+    kept_terms = {
+        _fold_lexical_term(term)
+        for term in (*(tokens[position] for position in outside), *analysis.words)
+    }
+    phrases = set().union(*(spellings(position) for position in inside)) - kept_phrases
+    terms = {_fold_lexical_term(tokens[position]) for position in inside} - kept_terms - {None}
+    return frozenset(phrases), frozenset(terms)
 
 
 def _exact_alias_phrases(
@@ -1502,7 +1566,11 @@ def candidates_for(
     row_exact_phrases: dict[str, frozenset[str]] = {}
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
-    consumed_words = _consumed_embedded_words(analysis, rows)
+    halves, half_terms = _consumed_compound_halves(
+        analysis, [lexicon_of(row) for row in rows], stopwords
+    )
+    consumed_words = _consumed_embedded_words(analysis, rows) | halves
+    turn_terms_folded -= half_terms
     # A word that is a whole name of ANY anchor is a name for every anchor it
     # reaches: two people share a first name, and only one is stored under it.
     whole_names: set[str] = set()
@@ -1852,10 +1920,14 @@ def entry_named_anchors(
         runs=False,
     )
     reachable_rows = [row for row, _lexicon in reachable]
-    entries = [
-        (terms, phrases, _consumed_embedded_words(analysis, reachable_rows))
-        for analysis, (terms, phrases) in zip(analyses, worded, strict=True)
-    ]
+    entries = []
+    for analysis, (terms, phrases) in zip(analyses, worded, strict=True):
+        halves, half_terms = _consumed_compound_halves(
+            analysis, (lexicon for _row, lexicon in reachable), stopwords
+        )
+        entries.append(
+            (terms - half_terms, phrases, _consumed_embedded_words(analysis, reachable_rows) | halves)
+        )
     return frozenset(
         row.anchor_id
         for row, lexicon in reachable
@@ -1987,22 +2059,9 @@ def _counted_terms(names: Iterable[str]) -> frozenset[str]:
 
 
 def _audience_cues(analysis: TurnAnalysis) -> tuple[frozenset[str], frozenset[str]]:
-    phrases = (
-        frozenset(analysis.ngrams)
-        | frozenset(analysis.tokens)
-        | frozenset(analysis.words)
-        | frozenset(
-            folded
-            for token in analysis.tokens
-            if (folded := fold_possessive(token)) not in STOPWORDS
-        )
-    )
-    turn_terms = frozenset(
-        folded
-        for term in frozenset((*analysis.tokens, *analysis.words)) - _STOPWORDS
-        if (folded := _fold_lexical_term(term)) is not None
-    )
-    return phrases, turn_terms
+    # The same words `candidates_for` reads: an anchor the turn can reach must
+    # be decided here, or `audience_view` keeps it undecided.
+    return _turn_phrases(analysis, _STOPWORDS), _turn_terms_folded(analysis, _STOPWORDS)
 
 
 def audience_view(

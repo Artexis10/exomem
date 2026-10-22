@@ -1398,6 +1398,50 @@ def test_r2_single_token_aliases_consume_nothing() -> None:
     assert "rare_term" in by_id["other.md"].evidence
 
 
+def test_a_spaced_compound_reads_as_its_closed_word_and_its_halves_name_nothing() -> None:
+    """Speech-to-text writes "Homework" as "home work": the turn named the
+    tracker, not a project keyed on one half of the word."""
+    home = _row("home.md", "Home", kind="project", terms=("home",))
+    tracker = _term_row("tracker.md", "Homework Tracker", terms=("homework", "tracker"))
+    analysis = resolve_module.analyze_turn(
+        "Is this another home work tracker case? Did you add a home work entry too?"
+    )
+    candidates = resolve_module.candidates_for(
+        analysis,
+        (home, tracker),
+        retrieval_paths=frozenset({"tracker.md"}),
+        term_anchor_counts={"home": 1, "homework": 1, "tracker": 1},
+    )
+    resolution = resolve_module.resolve(candidates, turn_tokens=analysis.tokens)
+
+    assert [a.anchor_id for a in resolution.resolved_anchors] == ["tracker.md"]
+    assert "home.md" not in {c.path for c in candidates}
+
+
+def test_a_compound_half_the_turn_also_writes_alone_still_names_its_anchor() -> None:
+    home = _row("home.md", "Home", kind="project", terms=("home",))
+    tracker = _term_row("tracker.md", "Homework Tracker", terms=("homework", "tracker"))
+    analysis = resolve_module.analyze_turn("tidy home before the home work tracker review")
+    candidates = resolve_module.candidates_for(
+        analysis, (home, tracker), term_anchor_counts={"home": 1, "homework": 1, "tracker": 1}
+    )
+
+    assert "exact_alias" in {c.path: c for c in candidates}["home.md"].evidence
+
+
+def test_audience_decides_an_anchor_the_turn_reaches_only_by_a_spaced_compound() -> None:
+    """A reader who may not see "Kettlebrook" must not get it back undecided
+    because the turn wrote it as "kettle brook"."""
+    hidden = _term_row("hidden.md", "Kettlebrook", terms=("kettlebrook",))
+    analysis = resolve_module.analyze_turn("what changed at kettle brook")
+    rows, _counts, decided = resolve_module.audience_view(
+        analysis, (hidden,), {"kettlebrook": 1}, lambda _path: False
+    )
+
+    assert rows == ()
+    assert decided == {"hidden.md"}
+
+
 # --------------------------------------------------------------------------- #
 # fix/activation-competing-senses, R3: a named anchor carries the packet. When
 # some RESOLVED anchor holds a deciding-alone kind, a competing group of same-
