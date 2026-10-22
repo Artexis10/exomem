@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.134.0](https://github.com/Artexis10/exomem/compare/v0.133.0...v0.134.0) (2026-10-22)
+
+
+### Features
+
+* cover read_memory in latency canary ([#1972](https://github.com/Artexis10/exomem/issues/1972)) ([a098b79](https://github.com/Artexis10/exomem/commit/a098b79da738ecba771929fffced3b3fa493d455))
+
+
+### Bug Fixes
+
+* **deps:** upgrade certifi to 2026.10.19 for GHSA-6q48-6c7w-9gw2 ([#1977](https://github.com/Artexis10/exomem/issues/1977)) ([6cb3074](https://github.com/Artexis10/exomem/commit/6cb307486ae9807a5e949765d3275d2661b1a4be))
+* refresh Cloud plugin listings and Dot E branding ([#1968](https://github.com/Artexis10/exomem/issues/1968)) ([d6c4d3c](https://github.com/Artexis10/exomem/commit/d6c4d3cfabc3f9b54d52c82baabdfd16d3bec339))
+
 ## [0.133.0](https://github.com/Artexis10/exomem/compare/v0.132.8...v0.133.0) (2026-10-21)
 
 
