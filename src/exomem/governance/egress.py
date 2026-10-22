@@ -3789,7 +3789,8 @@ _WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via")
 #: Harvested so a page mentioned only inside a sentence still gets a release
 #: decision: `release.withheld_paths` carries what hit projection happened to
 #: touch, and a unit's text can name a page recall never surfaced.
-_WORKING_SET_PROSE_FIELDS = ("text", "statement", "why", "title")
+#: `description` is a derived-view item's one-line description (context_views).
+_WORKING_SET_PROSE_FIELDS = ("text", "statement", "why", "title", "description")
 #: List-shaped fields whose entries are vault paths. Reuses `_PATH_LIST_FIELDS`
 #: (`superseded_by`/`parent_superseded_by`, hit projection's own path-list
 #: fields) and adds an anchor's own neighbourhood fields -- private
@@ -3874,7 +3875,8 @@ def _matches_explicit_non_page_shape(text: str) -> bool:
     (`working_set.py`, `working_set_index.py`) can legitimately produce
     that is NOT a page reference at all — exhaustively enumerated, never
     guessed at by how the string looks: a memory-id reference, the
-    synthetic project-anchor id, the synthetic plan-anchor id. R1's default
+    synthetic project-anchor id, the synthetic plan-anchor id, a derived-view
+    ref (`exomem://map...`, the refs `context_views` serves). R1's default
     is that every OTHER non-empty path-bearing-field string is a candidate
     that must be decided or withheld — nothing else is exempted.
     """
@@ -3883,7 +3885,9 @@ def _matches_explicit_non_page_shape(text: str) -> bool:
         return True
     if _matches_project_anchor_shape(text):
         return True
-    return _matches_plan_anchor_shape(text)
+    from .. import context_views
+
+    return _matches_plan_anchor_shape(text) or context_views.parse_view_ref(fragment_stripped) is not None
 
 
 def _is_page_shaped(text: str) -> bool:
@@ -4405,6 +4409,77 @@ def _guarded_anchor(
         if isinstance(stripped, Mapping):
             out.update(stripped)
     return out
+
+
+def _guarded_view_item(item: Mapping[str, Any], ctx: _PacketRelease) -> dict[str, Any] | None:
+    """One derived-view item as the caller may be served it, or `None`.
+
+    An item is anchor-shaped, so it passes the anchor rules: its typed page fields and its title.
+    Its `description` is prose and follows the working-set prose rule, which drops the whole item
+    because prose cannot be edited without authoring text. A `state` is an optional addition, so
+    one that names a withheld or invalid page is removed and the item stays.
+    """
+    kept = _guarded_anchor(item, ctx.frozen, ctx.decisions, ctx.invalid_refs)
+    if kept is None:
+        return None
+    if any(
+        _names_withheld(kept.get(field), ctx.frozen, reference_field=True)
+        for field in _WORKING_SET_PROSE_FIELDS
+    ):
+        return None
+    state = kept.get("state")
+    if isinstance(state, Mapping) and (
+        _names_withheld(state, ctx.frozen, reference_field=True)
+        or _value_names_an_invalid_reference(state, ctx.invalid_refs)
+    ):
+        kept["state"] = None
+    return kept
+
+
+def guard_view_response(
+    vault_root: Path,
+    response: Mapping[str, Any],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Mapping[str, Any]:
+    """Apply release decisions to a derived-view response (`context_views.read_view`).
+
+    The view is computed over the caller's own view, so this is the second line: it decides every
+    path the items name and drops an item that names a withheld or invalid one. The same three
+    states as every other consumer: no governance and nothing withheld -> untouched; `blocked` or an
+    unresolved-but-expected principal -> no items and no continuation; otherwise each item is decided.
+    """
+    items = response.get("items")
+    if not isinstance(items, list):
+        return response
+    vault_root = Path(vault_root)
+    policy, release_gate_active = gate_state(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.blocked or (not policy.empty and not who.resolved):
+        _record_blocked_outcome(who.audience_id)
+        return {**response, "items": [], "continuation": None}
+    guarded = copy.deepcopy(dict(response))
+    ctx = _packet_release(
+        vault_root,
+        {"anchors": guarded["items"]},
+        AnnotatedHits(hits=[]),
+        policy=policy,
+        release_gate_active=release_gate_active,
+        who=who,
+        purpose=purpose,
+        record="all",
+    )
+    if ctx is None:
+        return response
+    guarded["items"] = [
+        kept
+        for kept in (
+            _guarded_view_item(item, ctx) if isinstance(item, Mapping) else None for item in guarded["items"]
+        )
+        if kept is not None
+    ]
+    return guarded
 
 
 def _recent_entry_chars(entry: Mapping[str, Any]) -> int:
@@ -5450,6 +5525,11 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
             if parent_binding is None:
                 result = dict(result)
                 result.pop("revision_history")
+    if command_name == "read_memory" and isinstance(result, Mapping):
+        from .. import context_views
+
+        if isinstance(result.get("ref"), str) and context_views.parse_view_ref(result["ref"]) is not None:
+            result = guard_view_response(vault_root, result)
     artifact_scan_demand = _ArtifactScanDemand()
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.

@@ -57,6 +57,7 @@ from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
 from . import context_roles as context_roles_module
+from . import context_views as context_views_module
 from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
@@ -221,6 +222,18 @@ _WorkflowContextArgument = Annotated[
 _OptionalRelationText = Annotated[
     str | None,
     WithJsonSchema({"anyOf": [{"type": "string"}, {"type": "null"}]}),
+]
+# The bound is `context_views.CONTINUATION_MAX_CHARS`; `read_view` checks it on every token.
+_OptionalViewContinuation = Annotated[
+    str | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string", "maxLength": context_views_module.CONTINUATION_MAX_CHARS},
+                {"type": "null"},
+            ]
+        }
+    ),
 ]
 _OptionalRelationProposal = Annotated[
     dict | None,
@@ -7311,12 +7324,15 @@ def op_read_memory(
     purpose: str | None = None,
     history_limit: int | None = None,
     history_continuation: str | None = None,
+    continuation: _OptionalViewContinuation = None,
 ) -> dict:
     """Read a page or exact semantic unit selected by recall or known ref.
 
     unit_ref returns that current unit, parent citation/lifecycle and up to
     2,400 context characters. Missing/stale/ambiguous/superseded refs report
     status; never substituted. Without unit_ref, returns the page.
+    Also reads the paged views exomem://map, exomem://map/topic/<domain key>
+    and exomem://map/unfiled.
 
     Args:
         path: Vault-relative path or KB shorthand.
@@ -7328,6 +7344,7 @@ def op_read_memory(
         purpose: Declared purpose; governs visibility.
         history_limit: Retained revisions per page, from 1 to 50.
         history_continuation: Position from the previous revision_history envelope.
+        continuation: Next-page token of a view.
     """
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
@@ -7346,7 +7363,18 @@ def op_read_memory(
                 unit_ref=unit_ref,
                 history_limit=history_limit,
                 history_continuation=history_continuation,
+                continuation=continuation,
             )
+    # A derived view is not a page: it is dispatched before any identifier resolves.
+    if context_views_module.in_view_namespace(path):
+        if unit_ref is not None or frontmatter_only or include_history or links or include_raw:
+            raise ValueError(
+                "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
+                "unit_ref, frontmatter_only, include_history, links, or include_raw"
+            )
+        return context_views_module.read_view(vault_root, path, continuation=continuation)
+    if continuation is not None:
+        raise context_views_module.invalid_continuation()
     if unit_ref is not None:
         if frontmatter_only or links or include_raw:
             raise ValueError(
