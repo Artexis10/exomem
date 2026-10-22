@@ -1398,6 +1398,105 @@ def test_r2_single_token_aliases_consume_nothing() -> None:
     assert "rare_term" in by_id["other.md"].evidence
 
 
+def test_a_spaced_compound_reads_as_its_closed_word_and_its_halves_name_nothing() -> None:
+    """Speech-to-text writes "Homework" as "home work": the turn named the
+    tracker, not a project keyed on one half of the word."""
+    home = _row("home.md", "Home", kind="project", terms=("home",))
+    tracker = _term_row("tracker.md", "Homework Tracker", terms=("homework", "tracker"))
+    analysis = resolve_module.analyze_turn(
+        "Is this another home work tracker case? Did you add a home work entry too?"
+    )
+    candidates = resolve_module.candidates_for(
+        analysis,
+        (home, tracker),
+        retrieval_paths=frozenset({"tracker.md"}),
+        term_anchor_counts={"home": 1, "homework": 1, "tracker": 1},
+    )
+    resolution = resolve_module.resolve(candidates, turn_tokens=analysis.tokens)
+
+    assert [a.anchor_id for a in resolution.resolved_anchors] == ["tracker.md"]
+    assert "home.md" not in {c.path for c in candidates}
+
+
+def test_a_compound_half_the_turn_also_writes_alone_still_names_its_anchor() -> None:
+    home = _row("home.md", "Home", kind="project", terms=("home",))
+    tracker = _term_row("tracker.md", "Homework Tracker", terms=("homework", "tracker"))
+    analysis = resolve_module.analyze_turn("tidy home before the home work tracker review")
+    candidates = resolve_module.candidates_for(
+        analysis, (home, tracker), term_anchor_counts={"home": 1, "homework": 1, "tracker": 1}
+    )
+
+    assert "exact_alias" in {c.path: c for c in candidates}["home.md"].evidence
+
+
+def test_a_capitalised_name_beside_a_compound_half_keeps_its_anchor() -> None:
+    mark = _row("mark.md", "Mark", kind="entity", terms=("mark",))
+    sync = _term_row("sync.md", "Bookmark Sync", terms=("bookmark", "sync"))
+    analysis = resolve_module.analyze_turn("Did you read the book Mark lent me?")
+    candidates = resolve_module.candidates_for(
+        analysis, (mark, sync), term_anchor_counts={"mark": 1, "bookmark": 1, "sync": 1}
+    )
+
+    assert "exact_alias" in {c.path: c for c in candidates}["mark.md"].evidence
+
+
+def test_an_earlier_entry_reads_its_compound_against_the_whole_catalogue() -> None:
+    """The current turn reached only "Home"; the earlier entry wrote "home
+    work", so it must not qualify that project as named in the conversation."""
+    from exomem import working_set_conversation as conversation_module
+
+    home = _row("home.md", "Home", kind="project", terms=("home",))
+    tracker = _term_row("tracker.md", "Homework Tracker", terms=("homework", "tracker"))
+    conversation = conversation_module.bound(
+        {"recent": [{"role": "user", "text": "is this another home work tracker case?"}]}
+    )
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("any news on this?"),
+        (home, tracker),
+        retrieval_paths=frozenset({"home.md"}),
+    )
+    merged, _origins, _entries = conversation_module.apply(
+        candidates,
+        conversation_module.analyze(conversation),
+        conversation,
+        rows=(home, tracker),
+    )
+
+    assert "conversation" not in {c.path: c for c in merged}["home.md"].evidence
+
+
+def test_audience_decides_an_anchor_the_turn_reaches_only_by_a_spaced_compound() -> None:
+    """A reader who may not see "Kettlebrook" must not get it back undecided,
+    or counted as an owner of the word, because the turn wrote "kettle brook"."""
+    hidden = _term_row("hidden.md", "Kettlebrook", terms=("kettlebrook",))
+    analysis = resolve_module.analyze_turn("what changed at kettle brook")
+    rows, counts, decided = resolve_module.audience_view(
+        analysis, (hidden,), {"kettlebrook": 1}, lambda _path: False
+    )
+
+    assert rows == ()
+    assert decided == {"hidden.md"}
+    assert counts["kettlebrook"] == 0
+
+
+def test_audience_counts_a_focus_compound_whatever_the_turn_capitalises() -> None:
+    """The turn's capital "Brook" must not stop the focus line's "kettle brook"
+    from reaching, and so deciding, a withheld owner of "Kettlebrook"."""
+    from exomem import working_set_conversation as conversation_module
+
+    mill = _term_row("mill.md", "Kettlebrook Mill", terms=("kettlebrook", "mill"))
+    hidden = _term_row("hidden.md", "Kettlebrook Plan", terms=("kettlebrook", "plan"))
+    segments = conversation_module.analyze(
+        conversation_module.bound({"focus": "kettle brook status"})
+    )
+    analysis = segments.union(resolve_module.analyze_turn("I asked Brook about it"))
+    _rows, counts, _decided = resolve_module.audience_view(
+        analysis, (mill, hidden), {"kettlebrook": 2}, lambda path: path != "hidden.md"
+    )
+
+    assert counts["kettlebrook"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # fix/activation-competing-senses, R3: a named anchor carries the packet. When
 # some RESOLVED anchor holds a deciding-alone kind, a competing group of same-
