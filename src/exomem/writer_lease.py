@@ -7399,7 +7399,7 @@ def invoke_command(
             with body_meter as measured, call_spans.span("command.body", measured):
                 result = _invoke()
             with call_spans.span("command.terminal_filter"):
-                return postfilter(command.name, result, injected[0])
+                return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
         except BaseException as error:
             with call_spans.span("command.terminal_filter"):
                 postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
@@ -7418,7 +7418,7 @@ def invoke_command(
             with body_meter as measured, call_spans.span("command.body", measured):
                 result = _invoke()
             with call_spans.span("command.terminal_filter"):
-                result = postfilter(command.name, result, injected[0])
+                result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
         except BaseException as error:
             try:
                 with call_spans.span("command.terminal_filter"):

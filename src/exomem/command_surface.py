@@ -534,7 +534,7 @@ def bind_vault(
                     # One ownership proof for the pass, as in the dispatcher's;
                     # outside a scope every path decision proved its own.
                     with ownership.read_scope(injected[0]) as ownership_scope:
-                        result = postfilter(command.name, result, injected[0])
+                        result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
                         ownership_scope.finish()
                 from .governance import scrubber as governance_scrubber
 

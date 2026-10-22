@@ -22,7 +22,7 @@ import hashlib
 import hmac
 import json
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -161,13 +161,24 @@ class CallerView:
         return self.visible is None or bool(self.visible(path))
 
     @classmethod
-    def current(cls, vault_root: Path) -> CallerView:
-        who = principal_module.effective_principal()
+    def current(
+        cls,
+        vault_root: Path,
+        *,
+        purpose: str | None = None,
+        principal: principal_module.RequestPrincipal | None = None,
+    ) -> CallerView:
+        """The view of `principal` (default: the bound one) under the `purpose` the request declared.
+
+        The view's compile and the terminal guard both build it from the same two arguments, so
+        they decide under one purpose and one filter.
+        """
+        who = principal if principal is not None else principal_module.effective_principal()
         # The purpose the release decision itself takes, so the filter and the binding agree.
-        purpose = egress._declared_purpose(Path(vault_root), who, None)  # noqa: SLF001
-        visible = egress.restricted_release_filter(Path(vault_root), purpose=purpose)
-        binding = _digest(json.dumps([who.audience_id, who.authorization_session_id, purpose]))
-        return cls(visible, purpose, binding)
+        declared = egress._declared_purpose(Path(vault_root), who, purpose)  # noqa: SLF001
+        visible = egress.restricted_release_filter(Path(vault_root), principal=principal, purpose=declared)
+        binding = _digest(json.dumps([who.audience_id, who.authorization_session_id, declared]))
+        return cls(visible, declared, binding)
 
 
 def _digest(text: str) -> str:
@@ -257,6 +268,10 @@ class View:
     rows: tuple[Row, ...]
     #: How far the membership graph is built. Owner-only: a restricted caller is never told.
     graph: str | None = None
+    #: The map's current state of each anchor and collection, by entry id, over the caller's view.
+    states: dict[str, dict[str, Any]] | None = None
+    #: False when the map's states could not be read; its items then carry none.
+    state_available: bool = True
 
 
 def _recency(activity: str) -> tuple[int, object]:
@@ -314,18 +329,24 @@ def _row(entry: context_catalogue.Entry, topics: tuple[str, ...], activity: str)
     )
 
 
+def _unlinked(text: str) -> str:
+    """Registry text as a view serves it: without its wikilinks, as the catalogue stores an entry's."""
+    return " ".join(egress.without_wikilinks(text).split())
+
+
 def _topic_row(key: str, registries: _Registries, activity: str) -> Row:
     definition = registries.taxonomy.domains.get(key)
     description = (
-        working_set_state.bounded_statement(definition.description, working_set_index.LEDE_MAX_CHARS)
+        working_set_state.bounded_statement(_unlinked(definition.description), working_set_index.LEDE_MAX_CHARS)
         if definition is not None
         else ""
     )
+    label = _unlinked(definition.label) if definition is not None and definition.label else ""
     return Row(
         entry_id=f"{KIND_TOPIC}:{key}",
         kind=KIND_TOPIC,
         anchor_kind="",
-        title=(definition.label if definition is not None and definition.label else key),
+        title=label or key,
         description=description,
         description_origin=ORIGIN_REGISTRY if description else context_catalogue.ORIGIN_NONE,
         ref=topic_ref(key),
@@ -396,6 +417,7 @@ def _view_rows(target: ViewTarget, key: str, world: _World, registries: _Registr
 
 @dataclass(frozen=True, slots=True)
 class _Prepared:
+    root: Path
     target: ViewTarget
     #: The ref the view is known by: a deprecated or aliased topic key reads as its replacement.
     ref: str
@@ -407,7 +429,7 @@ class _Prepared:
     unlisted: bool
 
 
-def _prepare(vault_root: Path, path: str, caller: CallerView | None) -> _Prepared:
+def _prepare(vault_root: Path, path: str, caller: CallerView | None, purpose: str | None = None) -> _Prepared:
     """Resolve the ref and bring the catalogue forward. Reads no entry."""
     target = parse_view_ref(path)
     if target is None:
@@ -422,7 +444,8 @@ def _prepare(vault_root: Path, path: str, caller: CallerView | None) -> _Prepare
             raise not_found()
         key, ref = resolved, topic_ref(resolved)
     state, catalogue, unlisted = context_catalogue.ensure_unlisted(root)
-    return _Prepared(target, ref, key, registries, caller or CallerView.current(root), state, catalogue, unlisted)
+    caller = caller or CallerView.current(root, purpose=purpose)
+    return _Prepared(root, target, ref, key, registries, caller, state, catalogue, unlisted)
 
 
 def _abstention(prepared: _Prepared, state: str) -> View:
@@ -445,15 +468,29 @@ def _compile(prepared: _Prepared) -> View:
     assert catalogue is not None  # `_usable` returned None
     world = _world(catalogue, caller)
     rows = _view_rows(prepared.target, prepared.key, world, prepared.registries)
-    if not rows:
+    if not rows and prepared.target.kind == VIEW_TOPIC:
+        # A domain with nothing this caller can see reads as one that does not exist. The map and
+        # the unfiled map always exist, so an empty one is served, empty.
         raise not_found()
+    states: dict[str, dict[str, Any]] | None = None
+    state_available = True
+    if prepared.target.kind == VIEW_MAP:
+        try:
+            states = _states(prepared.root, rows, caller)
+        except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
+            states, state_available = {}, False
+    # The generation covers every field an item is served, its state included, so a continuation
+    # minted before any of them changed is stale.
     digest = hashlib.sha256(prepared.registries.digest.encode("ascii"))
+    digest.update(json.dumps(state_available).encode("ascii"))
     for row in rows:
         digest.update(row.digest().encode("ascii"))
+        if states is not None:
+            digest.update(_digest(json.dumps(states.get(row.entry_id), sort_keys=True)).encode("ascii"))
     pending = catalogue.pending()
     stale = prepared.unlisted or any(caller.sees(path) for path in pending)
     graph = None if caller.restricted else catalogue.graph_state()
-    return View(prepared.ref, READY, digest.hexdigest(), stale, tuple(rows), graph)
+    return View(prepared.ref, READY, digest.hexdigest(), stale, tuple(rows), graph, states, state_available)
 
 
 def compile_view(vault_root: Path, path: str, *, caller: CallerView | None = None) -> View:
@@ -581,10 +618,7 @@ def _open(secret: bytes, token: str, ref: str, caller: CallerView) -> tuple[str,
 
 
 def _states(vault_root: Path, rows: Sequence[Row], caller: CallerView) -> dict[str, dict[str, Any]]:
-    """Current state for the anchors and collections among `rows`, by entry id.
-
-    Only the rows served are asked, and each is asked over the caller's own view.
-    """
+    """Current state for the anchors and collections among `rows`, by entry id, each over the caller's own view."""
     wanted = {row.entry_id for row in rows if row.kind in (KIND_ANCHOR, KIND_COLLECTION)}
     if not wanted:
         return {}
@@ -611,15 +645,24 @@ def _states(vault_root: Path, rows: Sequence[Row], caller: CallerView) -> dict[s
     }
 
 
-def read_view(vault_root: Path, path: str, *, continuation: str | None = None) -> dict[str, Any]:
-    """Serve one page of a view, for the bound principal.
+def read_view(
+    vault_root: Path, path: str, *, continuation: str | None = None, purpose: str | None = None
+) -> dict[str, Any]:
+    """Serve one page of a view, for the bound principal under the `purpose` the request declared.
 
     The response carries the ref, the generation, a stale flag, at most `VIEW_PAGE_SIZE` items and a
     continuation for the next page. A view that cannot be served yet answers with its readiness state
     and no items. Raises NOT_FOUND, INVALID_CONTINUATION or CONTINUATION_STALE.
     """
-    root = Path(vault_root)
-    prepared = _prepare(root, path, None)
+    if purpose is None:
+        return _read_view(Path(vault_root), path, continuation, None)
+    # The readers under the view (a record's current state) take the purpose from the bound principal.
+    with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
+        return _read_view(Path(vault_root), path, continuation, purpose)
+
+
+def _read_view(root: Path, path: str, continuation: str | None, purpose: str | None) -> dict[str, Any]:
+    prepared = _prepare(root, path, None, purpose)
     abstained = _usable(prepared)
     if abstained is not None:
         return _response(abstained, [], None)
@@ -645,15 +688,76 @@ def read_view(vault_root: Path, path: str, *, continuation: str | None = None) -
         token = _mint(secret, prepared.ref, caller, view.generation, following)
     items = [row.item() for row in page]
     extra: dict[str, Any] = {}
-    if prepared.target.kind == VIEW_MAP:
-        try:
-            states = _states(root, page, caller)
-        except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
-            states = {}
+    if view.states is not None:
+        if not view.state_available:
             extra["state_available"] = False
         for row, item in zip(page, items, strict=True):
-            item["state"] = states.get(row.entry_id)
+            item["state"] = view.states.get(row.entry_id)
     return _response(view, items, token, extra)
+
+
+# --------------------------------------------------------------------------- #
+# The display text an item is served
+# --------------------------------------------------------------------------- #
+
+
+def _identity(item: Mapping[str, Any]) -> tuple[object, ...]:
+    """The fields that name an entry on the wire. A value that is not a string matches no entry."""
+    values = (item.get("kind"), item.get("anchor_kind") or "", item.get("ref"), item.get("path") or "")
+    return tuple(value if isinstance(value, str) else None for value in values)
+
+
+#: The fields of an item that are display text. The terminal guard serves an entry's own (`entry_display`).
+DISPLAY_FIELDS = ("title", "description", "description_origin")  # nosemgrep: ep-word-set -- `Row`'s own field names.
+
+
+def _display(row: Row) -> dict[str, str]:
+    return {field: getattr(row, field) for field in DISPLAY_FIELDS}
+
+
+def entry_display(
+    vault_root: Path, items: Sequence[Mapping[str, Any]], caller: CallerView
+) -> list[dict[str, str] | None]:
+    """The title and description each item's own entry is served with, or None when `caller` can see no such entry.
+
+    The terminal guard serves these in place of an item's own, so a description no entry has never
+    reaches the wire. An item is matched by the fields that name an entry: its kind, anchor kind, ref
+    and path. Only entries the caller may see are candidates, so a withheld entry never decides what
+    an item gets. Of visible entries alike in all four, the one with the item's own text is kept
+    when there is one, else the lowest entry id. A topic gets its domain's registry rendering.
+    """
+    root = Path(vault_root)
+    candidates: dict[tuple[object, ...], list[Row]] | None = None
+    registries: _Registries | None = None
+    out: list[dict[str, str] | None] = []
+    for item in items:
+        ref = item.get("ref")
+        if item.get("kind") == KIND_TOPIC:
+            target = parse_view_ref(ref) if isinstance(ref, str) else None
+            if target is None or target.kind != VIEW_TOPIC:
+                out.append(None)
+                continue
+            registries = registries or _Registries(root)
+            out.append(_display(_topic_row(target.key, registries, "")))
+            continue
+        if candidates is None:
+            candidates = {}
+            catalogue = context_catalogue.ContextCatalogue(root)
+            try:
+                entries = catalogue.entries()
+            finally:
+                catalogue.close()
+            for entry in entries:
+                if _admits(entry, caller.visible):
+                    row = _row(entry, (), "")
+                    candidates.setdefault(_identity(row.item()), []).append(row)
+        alike = candidates.get(_identity(item), [])
+        if not alike:
+            out.append(None)
+            continue
+        own = [row for row in alike if (row.title, row.description) == (item.get("title"), item.get("description"))]
+        out.append(_display(min(own or alike, key=lambda row: row.entry_id)))
+    return out
 
 
 def _response(

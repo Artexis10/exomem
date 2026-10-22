@@ -7352,6 +7352,15 @@ def op_read_memory(
         history_continuation: Position from the previous revision_history envelope.
         continuation: Next-page token of a view.
     """
+    # A derived view is not a page: it is dispatched before any identifier resolves. It takes
+    # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
+    if context_views_module.in_view_namespace(path):
+        if unit_ref is not None or frontmatter_only or include_history or links or include_raw:
+            raise ValueError(
+                "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
+                "unit_ref, frontmatter_only, include_history, links, or include_raw"
+            )
+        return context_views_module.read_view(vault_root, path, continuation=continuation, purpose=purpose)
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
     # (which has no `purpose` parameter of its own) see the declared purpose.
@@ -7371,14 +7380,6 @@ def op_read_memory(
                 history_continuation=history_continuation,
                 continuation=continuation,
             )
-    # A derived view is not a page: it is dispatched before any identifier resolves.
-    if context_views_module.in_view_namespace(path):
-        if unit_ref is not None or frontmatter_only or include_history or links or include_raw:
-            raise ValueError(
-                "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
-                "unit_ref, frontmatter_only, include_history, links, or include_raw"
-            )
-        return context_views_module.read_view(vault_root, path, continuation=continuation)
     if continuation is not None:
         raise context_views_module.invalid_continuation()
     if unit_ref is not None:
