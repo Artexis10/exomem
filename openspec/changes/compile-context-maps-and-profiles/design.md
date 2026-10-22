@@ -151,7 +151,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 
 1. Take one digest-pinned snapshot copy of the vault. The key writer writes the key on this copy.
 2. Remove the incident items (not their collection's definition page), the evaluation pages and every excluded ref from the copy. The evaluation pages include the iterating session's own episode thread and every audit or replay record of a case. Removals apply to the one shared copy, so a page removed for one case is gone for every case, and no key cites a page that another case excludes. Removal by provenance follows these rules:
-   - A linked session is the miss session or the sampled session itself, or any later session that cites the incident record, the field report, or one of that session's episode keys under any scheme. Links are read from provenance, never from wording.
+   - A linked session is the miss session or the sampled session itself, or any later session that cites the incident record, the field report, or one of that session's episode keys under any scheme. Links are read from provenance, never from wording. A session cites when one of its own writes references the record or key; a session that only read the record is not linked, and the report names that residual leak.
    - From every page that a linked session edited, remove the lines it wrote, including `summary`, lede and `topics` fields. A line is removed when any of these sources attributes it to a linked session:
      1. the page's revision history;
      2. the transcripts of the linked session and of every subagent or lane it spawned: their Exomem write calls and their file edits on vault paths;
@@ -162,6 +162,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - Registry and schema entries that a linked session added keep their key and closed attributes, because other pages depend on them; description text that a linked session wrote in them is removed. A case whose required item is such an entry is struck.
    - After both splits' removals, the copy builder sets the `updated` value of every page that a linked session edited to the newest of: the newest revision that no linked session wrote; the newest remaining dated unit; the page's `updated` value before the first linked edit, from revision history or a transcript. Only when none of these exists does the page take its `created` value. A linked session's edit then does not move the page's activity.
    - A struck case's linked writes are removed like any other case's, because the copy is shared.
+   - Revision history attributes at line level: diffing a revision's prior text against the next state gives the lines that one write changed, so a write that source 3 assigns removes only those lines. The copy then drops the retained-history trees, because a later revision's prior text holds lines that a linked write produced.
    - The report counts removed lines per source and per linked session, and pages per `updated` basis with the days each page moved.
    - Every page and episode revision that a linked session created is an excluded ref.
    - A case whose required item exists only in removed lines or removed pages is struck.
@@ -219,6 +220,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - A linked session added a schema entry that later pages use. Registry and schema entries keep their key; text a linked session wrote in them is removed.
    - The held-out guarantee checked ids only. It now also covers normalised text and group links, and a frame correction re-applies the dedupe.
    - The frame correction left the reserve nearly empty, so window widening is now likely. Widening now draws only from the added span and appends to the reserve, so no row moves.
+   - The keyed markdown mirror had omitted the vault's retained revision history, so source 3 removed whole pages and struck 11 of 12 held-out miss cases. Revision history now attributes source-3 writes at line level, and the copy drops the history trees. "Cites" now means a reference in the session's own writes.
    - The capture hook's key matched few Codex sessions, so provenance also reads the key from the session's own transcript.
    - A linked session's edit moved a page's `updated` field, which orders the map. The copy builder now restores it from the newest unlinked revision, the newest remaining unit or the value before the first linked edit, and falls back to `created` only when none exists.
    - Two links grouped cases without a written rule: a handoff between the cases' sessions, and an incident record that cites another case's record. Both now group cases, and a struck case's linked writes are still removed.
