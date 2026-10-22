@@ -1,32 +1,32 @@
 # Tasks
 
-## 1. Write side
+## 1. Contracts
 
-- [ ] 1.1 Add a one-line `summary` and current-state fields with an as-of date to pages; accept an agent-supplied summary on the write tools; store a marked derived summary otherwise.
-- [ ] 1.2 Add a per-thread head index that exposes the newest episode of each thread.
-- [ ] 1.3 Queue profile and map refresh for the anchors and topics a write touches, through the derived-sync components; mark unrefreshed lines stale.
-- [ ] 1.4 Backfill summaries for existing pages, with the method chosen from the open question in the design.
+- [ ] 1.1 Define the topic-membership contract in the registries: the membership relation kinds, project-key mapping and page declarations, with direction rules.
+- [ ] 1.2 Define the catalogue entry, its projections and the read contract for map, domain-map and profile refs.
+- [ ] 1.3 Freeze the evaluation protocol: cases, arms, agent, pull budget, scoring rule for successors and equivalent evidence, tolerance and decision rule.
 
-## 2. Compiled views
+## 2. Catalogue and projections
 
-- [ ] 2.1 Compile anchor profiles from semantic units by role, currency, typed relations, related pages and recent changes.
-- [ ] 2.2 Compile topic profiles and domain maps from registry domains.
-- [ ] 2.3 Compile the map with its budget and tiering.
-- [ ] 2.4 Apply the reader's view to every map, domain map and profile.
+- [ ] 2.1 Build the catalogue over the reader's view from index rows, units, memberships and the current-state authority.
+- [ ] 2.2 Project the map and the domain maps with bounded output and pagination.
+- [ ] 2.3 Compile anchor and topic profiles through the role lanes, cached by generation.
+- [ ] 2.4 Resolve map, domain-map and profile refs in `read_memory` with missing and stale states, on every surface.
+- [ ] 2.5 Teach the egress guard the new blocks and fields; add counterfactual privacy twins.
 
-## 3. Read side
+## 3. Write side
 
-- [ ] 3.1 Select the turn slice by meaning over map lines and profile summaries, with resolver evidence as a boost and a calibrated threshold.
-- [ ] 3.2 Accept agent `queries` on `activate_context` and run them through hybrid recall over the caller's view.
-- [ ] 3.3 Serve the map packet behind a setting, with `anchors` as the default.
+- [ ] 3.1 Accept an agent-supplied description on the write tools; store marked derived descriptions otherwise, outside Sources and Evidence.
+- [ ] 3.2 Add reverse dependencies and generation-bound invalidation to derived sync for the catalogue, projections and profiles.
+- [ ] 3.3 Backfill descriptions for existing entries: resumable, with provenance, cost and coverage reported.
 
-## 4. Client contract
+## 4. Activation and clients
 
-- [ ] 4.1 Update the server instructions, the `activate_context` description, the skill scaffold and the retrieve hook for the map packet.
+- [ ] 4.1 Serve the `maps` packet mode behind the setting, with `anchors` as the default and one packet budget.
+- [ ] 4.2 Update the server instructions, the `activate_context` description, the skill scaffold and the retrieve hook for map-assisted pulls before the first answer.
 
 ## 5. Evaluation and switch
 
-- [ ] 5.1 Settle the scoring rule for newer pages written after a reported failure, before any held-out run.
-- [ ] 5.2 Iterate on the development split: map plus slice from the turn alone, and with agent pulls; report served, reachable, off-target share, harm on cases without relevant memory, tokens, calls and latency.
-- [ ] 5.3 Run the held-out split once, blind, against the current packet and the activation-audit twins.
-- [ ] 5.4 If it passes, switch the default through the release line, then replay field reports on the installed release.
+- [ ] 5.1 Iterate on the development cases: map with pulls, and map plus turn slice with pulls, against `anchors` with the same pulls.
+- [ ] 5.2 Run the frozen held-out evaluation once, blind.
+- [ ] 5.3 If it passes, switch the default through the release line, then replay field reports on the installed release.

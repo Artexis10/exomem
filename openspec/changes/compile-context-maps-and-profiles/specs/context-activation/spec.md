@@ -2,67 +2,74 @@
 
 ## ADDED Requirements
 
-### Requirement: An always-on map of the vault
-The compiler SHALL maintain a map of the vault's live areas, threads, key anchors and trackers. Each map line SHALL name the item, say what it is, give its current state with an as-of date, and carry a ref. The map SHALL NOT depend on the current turn. The map SHALL stay within its configured character budget and SHALL link to a domain map for each topic it lists.
+### Requirement: Packet modes
+Activation SHALL serve one of two packet modes, selected by a setting: `anchors` and `maps`. The default SHALL be `anchors`. The requirements that predate this change SHALL apply to `anchors` mode. The requirements added by this change SHALL apply to `maps` mode.
 
-#### Scenario: The map is the same for every turn of a session
-- **WHEN** two turns of one session activate without a write between them
+#### Scenario: The default mode is unchanged
+- **WHEN** the setting is absent
+- **THEN** activation serves the `anchors` packet exactly as before
+
+### Requirement: A catalogue with bounded projections
+The compiler SHALL maintain a catalogue of topics, anchors, threads and trackers. Each entry SHALL carry a one-line description, its topic memberships, its source refs and the generation it was built from. In `maps` mode, activation SHALL return a map that is a bounded projection of the catalogue and does not depend on the turn. Each topic SHALL have a domain map, a projection of its entries, that a reader can open by ref.
+
+#### Scenario: The map does not depend on the turn
+- **WHEN** two turns activate in `maps` mode with no catalogue change between them
 - **THEN** both packets carry the same map
 
-#### Scenario: A large vault tiers its map
-- **WHEN** the vault holds more live items than the map budget fits
-- **THEN** the map lists topics and the most active items, and each topic's domain map holds the rest
+#### Scenario: Cold material stays reachable
+- **WHEN** an entry does not fit the map budget
+- **THEN** the domain map of each of its topics lists it
 
-### Requirement: Topic and anchor profiles compiled from semantic units
-The compiler SHALL compile a topic profile for each topic and an anchor profile for each indexed anchor. A topic SHALL be a domain that the vocabulary registry declares. Each profile line SHALL be a semantic unit or a reference to one, with its category, its role from the roles registry, its currency and as-of date, and its ref. A unit that does not fit the profile budget SHALL become a pointer and SHALL NOT be cut. Profiles SHALL be compiled from units and index rows, not by parsing page text.
+### Requirement: Topic membership is declared
+A topic SHALL be a domain that the vocabulary registry declares. An entry SHALL belong to a topic only when its page declares the domain, when its project key maps to the domain, or when an authored typed relation of a registry-declared membership kind links it to a member. A mention of an anchor SHALL NOT give the mentioning page that anchor's topics. Notes that are not anchors SHALL be catalogue entries in the topics they declare.
 
-#### Scenario: A vault-added domain gets a topic profile
+#### Scenario: A vault-added domain gets a domain map
 - **WHEN** the vault overlay adds a domain and pages declare it
-- **THEN** the compiler builds a topic profile and a domain map for it without a code change
+- **THEN** the catalogue holds a topic and a domain map for it without a code change
+
+#### Scenario: A mention does not spread membership
+- **WHEN** a note mentions an anchor of another topic and declares no relation of a membership kind
+- **THEN** the note does not join that topic
+
+### Requirement: Profiles read by ref
+A reader SHALL be able to read an anchor profile and a topic profile by ref. A profile SHALL be compiled from the role lanes over the anchor or the topic's members. Each line SHALL be a semantic unit with its category, role, currency and ref, a current-state line from the current-state authority, or a ref to a page or unit. A unit that does not fit SHALL become a ref and SHALL NOT be cut. A unit's as-of date SHALL be its own authored date; a page's modification date SHALL NOT stand in for it.
 
 #### Scenario: A superseded unit is marked
-- **WHEN** a unit in a profile has a current successor
+- **WHEN** a profile unit has a current successor visible to the reader
 - **THEN** the profile shows the successor, or marks the unit superseded and names its successor
 
-### Requirement: A turn slice selected by meaning
-The compiler SHALL select a turn slice from the turn, the recent conversation and any agent `focus` or `queries`. It SHALL match them by meaning against map lines and profile summaries. Resolver evidence such as an exact name MAY raise a candidate and SHALL NOT exclude one. The slice SHALL carry at most the configured number of profiles. A candidate below the confidence threshold SHALL appear only as a named ref. The slice MAY be empty, and an empty slice SHALL NOT remove the map.
+#### Scenario: A state without a date stays undated
+- **WHEN** an entry's state has no known observation date
+- **THEN** its map line and profile carry the state without an as-of date
 
-#### Scenario: A misspelled turn still reaches its topic
-- **WHEN** a turn names a topic's anchor with a typo or a split compound
-- **THEN** the slice carries that topic's profile or names its ref
+### Requirement: Derived views resolve through one read contract
+`read_memory` SHALL resolve map, domain-map and profile refs. Output SHALL be bounded; overflow SHALL be paginated refs. A missing ref SHALL report missing, and a view whose inputs changed and is not rebuilt SHALL be served marked stale.
 
-#### Scenario: A turn with no relevant memory gets no profile
-- **WHEN** no topic or anchor matches the turn above the threshold
-- **THEN** the packet carries the map and no profile
+#### Scenario: A stale profile is marked
+- **WHEN** a member of a profile changed and the profile is not rebuilt
+- **THEN** reading the profile returns it marked stale
 
-### Requirement: Agent queries reach hybrid recall
-`activate_context` SHALL accept up to three agent-written `queries`. Each query SHALL run through hybrid recall over the caller's view. Their hits SHALL join the slice as pointers or units labelled `origin: agent_query`. An agent query SHALL NOT resolve an ambiguous human reference to an identity.
+### Requirement: Descriptions and projections stay current on write
+A write that creates or changes a catalogue entry SHALL accept a one-line description from the writing agent. A description that the agent did not supply SHALL be stored as derived, marked as derived, and SHALL NOT be stored under Sources or Evidence. A write SHALL invalidate every projection and profile whose inputs it changed, including old and new memberships and incoming relations. A projection built from an obsolete generation SHALL NOT be published.
 
-#### Scenario: An agent query finds what the turn's words missed
-- **WHEN** the turn alone matches nothing and the agent passes a query that recall answers
-- **THEN** the slice carries the recalled page as a pointer or units labelled `origin: agent_query`
-
-### Requirement: Maps and profiles stay current on write
-Each write that creates or changes a page SHALL update the page's one-line summary and current-state fields with an as-of date. A summary that the writing agent did not supply SHALL be stored and marked as derived. The write SHALL queue a refresh of the profiles and map lines whose anchors or topics it touched. A map or profile line whose source changed and has not been refreshed SHALL be marked stale.
-
-#### Scenario: A capture updates the profile it touches
+#### Scenario: A capture reaches the profile it touches
 - **WHEN** an agent records a new decision about an anchor
-- **THEN** after the refresh, that anchor's profile carries the decision and its as-of date
+- **THEN** after the refresh, the anchor's profile carries the decision with its own date
 
-#### Scenario: An unrefreshed line is marked
-- **WHEN** a page changed and its profile refresh has not run
-- **THEN** the profile line from that page is served marked stale
+#### Scenario: A rename moves the entry
+- **WHEN** a page is renamed
+- **THEN** the catalogue, the map and every domain map that listed it carry the new ref and no line for the old one
 
-### Requirement: Maps and profiles respect the reader's view
-A map, domain map or profile served to a reader SHALL leave out every anchor, unit and count that the reader may not see.
+### Requirement: The reader's view applies before compilation
+The catalogue, map, domain maps and profiles served to a reader SHALL be computed over that reader's view. A hidden entry SHALL NOT affect any served description, selection, ranking, ordering, cap, count, staleness mark or generation token.
 
-#### Scenario: A withheld anchor is absent for a non-owner
-- **WHEN** a non-owner activates and the vault holds a withheld anchor in a listed topic
-- **THEN** the map, domain map and topic profile carry no line, unit or count from it
+#### Scenario: A withheld entry changes nothing a non-owner sees
+- **WHEN** a withheld entry is added to a topic that a non-owner can see
+- **THEN** that reader's map, domain map and topic profile are unchanged, including their order and counts
 
-### Requirement: The packet switch is decided by a held-out evaluation
-The map packet SHALL be selectable by a setting and SHALL NOT become the default until one blind run on a held-out split of field-report cases shows a gain over the current packet whose interval excludes the accepted loss, with no added harm on cases without relevant memory and on the activation-audit twins.
+### Requirement: The mode switch follows a frozen paired evaluation
+The default SHALL change to `maps` only after an evaluation whose cases, arms, agent, pull budget, scoring rule and decision rule were fixed before any held-out generation. The primary measure SHALL be whether the first answer uses the required current facts and constraints. The switch SHALL require the lower bound of the paired difference on the primary measure to be above zero, and non-inferiority within the fixed tolerance on answer contamination for cases without relevant memory and on the activation-audit twins.
 
 #### Scenario: The default stays until the evaluation passes
-- **WHEN** the held-out run has not passed
-- **THEN** activation serves the current packet by default
+- **WHEN** the frozen evaluation has not passed
+- **THEN** activation serves the `anchors` packet by default

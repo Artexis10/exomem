@@ -2,9 +2,9 @@
 
 ## Context
 
-`activate_context` today runs freshness, readiness and a lexical BM25 over anchor pages, then `compile_packet`: it analyses the raw turn, builds categorical anchor evidence (`working_set_resolve.candidates_for`), resolves anchors and fills role lanes from their neighbourhood. When nothing resolves, a gated lexical carry over the raw turn may serve one uncontested page; otherwise the turn abstains with no units. The hybrid recall engine behind `ask_memory` is never called. `conversation.focus` reaches only lexical anchor-name matching. Client instructions tell agents to pass the user's words verbatim, not a search query.
+`activate_context` today runs freshness, readiness and a lexical BM25 over anchor pages, then `compile_packet`: it analyses the raw turn, builds categorical anchor evidence, resolves anchors and fills role lanes from their neighbourhood. When nothing resolves, a gated lexical carry over the raw turn may serve one uncontested page; otherwise the turn abstains with no units. Activation also embeds the raw turn against anchor signatures (title, lede, headings) for `vector_band` evidence. It never calls the hybrid recall engine behind `ask_memory`. Client instructions tell agents to pass the user's words verbatim and rely on the packet.
 
-A replay of twelve private field reports, with an answer key written by an independent lane, measured where context is lost:
+A replay of twelve private field reports, with an answer key written by an independent lane, measured where context is lost. The cases are development evidence; they do not decide a switch.
 
 | Arm | Expected page served or selected | Expected page reached |
 |---|---|---|
@@ -13,96 +13,107 @@ A replay of twelve private field reports, with an answer key written by an indep
 | Hybrid recall, agent-written queries (top 3 / top 10) | 8 | 9 |
 | Agent with a 3.7 KB map, pulling by ref and query | 7 | 10 |
 
-The knowledge is stored and retrievable. A raw turn is a poor query, and a pushed packet that is guessed from it is mostly empty or off-topic.
+The strongest result is an agent that sees what exists and pulls. A server-side selector that matches the raw turn by meaning was not tested.
 
 ## Goals
 
-- One-shot context: a fresh session, coding or conversational, has what the first answer needs, from the user's turn alone, without the user pointing at material.
-- Push little and push what is reliable; give depth through pulls by ref or query.
-- Scale without a size cap: the vault grows, the per-turn push stays a few kilobytes.
+- One-shot context: a fresh session, coding or conversational, answers the user's first message with the context it needs, without the user pointing the agent at material. Autonomous pulls before the first answer are part of one-shot.
+- Push little: a bounded map. Give depth through pulls by ref or query.
+- Scale without a size cap: the vault grows, the map stays bounded, and cold material stays reachable through domain maps and recall.
 - Use the epistemic engine fully: semantic units, roles, currency, supersession, typed relations and the vocabulary registries.
-- Do no harm: a turn with no relevant memory gets no misleading material.
+- Do no harm: a turn with no relevant memory gets no misleading material, including from the map.
 
 ## Non-goals
 
 - A model call inside the activation request path.
 - Replacing `ask_memory` or `read_memory`.
-- Removing the anchor resolver before the evaluation decides the switch.
-- A new storage format. Maps and profiles are compiled from units and index rows, so they work on Markdown and on a SQLite store alike.
+- A new `queries` input on `activate_context` before a workflow or latency benefit is shown; agents query through `ask_memory`.
+- A mandatory current-state field on every page.
+- A new storage format.
 
-## The layers
+## Shape
 
-1. **Map.** An always-on index of live areas, threads, key anchors and trackers. One line per item: name, what it is, current state with an as-of date, ref. It does not depend on the turn, so it is stable across a session and cacheable by clients. Default budget 4,000 characters.
-2. **Domain map.** The same index for one topic: its anchors, threads and trackers. The map links to each domain map by ref.
-3. **Profiles.** A compacted bundle of context with refs to everything it cites.
-   - A **topic profile** covers one topic. A topic is a domain from the vocabulary registry (`domains`, plus the vault overlay). It carries the topic's standing stances, preferences, constraints and conventions, the anchors that matter now, open loops and recent changes.
-   - An **anchor profile** covers one anchor: an entity, project, hub or collection the index already knows. It carries a summary, current state with an as-of date, key units by role, typed relations, related pages and recent changes.
-4. **Turn slice.** The topics and anchors this turn touches, with their profiles. At most three profiles, 1,500 characters each by default. It may be empty.
-5. **Depth.** Pages, units and evidence through `read_memory` and `ask_memory`, by ref or by the agent's own queries.
+1. **Catalogue.** One searchable set of entries: topics, anchors, threads and trackers. Each entry has a one-line description, its memberships, its source refs and the generation it was built from.
+2. **Map.** A bounded projection of the catalogue: live topics, threads, key anchors and trackers, one line each with what it is, its state from the current-state authority with its as-of date when known, and a ref. Activation in `maps` mode returns it. It does not depend on the turn.
+3. **Domain map.** The projection of one topic's entries, read by ref. It is how cold material stays reachable when it is not on the map.
+4. **Profiles, read by ref.**
+   - An **anchor profile** is what the role lanes compile for one anchor today when an agent passes `anchor`: units by role with currency and refs, current state from Records first, typed relations, related pages and evidence pointers.
+   - A **topic profile** compiles the same lanes over a topic's members: the topic's standing stances, preferences, constraints and conventions, the anchors active now, open loops and recent changes.
+   Profiles are compiled on demand and cached by generation.
+5. **First-answer workflow.** The agent reads the map, opens the domain maps and profiles that the turn needs, searches with its own words when the map does not cover the need, then answers and cites refs.
+6. **Turn slice (an evaluation arm, not yet a contract).** Profiles selected by meaning from the turn and attached to the map. It ships only if it beats the map alone.
 
 ## Decisions
 
-### D1. Push a stable map, not a guessed packet
+### D1. Map-assisted pulls are the first-answer workflow
 
-The map is the default context of every turn. A map line cannot be wrong for a turn; it can only be absent. Its stability lets clients cache it. The agent sees what exists and how it links, then pulls.
+The evidence supports an agent that sees what exists and pulls. Activation in `maps` mode returns the map; client instructions make reading it and pulling before the first answer the supported workflow. The map is the only pushed layer until an arm shows that more push helps.
 
-### D2. Profiles are compiled views over semantic units
+### D2. One catalogue, many projections
 
-Each profile line is a semantic unit or a reference to one. It carries the unit's category, its role from the roles registry, its currency (current, superseded, disputed) with an as-of date, and its ref. A unit that does not fit becomes a pointer, never a cut claim, as today. What a profile shows per topic comes from the roles registry. Its relations come from the relations vocabulary. Code holds no vocabulary (C4).
+The map and the domain maps are projections of one catalogue, not separately maintained documents. Profiles are compiled from the existing role lanes, not stored as a second copy of the units. This keeps one source for each fact and one place to invalidate.
 
-### D3. Topics come from the registry
+### D3. Topic membership is a declared contract
 
-Topics are registry domains. An anchor belongs to the topics that its page, its units and its typed neighbours declare. A vault that adds a domain gets a topic profile and a domain map for it without a code change.
+A topic is a domain from the vocabulary registry. An entry belongs to a topic when its page declares the domain, when a project key maps to it, or when an authored typed relation of a registry-declared membership kind links it to a member. A mention of an anchor does not import the anchor's topics. Ordinary notes become catalogue entries in the topics they declare, so a domain map reaches notes that are not anchors. Membership rules live in the registries; code branches only on the closed attributes they declare.
 
-### D4. The slice is selected by meaning over curated text
+### D4. Current state has one authority
 
-The selector embeds map lines and profile summaries, which are short and written to be found. It matches the turn, the recent conversation and, when present, the agent's `focus` and `queries` against them. Existing resolver evidence (an exact name, a continuing thread) raises a candidate; it never excludes one. A candidate below the confidence threshold appears as a "possibly relevant" line with its ref, not as a profile. The threshold is calibrated on the development split only.
+Map lines and profiles take state from the existing current-state resolver: Records first, then declared state pages, then observations. Units keep their own authored dates; a page's modification date does not become a unit's as-of date. An entry with no known state shows none.
 
-### D5. Agent queries reach hybrid recall
+### D5. Descriptions are written at write time and invalidated by generation
 
-`activate_context` accepts up to three agent-written `queries`. Each runs through hybrid recall over the caller's view. Their hits join the slice as pointers or units labelled `origin: agent_query`. Agent cues still never settle an ambiguous human reference to an identity; they only choose what to read.
+When a write creates or changes a catalogue entry, the writing agent may supply its one-line description. Otherwise a derived description is stored, marked as derived, outside Sources and Evidence. Refresh runs through derived sync with explicit reverse dependencies: old and new memberships, incoming relations, deletion, rename, supersession, registry changes and external edits. Refresh coalesces per entry and never publishes a projection built from an obsolete generation. A projection whose inputs changed and are not yet rebuilt is served marked stale.
 
-### D6. Maps and profiles stay current on write
+### D6. Backfill is a launch dependency
 
-Each write that creates or changes a page updates its one-line `summary` and its current-state fields with an as-of date. The writing agent supplies the summary because it holds the context at that moment; when it does not, a derived summary is stored and marked as derived. The write then queues refresh of the profiles and map lines whose anchors or topics it touched, through the existing derived-sync components. A per-thread head index exposes the newest episode of each thread.
+Existing entries get descriptions before any evaluation of the map. The backfill is resumable, records its provenance and cost, reports coverage, and leaves uncovered entries visibly undescribed.
 
-### D7. Maps and profiles respect the reader's view
+### D7. The reader's view applies before compilation
 
-Maps and profiles are compiled per audience, or filtered at serve time by the same visibility rule that `audience_view` and `anchor_visible` apply today. A non-owner never sees a withheld anchor's line, its units or its count.
+The catalogue, map, domain maps and profiles are computed over the reader's view: hidden inputs never reach synthesis, selection, ranking, ordering, caps, counts, activity scores, staleness marks or generation tokens. A restricted reader's projections are compiled for that view and bypass any shared cache. Counterfactual twins prove it: adding or changing a withheld entry leaves a reader's map, domain maps, profiles and their ordering unchanged. The egress guard learns the new blocks and fields.
 
-### D8. The client contract changes with the packet
+### D8. Refs to derived views resolve through one read contract
 
-The server instructions, the `activate_context` description, the skill scaffold and the retrieve hook say: read the map and the slice; when the answer depends on stored knowledge, open a profile or page by ref, or search with your own words; cite refs. The hook still sends the user's turn; it adds the recent conversation when it has it.
+`read_memory` resolves `map`, domain-map and profile refs with bounded output, pagination for overflow, and explicit missing and stale states. Activation and every surface return the same shapes.
 
-### D9. The switch is decided by evaluation
+### D9. One packet budget
 
-A setting selects the packet: `anchors` (default) or `maps`. The default changes only after one blind run on the held-out split shows that the new packet beats the current one by more than the accepted loss, with no new harm on negative cases and on the existing activation-audit twins. The change ships through the normal release line, and the setting is the undo.
+The map and any slice share the existing packet character cap. Pulls have their own budget per answer. Overflow becomes bounded, paginated refs, never cut claims.
+
+### D10. The `anchors` mode stays until a frozen evaluation decides
+
+A setting selects `anchors` (default) or `maps`. Existing activation requirements apply to `anchors` mode. The default changes only through the frozen evaluation below and the normal release line; the setting is the undo.
 
 ## Evaluation
 
-- Corpus: field reports converted to cases by an independent key writer, split into development and held-out halves. The corpus stays outside the repository.
-- Arms:
-  - the current packet;
-  - map plus slice from the turn alone;
-  - map plus slice with agent pulls.
-- Measures, reported per case:
-  - expected material served in the slice;
-  - expected material reachable within the agent's pulls;
-  - off-target share of served text;
-  - harm on cases with no relevant memory;
-  - tokens, memory calls and latency.
-- Iterate on the development split. Run the held-out split once, blind, to decide the switch.
+The protocol is frozen before any held-out generation:
+
+- **Cases.** Field reports turned into cases by an independent key writer, with source-derived references. The existing twelve are development evidence. The held-out set stays unread while iterating and grows as new field reports arrive. Related cases are grouped.
+- **Arms.**
+  - The `anchors` packet, with the same pull tools and pull budget as the other arms.
+  - The map with pulls.
+  - The map plus the turn slice, with pulls.
+  Every arm uses the same agent, vault snapshot, tool permissions and pre-answer budget. The raw-turn arms receive no conversation, refs or prior session state.
+- **Primary measure.** Whether the first answer uses the required current facts and constraints, graded blind against source-derived references. A newer successor or equivalent valid evidence counts under a rule fixed before generation.
+- **Secondary measures.**
+  - Expected material reached.
+  - Off-target share.
+  - Contamination of answers on cases without relevant memory, including contamination from the map.
+  - Full-workflow tokens, calls and latency.
+  - Failures, kept in the denominator.
+- **Decision.** Report the paired per-case difference with its interval. The switch needs the primary measure's lower bound above zero, and non-inferiority within a fixed tolerance on contamination and on the activation-audit twins. Small samples can show only large effects; the report says so.
 
 ## Risks
 
-- **A stale summary pushes a wrong state.** Every line carries its as-of date and currency, writes refresh it, and an unrefreshed line is marked stale.
-- **The map grows with the vault.** The map tiers: it lists areas and hot items, and each domain map holds the rest.
-- **The slice selects a wrong profile.** It is small, below-threshold candidates are only named, and the map stays neutral.
-- **Writes get slower.** Refresh is incremental and runs in the background derived sync, not in the write's request.
-- **The evaluation leaks.** The key is written independently, the held-out split stays unread while iterating, and replays run against the reader's view.
+- **A description is stale or poor.** Each line carries its generation, a derived description is marked, and stale projections are served marked.
+- **The map grows with the vault.** The map is a bounded projection, and domain maps and recall hold the rest.
+- **Invalidation fans out.** A highly connected anchor can invalidate many projections. Refresh coalesces and rebuilds lazily on read when cheaper.
+- **Hidden material leaks through aggregates.** D7 computes over the reader's view before synthesis, and the counterfactual twins check it.
+- **The evaluation flatters an arm.** The protocol fixes agent, budget, snapshot and scoring before generation.
 
 ## Open questions
 
-- How existing pages get their first summaries: a backfill job with a model, derived summaries, or both.
-- How a case scores when the agent prefers a newer page written after the reported failure.
-- Whether the slice needs a server-side query rewrite for turns that defeat embedding match, or whether agent `queries` cover it.
+- The backfill method: a model pass, derived descriptions, or both, and its cost.
+- Whether a turn slice adds value over the map alone.
+- Whether `ask_memory` queries before the first answer are enough, or a combined call saves latency.
