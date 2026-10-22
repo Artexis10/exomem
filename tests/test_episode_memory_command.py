@@ -1131,6 +1131,13 @@ def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     # Failed binding and an idempotent Source retry must both remain attributable.
     for name in ("episode.guard_entry", "episode.write", "episode.revisions", "episode.journal_bind"):
         assert phases[name]["count"] == 2
+    # A Source retry must not count another plan or another heat event.
+    for name in (
+        "source.counts", "source.index_planning",
+        "episode.heat_attribution", "episode.heat_record",
+    ):
+        assert phases[name]["count"] == 1
+    assert phases["episode.nudge"]["count"] == 2
     assert {
         name: value for name, value in phases["episode.revisions"]["fields"].items()
         if name not in call_spans.CPU_FIELDS

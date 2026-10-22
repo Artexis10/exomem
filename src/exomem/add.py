@@ -25,6 +25,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import (
+    call_spans,
     cli_ops,
     corpus_aware,
     indexes,
@@ -503,19 +504,18 @@ def add(
             digest=artifact_digest,
         )
 
-    # Plan the source file write so the counts in compute_updates() are
-    # *post*-creation: compute_updates re-scans, the folder may not exist
-    # until the batch creates it, and the new file joins the batch — so the
-    # in-memory counts are bumped explicitly to include it.
+    # Plan with post-creation counts: the folder may not exist until the batch
+    # creates it, so include the new file in the in-memory counts.
     rel_source_no_ext = (
         source_path.relative_to(vault_root).with_suffix("").as_posix()
     )
 
     # Pre-compute counts and bump the relevant folder by 1 for the new file.
     count_errors: list[OSError] = []
-    pre_counts = indexes._count_sources(
-        kb_root(vault_root) / "Sources", on_error=count_errors.append
-    )
+    with call_spans.span("source.counts"):
+        pre_counts = indexes._count_sources(
+            kb_root(vault_root) / "Sources", on_error=count_errors.append
+        )
     post_counts = dict(pre_counts)
     post_counts[folder_name] = post_counts.get(folder_name, 0) + 1
 
@@ -533,38 +533,39 @@ def add(
         why_captured=why_captured,
     )
 
-    update = indexes.compute_updates(
-        vault_root,
-        source_type=folder_name.lower(),
-        folder_title=folder_name,
-        folder_description=taxonomy.category_description(folder_name),
-        rel_source_path=(
-            f"{kb_prefix()}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
-        ),
-        date_iso=date_iso,
-        stamp_iso=stamp_iso,
-        activity_summary=activity_summary,
-        log_entry_body=log_entry_body,
-        source_counts=post_counts,
-    )
+    with call_spans.span("source.index_planning"):
+        update = indexes.compute_updates(
+            vault_root,
+            source_type=folder_name.lower(),
+            folder_title=folder_name,
+            folder_description=taxonomy.category_description(folder_name),
+            rel_source_path=(
+                f"{kb_prefix()}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
+            ),
+            date_iso=date_iso,
+            stamp_iso=stamp_iso,
+            activity_summary=activity_summary,
+            log_entry_body=log_entry_body,
+            source_counts=post_counts,
+        )
 
-    kb = kb_root(vault_root)
-    # Refresh the Notes/Entities counts in the top index alongside the
-    # Sources counts that compute_updates() already handled. `add` doesn't
-    # change Notes/Entities counts, so no override needed.
-    sub_writes, top_with_counts = indexes.compute_subindex_writes(
-        vault_root,
-        top_index_text=update.top_index_content,
-        pending_paths=[rel_source_no_ext],
-    )
-    sub_writes = [
-        write for write in sub_writes
-        if write.path != kb / "Sources" / "index.md"
-    ]
-    top_index_final = (
-        top_with_counts if top_with_counts is not None
-        else update.top_index_content
-    )
+        kb = kb_root(vault_root)
+        # Refresh the Notes/Entities counts in the top index alongside the
+        # Sources counts that compute_updates() already handled. `add` doesn't
+        # change Notes/Entities counts, so no override needed.
+        sub_writes, top_with_counts = indexes.compute_subindex_writes(
+            vault_root,
+            top_index_text=update.top_index_content,
+            pending_paths=[rel_source_no_ext],
+        )
+        sub_writes = [
+            write for write in sub_writes
+            if write.path != kb / "Sources" / "index.md"
+        ]
+        top_index_final = (
+            top_with_counts if top_with_counts is not None
+            else update.top_index_content
+        )
     writes = [
         PlannedWrite(path=source_path, content=source_md),
         PlannedWrite(path=kb / "Sources" / "index.md", content=update.sources_index_content),
