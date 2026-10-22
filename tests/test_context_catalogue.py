@@ -9,6 +9,7 @@ current.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,13 @@ from conftest import _drain_background_threads
 from test_working_set_index import _seed_planning
 
 from exomem import context_catalogue as cc
-from exomem import episode_memory, epistemic_graph, freshness, working_set_index
+from exomem import (
+    episode_memory,
+    epistemic_graph,
+    freshness,
+    working_set_index,
+    working_set_runtime,
+)
 from exomem.governance import principal
 
 KB = "Knowledge Base"
@@ -71,6 +78,9 @@ def _seed(vault: Path) -> None:
     # Unfiled, and a project whose only domain does not resolve.
     _page(vault, "loose-end")
     _page(vault, "fleet-notes", "project: fleet-ops\n")
+    # Navigation pages, whatever their case: activation keeps them from becoming anchors, so they are not notes.
+    _page(vault, "index", "topics: [harbour]\n")
+    _page(vault, "README", "topics: [harbour]\n")
     # An anchor, a page the walk skips, and raw material.
     _page(vault, "harbour-hub", "tags: [hub]\ntopics: [harbour]\n")
     _page(vault, "skipped", folder=f"{KB}/Templates")
@@ -108,6 +118,7 @@ def test_a_page_joins_a_topic_only_by_the_declarations_the_spec_names(vault: Pat
     assert stored["crane-notes"].topics == ("old-harbour", "tug-schedules")  # raw, not resolved
     assert stored["tide-work"].projects == ("harbour-ops",)
     assert "raw-capture" not in stored and "skipped" not in stored
+    assert "index" not in stored and "README" not in stored
 
     topics = _topics(catalogue)
     assert topics["mooring-lines"] == ("harbour",)
@@ -267,7 +278,7 @@ def test_ensure_builds_inline_when_unmanaged_and_in_the_background_when_managed(
 
     state, catalogue, _ = cc.ensure(vault)
     assert (state, catalogue) == ("index_warming", None)  # the request thread did not walk the vault
-    cc.join_builds(vault)
+    working_set_runtime.join_builds(vault)
     state, catalogue, stale = cc.ensure(vault)
     assert state == cc.READY and catalogue is not None and catalogue.built()
 
@@ -275,6 +286,29 @@ def test_ensure_builds_inline_when_unmanaged_and_in_the_background_when_managed(
     cc.ContextCatalogue(vault).reset()
     state, catalogue, stale = cc.ensure(vault)
     assert state == cc.READY and catalogue is not None and catalogue.built() and not stale
+
+
+def test_stopping_the_runtime_abandons_a_running_catalogue_pass(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A service that is shutting down must not wait for, or let through, a half-finished fold."""
+    _seed(vault)
+    _anchors(vault)
+    monkeypatch.setattr(cc, "_managed", lambda: True)
+    stop = threading.Event()
+    read = cc._read_page
+
+    def read_then_stop(absolute: Path, vault_root: Path):
+        stop.set()  # the runtime stops while the first page is being folded
+        return read(absolute, vault_root)
+
+    monkeypatch.setattr(cc, "_read_page", read_then_stop)
+    working_set_runtime.bind_shutdown(vault, stop)
+    try:
+        assert cc.ensure(vault)[0] == "index_warming"
+        working_set_runtime.join_builds(vault)
+    finally:
+        working_set_runtime.reset_caches_for_tests()
+
+    assert not cc.ContextCatalogue(vault).built()
 
 
 def test_a_warm_managed_ensure_folds_the_pages_the_freshness_registry_saw(
@@ -286,7 +320,7 @@ def test_a_warm_managed_ensure_folds_the_pages_the_freshness_registry_saw(
     freshness.seed(vault, "kb", [(str(page), freshness.stat_signature(page)) for page in pages])
     monkeypatch.setattr(cc, "_managed", lambda: True)
     cc.ensure(vault)
-    cc.join_builds(vault)
+    working_set_runtime.join_builds(vault)
 
     target = _page(vault, "mooring-lines", "topics: [harbour]\nsummary: Rewritten while the service ran.\n")
     freshness.on_files_changed(vault, [vault / target])

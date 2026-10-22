@@ -170,6 +170,13 @@ SIGNATURE_MAX_CHARS = 600
 LEDE_MAX_CHARS = 240
 
 _NAVIGATION_BASENAMES = frozenset({"index.md", "log.md", "readme.md"})
+
+
+def is_navigation_page(path: str | Path) -> bool:
+    """Whether a page is a navigation page, which never becomes an anchor."""
+    return Path(path).name.casefold() in _NAVIGATION_BASENAMES
+
+
 #: Knowledge-base folders holding immutable raw material rather than anchors.
 #: Kept as the literal shipped-equivalence pin (`make-activation-conventions-
 #: vault-owned` tests compare it against `vault.APPEND_ONLY_KB_SUBPATHS`); the
@@ -1189,7 +1196,7 @@ def _page_entry(
     )
     kind = _page_anchor_kind(rel, frontmatter, kb=kb, conventions=conventions)
     anchor: dict[str, Any] | None = None
-    if kind is not None and path.name.casefold() not in _NAVIGATION_BASENAMES:
+    if kind is not None and not is_navigation_page(path):
         sections = _sections(page.body)
         tags = _strings(frontmatter.get("tags"))
         # A learned name joins the anchor's activation aliases and never the

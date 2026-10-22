@@ -726,7 +726,8 @@ class _Fold:
         from . import recall_policy
 
         if (
-            vault.in_excluded_scan_dir(rel)
+            working_set_index.is_navigation_page(rel)
+            or vault.in_excluded_scan_dir(rel)
             or vault.in_append_only_tree(rel) is not None
             or recall_policy.is_structured_only_path(self.root, rel)
         ):
@@ -979,7 +980,6 @@ def _insert_entry(conn: sqlite3.Connection, entry: Entry, digest: str) -> None:
 # -- ensure ------------------------------------------------------------------ #
 
 _LOCK = threading.Lock()
-_BUILDS: dict[Path, threading.Thread] = {}
 _INLINE_LOCKS: dict[Path, threading.Lock] = {}
 _CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
 
@@ -1073,38 +1073,20 @@ def _inline_lock(root: Path) -> threading.Lock:
 
 
 def _schedule(root: Path, freshness_stamp: str = "") -> None:
-    """Single-flight one background pass for a vault: a rebuild when cold, else a signature diff."""
+    """Single-flight one background pass for a vault: a rebuild when cold, else a signature diff.
+
+    The activation index's scheduler owns the slot, the shutdown binding and the
+    thread, so a vault never runs both passes at once and a stopping runtime
+    waits for either one.
+    """
     key = root.absolute()
 
-    def _warm() -> None:
-        try:
-            checkpoint = freshness.consumer_checkpoint(root, "kb") if freshness.is_live(root, "kb") else None
-            result = ContextCatalogue(root).update(freshness_stamp=freshness_stamp or None)
-            if checkpoint is not None and not result.get("unavailable"):
-                _CHECKPOINTS[key] = checkpoint
-        except foreground_priority.BulkCancelled:
-            pass
-        except Exception:  # noqa: BLE001 - a background fold never breaks a read
-            log.warning("context catalogue background build failed", exc_info=True)
-        finally:
-            with _LOCK:
-                _BUILDS.pop(key, None)
+    def _fold() -> None:
+        checkpoint = freshness.consumer_checkpoint(root, "kb") if freshness.is_live(root, "kb") else None
+        result = ContextCatalogue(root).update(freshness_stamp=freshness_stamp or None)
+        if checkpoint is not None and not result.get("unavailable"):
+            _CHECKPOINTS[key] = checkpoint
 
-    with _LOCK:
-        if key in _BUILDS:
-            return
-        thread = threading.Thread(target=_warm, name="exomem-context-catalogue-warm", daemon=True)
-        _BUILDS[key] = thread
-        try:
-            thread.start()
-        except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
-            _BUILDS.pop(key, None)
-            log.warning("context catalogue background build could not start", exc_info=True)
-
-
-def join_builds(vault_root: Path) -> None:
-    """Wait for the vault's background pass, if any."""
-    with _LOCK:
-        thread = _BUILDS.get(Path(vault_root).absolute())
-    if thread is not None and thread is not threading.current_thread():
-        thread.join()
+    working_set_runtime._schedule_build(
+        root, freshness_stamp=freshness_stamp, job=_fold, label="context catalogue"
+    )
