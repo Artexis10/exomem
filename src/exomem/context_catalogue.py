@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import secrets
 import sqlite3
 import threading
 from collections.abc import Iterable, Mapping
@@ -74,6 +75,13 @@ PENDING_DEFERRED = "deferred"
 
 # `Basis.dependency` leads with this word when the status registry could not be read.
 STATUS_UNAVAILABLE = "unavailable"
+
+# How far a catalogue may be behind the vault, as `ensure_lag` reports it: nothing known,
+# behind by exactly the paths `pending()` names, or behind by work it cannot name yet
+# (an unbridged freshness delta, a lagging activation index, an update that failed).
+LAG_CURRENT = "current"
+LAG_PENDING = "pending"
+LAG_UNKNOWN = "unknown"
 
 # The relation registry schema declares this family value; membership edges are
 # the authored edges whose relation kind has it, never a list of relation names.
@@ -303,6 +311,22 @@ class ContextCatalogue:
             return None
         row = conn.execute("SELECT value FROM catalogue_meta WHERE key = ?", (key,)).fetchone()
         return str(row[0]) if row else None
+
+    def secret(self) -> bytes:
+        """The key a continuation token is signed with, made on first use and kept in the sidecar.
+
+        It lives in `catalogue_meta`, so a wipe or a rebuilt sidecar issues a new key and every
+        token signed under the old one fails its check. Racing first calls settle on one key.
+        """
+        conn = self._connect()
+        if conn is None:
+            return b""
+        conn.execute(
+            "INSERT OR IGNORE INTO catalogue_meta (key, value) VALUES ('continuation_secret', ?)",
+            (secrets.token_hex(32),),
+        )
+        conn.commit()
+        return (self._meta("continuation_secret") or "").encode("ascii")
 
     def entries(self, kind: str | None = None) -> tuple[Entry, ...]:
         """Every entry with its raw declarations, ordered by id."""
@@ -996,52 +1020,72 @@ def ensure(
     inline and the rest in the background. An unmanaged process has no
     background worker, so it updates inline.
     """
+    state, catalogue, lag = ensure_lag(vault_root, freshness_stamp=freshness_stamp)
+    return state, catalogue, lag != LAG_CURRENT
+
+
+def ensure_lag(
+    vault_root: Path, *, freshness_stamp: str = ""
+) -> tuple[str, ContextCatalogue | None, str]:
+    """`ensure`, saying how far behind the catalogue may be: `LAG_CURRENT`, `LAG_PENDING` or `LAG_UNKNOWN`.
+
+    A reader that serves only some callers needs the difference. `LAG_PENDING`
+    means every path the catalogue may be behind on is in `pending()`, so a
+    caller can ask whether any of them is a page it may see. `LAG_UNKNOWN`
+    means the behind-ness has no list, and no caller can tell whether it
+    touches what that caller may see.
+    """
     if disabled():
-        return DISABLED, None, False
+        return DISABLED, None, LAG_CURRENT
     root = Path(vault_root)
     # Anchors are mirrored from the activation index, so it is built and current first.
     state, index, index_stale = working_set_runtime.ensure_index(root, freshness_stamp=freshness_stamp)
     if state != READY or index is None:
-        return state, None, False
+        return state, None, LAG_CURRENT
     catalogue = ContextCatalogue(root)
     if not catalogue.readable():
-        return UNAVAILABLE, None, False
+        return UNAVAILABLE, None, LAG_CURRENT
+    # A lagging activation index is behind by anchors the catalogue cannot list.
+    floor = LAG_UNKNOWN if index_stale else LAG_CURRENT
     if not catalogue.built():
         if _managed():
             _schedule(root, freshness_stamp)
-            return WARMING, None, False
+            return WARMING, None, LAG_CURRENT
         with _inline_lock(root.absolute()):
             if not catalogue.built():
                 result = catalogue.rebuild()
                 if result.get("unavailable"):
-                    return UNAVAILABLE, None, False
-        return READY, catalogue, index_stale
+                    return UNAVAILABLE, None, LAG_CURRENT
+        return READY, catalogue, floor
     if not _managed():
         if freshness_stamp and catalogue.freshness_stamp() == freshness_stamp and not catalogue.pending():
-            return READY, catalogue, index_stale
+            return READY, catalogue, floor
         with _inline_lock(root.absolute()):
             result = catalogue.update(freshness_stamp=freshness_stamp or None)
-        return READY, catalogue, index_stale or bool(result.get("unavailable") or catalogue.pending())
-    return READY, catalogue, _advance(root, catalogue, index, freshness_stamp) or index_stale
+        if result.get("unavailable") or floor == LAG_UNKNOWN:
+            return READY, catalogue, LAG_UNKNOWN
+        return READY, catalogue, LAG_PENDING if catalogue.pending() else LAG_CURRENT
+    lag = _advance(root, catalogue, index, freshness_stamp)
+    return READY, catalogue, LAG_UNKNOWN if lag == LAG_UNKNOWN or index_stale else lag
 
 
 def _advance(
     root: Path, catalogue: ContextCatalogue, index: working_set_index.WorkingSetIndex, freshness_stamp: str
-) -> bool:
-    """Fold the freshness delta of a warm catalogue; True when it may still be behind."""
+) -> str:
+    """Fold the freshness delta of a warm catalogue; say how far it may still be behind."""
     pending = catalogue.pending()
     mirrored = catalogue.mirrored_activation_token() == json.dumps(list(index.token()))
     if freshness_stamp and catalogue.freshness_stamp() == freshness_stamp and mirrored and not pending:
-        return False  # the vault has not moved since the last fold
+        return LAG_CURRENT  # the vault has not moved since the last fold
     key = root.absolute()
     checkpoint = _CHECKPOINTS.get(key)
     if checkpoint is None or not freshness.is_live(root, "kb"):
         _schedule(root, freshness_stamp)
-        return True
+        return LAG_UNKNOWN
     delta = freshness.delta_since(root, "kb", checkpoint)
     if not delta.complete:
         _schedule(root, freshness_stamp)
-        return True
+        return LAG_UNKNOWN
     if delta.changed or delta.deleted or pending or not mirrored:
         result = catalogue.update(
             delta.changed,
@@ -1051,11 +1095,11 @@ def _advance(
             freshness_stamp=freshness_stamp or None,
         )
         if result.get("unavailable"):
-            return True
+            return LAG_UNKNOWN
         if result.get("deferred"):
             _schedule(root, freshness_stamp)
         _CHECKPOINTS[key] = delta.to
-    return bool(catalogue.pending())
+    return LAG_PENDING if catalogue.pending() else LAG_CURRENT
 
 
 def _managed() -> bool:
