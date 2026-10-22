@@ -13,7 +13,7 @@
   "supportUrl": "https://substratesystems.io/exomem/support",
   "documentationUrl": "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md",
   "termsOfServiceUrl": "https://substratesystems.io/exomem/terms",
-  "icon": "./assets/icon.svg",
+  "icon": "./assets/icon.png",
   "license": "AGPL-3.0-or-later",
   "keywords": [
     "memory",

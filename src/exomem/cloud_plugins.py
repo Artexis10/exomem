@@ -151,7 +151,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 path.write_text(content, encoding="utf-8", newline="\n")
         assets = target / "assets"
         assets.mkdir()
-        shutil.copyfile(root / "plugins/cloud/assets/icon.svg", assets / "icon.svg")
+        shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
         shutil.copyfile(root / "LICENSE", target / "LICENSE")
         readme = (
             f"# {definition['display_name']}\n\n"
@@ -221,7 +221,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "supportUrl": definition["support"],
                 "documentationUrl": definition["documentation"],
                 "termsOfServiceUrl": definition["terms"],
-                "icon": "./assets/icon.svg",
+                "icon": "./assets/icon.png",
                 "license": definition["license"],
                 "keywords": definition["keywords"],
             }
@@ -236,7 +236,6 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         else:
             from .cloud_plugin_evals import directory_cases
 
-            shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
             shutil.copyfile(root / "plugins/cloud/assets/icon-small.png", assets / "icon-small.png")
             interface = {
                 "displayName": definition["display_name"],

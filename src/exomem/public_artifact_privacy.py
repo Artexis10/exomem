@@ -241,6 +241,7 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
         )
         for prefix in (
             "plugins/cloud/assets",
+            "plugins/cloud/generated/claude/assets",
             "plugins/cloud/generated/openai/assets",
             "assets",
         )

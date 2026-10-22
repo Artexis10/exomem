@@ -10,7 +10,6 @@ import textwrap
 import tomllib
 import zipfile
 from pathlib import Path
-from xml.etree import ElementTree
 
 import pytest
 
@@ -64,16 +63,14 @@ def test_claude_directory_links_and_icon_are_complete(tmp_path: Path) -> None:
             ("termsOfServiceUrl", "terms"),
         ):
             assert manifest[field] == definition[key]
-        icon = ElementTree.fromstring(archive.read(manifest["icon"].removeprefix("./")))
-    # Claude's plugin validator reports ICON_INVALID for an SVG with these constructs.
-    rejected = {"script", "style", "foreignObject", "animate", "animateMotion", "animateTransform", "set"}
-    elements = list(icon.iter())
-    assert not {element.tag.rpartition("}")[2] for element in elements} & rejected
-    for element in elements:
-        for name, value in element.attrib.items():
-            local = name.rpartition("}")[2]
-            assert local != "style" and not local.startswith("on")
-            assert local != "href" or value.startswith("#")
+        # Claude's directory takes a square PNG or JPEG of 512 to 2048 px under 2 MB, not SVG.
+        relative = manifest["icon"].removeprefix("./")
+        data = archive.read(relative)
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = struct.unpack(">II", data[16:24])
+    assert width == height and 512 <= width <= 2048
+    assert len(data) < 2 * 1024 * 1024
+    assert data == (ROOT / "plugins/cloud" / relative).read_bytes()
 
 
 def test_public_readmes_explain_data_handling_and_all_product_links(tmp_path: Path) -> None:

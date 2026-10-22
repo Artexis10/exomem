@@ -166,14 +166,15 @@ The Claude plugin manifest has no invented tagline field.
 
 `plugins/cloud/assets/` holds the approved Dot E icons and their size variants.
 OpenAI uses the full PNG for its listing and the compact PNG in the composer.
-Claude uses the SVG, which holds the full mark only.
-Claude's plugin validator rejects an SVG icon that contains a `style` element, so the SVG cannot switch to the compact mark at small sizes.
+Claude uses the full PNG: its directory accepts a square PNG or JPEG from 512 to 2048 pixels, under 2 MB, and does not accept SVG.
+Claude takes the package icon as the listing icon only when the plugin is first saved or submitted in its developer portal.
+A later package icon does not change an existing listing's icon.
 Provider previews remain the final check for provider-specific rasterisation.
 
 ### Claude credential-flow findings
 
 The registered Cloud hooks use the admitted MCP connection.
-Their command arguments fix `--activation-mode mcp` before ambient transport settings are read.
+The retrieve and capture registrations fix `--activation-mode mcp` before ambient transport settings are read.
 The retrieve hook emits native activation guidance without selecting its REST or CLI transport ladder.
 The capture hook's episode door returns before local credential resolution in MCP mode.
 The continuation hook reads local structural state and uses a restricted environment for its fixed Git probes.
@@ -210,8 +211,9 @@ After operator approval, use the existing Claude listing:
 1. Confirm the tracked repository, branch and plugin folder; the existing submission remains identified.
 2. Release the reviewed change through that tracked branch; the portal observes the intended new version.
 3. Inspect its validation, security findings and icon previews; the retained hooks and credential-flow evidence match the package.
-4. Update the connector tagline where supported; the connector keeps its existing MCP resource and OAuth configuration.
-5. Select the approved review or publication action; the portal records the actual outcome without an automatic withdrawal.
+4. If the listing still shows an older icon, change the listing icon in the portal where it allows that; the package icon cannot change it.
+5. Update the connector tagline where supported; the connector keeps its existing MCP resource and OAuth configuration.
+6. Select the approved review or publication action; the portal records the actual outcome without an automatic withdrawal.
 
 Prepare five positive and three negative review cases from the shared corpus.
 The OpenAI ZIP already includes those cases. Keep the same publisher and Cloud
