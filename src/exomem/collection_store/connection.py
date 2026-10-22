@@ -508,9 +508,9 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
 
 
 @contextmanager
-def reader_snapshot(path: Path):
+def reader_snapshot(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS):
     """Keep related canonical reads in one read-only transaction, then close it."""
-    conn = open_reader(path)
+    conn = open_reader(path, busy_timeout_ms=busy_timeout_ms)
     try:
         conn.execute("BEGIN")
         yield conn

@@ -867,6 +867,43 @@ def test_prepare_and_discard_wait_until_the_current_staging_owner_releases_custo
     assert not path.exists()
 
 
+def test_staging_survives_concurrent_comparison_and_cleanup_during_source_reads(env, capsys, monkeypatch):
+    """Releasing identity coordination for source reads must neither deadlock nor lose the unfinished candidate."""
+    root = legacy_vault(env)
+    capture = legacy_import.capture_legacy_collection
+    workers, observed, errors = [], [], []
+
+    def inspect():
+        with library_scope():
+            try:
+                directory = staging_directories(root)[0]
+                observed.append(migration._carried(root, directory))
+                observed.append(migration.discard_staging(root))
+                observed.append((directory / "staging.sqlite").is_file())
+            except Exception as error:  # noqa: BLE001 - report every worker failure
+                errors.append(error)
+
+    def capture_with_competitor(*args, **kwargs):
+        if not workers:
+            worker = threading.Thread(target=lambda: contextvars.Context().run(inspect))
+            workers.append(worker)
+            worker.start()
+            worker.join(1)
+            assert not worker.is_alive(), "a foreign reader must not wait for staging while holding coordination"
+            assert errors == []
+            assert observed == [(None, migration.NO_BASIS, []), 0, True]
+        return capture(*args, **kwargs)
+
+    monkeypatch.setattr(legacy_import, "capture_legacy_collection", capture_with_competitor)
+    try:
+        assert migrate(root, "apply") == 0
+        assert printed(capsys)["status"] == "marker_admitted"
+    finally:
+        for worker in workers:
+            worker.join(6)
+            assert not worker.is_alive()
+
+
 def test_refresh_and_cleanup_preserve_unknown_bytes_from_an_interrupted_attempt(env, capsys):
     """A leftover private file must neither block refresh nor disappear in a blanket directory removal."""
     root = legacy_vault(env)
@@ -1379,6 +1416,26 @@ def test_launcher_refuses_an_actual_older_interpreter_on_a_migrated_fresh_root_c
 
 
 NESTED = "Knowledge Base/Records/Work/Items/Nested/_collection.md"
+
+
+@pytest.mark.parametrize("staging", ["fresh", "prepared", "refresh"])
+def test_migration_with_relationships_can_read_an_existing_governance_sidecar(env, capsys, staging):
+    """Valid governance reads must work for fresh imports, retained staging and refreshed material."""
+    from exomem.governance import store
+
+    root = legacy_vault(env, relationships=True)
+    store.open_connection(root).close()
+    assert migrate(root, "dry-run") == 0
+    assert printed(capsys)["verdict"] == "migratable"
+    if staging != "fresh":
+        assert migrate(root, "prepare", operator=False) == 0
+        assert printed(capsys)["staging"] == "retained"
+        if staging == "refresh":
+            edit_by_hand(root)
+    assert migrate(root, "apply") == 0
+    applied = printed(capsys)
+    assert applied["status"] == "marker_admitted"
+    assert (applied["staging"] == "carried_forward") == (staging == "prepared")
 
 
 def test_a_store_summary_excluded_from_release_does_not_block_relationship_labels(s1, capsys):

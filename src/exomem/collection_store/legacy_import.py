@@ -249,7 +249,7 @@ def _capture_presentation(root, manifest, snapshot, *, check, operation=None):
     return tuple(resolutions), tuple(guards)
 
 
-def _recheck(captured, *, check):
+def _recheck_sources(captured, *, check):
     try:
         check()
         captured.manifest_guard.recheck(captured.root)
@@ -264,6 +264,10 @@ def _recheck(captured, *, check):
         raise CollectionStoreError(
             "COLLECTION_LEGACY_IMPORT_SOURCE_CHANGED", "captured source changed"
         ) from error
+
+
+def _recheck(captured, *, check):
+    _recheck_sources(captured, check=check)
     resolutions, _ = _capture_presentation(captured.root, captured.manifest, captured.snapshot, check=check,
                                           operation=captured.presentation_operation)
     if resolutions != captured.presentation_resolutions:
@@ -962,11 +966,14 @@ def import_legacy_collection(
     *,
     audit: LegacyAuditSpool,
     context: ImportContext,
+    defer_presentation: bool = False,
 ) -> LegacyImportResult:
     """Map and prove within the caller's transaction; never commit or publish.
 
     On any failure the caller must roll back the entire staging transaction.
     A verified store chain does not certify continuous historical provenance.
+    A caller that defers presentation must run the full recheck before committing,
+    then recheck sources after reacquiring its private identity coordination.
     """
     if not staging_conn.in_transaction:
         raise RuntimeError("legacy import requires a caller transaction")
@@ -988,7 +995,8 @@ def import_legacy_collection(
     if captured.manifest.view_mode != "items":
         # A file collection is an items view of its rows; summary is only ever a NEW collection.
         raise summary.mode_change_refused("items", captured.manifest.view_mode)
-    _recheck(captured, check=audit._check)
+    recheck = _recheck_sources if defer_presentation else _recheck
+    recheck(captured, check=audit._check)
     chain.verify_store_chain(staging_conn, check=audit._check)
     envelopes = []
     previous = None
@@ -1020,7 +1028,7 @@ def import_legacy_collection(
     result = assemble(staging_conn, material, audit._check)
     checkpoint = result.checkpoint_txn_id
     _prove(staging_conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash, check=audit._check)
-    _recheck(captured, check=audit._check)
+    recheck(captured, check=audit._check)
     # Iterator acquisition rechecks audit files even for an empty baseline.
     with closing(audit.iter_reachable(captured.audit_proof)) as iterator:
         next(iterator, None)
