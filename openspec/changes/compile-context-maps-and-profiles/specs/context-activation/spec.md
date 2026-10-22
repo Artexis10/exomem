@@ -17,7 +17,7 @@ Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected b
   - "A band resolution on an ordinary word yields to a different carried page";
   - the packet shape of "Bounded role lanes and the working-memory packet".
 - The role lanes' bounds and lifecycle rules SHALL also bind profiles that are compiled through those lanes.
-- The `continuity` and `conversation` contracts of the conversation-aware activation and continuity capabilities SHALL bind `anchors` mode. `maps` mode SHALL follow "The maps packet".
+- The `continuity` and `conversation` contracts of the conversation-aware activation and continuity capabilities, and the retrieve-inject-hook rendering contract, SHALL bind `anchors` mode. `maps` mode SHALL follow "The maps packet".
 
 #### Scenario: The default mode is unchanged
 - **WHEN** `EXOMEM_ACTIVATION_PACKET` is absent
@@ -28,15 +28,24 @@ Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected b
 - **THEN** activation returns the disabled abstention and no map
 
 ### Requirement: The maps packet
-In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT resolve anchors, call a model other than retrieval scorers, or write to the vault. The map and any attached profile SHALL share the request's `max_chars` cap. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation and SHALL NOT encode anchors. Unless the turn-slice evaluation arm is enabled, `conversation`, `focus` and `trigger` SHALL NOT change the map.
+In `maps` mode, activation SHALL return the map, its generation, the budget report, and the same governance and generation metadata as an `anchors` packet. It SHALL NOT resolve anchors, call a model other than retrieval scorers, or write to the vault. The map and any attached profile SHALL share the request's `max_chars` cap. A vault with no context-catalogue entries visible to the caller SHALL return an empty map with the reason `empty`. The `continuity` token SHALL carry the map generation, so that a caller can tell when its map is outdated, and SHALL NOT encode anchors. Unless the turn-slice evaluation arm is enabled, `conversation`, `focus` and `trigger` SHALL NOT change the map.
+
+#### Scenario: An empty vault returns an empty map
+- **WHEN** no context-catalogue entry is visible to the caller
+- **THEN** the packet carries an empty map with the reason `empty`
+
+#### Scenario: The map fits the budget
+- **WHEN** the caller sets `max_chars`
+- **THEN** the map and any attached profile together fit within it
 
 #### Scenario: Conversation does not change the map
 - **WHEN** two `maps`-mode calls differ only in `conversation`
 - **THEN** both return the same map
 
 ### Requirement: A context catalogue with bounded projections
-The compiler SHALL maintain a context catalogue, distinct from the anchor catalogue. Its entry kinds SHALL be the closed set that its schema declares: topic, anchor, thread and collection.
-- A thread SHALL be the newest episode revision for one episode identity.
+The compiler SHALL maintain a context catalogue, distinct from the anchor catalogue. Its entry kinds SHALL be the closed set that its schema declares: topic, anchor, note, thread and collection.
+- A note SHALL be a page that is not an anchor, a thread or a collection.
+- A thread SHALL be the newest episode revision for one episode identity: the `ep-` key of the episode model.
 - A collection SHALL be a Records or Planning collection.
 - Each entry SHALL carry:
   - a one-line description;
@@ -44,7 +53,9 @@ The compiler SHALL maintain a context catalogue, distinct from the anchor catalo
   - its source refs;
   - the generation it was built from.
 
-The map SHALL be a projection of the catalogue that does not depend on the turn. It SHALL fit within the request's `max_chars` cap. Which entries the map lists SHALL be decided by registry-declared lifecycle classes and entry activity, not by lists in code. Each topic SHALL have a domain map: a projection of its entries, paginated at the read contract's page size. Entries with no topic SHALL be listed in an unfiled domain map. The map SHALL describe itself as an index of what exists, not as material relevant to the turn.
+The context catalogue SHALL be part of the derived activation index: recall SHALL NOT read it, and it SHALL be rebuildable from the vault alone. Agent-supplied descriptions SHALL persist in the page field that the catalogue contract names. Derived descriptions SHALL persist in a vault-held derived-description store.
+
+The map SHALL be a projection of the catalogue that does not depend on the turn. It SHALL fit within the request's `max_chars` cap. Which entries the map lists SHALL be decided by registry-declared lifecycle classes and by entry activity as the catalogue contract defines it, not by lists in code. Each topic SHALL have a domain map: a projection of its entries, paginated at the read contract's page size. Entries with no topic SHALL be listed in an unfiled domain map. The map SHALL describe itself as an index of what exists, not as material relevant to the turn.
 
 #### Scenario: The map does not depend on the turn
 - **WHEN** two turns activate in `maps` mode with no catalogue change between them
@@ -87,7 +98,7 @@ A unit that does not fit SHALL become a ref and SHALL NOT be cut. A unit's as-of
 - **THEN** its profile line carries no as-of date
 
 ### Requirement: Derived views resolve through one read contract
-`read_memory` SHALL resolve map, domain-map and profile refs, on every surface that serves `read_memory`. Each response SHALL return at most one page of the configured page size. Further pages SHALL be reachable by a continuation token. A missing ref SHALL report missing. When a view's inputs changed and the rebuilt view has not been published yet, the response SHALL serve the last published view marked stale.
+`read_memory` SHALL resolve map, domain-map and profile refs, on every surface that serves `read_memory`. Each response SHALL return at most one page of the page size that the read contract defines. Further pages SHALL be reachable by a continuation token. A missing ref SHALL report missing. When a view's inputs changed and the rebuilt view has not been published yet, the response SHALL serve the last published view marked stale.
 
 #### Scenario: A stale profile is marked
 - **WHEN** a member of a profile changed and no newer build of the profile is published

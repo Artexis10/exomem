@@ -3,7 +3,7 @@
 ## 1. Contracts
 
 - [ ] 1.1 Define the topic-membership contract in the registries: name the page field that declares a domain, the project-key attribute that maps a key to a domain, and the use of the `membership` relation family, with direction and non-transitivity.
-- [ ] 1.2 Define the catalogue entry, its projections and the read contract for map, domain-map and profile refs.
+- [ ] 1.2 Define the context-catalogue entry, the page field for descriptions, the derived-description store, entry activity, the projections, and the read contract (page size and continuation) for map, domain-map and profile refs.
 - [ ] 1.3 Freeze the evaluation protocol: cases, arms (including pull instructions with no map), agent, pull budget, scoring rule for successors and equivalent evidence, contamination tolerance and decision rule.
 
 ## 2. Catalogue and projections
@@ -22,7 +22,7 @@
 
 ## 4. Activation and clients
 
-- [ ] 4.1 Serve the `maps` packet mode behind the setting, with `anchors` as the default and one packet budget.
+- [ ] 4.1 Serve the `maps` packet mode behind the setting, with `anchors` as the default and one packet budget; register its stages under instrumentation and extend the latency gate to `maps` mode.
 - [ ] 4.2 Update the server instructions (within their 900-character bound, keeping the user's words verbatim as `turn`), the `activate_context` description, the skill scaffold, and the retrieve hook's rendering of a map, for map-assisted pulls before the first answer. Regenerate the surface pins: schema fidelity fixture, digests, `docs/capabilities.md`, README table and plugin trees.
 
 ## 5. Evaluation and switch

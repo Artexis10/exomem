@@ -9,7 +9,7 @@ A private replay of twelve field reports measured the gap on one live vault. Its
 ## What Changes
 
 - Make **map-assisted pulls** the first-answer workflow: activation returns a small map of what the vault holds, and the agent reads the map, pulls what the answer needs, and only then answers. The user does not point the agent at material.
-- Keep one searchable **context catalogue** of described entries (topics, anchors, threads, collections) with membership, source refs and generations. It is distinct from the existing anchor catalogue. The **map** and the **domain maps** are bounded projections of it, and the map says it is an index of what exists, not material relevant to the turn.
+- Keep one searchable **context catalogue** of described entries (topics, anchors, notes, threads, collections) with membership, source refs and generations. It is distinct from the existing anchor catalogue. The **map** and the **domain maps** are bounded projections of it, and the map says it is an index of what exists, not material relevant to the turn.
 - Serve **anchor profiles** and **topic profiles** by ref, compiled on demand through the existing role lanes and current-state authority, cached where useful.
 - Define **topic membership** from registry domains, project keys and explicit page declarations, with direction rules, so that ordinary notes are reachable through their topic and not only through anchors.
 - Keep descriptions current on write with generation-bound invalidation, and backfill descriptions for existing entries before evaluation.
