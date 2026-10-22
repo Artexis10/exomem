@@ -166,7 +166,8 @@ The Claude plugin manifest has no invented tagline field.
 
 `plugins/cloud/assets/` holds the approved Dot E icons and their size variants.
 OpenAI uses the full PNG for its listing and the compact PNG in the composer.
-Claude uses the SVG, which selects the compact mark below 32 pixels in supporting renderers.
+Claude uses the SVG, which holds the full mark only.
+Claude's plugin validator rejects an SVG icon that contains a `style` element, so the SVG cannot switch to the compact mark at small sizes.
 Provider previews remain the final check for provider-specific rasterisation.
 
 ### Claude credential-flow findings

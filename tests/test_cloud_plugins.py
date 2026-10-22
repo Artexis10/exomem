@@ -10,6 +10,7 @@ import textwrap
 import tomllib
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -63,7 +64,16 @@ def test_claude_directory_links_and_icon_are_complete(tmp_path: Path) -> None:
             ("termsOfServiceUrl", "terms"),
         ):
             assert manifest[field] == definition[key]
-        assert archive.read(manifest["icon"].removeprefix("./"))
+        icon = ElementTree.fromstring(archive.read(manifest["icon"].removeprefix("./")))
+    # Claude's plugin validator reports ICON_INVALID for an SVG with these constructs.
+    rejected = {"script", "style", "foreignObject", "animate", "animateMotion", "animateTransform", "set"}
+    elements = list(icon.iter())
+    assert not {element.tag.rpartition("}")[2] for element in elements} & rejected
+    for element in elements:
+        for name, value in element.attrib.items():
+            local = name.rpartition("}")[2]
+            assert local != "style" and not local.startswith("on")
+            assert local != "href" or value.startswith("#")
 
 
 def test_public_readmes_explain_data_handling_and_all_product_links(tmp_path: Path) -> None:
