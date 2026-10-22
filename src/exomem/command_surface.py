@@ -403,13 +403,8 @@ def bind_vault(
             for parameter in visible
         ]
     if command is not None and command.name == "activate_context":
-        from .working_set_conversation import MCP_WITHHELD_INPUTS, public_input_schema
+        from .working_set_conversation import public_input_schema
 
-        # MCP is the model's door: caller labels and earlier turns travel only on
-        # the hook doors (CLI, REST), so this door neither advertises nor uses them.
-        visible = [
-            parameter for parameter in visible if parameter.name not in MCP_WITHHELD_INPUTS
-        ]
         # Discovery describes existing bounds; validation still uses the permissive dict.
         visible = [
             parameter.replace(

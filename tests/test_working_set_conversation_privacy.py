@@ -106,9 +106,7 @@ def test_no_state_file_holds_the_conversation_or_its_hash(
         for digest in digests:
             assert digest.encode() not in blob, path
     (row,) = [json.loads(line) for line in (ledger / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
-    # The MCP door drops `recent` before the ledgered middleware sees the call.
-    accepted = {name: value for name, value in conversation.items() if name != "recent"}
-    assert row["args"]["conversation"] == {"len": len(call_ledger.canonical_json({"v": accepted}))}
+    assert row["args"]["conversation"] == {"len": len(serialised[0])}
     assert SENTINEL not in json.dumps(packet)
     call_ledger.reset_chain_cache()
 

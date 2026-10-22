@@ -58,30 +58,8 @@ ENTRY_KINDS: frozenset[str] = frozenset({"exact_alias", "lexical_overlap"})
 FOCUS_KINDS: frozenset[str] = frozenset({"exact_alias", "lexical_overlap", "claims_match"})
 
 
-#: `activate_context` parameters that only the hook doors (CLI, REST) carry. The
-#: MCP door is the model's, and a model sends the current turn plus `focus` and
-#: `refs`: caller labels and earlier turns are not its to supply.
-MCP_WITHHELD_INPUTS: frozenset[str] = frozenset({"client", "session", "workspace"})
-
-
-def model_door_inputs(arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """`activate_context` arguments as the MCP door accepts them.
-
-    Drops what a stale client may still send: the hook-only parameters and
-    `conversation.recent`. Dropping happens before bounding, so the packet is
-    the one the same call produces without those fields.
-    """
-    kept = {name: value for name, value in arguments.items() if name not in MCP_WITHHELD_INPUTS}
-    conversation = kept.get("conversation")
-    if isinstance(conversation, Mapping) and "recent" in conversation:
-        kept["conversation"] = {
-            name: value for name, value in conversation.items() if name != "recent"
-        }
-    return kept
-
-
 def public_input_schema() -> dict[str, Any]:
-    """Describe the MCP door's bounded cues without changing the runtime's clipping and ignoring."""
+    """Describe bounded cues without changing the runtime's clipping and ignoring."""
     return {
         "type": "object",
         "additionalProperties": False,
@@ -90,6 +68,24 @@ def public_input_schema() -> dict[str, Any]:
                 "type": "string",
                 "maxLength": FOCUS_MAX_CHARS,
                 "description": "Assistant-authored subject cue; separate from user words.",
+            },
+            "recent": {
+                "type": "array",
+                "maxItems": RECENT_MAX_ENTRIES,
+                "description": f"Relevant excerpts, newest last; {RECENT_MAX_TOTAL_CHARS:,} characters total.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["role", "text"],
+                    "properties": {
+                        "role": {"type": "string", "enum": list(ROLES)},
+                        "text": {
+                            "type": "string",
+                            "maxLength": max(USER_ENTRY_MAX_CHARS, ASSISTANT_ENTRY_MAX_CHARS),
+                            "description": f"Max {USER_ENTRY_MAX_CHARS} user or {ASSISTANT_ENTRY_MAX_CHARS} assistant characters.",
+                        },
+                    },
+                },
             },
             "refs": {
                 "type": "array",

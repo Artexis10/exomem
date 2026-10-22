@@ -6543,7 +6543,7 @@ def op_activate_context(
         session: Stable opaque conversation ID; max 256 chars.
         workspace: Thread project key; max 256 chars.
         conversation: All optional: focus (one line/240 chars; current subjects and attachment names/objects),
-            refs (12 already-read pages); never earlier turns or full history.
+            refs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history.
         trigger: user_turn: initial recall. task_refresh: keep turn; task in focus;
             intent_resolution qualifies human intent separately.
         initiator: Caller label; no authority. Invalid labels ignored.
@@ -9748,9 +9748,7 @@ def op_connect_memory(
     Proposals are read-only; create-entity and accept-relation are additive writes.
 
     Args:
-        operation: context, suggest-links, suggest-relations, graph-context,
-            inbound-links, resolve-relation, resolve-entity, create-entity,
-            accept-relation.
+        operation: create-entity and accept-relation write; the others read.
         requested_relation: Relation label (resolve-relation needs this or
             query); on accept-relation, the active registered relation to apply.
         entity_type: Type id from the active entity registry, incl. `_Schema/entity-types.yaml`.
@@ -12037,9 +12035,7 @@ def op_manage_memory_file(
     flags.
 
     Args:
-        operation: list, create, append, move, reclassify,
-            propose-reclassification, revert-reclassification, delete,
-            trash-list, or recover.
+        operation: list, trash-list and propose-reclassification read; the others write.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.

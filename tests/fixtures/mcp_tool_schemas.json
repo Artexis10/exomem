@@ -39,6 +39,18 @@
           "description": "Stage timings.",
           "type": "boolean"
         },
+        "client": {
+          "type": "string",
+          "description": "Lowercase client label; invalid labels ignored."
+        },
+        "session": {
+          "type": "string",
+          "description": "Stable opaque conversation ID; max 256 chars."
+        },
+        "workspace": {
+          "type": "string",
+          "description": "Thread project key; max 256 chars."
+        },
         "conversation": {
           "additionalProperties": false,
           "properties": {
@@ -46,6 +58,33 @@
               "description": "Assistant-authored subject cue; separate from user words.",
               "maxLength": 240,
               "type": "string"
+            },
+            "recent": {
+              "description": "Relevant excerpts, newest last; 2,400 characters total.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "user",
+                      "assistant"
+                    ],
+                    "type": "string"
+                  },
+                  "text": {
+                    "description": "Max 600 user or 300 assistant characters.",
+                    "maxLength": 600,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "role",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "maxItems": 6,
+              "type": "array"
             },
             "refs": {
               "description": "Canonical page references already read.",
@@ -58,7 +97,7 @@
             }
           },
           "type": "object",
-          "description": "All optional: focus (one line/240 chars; current subjects and attachment names/objects),\nrefs (12 already-read pages); never earlier turns or full history."
+          "description": "All optional: focus (one line/240 chars; current subjects and attachment names/objects),\nrefs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history."
         },
         "trigger": {
           "default": "user_turn",
@@ -764,7 +803,7 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-relation, resolve-entity, create-entity, accept-relation.",
+          "description": "create-entity and accept-relation write; the others read.",
           "enum": [
             "suggest-links",
             "suggest-relations",
@@ -1956,7 +1995,7 @@
       "properties": {
         "operation": {
           "default": "list",
-          "description": "list, create, append, move, reclassify, propose-reclassification, revert-reclassification, delete, trash-list, or recover.",
+          "description": "list, trash-list and propose-reclassification read; the others write.",
           "enum": [
             "list",
             "create",
