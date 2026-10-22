@@ -2680,7 +2680,7 @@
     }
   },
   "read_memory": {
-    "description": "Read a page or exact semantic unit selected by recall or known ref.\n\nunit_ref returns that current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.",
+    "description": "Read a page or exact semantic unit selected by recall or known ref.\n\nunit_ref returns that current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.\nAlso reads the paged views exomem://map, exomem://map/topic/<domain key>\nand exomem://map/unfiled.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2723,6 +2723,11 @@
         "history_continuation": {
           "type": "string",
           "description": "Position from the previous revision_history envelope."
+        },
+        "continuation": {
+          "maxLength": 1024,
+          "type": "string",
+          "description": "Next-page token of a view."
         }
       },
       "required": [

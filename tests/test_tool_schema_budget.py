@@ -26,8 +26,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Raised from 90,000 for the evaluated correction guidance in the semantic-authoring
 # contract (five authoring tools) and the retained-history read and observe fields,
-# then by 80 for browse_memory's page fields (`limit`, `cursor`).
-TOTAL_BUDGET = 91_730
+# then by 80 for browse_memory's page fields (`limit`, `cursor`), then by 150 for read_memory's derived
+# view refs and `continuation` field.
+TOTAL_BUDGET = 91_880
 
 #: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
 # The bounded viewer and original recovery use spare per-tool headroom; correction guidance raises the total.
@@ -52,7 +53,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "plan_memory": 2275,
     "preserve_artifacts": 2300,
     "configure_memory": 1400,
-    "read_memory": 1530,
+    "read_memory": 1680,
     "adopt_vault": 1300,
     "preserve_evidence": 1350,
     "review_item_context": 1300,

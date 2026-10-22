@@ -13,6 +13,10 @@
 # e.g. `client-work: { folder: Client Work, category: product, tenant_scoped: true }`;
 # `audit` flags `tenant:` on pages of every other project. A page whose
 # `projects:` list contains a tenant-scoped key is accepted.
+# Add `domain: <domain key>` (or a list of keys) to a key to make its pages
+# members of those topics, e.g. `work: { folder: Work, category: domain, domain: ops }`.
+# A value must resolve through the domains registry (`_Schema/source-taxonomy.yaml`
+# or a built-in); one that does not joins no topic and is counted as unresolved.
 #
 # These are starter examples — rename or replace them with your own.
 
