@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.136.0](https://github.com/Artexis10/exomem/compare/v0.135.0...v0.136.0) (2026-10-23)
+
+
+### Features
+
+* **bench:** add the maps-versus-anchors switch evaluation harness ([#1999](https://github.com/Artexis10/exomem/issues/1999)) ([f1586e0](https://github.com/Artexis10/exomem/commit/f1586e00360f1707984de6ccf8824d63b19fecca))
+
+
+### Bug Fixes
+
+* **bench:** add a build-only CPU budget and recover arm retries in the switch evaluation ([#2019](https://github.com/Artexis10/exomem/issues/2019)) ([eb0a771](https://github.com/Artexis10/exomem/commit/eb0a771e46c483a68fad9a756301e91322d88a7f))
+* reserve temporary storage for owner exports ([5c2b10a](https://github.com/Artexis10/exomem/commit/5c2b10ae061f7499c507850c53481fb8b4b73321))
+* stop two release-gate flakes (watcher self-write, re-seed lexical repair) ([#2016](https://github.com/Artexis10/exomem/issues/2016)) ([10bc16c](https://github.com/Artexis10/exomem/commit/10bc16cd84013e0fad7eb62ee362e03d3a76e59a))
+
+
+### Performance
+
+* **indexes:** skip discarded Source index rendering ([#2001](https://github.com/Artexis10/exomem/issues/2001)) ([ae9e740](https://github.com/Artexis10/exomem/commit/ae9e740d0a8a378763c42f5808cf896e85ecbb5b))
+* **recall:** attribute matrix catch-up preparation and copying ([#2002](https://github.com/Artexis10/exomem/issues/2002)) ([be57bc6](https://github.com/Artexis10/exomem/commit/be57bc686a6500c45237a91a61e88763a3ed5c31))
+* **recall:** bound keyword hydration by emitted groups ([#2009](https://github.com/Artexis10/exomem/issues/2009)) ([d1f3d6a](https://github.com/Artexis10/exomem/commit/d1f3d6a3ce30c748d04d7a4c4647fe19af08dd7b))
+* **recall:** reuse unit reads and hydrate selected dense evidence ([#2000](https://github.com/Artexis10/exomem/issues/2000)) ([5e71442](https://github.com/Artexis10/exomem/commit/5e71442ec3267145a9a061cfac35e4aa4a2ca5f7))
+
 ## [0.135.0](https://github.com/Artexis10/exomem/compare/v0.134.5...v0.135.0) (2026-10-23)
 
 
