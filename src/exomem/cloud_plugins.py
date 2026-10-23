@@ -134,6 +134,11 @@ def _claude_hooks(root: Path, target: Path) -> None:
 def build_packages(root: Path, output: Path | None = None) -> dict:
     root = Path(root)
     definition = _definition(root)
+    # Claude's upload contract caps the manifest description at 500 characters.
+    # https://platform.claude.com/docs/en/manage-claude/plugins-api
+    description = definition["claude_description"]
+    if not isinstance(description, str) or not description.strip() or len(description) > 500:
+        raise ValueError("Claude plugin description must contain 1 to 500 characters")
     identity = release_identity(root)
     workflow_skills.validate_skill_contract()
     destination = Path(output) if output is not None else root / "plugins/cloud/generated"
@@ -212,7 +217,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             manifest = {
                 "name": definition["name"],
                 "displayName": definition["display_name"],
-                "description": definition["description"],
+                "description": definition["claude_description"],
                 "version": identity["version"],
                 "author": definition["author"],
                 "homepage": definition["homepage"],
