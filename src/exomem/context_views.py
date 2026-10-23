@@ -47,6 +47,7 @@ from . import (
     lifecycle_statuses,
     project_keys,
     source_taxonomy,
+    state_paths,
     vocabulary_resolution,
     working_set,
     working_set_index,
@@ -68,8 +69,9 @@ ANCHOR_PROFILE_PREFIX = PROFILE_REF_PREFIX + "anchor/"
 TOPIC_PROFILE_PREFIX = PROFILE_REF_PREFIX + "topic/"
 # Profile sections are the existing packet sections fixed by the read contract.
 PROFILE_SECTIONS = ("current_state", "units", "pointers")
-# These public reasons are the working-set contract's truncation and disclosure notices.
-PROFILE_MISSING_REASONS = ("lane_truncated", "withheld")
+# The two reasons a profile marker may give: the working-set contract's truncation and disclosure notices.
+MISSING_TRUNCATED = "lane_truncated"
+MISSING_WITHHELD = "withheld"
 # The two profile kinds are the closed ref shapes above.
 PROFILE_ANCHOR = "anchor_profile"
 PROFILE_TOPIC = "topic_profile"
@@ -475,9 +477,17 @@ class _World:
     topic_activity: dict[str, str]
 
 
-def _world(catalogue: context_catalogue.ContextCatalogue, caller: CallerView) -> _World:
+def _world(
+    catalogue: context_catalogue.ContextCatalogue, caller: CallerView,
+    among: Sequence[context_catalogue.Entry] | None = None,
+) -> _World:
+    """The caller's world over `among`, entries chosen before admission (default: every entry)."""
+    if among is None:
+        among = catalogue.entries()
+        # Every entry is decided here, and each read of the view decides them all again.
+        egress.reserve_decision_memo(len(among))
     entries = [
-        entry for entry in catalogue.entries()
+        entry for entry in among
         if _admits(entry, caller.visible)
         # A project anchor is the project registry's entry: its title is the registry's folder.
         and (caller.projects_admitted or entry.anchor_kind != working_set_index.PROJECT_ANCHOR_KIND)
@@ -679,6 +689,40 @@ def _profile_anchors(
         index.close()
 
 
+def _names_anchor(row: Row, key: str) -> bool:
+    return row.kind in (KIND_ANCHOR, KIND_COLLECTION) and key in (row.ref, row.path, row.entry_id)
+
+
+def _profile_candidates(
+    catalogue: context_catalogue.ContextCatalogue, prepared: _Prepared, caller: CallerView
+) -> list[context_catalogue.Entry]:
+    """The entries that can change what a profile serves, chosen before any of them is decided.
+
+    A decision costs a page read, so a profile decides these and not the whole catalogue. The
+    members come first: the entries that name the anchor, or that the join over every entry files
+    under the topic. A visible member's topics are a subset of that join's, and a membership target
+    that files a member under the topic is filed there too, so it is a member here. Then the other
+    inputs of the caller's join: every revision of a member's thread, because the thread serves its
+    newest visible revision, and every entry of a member's project keys, because an entry without
+    activity of its own takes its project's newest.
+    """
+    entries = catalogue.entries()
+    if prepared.target.kind == PROFILE_ANCHOR:
+        chosen = [entry for entry in entries if _names_anchor(_row(entry, (), entry.activity), prepared.key)]
+    else:
+        joined = catalogue.memberships(entries, projects=caller.projects_admitted).topics
+        chosen = [entry for entry in entries if prepared.key in joined.get(entry.entry_id, ())]
+    ids = {entry.entry_id for entry in chosen}
+    threads = {entry.thread_key for entry in chosen if entry.kind == KIND_THREAD}
+    projects = {key for entry in chosen if not entry.activity for key in entry.projects}
+    return [
+        entry for entry in entries
+        if entry.entry_id in ids
+        or (entry.kind == KIND_THREAD and entry.thread_key in threads)
+        or not projects.isdisjoint(entry.projects)
+    ]
+
+
 def _compile_profile(prepared: _Prepared) -> View:
     from . import find
 
@@ -686,12 +730,9 @@ def _compile_profile(prepared: _Prepared) -> View:
     assert catalogue is not None
     root = catalogue.vault_root
     token = catalogue.token()
-    world = _world(catalogue, caller)
+    world = _world(catalogue, caller, _profile_candidates(catalogue, prepared, caller))
     if prepared.target.kind == PROFILE_ANCHOR:
-        members = _ordered(
-            row for row in world.rows
-            if row.kind in (KIND_ANCHOR, KIND_COLLECTION) and prepared.key in (row.ref, row.path, row.entry_id)
-        )
+        members = _ordered(row for row in world.rows if _names_anchor(row, prepared.key))
     else:
         members = _ordered(row for row in world.rows if prepared.key in row.topics)
     if not members:
@@ -758,7 +799,7 @@ def _compile_profile(prepared: _Prepared) -> View:
     if catalogue.token() != token:
         return _abstention(prepared, INDEX_WARMING)
     return View(prepared.ref, READY, generation, stale, rows,
-                missing=tuple(entry for entry in missing if entry.get("reason") == "lane_truncated"))
+                missing=tuple(entry for entry in missing if entry.get("reason") == MISSING_TRUNCATED))
 
 
 # --------------------------------------------------------------------------- #
@@ -1087,11 +1128,14 @@ def read_view(
     continuation for the next page. A view that cannot be served yet answers with its readiness state
     and no items. Raises NOT_FOUND, INVALID_CONTINUATION or CONTINUATION_STALE.
     """
-    if purpose is None:
-        return _read_view(Path(vault_root), path, continuation, None)
-    # The readers under the view (a record's current state) take the purpose from the bound principal.
-    with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
-        return _read_view(Path(vault_root), path, continuation, purpose)
+    # The view decides every entry it reads. Like `find`, it resolves placement and reads the connector
+    # ceiling once for all of them, and the terminal guard reads both again, live.
+    with state_paths.resolution_scope():
+        if purpose is None:
+            return _read_view(Path(vault_root), path, continuation, None)
+        # The readers under the view (a record's current state) take the purpose from the bound principal.
+        with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
+            return _read_view(Path(vault_root), path, continuation, purpose)
 
 
 def _read_view(root: Path, path: str, continuation: str | None, purpose: str | None) -> dict[str, Any]:
@@ -1221,6 +1265,24 @@ def pinned_missing(vault_root: Path, response: Mapping[str, Any], caller: Caller
     """The profile markers this request's compile served for `response`, as `pinned_items` reads its items."""
     served = _record(vault_root, response.get("ref"), response.get("generation"), response.get("continuation"), caller)
     return [] if served is None else copy.deepcopy(list(served.missing))
+
+
+def profile_markers(vault_root: Path, missing: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The markers a profile serves: each role from a closed set, never text that a page or a caller wrote.
+
+    A withheld marker names a profile section, and a truncation marker names a lane of the vault's
+    role registry. Any other marker is dropped, and a kept one carries only its role and reason.
+    """
+    roles = {
+        MISSING_TRUNCATED: frozenset(context_roles.load_roles(vault_root).roles),
+        MISSING_WITHHELD: frozenset(PROFILE_SECTIONS),
+    }
+    return [
+        {"role": entry["role"], "reason": entry["reason"]}
+        for entry in missing
+        if isinstance(entry.get("reason"), str) and isinstance(entry.get("role"), str)
+        and entry["role"] in roles.get(entry["reason"], ())
+    ]
 
 
 def pinned_map_block(vault_root: Path, packet: Mapping[str, Any], caller: CallerView) -> dict[str, Any] | None:

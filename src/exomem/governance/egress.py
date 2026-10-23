@@ -1595,8 +1595,27 @@ def registered_kinds() -> frozenset[str]:
 # Per-request decision memo (D2)
 # ---------------------------------------------------------------------------
 
-_DECISION_MEMO_MAX = 4096
+#: Room for one request's own decisions when no scan has asked for more.
+_DECISION_MEMO_FLOOR = 4096
+#: Hard ceiling on retained decisions, whatever a scan asks for. A memory bound: a decision
+#: and its key held about 1 KB at 8,000 notes, so the ceiling holds about 32 MB, and the
+#: membership memos sized with it hold less each.
+_DECISION_MEMO_CEILING = 32_768
+_DECISION_MEMO_MAX = _DECISION_MEMO_FLOOR
 _DECISION_MEMO: OrderedDict[tuple[Any, ...], Decision] = OrderedDict()
+
+
+def reserve_decision_memo(entries: int) -> None:
+    """Keep a scan of `entries` decisions, plus a request's own, until the next scan reuses them.
+
+    A least-recently-used memo smaller than a sequential scan evicts each decision before
+    the next scan reaches it, so every read of a restricted view re-decides every entry and
+    re-parses its page. The page memberships the decisions read are sized with them. The
+    bound only grows, because a smaller vault's scan must not evict a larger one's.
+    """
+    global _DECISION_MEMO_MAX
+    _DECISION_MEMO_MAX = min(_DECISION_MEMO_CEILING, max(_DECISION_MEMO_MAX, entries + _DECISION_MEMO_FLOOR))
+    membership_module.reserve_memo(_DECISION_MEMO_MAX)
 
 
 def clear_decision_memo() -> None:
@@ -4544,10 +4563,7 @@ def guard_view_response(
             item for section in context_views.PROFILE_SECTIONS for item in (kept or {}).get(section, ())
         ]
         if "missing" in guarded or (kept or {}).get("missing"):
-            guarded["missing"] = [
-                entry for entry in (kept or {}).get("missing", ())
-                if entry.get("reason") in context_views.PROFILE_MISSING_REASONS
-            ]
+            guarded["missing"] = context_views.profile_markers(vault_root, (kept or {}).get("missing", ()))
         if kept is None:
             guarded["continuation"] = None
         return guarded

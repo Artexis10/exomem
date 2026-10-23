@@ -967,6 +967,59 @@ def test_maps_packet_stays_bounded_at_scale(
         assert large_ms < bound, {"mode": mode, "bound_ms": bound, "measurements": measured}
 
 
+@pytest.mark.timeout(900)
+def test_restricted_view_reads_under_a_withholding_policy_are_reported_not_gated(
+    tmp_path: Path, model_free,
+) -> None:
+    """A restricted caller decides every catalogue entry its view reads, and a policy makes each
+    decision real work. The maps gate above runs with no policy, where every decision is free,
+    so this reports the warm cost of a map, an anchor profile and a topic profile at 2k and 8k
+    notes with one page withheld. It is not gated: a slow read here is a finding to report."""
+    from synth_vault import gen_entity_overlay
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import commands, context_catalogue, context_views
+    from exomem.governance import egress
+
+    measured = {}
+    for notes, entities in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
+        vault = _build_dense_vault(tmp_path, notes)
+        people = gen_entity_overlay(vault, entities, seed=23)
+        schema = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+        schema.parent.mkdir(parents=True, exist_ok=True)
+        schema.write_text("schema_version: 1\ndomains:\n  measured: {label: Measured, path_label: Measured}\n")
+        filed = sorted((vault / "Knowledge Base").glob("*/note-000[0-3]*.md")) + [vault / rel for rel in people[:6]]
+        for page in filed:
+            text = page.read_text(encoding="utf-8")
+            page.write_text(text.replace("tags: [", "topics: [measured]\ntags: [", 1), encoding="utf-8")
+        withheld = filed[0].relative_to(vault).as_posix()
+        _withhold(vault, withheld, ceiling=0)
+        _prepare_working_set_vault(vault)
+        refs = {
+            "map": context_views.MAP_REF,
+            "anchor_profile": context_views.anchor_profile_ref(people[0]),
+            "topic_profile": context_views.topic_profile_ref("measured"),
+        }
+        measured[notes] = {}
+        for view, ref in refs.items():
+            samples = []
+            for _ in range(4):  # the first read warms the decision memo and is left out
+                gc.collect()
+                started = time.perf_counter()
+                with principal.request_scope(_external()):
+                    result = commands.op_read_memory(vault, path=ref)
+                    result = egress.postfilter("read_memory", result, vault, request_kwargs={"path": ref})
+                samples.append((time.perf_counter() - started) * 1000)
+                assert result["state"] == context_views.READY and result["items"], (view, result.get("state"))
+                assert all(item.get("path") != withheld for item in result["items"])
+            measured[notes][view] = {
+                "first_ms": round(samples[0], 1), "warm_median_ms": round(statistics.median(samples[1:]), 1),
+            }
+        measured[notes]["catalogue_entries"] = len(context_catalogue.ContextCatalogue(vault).entries())
+    print("\n[reported, not gated] restricted view reads " + json.dumps(measured, sort_keys=True))
+
+
 # --- Retrieval-carry bound (bound-request-latency-across-surfaces). A turn
 # that resolves nothing pays the carry's two rungs and then abstains, and on a
 # written-to catalogue nothing a previous turn computed may be reused. The

@@ -453,3 +453,68 @@ def test_profile_reports_lane_truncation_and_live_notice_removal(vault: Path) ->
     assert {"role": "units", "reason": "withheld"} in revoked["missing"]
     assert all(entry["reason"] in ("lane_truncated", "withheld") for entry in revoked["missing"])
     assert all(item.get("provenance", {}).get("path") != MOORING for item in revoked["items"])
+
+
+def test_a_profile_serves_what_deciding_every_entry_would_serve(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profile decides only the entries that can change it, and no byte moves for any caller: a
+    thread still reads as its newest visible revision, and a project anchor takes its pages' activity."""
+    _frozen(monkeypatch)
+    # One anchor slot, so the anchors' order decides which anchor a topic profile reads.
+    monkeypatch.setattr(cv, "PROFILE_MAX_ANCHORS", 1)
+    _seed_profile(vault)
+    # The project anchor has no activity of its own; this page makes it the newest harbour anchor.
+    _page(vault, "tide-work", "project: harbour-ops\nupdated: 2026-10-20\n", body="- [decision] Work at slack tide ^slack\n")
+    # An undated fleet hub takes its project's activity from a page that is not filed under fleet.
+    _page(vault, "fleet-yard", "tags: [hub]\ntopics: [fleet]\nupdated: 2026-10-15\n", body="- [decision] Paint the hulls ^paint\n")
+    _page(vault, "dock-crew-hub", "tags: [hub]\ntopics: [fleet]\nproject: dock-crew\n", body="- [decision] Rotate the crews ^rotate\n")
+    _page(vault, "dock-roster", "project: dock-crew\nupdated: 2026-10-21\n")
+    ledger = f"{KB}/Sources/Episodes/ledger-close-ep0fedcba98765"
+    # The thread's older revision is filed under ledger, and its newer one leaves it for fleet.
+    _write(vault, f"{ledger}-20260915t090000000000-cccccccc.md",
+           "---\ntype: source\nstatus: active\nupdated: 2026-09-15\ntopics: [ledger]\n---\n\n# Ledger close one\n\nFirst close.\n")
+    _write(vault, f"{ledger}-20261005t090000000000-dddddddd.md",
+           "---\ntype: source\nstatus: active\nupdated: 2026-10-05\ntopics: [fleet]\n---\n\n# Ledger close two\n\nSecond close.\n")
+    _withhold(vault, THREAD_W, ceiling=0)
+    _built(vault)
+    lexstore.ensure_fresh(vault)
+    refs = [cv.anchor_profile_ref(HUB), *(cv.topic_profile_ref(key) for key in ("harbour", "fleet", "ledger"))]
+
+    def read_all() -> dict:
+        outcomes = {}
+        for name, caller in (("owner", None), ("guest", _external())):
+            for ref in refs:
+                _cold()
+                outcomes[name, ref] = _outcome(vault, ref, caller)
+        return outcomes
+
+    chosen = read_all()
+    with monkeypatch.context() as patch:
+        patch.setattr(cv, "_profile_candidates", lambda catalogue, prepared, caller: list(catalogue.entries()))
+        every = read_all()
+    assert chosen == every
+    assert all(chosen[name, cv.topic_profile_ref("ledger")] == "NOT_FOUND: memory identifier is unavailable"
+               for name in ("owner", "guest"))
+    assert all(isinstance(chosen[name, ref], list) for name in ("owner", "guest") for ref in refs[:3])
+    fleet = json.dumps(chosen["guest", cv.topic_profile_ref("fleet")])
+    assert f"{INSIGHTS}/dock-crew-hub.md" in fleet and "fleet-yard" not in fleet
+
+
+def test_a_forged_missing_marker_never_reaches_the_wire(vault: Path) -> None:
+    """A profile marker names a profile section or a role lane, never text from the response it came in."""
+    _seed_profile(vault)
+    _write(vault, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# secret-cluster\n\nHidden.\n")
+    _withhold(vault, SECRET, ceiling=0)
+    _built(vault)
+    lexstore.ensure_fresh(vault)
+    _cold()
+    ref = cv.topic_profile_ref("harbour")
+    with principal.request_scope(_external()):
+        response = _ask(vault, ref, _external())
+        forged = {**response, "missing": [
+            {"role": "Confidential label secret-cluster", "reason": "lane_truncated"},
+            {"role": SECRET, "reason": "lane_truncated"},
+            {"role": SECRET, "reason": "withheld"},
+            {"role": "units", "reason": "withheld", "note": "secret-cluster"},
+        ]}
+        guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": ref})
+    assert guarded == response
