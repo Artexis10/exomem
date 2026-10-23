@@ -330,8 +330,8 @@ def test_the_profile_guard_drops_an_unpinned_item_naming_a_withheld_page(vault: 
     assert guarded == response
 
 
-def test_profile_pins_replace_forged_literals_and_the_guard_strips_a_withheld_corrects(vault: Path) -> None:
-    """Pinned display text cannot be replaced with literal secrets; correction provenance still requires admission."""
+def test_profile_pins_replace_forged_literals(vault: Path) -> None:
+    """Literal secrets cannot replace pinned unit text, pointer titles or current-state fields."""
     _seed_profile(vault)
     _write(vault, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# secret-cluster\n\nHidden.\n")
     _page(vault, "quay-crane", "topics: [harbour]\nstate: parked\nupdated: 2026-10-12\n", folder=f"{KB}/Products")
@@ -350,6 +350,17 @@ def test_profile_pins_replace_forged_literals_and_the_guard_strips_a_withheld_co
         item["source"] = SECRET
     with principal.request_scope(_external()):
         assert egress.postfilter("read_memory", forged, vault, request_kwargs={"path": ref}) == response
+
+
+def test_the_guard_strips_a_corrects_ref_to_a_withheld_unit(vault: Path) -> None:
+    """A visible claim cannot disclose a withheld seed through correction provenance."""
+    _seed_profile(vault)
+    _write(vault, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# secret-cluster\n\nHidden.\n")
+    _withhold(vault, SECRET, ceiling=0)
+    lexstore.ensure_fresh(vault)
+    _cold()
+    response = _ask(vault, cv.topic_profile_ref("harbour"), _external())
+    with principal.request_scope(_external()):
         unit = next(item for item in response["items"] if item["kind"] == "units")
         corrected = {**unit, "provenance": {**unit["provenance"], "corrects": SECRET + "#private"}}
         guarded = egress.guard_working_set(vault, {"units": [corrected]}, egress.AnnotatedHits(hits=[]))
