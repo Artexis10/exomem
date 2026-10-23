@@ -206,7 +206,7 @@ def test_the_power_step_simulates_the_frozen_groups_not_one_group_per_case() -> 
     # Repeats that never vary: equal arms then differ by exactly 0, so each case alone would pass.
     dev = [_dev("ordinary", {arm: (1.0, 1.0, 1.0) for arm in "AMP"})] * 4
 
-    rule = stats.power_step(design, dev, reserve=0, seed=0, simulations=200)["rules"]["2"]
+    rule = stats.power_step(design, dev, reserve=[], seed=0, simulations=200)["rules"]["2"]
 
     assert rule["groups"] == 2
     assert rule["pass_rate"] == 0.0 and rule["short"]
@@ -219,7 +219,7 @@ def test_the_power_step_keeps_each_cases_repeat_spread_instead_of_a_pooled_rate(
     variable = [_dev("ordinary", {arm: (1.0, 0.0, 0.0) for arm in "AMP"})] * 4
 
     def first_rate(dev: list[stats.DevCase]) -> float:
-        return stats.power_step(design, dev, reserve=0, seed=0, simulations=200)["rules"]["2"]["table"][0]["pass_rate"]
+        return stats.power_step(design, dev, reserve=[], seed=0, simulations=200)["rules"]["2"]["table"][0]["pass_rate"]
 
     assert first_rate(stable) == 1.0
     assert first_rate(variable) < 0.8
@@ -231,9 +231,21 @@ def test_the_power_step_simulates_rule_3s_calls_test_from_the_development_call_c
     # In development M makes one call where P makes three: M wins the calls test.
     dev = [_dev("ordinary", scores, calls={"A": (2.0,) * 3, "M": (1.0,) * 3, "P": (3.0,) * 3})] * 4
 
-    rule = stats.power_step(design, dev, reserve=0, seed=0, simulations=200)["rules"]["3"]
+    rule = stats.power_step(design, dev, reserve=[], seed=0, simulations=200)["rules"]["3"]
 
     assert rule["calls_pass_rate"] == 1.0
+
+
+def test_the_power_step_counts_reserve_turns_in_their_keyed_groups() -> None:
+    # Six held-out ordinary turns share one group, and the five keyed reserve turns join it.
+    design = [stats.DesignCase("ordinary", "g", True) for _ in range(6)]
+    reserve = [stats.DesignCase("ordinary", "g", True) for _ in range(5)]
+    dev = [_dev("ordinary", {arm: (1.0, 1.0, 1.0) for arm in "AMP"})] * 4
+
+    rule = stats.power_step(design, dev, reserve=reserve, seed=0, simulations=200)["rules"]["2"]
+
+    # As singleton groups the reserve would read as six groups that pass every simulation.
+    assert rule["groups"] == 1 and rule["short"]
 
 
 def test_rule_3s_power_is_short_when_ms_activation_call_makes_the_composite_rule_unreachable() -> None:
@@ -242,7 +254,7 @@ def test_rule_3s_power_is_short_when_ms_activation_call_makes_the_composite_rule
     # Equal quality, so only non-inferiority with fewer calls could pass, and M makes one call more than P.
     dev = [_dev("ordinary", scores, calls={"A": (3.0,) * 3, "M": (3.0,) * 3, "P": (2.0,) * 3})] * 4
 
-    rule = stats.power_step(design, dev, reserve=0, seed=0, simulations=200)["rules"]["3"]
+    rule = stats.power_step(design, dev, reserve=[], seed=0, simulations=200)["rules"]["3"]
 
     assert rule["short"]
 

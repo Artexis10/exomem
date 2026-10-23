@@ -747,15 +747,21 @@ def cmd_power(args: argparse.Namespace) -> int:
             )
         )
     design = [DesignCase(**row) for row in key_structure(Path(args.heldout_key))]
+    # Only keyed reserve turns count: a turn's group and memory flag come from its key.
+    reserve = (
+        [DesignCase(**row) for row in key_structure(Path(args.reserve_key))]
+        if args.reserve_key
+        else []
+    )
     try:
         result = power_step(
-            design, dev, reserve=args.reserve, seed=args.seed, simulations=args.simulations
+            design, dev, reserve=reserve, seed=args.seed, simulations=args.simulations
         )
     except ValueError as error:
         raise SystemExit(f"power step refused: {error}") from error
     target = layout.run / "power.json"
     target.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
-    print(f"reserve turns added: {result['additions']} of {result['reserve']}")
+    print(f"keyed reserve turns added: {result['additions']} of {result['reserve']}")
     for number, rule in sorted(result["rules"].items()):
         delta = f", delta {rule['delta']}" if rule["delta"] else ""
         state = "short" if rule["short"] else "reaches the target"
@@ -769,6 +775,15 @@ def cmd_power(args: argparse.Namespace) -> int:
             f"rule {number}: {rule['cases']} cases in {rule['groups']} groups{delta}, "
             f"pass rate {rule['pass_rate']:.3f}{parts}, {state}"
         )
+        further = rule["more_keyed_turns"]
+        if rule["short"]:
+            needed = (
+                f"at least {further['needed']} more keyed turns, a lower bound"
+                if further["needed"] is not None
+                else further.get("reason")
+                or f"more than {further['searched_up_to']} more keyed turns"
+            )
+            print(f"  to reach the target: {needed}")
     print(f"written to {target}")
     return 0
 
@@ -919,7 +934,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="the held-out key; only each case's kind, group and memory flag are read",
     )
     p.add_argument(
-        "--reserve", type=int, required=True, help="reserve turns available to grow the split"
+        "--reserve-key",
+        help="the keyed reserve turns in their fixed order, read like the held-out key; "
+        "default: none, so no reserve turn counts",
     )
     p.add_argument(
         "--split", default=protocol.SPLIT_DEV, help="the split whose repeats give the spread"

@@ -361,36 +361,40 @@ def _simulate(
     }
 
 
+#: Harness knob: the most further keyed turns the projection for a short rule searches.
+PROJECTION_LIMIT = 256
+
+
 def power_step(
     design: Sequence[DesignCase],
     dev: Sequence[DevCase],
     *,
-    reserve: int,
+    reserve: Sequence[DesignCase],
     seed: int,
     simulations: int = 2000,
     alpha: float = protocol.ALPHA_ONE_SIDED,
 ) -> dict:
     """The protocol's power step for rules 1 to 3, on the frozen held-out design.
 
-    ``design`` is the held-out key's structure; ``dev`` the development cases'
-    measured repeats. Rule 1 simulates M beating A, each stratum at its own
-    development M - A capped at +0.5; rules 2 and 3 simulate equal arms within
-    δ, and rule 3 passes as the rule does, on superiority or on non-inferiority
-    with fewer calls, so a calls test that cannot pass leaves it short. Reserve turns are ordinary turns, each its own group (their groups are
-    unknown until they are keyed), and they enter every rule, so the size the
-    rules reach is the largest any rule needs. A share of them expects memory,
-    the held-out ordinary turns' share. At that size rules 2 and 3 raise δ from
-    the floor to the cap; a rule below the target with every reserve turn and
-    at the cap is short.
+    ``design`` is the held-out key's structure; ``reserve`` the keyed reserve
+    turns' structure, in the reserve's fixed order; ``dev`` the development
+    cases' measured repeats. Rule 1 simulates M beating A, each stratum at its
+    own development M - A capped at +0.5; rules 2 and 3 simulate equal arms
+    within δ, and rule 3 passes as the rule does, on superiority or on
+    non-inferiority with fewer calls, so a calls test that cannot pass leaves
+    it short. Reserve turns enter in order with their keyed group and memory
+    flag, and each enters every rule, so the size the rules reach is the
+    largest any rule needs; a reserve turn not yet keyed counts for nothing.
+    At that size rules 2 and 3 raise δ from the floor to the cap; a rule below
+    the target with every keyed reserve turn and at the cap is short.
     """
 
     design = [c for c in design if c.kind in (KIND_MISS, KIND_ORDINARY)]
+    reserve = [c for c in reserve if c.kind in (KIND_MISS, KIND_ORDINARY)]
     dev = [c for c in dev if c.kind in (KIND_MISS, KIND_ORDINARY)]
     if any(set(c.repeats) != set(protocol.ARM_IDS) for c in dev):
         raise ValueError(f"every development case needs the repeats of arms {protocol.ARM_IDS}")
     pools = {kind: [c for c in dev if c.kind == kind] for kind in (KIND_MISS, KIND_ORDINARY)}
-    ordinary = [c for c in design if c.kind == KIND_ORDINARY]
-    share = sum(c.expects_memory for c in ordinary) / len(ordinary) if ordinary else 0.0
     effects = {}
     for kind, pool in pools.items():
         stratum = [c for c in pool if c.expects_memory]
@@ -403,24 +407,17 @@ def power_step(
                 "simulated": min(measured, protocol.RULE1_EFFECT_CAP),
             }
 
-    def slots(rule: str, additions: int) -> list[DesignCase]:
-        remembered = round(additions * share)
-        added = [
-            DesignCase(KIND_ORDINARY, f"reserve-{n}", n < remembered) for n in range(additions)
-        ]
-        held = [*design, *added]
+    def evaluate(rule: str, held: Sequence[DesignCase], delta: float) -> dict:
         if rule == "1":
-            return [c for c in held if c.expects_memory]
-        if rule == "2":
-            return [c for c in held if c.kind == KIND_ORDINARY]
-        return held
-
-    def evaluate(rule: str, additions: int, delta: float) -> dict:
-        chosen = slots(rule, additions)
+            chosen = [c for c in held if c.expects_memory]
+        elif rule == "2":
+            chosen = [c for c in held if c.kind == KIND_ORDINARY]
+        else:
+            chosen = list(held)
         for kind in {c.kind for c in chosen}:
             if not pools[kind] or (rule == "1" and kind not in effects):
                 raise ValueError(f"rule {rule}: no development {kind} cases to simulate from")
-        result = _simulate(
+        return _simulate(
             chosen,
             pools,
             compared=("A", "M") if rule != "3" else ("M", "P"),
@@ -431,30 +428,63 @@ def power_step(
             alpha=alpha,
             calls=rule == "3",
         )
-        return {"additions": additions, **result}
+
+    def with_reserve(additions: int) -> list[DesignCase]:
+        return [*design, *reserve[:additions]]
+
+    def further_turns(rule: str, delta: float) -> dict:
+        """A lower bound on the keyed turns a short rule still needs past the
+        keyed reserve: each further turn is taken as an ordinary turn in a group
+        of its own that expects memory, the most a turn can add to any rule. It
+        is a projection to plan a widening with, never a power figure."""
+
+        if not pools[KIND_ORDINARY] or (rule == "1" and KIND_ORDINARY not in effects):
+            return {"needed": None, "reason": "no development ordinary turns to project from"}
+        base = with_reserve(len(reserve))
+        taken = {c.group for c in base}
+        candidates = (f"projected-{n}" for n in range(len(taken) + PROJECTION_LIMIT))
+        fresh = [label for label in candidates if label not in taken][:PROJECTION_LIMIT]
+
+        def reaches(count: int) -> bool:
+            added = [DesignCase(KIND_ORDINARY, label, True) for label in fresh[:count]]
+            return evaluate(rule, [*base, *added], delta)["pass_rate"] >= protocol.POWER_TARGET
+
+        low, high = 0, 1
+        while not reaches(high):
+            if high == PROJECTION_LIMIT:
+                return {"needed": None, "searched_up_to": PROJECTION_LIMIT}
+            low, high = high, min(2 * high, PROJECTION_LIMIT)
+        while high - low > 1:
+            middle = (low + high) // 2
+            low, high = (low, middle) if reaches(middle) else (middle, high)
+        return {"needed": high, "lower_bound": True}
 
     floors = {"1": 0.0, "2": protocol.DELTA_FLOOR, "3": protocol.DELTA_FLOOR}
     tables: dict[str, list[dict]] = {rule: [] for rule in floors}
     needed = {}
     for rule, floor in floors.items():
-        for additions in range(reserve + 1):
-            tables[rule].append(evaluate(rule, additions, floor))
+        for additions in range(len(reserve) + 1):
+            tables[rule].append(
+                {"additions": additions, **evaluate(rule, with_reserve(additions), floor)}
+            )
             if tables[rule][-1]["pass_rate"] >= protocol.POWER_TARGET:
                 needed[rule] = additions
                 break
-    additions = max(needed.get(rule, reserve) for rule in floors)
+    additions = max(needed.get(rule, len(reserve)) for rule in floors)
     rules = {}
     for rule, floor in floors.items():
         row = next((r for r in tables[rule] if r["additions"] == additions), None)
         if row is None:
-            row = evaluate(rule, additions, floor)
+            row = {"additions": additions, **evaluate(rule, with_reserve(additions), floor)}
             tables[rule].append(row)
         steps = round((protocol.DELTA_CAP - protocol.DELTA_FLOOR) / DELTA_STEP) if floor else 0
         for step in range(1, steps + 1):
             if row["pass_rate"] >= protocol.POWER_TARGET:
                 break
-            row = evaluate(rule, additions, round(floor + DELTA_STEP * step, 2))
+            delta = round(floor + DELTA_STEP * step, 2)
+            row = {"additions": additions, **evaluate(rule, with_reserve(additions), delta)}
             tables[rule].append(row)
+        short = row["pass_rate"] < protocol.POWER_TARGET
         rules[rule] = {
             **row,
             "compares": "M - P" if rule == "3" else "M - A",
@@ -463,25 +493,33 @@ def power_step(
                 "2": "non-inferiority",
                 "3": "superiority, or non-inferiority with fewer calls",
             }[rule],
-            "short": row["pass_rate"] < protocol.POWER_TARGET,
+            "short": short,
+            "more_keyed_turns": further_turns(rule, row["delta"] or 0.0)
+            if short
+            else {"needed": 0},
             "table": tables[rule],
         }
     rules["1"]["effects"] = effects
     return {
         "rules": rules,
         "additions": additions,
-        "reserve": reserve,
+        "reserve": len(reserve),
         "spread": repeat_spread(dev),
         "development_cases": {kind: len(pool) for kind, pool in pools.items()},
         "held_out": {
             kind: sum(1 for c in design if c.kind == kind) for kind in (KIND_MISS, KIND_ORDINARY)
         },
-        "reserve_memory_share": share,
         "model": (
             "each slot draws a development case of its kind and one of its arms; both arms "
             "resample that arm's repeats; rule 1 adds its stratum's development M - A capped at "
-            f"+{protocol.RULE1_EFFECT_CAP}; reserve turns are ordinary singleton groups, the held-out "
-            "ordinary share of them expecting memory"
+            f"+{protocol.RULE1_EFFECT_CAP}; reserve turns enter in their fixed order with their "
+            "keyed group and memory flag; rule 3 passes on superiority or on non-inferiority "
+            "with fewer calls"
+        ),
+        "projection": (
+            "for a short rule, a lower bound on further keyed turns past the keyed reserve, "
+            "each taken as an ordinary turn in its own group that expects memory, searched up "
+            f"to {PROJECTION_LIMIT}; not a power figure"
         ),
         "simulations": simulations,
         "seed": seed,
