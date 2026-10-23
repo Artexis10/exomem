@@ -85,10 +85,10 @@ def _prepare_semantic_catalog(root: Path, paths: list[Path]) -> None:
 
 
 @pytest.mark.parametrize("result_level", ["unit", "mixed"])
-def test_public_cold_and_warm_recall_keeps_unit_identity_and_bounds_unit_only_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_level: str,
+def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_level: str, warm_managed_cell,
 ) -> None:
-    """Warm unit and mixed calls preserve identity; unit-only calls bound canonical parent reads."""
+    """Managed unit and mixed calls preserve identity and bound canonical parent reads."""
     from test_governance_egress import _reset_caches, write_rule, write_scope
 
     from exomem import bm25, memory_refs, semantic_units
@@ -109,7 +109,7 @@ def test_public_cold_and_warm_recall_keeps_unit_identity_and_bounds_unit_only_re
     write_scope(tmp_path, paths="Notes/hidden-gauges.md", name="Restricted gauges")
     write_rule(tmp_path, ceiling=0)
     _reset_caches()
-    _prepare_semantic_catalog(tmp_path, paths)
+    warm_managed_cell(tmp_path)
     canonical = {
         unit.unit_ref: unit for path in paths
         for unit in semantic_index.build_parent_index_state(tmp_path, path).document.units
@@ -150,12 +150,9 @@ def test_public_cold_and_warm_recall_keeps_unit_identity_and_bounds_unit_only_re
             hits = response["hits"] if isinstance(response, dict) else response
             assert hits
             parents = {hit.get("parent_path", hit.get("path")) for hit in hits}
-            # The unit-only response owns this proof. Whole mixed hydration
-            # remains unmet under task 6.14's page-lane work and task 6.6 acceptance.
-            if result_level == "unit":
-                overfetch = egress.pool_limit(3) - len(hits)
-                assert len(set(reads) - parents) <= overfetch
-                assert len(reads) <= len(parents) + overfetch
+            overfetch = egress.pool_limit(3) - len(hits)
+            assert len(set(reads) - parents) <= overfetch
+            assert len(reads) <= len(parents) + overfetch
             for hit in hits:
                 if hit.get("result_type") == "semantic_unit":
                     expected = canonical[hit["unit_ref"]]
