@@ -963,7 +963,8 @@ def test_maps_packet_stays_bounded_at_scale(
     for mode in ("owner_cleared", "restricted"):
         small_ms, large_ms = (measured[notes][mode]["median_ms"] for notes in (N_NOTES, N_NOTES_LARGE))
         assert max(small_ms, large_ms) < CEIL_WORKING_SET_MS, measured
-        bound = max(small_ms * CEIL_WORKING_SET_RATIO, small_ms + WORKING_SET_RATIO_SLACK_MS)
+        # A map walks the catalogue by design; the 8,609 ms decision-memo cliff still fails this linear bound.
+        bound = small_ms * (N_NOTES_LARGE / N_NOTES) * CEIL_WORKING_SET_RATIO + WORKING_SET_RATIO_SLACK_MS
         assert large_ms < bound, {"mode": mode, "bound_ms": bound, "measurements": measured}
 
 

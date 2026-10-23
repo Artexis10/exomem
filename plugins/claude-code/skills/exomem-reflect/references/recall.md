@@ -144,6 +144,7 @@ descriptions and current state when available. Read the map and pull by ref
 with `read_memory`, or query `ask_memory`, before answering; cite the refs you use.
 Read `exomem://map` for the paginated index and follow its domain-map refs for
 material beyond the packet. A map is not a claim that its items fit the turn.
+Read an anchor's profile through its `profile` ref.
 The retrieve hook shows the index once per generation. Later turns with the
 same generation show a pointer to the map; a changed generation shows it again.
 

@@ -4508,6 +4508,7 @@ def _guard_view_items(
     from .. import context_views
 
     items = context_views.pinned_items(vault_root, response, caller)
+    # An anchor's pinned profile ref encodes its own ref; the anchor's release decision covers both.
     ctx = _packet_release(
         vault_root, {"anchors": items}, AnnotatedHits(hits=[]), policy=policy,
         release_gate_active=release_gate_active, who=who, purpose=purpose, record="all",

@@ -2118,7 +2118,8 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tupl
             details = [f"{key}: {state[key]}" for key in ("as_of", "source", "path") if state.get(key)]
             if details:
                 text += " (" + "; ".join(details) + ")"
-        items.append(_packet_line("item", text, str(item.get("ref") or "")))
+        item_ref = item.get("profile") if item.get("kind") == "anchor" and not item.get("path") else item.get("ref")
+        items.append(_packet_line("item", text, str(item_ref or item.get("ref") or "")))
     # These are the read contract's derived-view refs, not vocabulary entries.
     overflow = _packet_line("overflow", str(block.get("overflow") or (
         "Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled."

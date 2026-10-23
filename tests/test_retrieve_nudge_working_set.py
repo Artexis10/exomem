@@ -2533,6 +2533,21 @@ def test_map_readiness_is_visible_and_a_malformed_item_does_not_lose_the_map() -
     assert "already activated" in pointer and "Stale." in pointer and "State is unavailable." in pointer
 
 
+def test_map_anchors_show_a_profile_without_a_page_and_the_page_otherwise() -> None:
+    """A rendered project must offer an openable ref; an anchor with a page keeps its page ref."""
+    packet = {"map": {"items": [
+        {"kind": "anchor", "title": "Harbour", "ref": "project:harbour",
+         "profile": "exomem://profile/anchor/project%3Aharbour"},
+        {"kind": "anchor", "title": "Quay", "path": "Knowledge Base/Notes/quay.md",
+         "ref": "Knowledge Base/Notes/quay.md", "profile": "exomem://profile/anchor/quay"},
+    ]}}
+    text = hook._format_working_set_block(packet, 4000)
+    assert "[exomem://profile/anchor/project%3Aharbour]" in text
+    assert "[project:harbour]" not in text
+    assert "[Knowledge Base/Notes/quay.md]" in text
+    assert "[exomem://profile/anchor/quay]" not in text
+
+
 def test_maps_use_one_reduced_call_after_discovery_and_mode_changes_restore_the_original_cap(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, working_set_mode,
 ) -> None:
