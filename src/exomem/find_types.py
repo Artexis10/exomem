@@ -698,6 +698,7 @@ class FindTimings:
         *,
         source: str = SOURCE_COMPUTED,
         measured: Mapping[str, Any] | None = None,
+        elapsed_ms_field: str | None = None,
         **fields: Any,
     ):
         """Time one stage, record where its answer came from, and what held it.
@@ -709,6 +710,8 @@ class FindTimings:
         `measured` is the integer counts the body collected (usually a
         `call_spans.meter`), read on the way out and recorded as the ledger
         span's fields; it never enters this table.
+        `elapsed_ms_field` also records this interval's whole milliseconds in
+        the ledger, so separate phases can keep one aggregate span name.
         """
         _validated_source(source)
         _validated_fields(name, fields)
@@ -731,7 +734,10 @@ class FindTimings:
                 declared = self._pending_sources.pop(name, source)
                 self._parents_seen.setdefault(name, set()).add(parent)
             entry = self.stages._entry(name)
-            elapsed = round((t1 - t0) * 1000.0, 3)
+            elapsed_ms = (t1 - t0) * 1000.0
+            elapsed = round(elapsed_ms, 3)
+            if elapsed_ms_field is not None:
+                ledger_fields = {**(ledger_fields or {}), elapsed_ms_field: int(elapsed_ms)}
             if "ms" in entry:
                 # A stage can run twice in one call — `filter_eligibility` does,
                 # once for the unit lane and once for the page lane, whenever
@@ -834,12 +840,15 @@ def timing_span(
     *,
     source: str = SOURCE_COMPUTED,
     measured: Mapping[str, Any] | None = None,
+    elapsed_ms_field: str | None = None,
     **fields: Any,
 ):
     """A timing span when a collector is present, else a no-op context."""
     if timings is None:
         return nullcontext()
-    return timings.span(name, source=source, measured=measured, **fields)
+    return timings.span(
+        name, source=source, measured=measured, elapsed_ms_field=elapsed_ms_field, **fields
+    )
 
 
 def timing_mark_source(timings: FindTimings | None, name: str, source: str) -> None:

@@ -2136,7 +2136,7 @@ def find(
                 timings=timings,
             )
     else:
-        with _span(timings, "semantic.search"):
+        with _span(timings, "semantic.search", elapsed_ms_field="entry_ms"):
             hits = _find_semantic(
                 vault_root,
                 query=query,
@@ -2221,7 +2221,7 @@ def find(
 
     def finish() -> list[Hit]:
         if isinstance(selected, _SelectedHits):
-            with _span(timings, "semantic.search"):
+            with _span(timings, "semantic.search", elapsed_ms_field="finish_ms"):
                 hits = selected.finish()
         else:
             hits = selected
@@ -4893,26 +4893,27 @@ def _find_semantic(
     the "the lane broke and we silently served a weaker ranking" signal, versus
     `degraded_out`'s "the lane was deferred while a model preload is warming".
     """
-    # Lazy imports — keep keyword-mode users out of the torch import path.
-    from . import embeddings, lexstore, readiness, scene_frames
+    with _span(timings, "semantic.preflight"):
+        # Lazy imports — keep keyword-mode users out of the torch import path.
+        from . import embeddings, lexstore, readiness, scene_frames
 
-    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    type_basis = type_basis or note_types.Basis(vault_root)
+        status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+        type_basis = type_basis or note_types.Basis(vault_root)
 
-    if snapshot is None:
-        snapshot = FreshnessSnapshot(vault_root)
-    if page_memo is None:
-        page_memo = {}
+        if snapshot is None:
+            snapshot = FreshnessSnapshot(vault_root)
+        if page_memo is None:
+            page_memo = {}
 
-    lexical_freshness = snapshot.for_scope(scope)
-    lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
-    if mode != "vector" and not lexical_repair and lexstore.maintained_content_index_enabled():
-        catalog = lexstore.get_store(vault_root).catalog_readiness(
-            scope,
-            lexical_freshness,
-        )
-        if not catalog.complete:
-            _raise_catalog_outcome(catalog)
+        lexical_freshness = snapshot.for_scope(scope)
+        lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
+        if mode != "vector" and not lexical_repair and lexstore.maintained_content_index_enabled():
+            catalog = lexstore.get_store(vault_root).catalog_readiness(
+                scope,
+                lexical_freshness,
+            )
+            if not catalog.complete:
+                _raise_catalog_outcome(catalog)
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
