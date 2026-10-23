@@ -321,6 +321,49 @@ def test_the_service_startup_gate_admits_the_mixed_vault(service):
     state_migration.require_vault_state_ready(service.root)
 
 
+def test_a_busy_consistency_read_does_not_cost_a_publication_interval(tmp_path, monkeypatch, caplog):
+    """A brief read must not delay an unstarted replica publication for a full minute."""
+    root = _served_vault(tmp_path, monkeypatch)
+    caplog.set_level("DEBUG", logger="exomem.mutation_lock")
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        assert offline_create(root, tmp_path / "c.md", manifest_path(), why="store fixture") == 0
+        with monkeypatch.context() as timing:
+            # Keep scheduling out of setup; restore the normal timers while the read holds the boundary.
+            timing.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 3600)
+            timing.setattr(runtime, "PUBLISH_SETTLE_SECONDS", 3600)
+            started = Service(root, writer_lease.start_server_lifecycle())
+            try:
+                _until(lambda: started.manager.status().get("collection_store", {}).get("status") == "admitted")
+                assert call(root, "record_memory", action="append", collection=CID,
+                            item={"title": "Published after the read"}, item_key=LATER,
+                            why="publication fixture")["outcome"] == "committed"
+
+                def views_ready():
+                    with closing(connection.open_reader(connection.store_path(root))) as reader:
+                        return reader.execute(
+                            "SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1"
+                        ).fetchone() is None
+
+                _until(views_ready)
+                with started.manager.consistency_guard(root, operation="publication-test-read"):
+                    timing.undo()
+                    # Synchronize on a real publisher refusal; durable replica data is the outcome below.
+                    _until(lambda: any(
+                        getattr(record, "event", None) == "mutation_lock_refused"
+                        and record.threadName == "exomem-collection-replica"
+                        and getattr(record, "fields", {}).get("operation") == "publication-test-read"
+                        for record in caplog.records
+                    ))
+                _published(SimpleNamespace(meta=lambda: store_meta(root)))
+                with closing(connection.open_reader(replica.replica_path(root))) as reader:
+                    assert reader.execute(
+                        "SELECT COUNT(*) FROM items WHERE item_key=?", (LATER,)
+                    ).fetchone() == (1,)
+            finally:
+                timing.undo()
+                started.stop()
+
+
 def test_the_service_serves_c_from_its_own_session_and_keeps_a_and_b_in_files(service):
     """Defect: the installed service never opens its store, so C refuses or reads its views as
     files; A/B rows reach the store or C traffic changes A/B bytes; or the in-service owner
