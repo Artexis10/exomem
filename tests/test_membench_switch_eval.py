@@ -39,7 +39,7 @@ from membench.utility.switch_eval.judge import (
     validate_verdict,
     write_items,
 )
-from membench.utility.switch_eval.score import ChainError, decide, rules, score_run
+from membench.utility.switch_eval.score import ChainError, decide, read_power, rules, score_run
 from membench.utility.switch_eval.session import (
     ACTOR_FAILURE,
     HARNESS_FAULT,
@@ -257,6 +257,19 @@ def test_rule_3s_power_is_short_when_ms_activation_call_makes_the_composite_rule
     rule = stats.power_step(design, dev, reserve=[], seed=0, simulations=200)["rules"]["3"]
 
     assert rule["short"]
+
+
+def test_scoring_refuses_power_figures_computed_for_another_design(tmp_path: Path) -> None:
+    dev = [_dev("ordinary", {arm: (1.0, 0.0, 1.0) for arm in "AMP"})] * 4
+    build = {"harness_digest": "harness-1", "arm_hashes": {arm: f"arm-{arm}" for arm in "AMP"}}
+    power = tmp_path / "power.json"
+    simulated = [stats.DesignCase("ordinary", "turn-0", True)]
+    power.write_text(json.dumps({**stats.power_step(simulated, dev, reserve=[], seed=0, simulations=50), "build": build}))
+    scored = [stats.DesignCase("ordinary", f"turn-{n}", True) for n in range(7)]
+
+    # One simulated turn says rules 2 and 3 are short at the cap; seven scored turns are another experiment.
+    with pytest.raises(ChainError):
+        read_power(power, design=scored, build=build)
 
 
 def test_a_run_whose_rules_are_not_evaluable_decides_nothing() -> None:

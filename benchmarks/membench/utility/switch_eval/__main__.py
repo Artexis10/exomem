@@ -663,7 +663,10 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
         )
     except UnblindingError as error:
         raise SystemExit(f"chain check failed after judging: {error}") from error
-    deltas, short, power_digest = _power_settings(args)
+    from .stats import DesignCase
+
+    design = [DesignCase(c.kind, c.group, c.expects_memory) for c in cases if c.split == args.split]
+    deltas, short, power_digest = _power_settings(args, design=design, build=_build(layout, inputs))
     result = score_run(
         layout,
         cases=cases,
@@ -759,6 +762,7 @@ def cmd_power(args: argparse.Namespace) -> int:
         )
     except ValueError as error:
         raise SystemExit(f"power step refused: {error}") from error
+    result["build"] = _build(layout, _load(layout.run, "inputs.json"))
     target = layout.run / "power.json"
     target.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     print(f"keyed reserve turns added: {result['additions']} of {result['reserve']}")
@@ -788,23 +792,37 @@ def cmd_power(args: argparse.Namespace) -> int:
     return 0
 
 
-def _power_settings(args: argparse.Namespace) -> tuple[dict[int, float], list[int], str | None]:
+def _build(layout, inputs: dict) -> dict:
+    """The build a run measured: its harness code and each arm's frozen hash."""
+
+    hashes = _load(layout.run, "arm-hashes.json")
+    return {
+        "harness_digest": inputs["harness_digest"],
+        "arm_hashes": {arm: record["arm_hash"] for arm, record in sorted(hashes.items())},
+    }
+
+
+def _power_settings(
+    args: argparse.Namespace, *, design: Sequence, build: dict
+) -> tuple[dict[int, float], list[int], str | None]:
     """Each rule's δ and the rules short at the cap, from ``--power`` when given."""
+
+    from .score import ChainError, read_power
 
     explicit = {2: args.delta_rule2, 3: args.delta_rule3}
     if not args.power:
         deltas = {rule: protocol.DELTA_FLOOR if d is None else d for rule, d in explicit.items()}
         return deltas, [], None
-    text = Path(args.power).read_text(encoding="utf-8")
-    recorded = json.loads(text)["rules"]
-    deltas = {rule: recorded[str(rule)]["delta"] for rule in explicit}
+    try:
+        deltas, short, digest = read_power(Path(args.power), design=design, build=build)
+    except ChainError as error:
+        raise SystemExit(f"chain check failed: {error}") from error
     for rule, value in explicit.items():
         if value is not None and value != deltas[rule]:
             raise SystemExit(
                 f"--delta-rule{rule} {value} conflicts with the power step's delta {deltas[rule]}"
             )
-    short = [int(rule) for rule, values in sorted(recorded.items()) if values["short"]]
-    return deltas, short, hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return deltas, short, digest
 
 
 def main(argv: Sequence[str] | None = None) -> int:

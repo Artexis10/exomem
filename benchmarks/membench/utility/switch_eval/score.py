@@ -7,6 +7,7 @@ recomputes it and compares, which is the protocol's last chain check.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -28,6 +29,31 @@ class ChainError(RuntimeError):
 # --------------------------------------------------------------------------
 # Chain checks.
 # --------------------------------------------------------------------------
+
+
+def read_power(
+    path: Path, *, design: Sequence[stats.DesignCase], build: Mapping
+) -> tuple[dict[int, float], list[int], str]:
+    """Rules 2 and 3's δ, the rules short at the cap and the file's digest,
+    from the power step's ``power.json``. Refused unless the figures were
+    computed for this run's design and measured on this run's build."""
+
+    text = Path(path).read_text(encoding="utf-8")
+    recorded = json.loads(text)
+    if recorded.get("design_digest") != stats.design_digest(design):
+        raise ChainError(
+            f"{path} was computed for another design: its groups, sizes or strata "
+            "differ from this run's"
+        )
+    if recorded.get("build") != build:
+        raise ChainError(
+            f"{path} was measured on another build: its harness or arm hashes differ "
+            "from this run's"
+        )
+    rules = recorded["rules"]
+    deltas = {rule: rules[str(rule)]["delta"] for rule in (2, 3)}
+    short = [int(rule) for rule, values in sorted(rules.items()) if values["short"]]
+    return deltas, short, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _page_text(vault: Path, ref: str) -> str | None:

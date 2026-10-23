@@ -13,6 +13,8 @@ the result so a reader recomputes the same p-value.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -244,6 +246,17 @@ class DevCase:
     expects_memory: bool
     repeats: Mapping[str, Sequence[float]]
     calls: Mapping[str, Sequence[float]]
+
+
+def design_digest(design: Sequence[DesignCase]) -> str:
+    """Digest of the design that rules 1 to 3 read: each miss case and ordinary
+    turn's kind, group and memory flag, so the groups, their sizes and the
+    strata, in no particular order."""
+
+    rows = sorted(
+        [c.kind, c.group, c.expects_memory] for c in design if c.kind in (KIND_MISS, KIND_ORDINARY)
+    )
+    return hashlib.sha256(json.dumps(rows).encode("utf-8")).hexdigest()
 
 
 def repeat_spread(dev: Sequence[DevCase]) -> float:
@@ -504,6 +517,8 @@ def power_step(
         "rules": rules,
         "additions": additions,
         "reserve": len(reserve),
+        # What score --power checks before it applies these figures to a run.
+        "design_digest": design_digest(with_reserve(additions)),
         "spread": repeat_spread(dev),
         "development_cases": {kind: len(pool) for kind, pool in pools.items()},
         "held_out": {
