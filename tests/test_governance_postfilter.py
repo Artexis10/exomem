@@ -329,6 +329,51 @@ def test_a_continuity_token_crosses_the_boundary_intact() -> None:
     assert blocked and HIGH_ENTROPY not in json.dumps(cleaned)
 
 
+def test_issued_query_cursor_survives_mcp_while_equal_user_text_is_scrubbed(
+    vault: Path, monkeypatch
+) -> None:
+    """Ciphertext can resemble a credential; only its issued protocol position survives."""
+    import asyncio
+    import base64
+    from dataclasses import replace
+
+    from fastmcp import FastMCP
+
+    from exomem import command_surface, commands
+    from exomem.governance.principal import library_scope
+    from exomem.query_engine.cursors import CursorCodec
+
+    codec = CursorCodec(base64.urlsafe_b64encode(bytes(32)))
+    binding = {name: str(index) * 64 for index, name in enumerate(
+        ("query", "principal", "schema", "authorization", "visible", "lineage"), 1
+    )}
+    # Fix the encryption nonce to reproduce a valid token containing a provider-prefix pattern.
+    with monkeypatch.context() as randomness:
+        randomness.setattr("cryptography.fernet.os.urandom", lambda size: base64.urlsafe_b64decode("-sk-AAAAAAAAAAAAAAAAAA=="))
+        token = codec.mint(binding, as_of="2026-02-02T00:00:00Z", boundary="item-0050")
+    assert scrubber.scrub_value({"next_cursor": str(token)})[1], "exercise an explicit credential pattern"
+    codec.verify(codec.open(token), binding)
+    payload = {"next_cursor": token, "has_more": True,
+               "rows": [{"next_cursor": token, "note": str(token)}]}
+
+    def leaf(_vault: Path, *, action: str = "query") -> dict:
+        return payload
+
+    command = replace(next(item for item in commands.PRODUCT_COMMANDS if item.name == "record_memory"),
+                      leaf=leaf, params=(), response_detail=None)
+    bound = command_surface.bind_vault(leaf, vault, command=command)
+    mcp = FastMCP("cursor boundary")
+    mcp.tool(name="record_memory")(bound)
+    with library_scope():
+        result = asyncio.run(mcp.call_tool("record_memory", {"action": "query"}, run_middleware=False))
+    wire = json.loads(json.dumps(result.structured_content))
+    codec.verify(codec.open(wire["next_cursor"]), binding)
+    assert wire["rows"][0]["next_cursor"] != str(token)
+    assert wire["rows"][0]["note"] != str(token)
+    cleaned, blocked = scrubber.scrub_value({"next_cursor": str(token)})
+    assert blocked and cleaned["next_cursor"] != str(token)
+
+
 def test_credential_named_fields_are_never_structural() -> None:
     """The suffix rule must widen coverage of identifiers, never open a hole
     for a field whose own name says it holds a secret."""
