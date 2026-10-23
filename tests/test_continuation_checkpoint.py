@@ -2674,24 +2674,28 @@ def test_first_checkpoint_survives_a_concurrent_home_creator(
 def test_true_multiprocess_older_observation_cannot_replace_newer(tmp_path: Path) -> None:
     home = tmp_path / "home"
     code = (
-        "import json,sys,time; from pathlib import Path; "
+        "import json,sys; from pathlib import Path; "
         "from exomem._hooks import exomem_continuation_checkpoint as c; "
-        "time.sleep(float(sys.argv[4])); "
         "e={'client':'codex','event':'PreCompact','session_id':'ordered','turn_id':None,"
         "'trigger':sys.argv[2],'source':None,'cwd':None,'transcript_path':None,'model':None}; "
         "print(json.dumps(c.write_checkpoint(e,Path(sys.argv[1]),observed_at_ns=int(sys.argv[3]))))"
     )
-    newer = subprocess.Popen(
-        [sys.executable, "-c", code, str(home), "auto", "200", "0"],
-        stdout=subprocess.PIPE,
+    newer = subprocess.run(
+        [sys.executable, "-c", code, str(home), "auto", "200"],
+        capture_output=True,
         text=True,
+        check=True,
+        timeout=_OBSERVE_SECONDS,
     )
-    older = subprocess.Popen(
-        [sys.executable, "-c", code, str(home), "manual", "100", "0.2"],
-        stdout=subprocess.PIPE,
+    assert json.loads(newer.stdout)["status"] == "written"
+    older = subprocess.run(
+        [sys.executable, "-c", code, str(home), "manual", "100"],
+        capture_output=True,
         text=True,
+        check=True,
+        timeout=_OBSERVE_SECONDS,
     )
-    assert newer.wait(_OBSERVE_SECONDS) == 0 and older.wait(_OBSERVE_SECONDS) == 0
+    assert json.loads(older.stdout)["status"] == "stale"
     state = checkpoint.session_state_dir(home, "codex", "ordered")
     current = checkpoint.load_checkpoint(state / "current.json")
     assert current["structural"]["trigger"] == "auto"
