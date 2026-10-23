@@ -774,9 +774,6 @@ def _compile_profile(prepared: _Prepared) -> View:
         analysis=analysis, status_basis=basis,
         lane_failed=lambda lane, error: _log_profile_failure(root, token, lane, error),
     )
-    if any(entry.get("reason") == "lane_failed" for entry in missing):
-        # A failed lane leaves knowledge unknown; warming costs a retry instead of silently serving omissions.
-        return _abstention(prepared, INDEX_WARMING)
     # The packet builder owns currency, deduplication, role caps and whole-unit budgets.
     packet = working_set.build_packet(
         # A profile serves page candidates by ref; only semantic units carry authored prose and dates.
@@ -786,6 +783,10 @@ def _compile_profile(prepared: _Prepared) -> View:
         max_chars=working_set.MAX_BUDGET_CHARS, generation={}, status="resolved",
         status_basis=basis, visible=visible,
     )
+    missing = packet["missing"]
+    if any(entry.get("reason") == "lane_failed" for entry in missing):
+        # A failed lane leaves knowledge unknown; warming costs a retry instead of silently serving omissions.
+        return _abstention(prepared, INDEX_WARMING)
     if packet.get("abstained"):
         return _abstention(prepared, UNAVAILABLE)
     pages = {item.ref for item in items if item.level == "page"}

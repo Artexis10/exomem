@@ -247,6 +247,35 @@ def test_a_build_started_before_a_write_never_replaces_the_newer_profile(
     assert "Use doubled lines" not in json.dumps(current)
 
 
+def test_profile_warms_when_selected_unit_changes_without_catalogue_publication(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final canonical verification must not turn a changed selected claim into a clean omission."""
+    _seed_profile(vault, with_w=False)
+    ref = cv.topic_profile_ref("harbour")
+    assert any(item["kind"] == "units" and item["provenance"]["path"] == MOORING
+               for item in _items(_pages(vault, ref)))
+    _cold()
+    catalogue = cc.ContextCatalogue(vault)
+    token = catalogue.token()
+    run = working_set.run_lanes
+
+    def lanes_then_change(*args, **kwargs):
+        items, missing = run(*args, **kwargs)
+        assert not any(entry.get("reason") == "lane_failed" for entry in missing)
+        assert any(item.unit_candidate is not None and item.path == MOORING for item in items)
+        path = vault / MOORING
+        path.write_text(path.read_text().replace("Use doubled lines", "Use newly braided mooring lines"))
+        assert catalogue.token() == token
+        return items, missing
+
+    monkeypatch.setattr(working_set, "run_lanes", lanes_then_change)
+    response = _ask(vault, ref)
+
+    assert catalogue.token() == token
+    assert response["state"] == INDEX_WARMING and not response["items"]
+
+
 @pytest.mark.parametrize("live", [True, False], ids=["event-maintained", "non-live-warming"])
 def test_a_captured_decision_reaches_the_anchor_profile_after_derived_sync(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live: bool, caplog: pytest.LogCaptureFixture
