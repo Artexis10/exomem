@@ -251,6 +251,16 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - The discovery names are now `recall_context` and `search_memory`. The execution identities, read capabilities, pull budget and decision rules stay the same.
    - Development rounds from earlier builds keep their pinned surfaces. A development round on the renamed surface must pass before the freeze.
 
+7. **Amendment 7 (2026-10-23, before any held-out generation).** Reuse a completed tree across serial rounds at its original resolved serving path:
+   - Preserve the original absolute `slot/vault` path. Machine-state identity hashes that path; unchanged vault bytes and signatures alone do not establish compatibility.
+   - After the donor round finishes and returns custody, archive its complete evidence separately. Retain build metadata and baseline machine state for independent recomputation.
+   - Prepare the successor at the original run path. Copy baseline machine state and move the original vault on the same filesystem, preserving signatures.
+   - Verify snapshot, retrieval profile, baseline digests, vector publication, quiescence, and product/index compatibility before reuse. Preserve the original CPU budget and resume fields.
+   - If index code changes, seed the original slot with the donor's complete machine state and rerun product publication before creating successor proof. Retain accepted vectors only when their fingerprint and coverage remain compatible; report encoding activity.
+   - Keep donor provenance and vector-build CPU budget distinct from successor preparation. Record custody before moving the seeded vault; an interrupted preparation preserves the seed and cannot fall through to a destructive fresh build.
+   - Capture every successor arm's surface anew. Record donor provenance, verify donor score recomputation, and report the successor's readiness and unchanged-vault proof.
+   - Donor and successor work never overlap. Reuse does not change cases, keys, removals, arm budgets, or the one blind held-out decision.
+
 ### Ready before held-out generation
 
 1. `maps` mode built, and pinned to one release or commit for every arm.
