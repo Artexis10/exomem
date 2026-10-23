@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import multiprocessing
 import os
+import pickle
 import sqlite3
 import stat
 import threading
@@ -251,6 +253,214 @@ def test_legacy_owner_lock_is_hardened_with_runtime_state(tmp_path: Path) -> Non
     IdempotencyStore(state / "idempotency.sqlite")
 
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+def _initialize_idempotency_client(database: Path, role: str, legacy: bool, channel) -> None:  # noqa: ANN001
+    from exomem import mutation_lock
+
+    notified = False
+    real_connect = sqlite3.connect
+    real_lstat = Path.lstat
+    real_try_lock = mutation_lock._try_os_lock
+
+    def wait_for_parent() -> None:
+        if not channel.poll(_HOLD_SECONDS):
+            raise TimeoutError("parent did not release the initialization boundary")
+        channel.recv()
+
+    def observe_lock(handle):  # noqa: ANN001
+        nonlocal notified
+        acquired = real_try_lock(handle)
+        if role == "second" and not acquired and not notified:
+            notified = True
+            channel.send("blocked")
+        return acquired
+
+    def observe_lstat(path, *args, **kwargs):  # noqa: ANN001
+        nonlocal notified
+        try:
+            return real_lstat(path, *args, **kwargs)
+        except FileNotFoundError:
+            if role == "second" and path == database and not notified:
+                notified = True
+                channel.send("absent")
+                wait_for_parent()
+            raise
+
+    def observe_sql(statement: str) -> None:
+        nonlocal notified
+        if statement == "ALTER TABLE mutations ADD COLUMN owner TEXT" and not notified:
+            notified = True
+            channel.send("migrating")
+            wait_for_parent()
+
+    def observe_connect(path, *args, **kwargs):  # noqa: ANN001
+        nonlocal notified
+        if role == "first" and not legacy and not notified:
+            notified = True
+            channel.send("ready")
+            wait_for_parent()
+            connection = real_connect(path, *args, **kwargs)
+            channel.send("created")
+            wait_for_parent()
+            return connection
+        if role == "second" and not legacy and not notified:
+            notified = True
+            channel.send("connecting")
+            wait_for_parent()
+        connection = real_connect(path, *args, **kwargs)
+        if legacy:
+            connection.set_trace_callback(observe_sql)
+        return connection
+
+    try:
+        os.umask(0o022)
+        mutation_lock._try_os_lock = observe_lock
+        Path.lstat = observe_lstat
+        sqlite3.connect = observe_connect
+        store = IdempotencyStore(database)
+        retained = store.run("retained", "digest", lambda: {"retained": True}) if legacy else None
+        first = store.run(role, "digest", lambda: {"writer": role})
+        replay = store.run(role, "digest", lambda: {"unexpected": True})
+        with store._connect():
+            modes = [
+                stat.S_IMODE(path.stat().st_mode)
+                for path in (
+                    database,
+                    database.with_name(f"{database.name}-wal"),
+                    database.with_name(f"{database.name}-shm"),
+                )
+                if path.exists()
+            ]
+        channel.send(("ok", first, replay, retained, modes))
+    except BaseException as error:
+        channel.send(("error", repr(error)))
+    finally:
+        channel.close()
+
+
+def _run_concurrent_idempotency_initialization(database: Path, *, legacy: bool) -> list[tuple]:
+    context = multiprocessing.get_context("spawn")
+    channels = [context.Pipe() for _ in range(2)]
+    processes = [
+        context.Process(target=_initialize_idempotency_client, args=(database, role, legacy, child))
+        for role, (_parent, child) in zip(("first", "second"), channels, strict=True)
+    ]
+
+    def receive(index: int):  # noqa: ANN202
+        assert channels[index][0].poll(_OBSERVE_SECONDS), "initialization boundary did not respond"
+        return channels[index][0].recv()
+
+    try:
+        processes[0].start()
+        assert receive(0) == ("migrating" if legacy else "ready")
+        processes[1].start()
+        second_boundary = receive(1)
+        assert second_boundary in ({"blocked", "migrating"} if legacy else {"blocked", "absent", "connecting"})
+        channels[0][0].send("continue")
+        if not legacy:
+            assert receive(0) == "created"
+        second_result = None
+        if second_boundary != "blocked":
+            channels[1][0].send("continue")
+            if not legacy:
+                second_result = receive(1)
+        if not legacy:
+            channels[0][0].send("continue")
+        results = [receive(0), second_result if second_result is not None else receive(1)]
+        for process in processes:
+            process.join(_OBSERVE_SECONDS)
+            assert process.exitcode == 0
+        return results
+    finally:
+        for process in processes:
+            if process.pid is not None:
+                if process.is_alive():
+                    process.terminate()
+                process.join(_OBSERVE_SECONDS)
+        for parent, child in channels:
+            parent.close()
+            child.close()
+
+
+def test_concurrent_cold_idempotency_initialization_keeps_both_clients_usable(tmp_path: Path) -> None:
+    database = tmp_path / "state" / "idempotency.sqlite"
+
+    results = _run_concurrent_idempotency_initialization(database, legacy=False)
+
+    for role, result in zip(("first", "second"), results, strict=True):
+        assert result[:4] == ("ok", {"writer": role}, {"writer": role}, None), result
+        if os.name != "nt":
+            assert result[4] and all(mode == 0o600 for mode in result[4])
+
+
+def test_concurrent_legacy_idempotency_initialization_preserves_completed_results(tmp_path: Path) -> None:
+    database = tmp_path / "state" / "idempotency.sqlite"
+    if os.name == "nt":
+        from exomem.mutation_lock import prepare_windows_private_state_root
+
+        prepare_windows_private_state_root(database.parent)
+    else:
+        database.parent.mkdir()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE mutations (key TEXT PRIMARY KEY, digest TEXT NOT NULL, "
+            "state TEXT NOT NULL, result BLOB, updated_at REAL NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO mutations VALUES (?, ?, 'completed', ?, ?)",
+            ("retained", "digest", pickle.dumps({"kept": True}), time.time()),
+        )
+    connection.close()
+    if os.name != "nt":
+        database.parent.chmod(0o755)
+        database.chmod(0o644)
+
+    results = _run_concurrent_idempotency_initialization(database, legacy=True)
+
+    for role, result in zip(("first", "second"), results, strict=True):
+        assert result[:4] == ("ok", {"writer": role}, {"writer": role}, {"kept": True}), result
+        if os.name != "nt":
+            assert result[4] and all(mode == 0o600 for mode in result[4])
+
+
+def test_idempotency_initialization_timeout_leaves_the_store_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "state" / "idempotency.sqlite"
+    with writer_lease_module._idempotency_initialization_guard(database):
+        with monkeypatch.context() as patch:
+            patch.setattr(writer_lease_module, "_IDEMPOTENCY_SQLITE_TIMEOUT_SECONDS", 0.0)
+            with pytest.raises(TimeoutError, match="initialization lock timed out"):
+                IdempotencyStore(database)
+
+    store = IdempotencyStore(database)
+    assert store.run("recovered", "digest", lambda: {"ok": True}) == {"ok": True}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ancestor alias contract")
+def test_idempotency_initialization_preserves_a_configured_ancestor_alias(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    store = IdempotencyStore(alias / "state" / "idempotency.sqlite")
+
+    assert store.run("aliased", "digest", lambda: {"ok": True}) == {"ok": True}
+    assert (target / "state" / "idempotency.sqlite").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX leaf symlink contract")
+def test_idempotency_initialization_refuses_a_symlink_runtime_root(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    store = IdempotencyStore(alias / "idempotency.sqlite")
+
+    with pytest.raises(RuntimeError, match="cannot be upgraded safely"):
+        store.run("aliased", "digest", lambda: pytest.fail("symlink runtime root was trusted"))
+    assert list(target.iterdir()) == []
 
 
 class _EnvelopeProtector:

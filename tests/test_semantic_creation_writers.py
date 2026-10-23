@@ -778,6 +778,50 @@ def test_subindex_planner_can_include_unchanged_targets(vault: Path) -> None:
     }
 
 
+def test_public_note_preparation_preserves_draft_shape_and_defaults(vault: Path) -> None:
+    before = _tree_bytes(vault)
+    arguments = {
+        "content": _compact_content("Public draft"),
+        "note_type": "insight",
+        "title": "Public draft",
+        "validate_only": True,
+    }
+    prepared = commands._invoke_note(vault, **arguments)
+    assert isinstance(prepared, semantic_writes.CreationPreflight)
+    payload = commands.op_note(
+        vault,
+        **arguments,
+        draft_id=prepared.draft_id,
+        draft_hash=prepared.draft_hash,
+        draft_token=prepared.draft_token,
+    )
+
+    assert payload == prepared.as_dict()
+    assert payload["destination"] == "Knowledge Base/Notes/Insights/public-draft.md"
+    assert payload["mutated"] is False
+    assert "source" not in payload
+    frontmatter, _body, _raw = vault_module.parse_frontmatter(prepared.source)
+    assert frontmatter["status"] == "active"
+    assert _tree_bytes(vault) == before
+
+
+@pytest.mark.parametrize("argument", ["today", "_return_prepared"])
+def test_note_invocation_rejects_parameters_outside_the_public_contract(
+    tmp_path: Path, argument: str
+) -> None:
+    arguments = {
+        "content": _compact_content(),
+        "note_type": "insight",
+        "title": "Private parameter",
+        "validate_only": True,
+        argument: True,
+    }
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        commands.op_note(tmp_path, **arguments)
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        commands._invoke_note(tmp_path, **arguments)
+
+
 def test_note_validate_only_freezes_path_and_date_without_any_mutation(vault: Path) -> None:
     before = _tree_bytes(vault)
 

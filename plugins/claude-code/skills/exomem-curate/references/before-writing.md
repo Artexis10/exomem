@@ -1,10 +1,10 @@
 # Before writing
 
-First partition durable material into independently reusable objects by retrieval
-question, subject, domain, episode, and epistemic role. Resolve a canonical home
-for each meaningful cluster; the currently open note has no priority. Keep details
-within a coherent existing scope together. Preserve a durable interpretation as
-an attributed, uncertain claim rather than dropping it or asserting it as fact.
+First partition durable material by retrieval question, subject, domain, episode,
+and epistemic role. Apply the destination-fitness rule in the semantic authoring
+contract before choosing a home. Handle existing structural debt through governed
+curation. Preserve a durable interpretation as an
+attributed, uncertain claim rather than dropping it or asserting it as fact.
 
 Read the selected procedure and check the envelope below. Search for existing
 knowledge and inspect matching pages before creating another. Capture external

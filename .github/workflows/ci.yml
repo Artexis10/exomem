@@ -387,6 +387,9 @@ jobs:
           tests/test_held_fs_windows.py
           tests/test_reserved_admin_paths.py
           tests/test_mutation_concurrency.py
+          tests/test_windows_idempotency_trust.py
+          tests/test_writer_lease.py::test_concurrent_cold_idempotency_initialization_keeps_both_clients_usable
+          tests/test_writer_lease.py::test_concurrent_legacy_idempotency_initialization_preserves_completed_results
           tests/test_windows_path_alias_guard.py
           tests/test_artifact_recovery.py::test_retained_copy_rechecks_bytes_even_with_unchanged_mtime
           tests/test_artifact_recovery.py::test_in_place_rewrite_during_final_origin_check_releases_no_stale_original

@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: f9fcf1d6d18ac082cf8e3b7861a24bef6ff82c1f3f7234eb5140a13ea8b3354a
+  skill_contract: af52c0c7404f5a48a828e329a57063db3290dfe5344e2e5617b5fb35abffc645
   version: "0.1.0"
 ---
 
@@ -78,10 +78,12 @@ Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typ
 ## Mistakes to avoid
 Do not skip raw preservation. Do not paste large raw artifacts into compiled notes. Do not claim media content was inspected unless an extraction, frame, transcript, OCR, or artifact view was actually used.
 
-<!-- exomem-semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2 -->
+<!-- exomem-semantic-authoring:v9 sha256:5c51c091751dfca2645a71fa607dd16eb23a6a68b16fb55b37df18c9503f6949 -->
 ## Semantic authoring contract
 
-Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
+Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
+
+Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
 
 Semantic roles:
 

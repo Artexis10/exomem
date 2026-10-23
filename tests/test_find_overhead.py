@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from threading import get_ident
 
 import pytest
 
@@ -21,17 +22,20 @@ def _count_walks(vault: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     from exomem import vault as vault_module
 
     kb_root = vault / "Knowledge Base"
+    # Background index repair has its own walk budget, outside this request.
+    caller_thread = get_ident()
     counts = {"kb": 0, "vault": 0}
     orig_kb = find_module._walk_md
     orig_vault = vault_module.walk_vault_md
 
     def kb_walk(root: Path):
-        if root == kb_root:
+        if root == kb_root and get_ident() == caller_thread:
             counts["kb"] += 1
         return orig_kb(root)
 
     def vault_walk(root: Path):
-        counts["vault"] += 1
+        if root == vault and get_ident() == caller_thread:
+            counts["vault"] += 1
         return orig_vault(root)
 
     monkeypatch.setattr(find_module, "_walk_md", kb_walk)
