@@ -59,6 +59,7 @@ from membench.utility.switch_eval.tap import (
     ACTIVATION_WARMING_REASON,
     BUDGET_REFUSAL,
     RECALL_WARMING_CODE,
+    REQUIRED_CLEAR_COMPONENTS,
     ready_wait,
 )
 from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
@@ -542,8 +543,9 @@ def test_a_server_exit_during_the_gate_is_a_retried_setup_fault(tmp_path: Path) 
 
 def test_the_warming_guard_tracks_the_product_refusal_constants() -> None:
     from exomem.activation_result import INDEX_WARMING
-    from exomem.find import RetrievalIndexWarming
+    from exomem.find import _RECALL_PROJECTION_STALE_COMPONENT, RetrievalIndexWarming
 
+    assert REQUIRED_CLEAR_COMPONENTS == {_RECALL_PROJECTION_STALE_COMPONENT}
     assert (ACTIVATION_WARMING_REASON, RECALL_WARMING_CODE) == (
         INDEX_WARMING, RetrievalIndexWarming(site="catalog_proof_incomplete").code,
     )
@@ -692,7 +694,7 @@ def test_usage_and_the_failure_report_read_every_attempt_not_only_the_last(tmp_p
         layout, "case-1", "A", 1,
         AttemptResult(HARNESS_FAULT, "rate_limit", turns=[turn]),
         AttemptResult(HARNESS_FAULT, "transport", turns=[turn]),
-        AttemptResult(OK, answer="An answer.", turns=[turn]),
+        AttemptResult(OK, answer="An answer.", turns=[turn], facts={"ready_gate": {"outcome": "ready", "warming": {"components": ["embeddings", "graph"]}}}),
     )  # fmt: skip
     verdict = {"required": {}, "forbidden": {}, "contaminated": None}
 
@@ -703,6 +705,10 @@ def test_usage_and_the_failure_report_read_every_attempt_not_only_the_last(tmp_p
     )  # fmt: skip
 
     assert scored["usage"]["totals"] == {"input_tokens": 300, "output_tokens": 30, "wall_seconds": 3.0, "ready_wait_seconds": 6.0, "attempts": 3}
+    assert scored["warming_at_gate"]["A"] == {
+        "sessions": 1, "unrecorded": 0, "not_ready": 0,
+        "by_components": [{"components": ["embeddings", "graph"], "sessions": 1}],
+    }
     assert scored["usage"]["projected"]["ready_wait_seconds"] == 72.0
     assert scored["secondary"]["A"]["harness_faults_by_kind"] == {"rate_limit": 1, "transport": 1}
 
@@ -722,6 +728,7 @@ def test_usage_and_retried_faults_read_as_unavailable_when_an_attempt_log_is_mis
     )  # fmt: skip
 
     # The final record still names two attempts; zero would understate the run.
+    assert scored["warming_at_gate"]["A"]["unrecorded"] == 1
     assert scored["usage"]["totals"] is None
     assert scored["secondary"]["A"]["harness_faults_by_kind"] is None
 
@@ -1078,3 +1085,123 @@ def test_the_tie_break_needs_the_arm_key_and_runs_only_after_unblinding(tmp_path
     for_a = tie_break({**first, "item_id": "item-a"}, {**second, "item_id": "item-a"}, unblinded=unblinded)
     assert (for_m["required"]["r1"], for_m["forbidden"]["f1"]) == ("missing", "asserted_as_current")
     assert (for_a["required"]["r1"], for_a["forbidden"]["f1"]) == ("used", "absent")
+
+
+@pytest.fixture
+def built_slot_tree(tmp_path: Path) -> Layout:
+    """A built arm with nested text and binary files and disposable machine state."""
+    from membench.utility.switch_eval.state import tree_digest
+
+    layout = Layout(tmp_path / "run")
+    arm = layout.arm_tree("P", "snapshot")
+    (arm / "vault" / "notes").mkdir(parents=True)
+    (arm / "vault" / "notes" / "page.md").write_text("A frozen observation.")
+    (arm / "vault" / "attachment.bin").write_bytes(bytes(range(256)))
+    (arm / "vault" / "_schema.yaml").write_text("schema: 1")
+    (arm / "state").mkdir()
+    (arm / "state" / "index.sqlite").write_bytes(b"machine state")
+    (arm / "state.json").write_text(json.dumps({
+        "vault_digest": tree_digest(arm / "vault"), "state_digest": tree_digest(arm / "state"),
+        "build": {"vectors": {"state": "current"}},
+    }))
+    return layout
+
+
+def test_restoring_and_recovering_a_slot_preserves_every_file_signature(built_slot_tree: Layout) -> None:
+    from membench.utility.switch_eval.state import prepare_session_slot, recover_session_vault
+
+    layout = built_slot_tree
+    source = layout.arm_tree("P", "snapshot") / "vault"
+    before = {p.relative_to(source): (p.stat().st_mtime_ns, p.stat().st_ctime_ns, p.stat().st_size)
+              for p in source.rglob("*") if p.is_file()}
+    slot = prepare_session_slot(layout, "P", "snapshot", "first-session")
+    assert not source.exists()
+    assert {p.relative_to(slot.vault): (p.stat().st_mtime_ns, p.stat().st_ctime_ns, p.stat().st_size)
+            for p in slot.vault.rglob("*") if p.is_file()} == before
+    # A killed runner left this slot behind. The next preparation must recover it before wiping.
+    slot = prepare_session_slot(layout, "P", "snapshot", "after-crash")
+    recover_session_vault(layout)
+    slot.wipe()
+    assert {p.relative_to(source): (p.stat().st_mtime_ns, p.stat().st_ctime_ns, p.stat().st_size)
+            for p in source.rglob("*") if p.is_file()} == before
+
+
+def test_a_session_that_changes_the_vault_stops_the_run_and_preserves_it(built_slot_tree: Layout, tmp_path: Path) -> None:
+    from membench.utility.switch_eval.state import StateError, prepare_session_slot
+
+    layout = built_slot_tree
+    changed = layout.slot / "vault" / "notes" / "page.md"
+    inputs = replace(_inputs(arm="P"), cwd=layout.slot / "cwd", argv=(
+        sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('changed')", str(changed),
+    ))
+    executor = ClaudeSessionExecutor(layout, {"P": arm_specs()["P"]}, "m", "v", {})
+    with pytest.raises(RunAborted, match=f"{inputs.planned.session_id}.*vault digest changed"):
+        run_session(inputs, tmp_path / "session", executor)
+    assert changed.read_text() == "changed"
+    assert not (layout.arm_tree("P", "snapshot") / "vault").exists()
+    # Recovery cannot silently bless the changed vault on a later run either.
+    with pytest.raises(StateError, match="vault digest changed"):
+        prepare_session_slot(layout, "P", "snapshot", "next-session")
+    assert changed.read_text() == "changed"
+
+
+@pytest.mark.parametrize("failure", [OSError("actor launch failed"), KeyboardInterrupt()])
+def test_session_exceptions_return_the_unchanged_vault(built_slot_tree: Layout, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> None:
+    layout = built_slot_tree
+    executor = ClaudeSessionExecutor(layout, {"P": arm_specs()["P"]}, "m", "v", {})
+
+    def interrupted(*args):
+        raise failure
+
+    monkeypatch.setattr(executor, "_execute", interrupted)
+    with pytest.raises(type(failure)):
+        executor(_inputs(arm="P"), tmp_path / "attempt")
+    assert (layout.arm_tree("P", "snapshot") / "vault" / "notes" / "page.md").read_text() == "A frozen observation."
+    assert not layout.slot.exists()
+    assert not (layout.run / "slot-vault.json").exists()
+
+
+def test_the_builder_publishes_vectors_and_the_active_pointer(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+    from membench.utility.switch_eval.state import build_state, tree_digest
+
+    from exomem import embedding_backend, embeddings, index_paths, recall_migration, state_paths
+
+    # Keep the real product publication and storage; replace only the encoder boundary.
+    class Encoder:
+        device = "cpu"
+        concurrent_encodes = False
+        profile = embedding_backend.EncoderProfile(
+            model="fixture/encoder", pooling="cls", query_prefix="", passage_prefix="",
+            max_seq=512, pad_token="<pad>", revision="0" * 40, quantization="fixture",
+            file_format="fixture", artifact_digest="fixture",
+        )
+
+        def encode(self, texts, **kwargs):
+            return np.ones((len(texts), 8), dtype=np.float32) / np.sqrt(8)
+
+        def release(self):
+            pass
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv(recall_migration.REEMBED_ENV, raising=False)
+    monkeypatch.setattr(embeddings, "MODEL_NAME", "fixture/encoder")
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setattr(embedding_backend, "_importable", lambda module: True)
+    monkeypatch.setattr(embedding_backend, "load_encoder", lambda *args, **kwargs: Encoder())
+    try:
+        built = build_state(vault)
+        pointer = state_paths.vault_state_dir(vault) / index_paths.ACTIVE_SIDECAR_POINTER
+        sidecar = index_paths.sidecar_path(vault)
+        assert pointer.read_text().strip() == sidecar.name
+        assert sidecar.is_file()
+        assert embeddings.get_embedding_index(vault).file_mtimes()
+        assert built["vectors"]["state"] == "current"
+        before = tree_digest(sidecar.parent)
+        pointer.unlink()
+        assert tree_digest(sidecar.parent) != before
+        print(f"Synthetic vector publication (fixture encoder): {built['vectors']['seconds']}s")
+    finally:
+        embeddings.unload_model()
+        embeddings.clear_embedding_indexes()
+        recall_migration.reset_for_tests()

@@ -60,6 +60,7 @@ from .state import (
     mcp_server_entry,
     prepare_session_slot,
     product_env,
+    recover_session_vault,
 )
 from .tap import READY_TIMEOUT_SECONDS, process_start_ticks, ready_wait, warming_refusal
 
@@ -811,6 +812,17 @@ def _end_orphan_server(tap_events: Sequence[dict]) -> bool:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         return False
+    # Do not return the vault while a killed server can still write to it.
+    deadline = time.monotonic() + 10
+    while process_start_ticks(pid) == ticks:
+        try:
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                break
+        except FileNotFoundError:
+            break
+        if time.monotonic() >= deadline:
+            raise StateError(f"session server {pid} did not stop; preserved the vault in its slot")
+        time.sleep(0.05)
     return True
 
 
@@ -850,24 +862,41 @@ class ClaudeSessionExecutor:
     def __call__(self, inputs: SessionInputs, attempt_dir: Path) -> AttemptResult:
         spec = self.specs[inputs.planned.arm]
         try:
-            slot = prepare_session_slot(self.layout, spec.arm_id, inputs.tree)
+            slot = prepare_session_slot(
+                self.layout, spec.arm_id, inputs.tree, inputs.planned.session_id
+            )
+            try:
+                result = self._execute(inputs, attempt_dir, slot)
+            finally:
+                _end_orphan_server(_read_jsonl(slot.runtime / "tap.jsonl"))
+                digest = recover_session_vault(self.layout)
+                slot.wipe()
+            result.facts["vault_digest_after"] = digest
+            return result
         except StateError as error:
             return AttemptResult(ABORT, "state", str(error))
+
+    def _execute(self, inputs: SessionInputs, attempt_dir: Path, slot: Slot) -> AttemptResult:
+        spec = self.specs[inputs.planned.arm]
         attempt_dir.mkdir(parents=True, exist_ok=True)
         started_wall = time.time()
         transcript_path = attempt_dir / "transcript.jsonl"
         stderr = open(attempt_dir / "claude.stderr", "w", encoding="utf-8")  # noqa: SIM115 - closed below
-        proc = subprocess.Popen(  # noqa: S603 - argv built by the harness from the shared builder
-            launched_argv(self.launcher, inputs.argv),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=stderr,
-            text=True,
-            bufsize=1,
-            cwd=inputs.cwd,
-            env=dict(inputs.env),
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(  # noqa: S603 - argv built by the harness from the shared builder
+                launched_argv(self.launcher, inputs.argv),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                text=True,
+                bufsize=1,
+                cwd=inputs.cwd,
+                env=dict(inputs.env),
+                start_new_session=True,
+            )
+        except BaseException:
+            stderr.close()
+            raise
         # Each line with the time it arrived: the hook events carry no timing,
         # and the push's wall time is the gap between its start and response.
         lines: queue.Queue[tuple[float, str] | None] = queue.Queue()
@@ -992,7 +1021,6 @@ class ClaudeSessionExecutor:
             # A launcher's refusal reaches only its stderr.
             said = (attempt_dir / "claude.stderr").read_text(encoding="utf-8", errors="replace")
             result.detail += f"; stderr: {said.strip()[-400:] or '(empty)'}"
-        slot.wipe()
         return result
 
 

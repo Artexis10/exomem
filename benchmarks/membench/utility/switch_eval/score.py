@@ -612,6 +612,35 @@ def _mean(values: Sequence[float | None]) -> float | None:
     return sum(present) / len(present) if present else None
 
 
+def warming_tally(sessions: Mapping[str, Mapping], arm_ids: Sequence[str]) -> dict:
+    """Count final sessions by observed component combinations; preserve unknowns."""
+
+    out = {}
+    for arm in arm_ids:
+        records = [record for record in sessions.values() if record["arm"] == arm]
+        combinations: dict[tuple[str, ...], int] = {}
+        unrecorded = not_ready = 0
+        for record in records:
+            gate = (record.get("facts") or {}).get("ready_gate")
+            if gate is None:
+                unrecorded += 1
+            elif gate.get("outcome") != "ready":
+                not_ready += 1
+            else:
+                components = tuple(sorted(set((gate.get("warming") or {}).get("components") or [])))
+                combinations[components] = combinations.get(components, 0) + 1
+        out[arm] = {
+            "sessions": len(records),
+            "unrecorded": unrecorded,
+            "not_ready": not_ready,
+            "by_components": [
+                {"components": list(components), "sessions": count}
+                for components, count in sorted(combinations.items())
+            ],
+        }
+    return out
+
+
 def usage(layout: Layout, sessions: Mapping[str, Mapping], *, project_sessions: int | None) -> dict:
     """Measured usage per session over every attempt, and the projection for a
     planned run size. ``wall_seconds`` excludes the gate; ``ready_wait_seconds``
@@ -813,6 +842,7 @@ def score_run(
         "arm_guess_audit": audited,
         "secondary": secondary(cases=cases, table=built["cases"], arm_ids=arm_ids),
         "usage": usage(layout, sessions, project_sessions=project_sessions),
+        "warming_at_gate": warming_tally(sessions, arm_ids),
         "cases": built["cases"],
         "actor_failures": sum(1 for r in sessions.values() if r["outcome"] == ACTOR_FAILURE),
         "deltas": {str(k): v for k, v in deltas.items()},

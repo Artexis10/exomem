@@ -4,8 +4,9 @@ Exomem keys a vault's machine-local state by the vault's resolved path
 (``state_paths.vault_state_dir``), so state built for one path is not found
 under another. Every build and every session therefore runs in one fixed slot
 inside the run directory: ``slot/vault`` and ``slot/state``. A build leaves its
-result in ``arms/<arm>/<tree>/`` with a digest; a session copies that result
-back into the slot, checks the digest, runs, and the slot is wiped. Nothing
+result in ``arms/<arm>/<tree>/`` with a digest. A session moves the vault
+back into the slot and copies machine state. It returns the unchanged vault
+before wiping the slot. Nothing
 here reads or writes the user's own state root or a running service: every
 product location is pinned under the slot (see :func:`product_env`).
 """
@@ -19,6 +20,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -187,6 +189,7 @@ def _child_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[str
 
 
 def prepare_build_slot(layout: Layout, source_vault: Path) -> Slot:
+    recover_session_vault(layout)
     slot = Slot(layout.slot)
     slot.wipe()
     for path in (slot.runtime, slot.cwd, slot.hook_home):
@@ -203,15 +206,29 @@ def build_state(vault: Path) -> dict:
     not in what the vault holds.
     """
 
-    from exomem import state_migration
+    from exomem import index_paths, recall_migration, state_migration
     from exomem.context_catalogue import ContextCatalogue
     from membench.utility.context_activation_product import publish
 
     started = time.monotonic()
     state_migration.require_vault_state_ready(vault)
     publication = publish(vault)
+    vector_started = time.monotonic()
+    vector_state = recall_migration.run(vault, threading.Event())
+    sidecar = index_paths.active_sidecar_name(vault)
+    if (
+        vector_state != "current"
+        or sidecar is None
+        or not index_paths.sidecar_path(vault).is_file()
+    ):
+        raise StateError(f"vector publication did not complete: {vector_state}, sidecar={sidecar}")
+    vectors = {
+        **recall_migration.status(vault),
+        "seconds": round(time.monotonic() - vector_started, 3),
+    }
     catalogue = ContextCatalogue(vault).rebuild()
     return {
+        "vectors": vectors,
         "anchors": len(publication.anchors),
         "indexed_pages": publication.indexed_pages,
         "catalogue": {
@@ -370,7 +387,9 @@ def build_arm(
 
     target = layout.arm_tree(spec.arm_id, tree)
     if (target / "state.json").exists():
-        return json.loads((target / "state.json").read_text(encoding="utf-8"))
+        record = json.loads((target / "state.json").read_text(encoding="utf-8"))
+        _require_vector_build(record)
+        return record
     snapshot_digest = tree_digest(source_vault)
     slot = prepare_build_slot(layout, source_vault)
     env = _child_env(parent_env, slot, spec)
@@ -424,23 +443,86 @@ def load_arm_state(layout: Layout, arm: str, tree: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def prepare_session_slot(layout: Layout, arm: str, tree: str) -> Slot:
-    """A fresh copy of the arm's built state in the slot, checked against its digest."""
+def _require_vector_build(record: Mapping) -> None:
+    # Older snapshots lack vectors and would restart the same incomplete sessions.
+    if record.get("build", {}).get("vectors", {}).get("state") != "current":
+        raise StateError("arm state lacks completed vector publication; build a fresh run")
 
+
+def _rename_vault(source: Path, destination: Path) -> None:
+    """Never fall back to copying: it invalidates the inherited catalog proof."""
+
+    if source.stat().st_dev != destination.parent.stat().st_dev:
+        raise StateError(f"vault move crosses devices: {source} -> {destination}")
+    try:
+        source.rename(destination)
+    except OSError as error:
+        raise StateError(f"vault rename failed: {source} -> {destination}: {error}") from error
+
+
+def recover_session_vault(layout: Layout) -> str | None:
+    """Return a checked-out vault, including one left by a killed runner.
+
+    A changed vault stays in the slot with its custody receipt. Refusing later
+    preparation prevents a new session or build from deleting that evidence.
+    """
+
+    receipt = layout.run / "slot-vault.json"
+    if not receipt.exists():
+        return None
+    custody = json.loads(receipt.read_text(encoding="utf-8"))
+    source = layout.arm_tree(custody["arm"], custody["tree"]) / "vault"
+    held = Slot(layout.slot).vault
+    location = held if held.exists() else source
+    digest = tree_digest(location) if location.is_dir() else None
+    if digest != custody["digest"]:
+        raise StateError(
+            f"session {custody['session']}: vault digest changed; "
+            f"preserved at {location}; expected {custody['digest']}, got {digest}"
+        )
+    if held.exists():
+        if source.exists():
+            raise StateError(
+                f"session {custody['session']}: both vault locations exist; preserved {held}"
+            )
+        _rename_vault(held, source)
+    receipt.unlink()
+    return digest
+
+
+def prepare_session_slot(layout: Layout, arm: str, tree: str, session: str = "unstarted") -> Slot:
+    """Move the vault without changing signatures; copy only writable machine state."""
+
+    recover_session_vault(layout)
     record = load_arm_state(layout, arm, tree)
     if record is None:
         raise StateError(f"arm {arm} tree {tree} has no built state; run the state stage first")
+    _require_vector_build(record)
     slot = Slot(layout.slot)
     slot.wipe()
     for path in (slot.runtime, slot.cwd, slot.hook_home):
         path.mkdir(parents=True)
     source = layout.arm_tree(arm, tree)
-    shutil.copytree(source / "vault", slot.vault, symlinks=True)
-    shutil.copytree(source / "state", slot.state, symlinks=True)
     for name, key in (("vault", "vault_digest"), ("state", "state_digest")):
-        if tree_digest(slot.root / name) != record[key]:
+        if tree_digest(source / name) != record[key]:
+            raise StateError(f"arm {arm} tree {tree}: {name} does not match its build digest")
+    # Write custody before rename so an interrupt on either side can recover it.
+    (layout.run / "slot-vault.json").write_text(
+        json.dumps(
+            {"arm": arm, "tree": tree, "session": session, "digest": record["vault_digest"]}
+        ),
+        encoding="utf-8",
+    )
+    try:
+        _rename_vault(source / "vault", slot.vault)
+        shutil.copytree(source / "state", slot.state, symlinks=True)
+        if tree_digest(slot.state) != record["state_digest"]:
             raise StateError(
-                f"arm {arm} tree {tree}: the session copy of {name} does not match its build digest"
+                f"arm {arm} tree {tree}: the session state copy differs from its build"
             )
-    slot.turn_file.write_text("-1", encoding="utf-8")
+        slot.turn_file.write_text("-1", encoding="utf-8")
+    except BaseException:
+        recover_session_vault(layout)
+        slot.wipe()
+        raise
     return slot
