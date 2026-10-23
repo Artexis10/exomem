@@ -228,6 +228,9 @@ def _attempts(layout: Layout, record: Mapping) -> list[dict] | None:
     ``None`` when the log is missing or does not hold the attempts its final
     record counts: then what those attempts used is unknown, not zero."""
 
+    if record["outcome"] == STRUCK and record["attempts"] == 0:
+        # The runner skips the sessions of a struck case: none ran, so no log exists.
+        return []
     path = layout.session_dir(record["case_id"], record["arm"], record["repeat"]) / "attempts.jsonl"
     if not path.exists():
         return None

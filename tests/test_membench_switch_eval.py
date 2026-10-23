@@ -543,6 +543,25 @@ def test_usage_and_retried_faults_read_as_unavailable_when_an_attempt_log_is_mis
     assert scored["secondary"]["A"]["harness_faults_by_kind"] is None
 
 
+def test_a_skipped_struck_session_counts_no_usage_instead_of_making_usage_unavailable(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    turn = {"calls": 1, "activation_calls": 0, "input_tokens": 100, "output_tokens": 10, "push_bytes": 0,
+            "wall_seconds": 1.0, "hook_responses": []}  # fmt: skip
+    record = _session(layout, "case-1", "A", 1, AttemptResult(OK, answer="An answer.", turns=[turn]))
+    # The runner's record for a session it skipped because its case was struck: no attempt ran, so no log exists.
+    skipped = {"session_id": "case-2--A--r1", "case_id": "case-2", "arm": "A", "repeat": 1, "outcome": "struck",
+               "kind": "case struck after harness faults", "attempts": 0, "turns": [], "answer": None, "checks": {}}  # fmt: skip
+    verdict = {"required": {}, "forbidden": {}, "contaminated": None}
+
+    scored = score_run(
+        layout, cases=[_case("case-1"), _case("case-2")], sessions={record["session_id"]: record, skipped["session_id"]: skipped},
+        verdicts={record["session_id"]: verdict}, arm_ids=["A"], repeats=1, split=protocol.SPLIT_HELDOUT,
+        deltas={2: 0.1, 3: 0.1}, seed=0,
+    )  # fmt: skip
+
+    assert scored["usage"]["totals"] == {"input_tokens": 100, "output_tokens": 10, "wall_seconds": 1.0, "attempts": 1}
+
+
 def test_the_activation_share_counts_user_turns_with_an_activate_context_call_not_calls(tmp_path: Path) -> None:
     layout = Layout(tmp_path / "run")
     def turn(calls: int, activation_calls: int) -> dict:
