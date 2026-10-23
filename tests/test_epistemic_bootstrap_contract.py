@@ -446,7 +446,7 @@ def test_reduced_surface_keeps_every_commitment(vault: Path) -> None:
             surface="test",
             profile="tier-one-only",
             tier2_enabled=False,
-            product_commands=("bootstrap", "ask_memory"),
+            product_commands=("bootstrap", "search_memory"),
         ),
         vault,
     )

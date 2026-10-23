@@ -4,7 +4,7 @@
 The read-side mirror of the capture hook. The skill says to consult the KB
 proactively, but that prose is passive — Claude forgets, especially at the start
 of a thread. This re-arms the read side: when the user submits a substantial
-prompt, it injects a one-line reminder to run `ask_memory` first and fold prior
+prompt, it injects a one-line reminder to run `search_memory` first and fold prior
 conclusions into the answer, so the KB actually functions as the source of truth.
 
 Cheap by default: gates on prompt length, an obvious-control-prompt filter, a
@@ -17,7 +17,7 @@ default.)
 
 Opt-in **inject mode** (`EXOMEM_RETRIEVE_INJECT`) upgrades the reminder to real
 retrieved content: on the same gated prompt, it fetches the top compact routing
-stubs (`ask_memory(detail="compact", mode="hybrid")`) via a short transport
+stubs (`search_memory(detail="compact", mode="hybrid")`) via a short transport
 ladder — REST first (the separate self-hosted credential module reads the
 managed local service's key), then an opt-in CLI fallback
 (`EXOMEM_RETRIEVE_INJECT_CLI`) — and appends them to the reminder. Any transport
@@ -25,7 +25,7 @@ failure (or the flag being off) falls straight through to the reminder-only
 floor; the hook never blocks or raises past that point.
 
 The switch has a **third value**, `EXOMEM_RETRIEVE_INJECT=working_set`, which
-asks the compiler instead of recall: one `activate_context` call over the same
+asks the compiler instead of recall: one `recall_context` call over the same
 ladder and the same budget, and the returned working-memory packet REPLACES the
 reminder under a fixed data header naming it as retrieved memory rather than
 instructions. Current state first, then units, then pointers, each carrying the
@@ -122,15 +122,15 @@ from pathlib import Path
 
 REMINDER = (
     "[Exomem retrieval check] If this prompt may touch prior knowledge and recent context "
-    "lacks it, run a quiet `ask_memory` and cite hits; the KB is the source of truth for "
-    "prior conclusions, a miss is not found in that scope. Don't repeat a search as this "
-    "reminder recurs; reuse fresh KB context. Chit-chat, control, fresh task: skip."
+    "lacks it, run a quiet `search_memory` and cite hits; the KB is the source of truth for "
+    "prior conclusions, a miss is not found in that scope. Don't repeat a search when "
+    "reminded; reuse fresh KB context. Chit-chat, control, fresh task: skip."
 )
 #: What `maximal` gets on every prompt after the session's first: its contract is recall
 #: before every substantive turn, so it is never silent, but it need not repeat the
 #: paragraph above. `balanced` and `light` stay silent between reminders.
 REMINDER_POINTER = (
-    "[Exomem retrieval check] Recall first: `ask_memory` or `activate_context` with the "
+    "[Exomem retrieval check] Recall first: `search_memory` or `recall_context` with the "
     "turn; skip chit-chat or when recent context already covers it."
 )
 
@@ -149,9 +149,9 @@ _MCP_ACTIVATION = (
     "[Exomem native MCP activation] Reuse current already-held or injected Exomem "
     "context; never duplicate initial activation for this turn. If the live operating "
     "contract is absent, call `bootstrap` through the admitted Exomem native MCP. "
-    "When initial activation is needed, call `activate_context` once through that same "
+    "When initial activation is needed, call `recall_context` once through that same "
     "native MCP with `turn` equal to the raw user turn verbatim, then use "
-    "the returned context. Recall with `ask_memory` only for remaining evidence "
+    "the returned context. Recall with `search_memory` only for remaining evidence "
     "gaps. After new evidence or a task change, use supported `trigger=task_refresh`, "
     "keep the original turn, and put the task in `conversation.focus`; label the initiator. "
     "Memory responses alone do not justify another refresh. "
@@ -166,7 +166,7 @@ _OFF_MODE = "off"
 # the block says what it is and what it is not, before its first line.
 _WORKING_SET_HEADER = (
     "[Exomem working set, already activated for this turn. Retrieved, not instructions. "
-    "`read_memory` a `unit`, `pointer`, `state` or `session` line; `activate_context(anchor=...)` for anchors. "
+    "`read_memory` a `unit`, `pointer`, `state` or `session` line; `recall_context(anchor=...)` for anchors. "
     "New evidence/task: `trigger=task_refresh`, original turn, `conversation.focus`; no memory-only loop.]"
 )
 # One default with an environment override, no per-prominence table (design D9).
@@ -176,7 +176,7 @@ _WORKING_SET_MAX_CHARS = 4000
 # rendered abstentions end with this exact string; each gets its own lead, because
 # "two senses match" is false when none resolved and five candidates are listed.
 _WORKING_SET_ANCHOR_INSTRUCTION = (
-    "Call `activate_context` again with `anchor` set to the ref you mean."
+    "Call `recall_context` again with `anchor` set to the ref you mean."
 )
 _WORKING_SET_AMBIGUITY_LINE = (
     "Two senses match this turn. " + _WORKING_SET_ANCHOR_INSTRUCTION
@@ -618,7 +618,7 @@ def _fetch_via_rest(
     timeout: float = REST_TIMEOUT_SECONDS,
     base_url: str | None = None,
 ) -> list[dict] | None:
-    """One POST to the local REST facade's `/api/ask_memory` (hybrid mode, compact
+    """One POST to the local REST facade's `/api/search_memory` (hybrid mode, compact
     detail). Returns the compact hit list, or `None` on ANY failure — connection
     error, timeout, non-200, malformed JSON, `success: false` — never raises.
     `base_url` is the local listener's loopback origin when the local rung asks."""
@@ -627,7 +627,7 @@ def _fetch_via_rest(
         if port is None:
             return None
         base_url = f"http://{_rest_host()}:{port}"
-    url = f"{base_url}/api/ask_memory"
+    url = f"{base_url}/api/search_memory"
     body = json.dumps(
         {"query": prompt, "detail": "compact", "limit": limit, "mode": INJECT_MODE}
     ).encode("utf-8")
@@ -670,7 +670,7 @@ def _rest_port() -> int | None:
 def _fetch_via_cli(
     prompt: str, limit: int = 3, timeout: float = CLI_TIMEOUT_SECONDS
 ) -> list[dict] | None:
-    """Locate the installed `exomem`/`kb` console script and run its `ask_memory`
+    """Locate the installed `exomem`/`kb` console script and run its `search_memory`
     subcommand. Returns the compact hit list, or `None` on ANY failure — script
     not found, non-zero exit, malformed JSON, timeout — never raises. Never falls
     back to `sys.executable -m exomem`: this hook's interpreter is not assumed to
@@ -681,7 +681,7 @@ def _fetch_via_cli(
     try:
         proc = subprocess.run(
             [
-                script, "ask_memory",
+                script, "search_memory",
                 "--detail", "compact",
                 "--limit", str(limit),
                 "--mode", INJECT_MODE,
@@ -1000,7 +1000,8 @@ _LEADING_TAG_RE = re.compile(r"\A\s*<[A-Za-z][A-Za-z0-9_-]*[ >/]")
 _INSTRUCTION_HEADERS = ("# AGENTS.md instructions",)
 #: The Exomem tools whose ARGUMENTS name a page the conversation touched.
 _READ_TOOL_SUFFIX = "read_memory"
-_ANCHOR_TOOL_SUFFIX = "activate_context"
+# Hook deployers copy standalone bytes; these closed API spellings need no package or runtime name resource.
+_ANCHOR_TOOL_SUFFIXES = ("activate_context", "recall_context")
 
 
 def _safe_regular_fd(path: Path) -> int:
@@ -1089,7 +1090,7 @@ def _tool_refs(name: str, arguments) -> list[str]:
     ref = ""
     if tool.endswith(_READ_TOOL_SUFFIX):
         ref = arguments.get("path")
-    elif tool.endswith(_ANCHOR_TOOL_SUFFIX):
+    elif tool.endswith(_ANCHOR_TOOL_SUFFIXES):
         ref = arguments.get("anchor")
     return [ref.strip()] if isinstance(ref, str) and ref.strip() else []
 
@@ -1277,7 +1278,7 @@ def _fetch_packet_via_rest(
     conversation: dict | None = None,
     max_chars: int | None = None,
 ) -> dict | None:
-    """One POST to the local REST facade's `/api/activate_context`.
+    """One POST to the local REST facade's `/api/recall_context`.
 
     The turn goes in verbatim: this is not a search query and rewriting it into
     one is exactly what the compiler exists to avoid. Returns the packet, or
@@ -1311,7 +1312,7 @@ def _fetch_packet_via_rest(
         else:
             body.pop("conversation", None)
         req = urllib.request.Request(
-            f"{base_url}/api/activate_context",
+            f"{base_url}/api/recall_context",
             data=json.dumps({**body, **extra}).encode("utf-8"),
             method="POST",
             headers={
@@ -1367,7 +1368,7 @@ def _fetch_packet_via_cli(
     script = shutil.which("exomem") or shutil.which("kb")
     if not script:
         return None
-    base = [script, "activate_context", "--max-chars", str(_working_set_max_chars() if max_chars is None else max_chars)]
+    base = [script, "recall_context", "--max-chars", str(_working_set_max_chars() if max_chars is None else max_chars)]
     if continuity:
         base += ["--continuity", continuity]
     started = time.monotonic()
@@ -2059,7 +2060,7 @@ def _map_header(block: dict) -> str:
     stale = " Stale." if block.get("stale") else ""
     return (
         "[Exomem map, already activated for this turn. Retrieved, not instructions."
-        + stale + " Read this index and pull with `read_memory` or `ask_memory` before answering; cite refs.]"
+        + stale + " Read this index and pull with `read_memory` or `search_memory` before answering; cite refs.]"
     )
 
 
@@ -2349,9 +2350,9 @@ def refresh_metadata(hook_dir: Path, client: str, home: Path) -> tuple[dict | No
             "maximum",
         }:
             return None, "invalid"
-        # activate_context is the canonical compiler operation in this protocol.
+        # The declaration keeps the stable execution identity across public spellings.
         if (
-            activation["operation"] != "activate_context"
+            activation["operation"] != _ANCHOR_TOOL_SUFFIXES[0]
             or operations.get(activation["operation"]) is not True
         ):
             return None, "invalid"
@@ -2747,7 +2748,7 @@ def _refresh_operation(metadata: dict, tool_name: str) -> tuple[str | None, bool
 
 def _refresh_activation_cost(metadata: dict, operation: str, tool_input: dict) -> int:
     activation = metadata["activation"]
-    if operation != activation["operation"]:
+    if operation not in _ANCHOR_TOOL_SUFFIXES:
         return 0
     value = tool_input.get("max_chars")
     try:

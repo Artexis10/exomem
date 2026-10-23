@@ -77,7 +77,7 @@ token, declare consent, change policy, or authorize itself.
 
 A compiled note may carry a deliberately reviewed conclusion across a
 confidential boundary without exposing its source trail. Author it through the
-normal `remember` or `replace_memory` review flow with all three fields:
+normal `create_note` or `supersede_note` review flow with all three fields:
 `bridge_of` (source paths or stable memory refs), `bridge_scope` (a descriptive
 lowercase slug), and `bridge_review` (an ISO review date). Exomem normalizes the
 dependencies to stable refs and binds the fields into the reviewed draft.

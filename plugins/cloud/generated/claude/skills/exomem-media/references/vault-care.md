@@ -69,7 +69,7 @@ works on any folder under the vault root, including trees outside
 `Knowledge Base/` (a `Daily/` or `Journal/` folder), and on vaults with no KB at
 all. The folders it reports *outside* `Knowledge Base/` are read-only input — link
 to them, never write them; only `Knowledge Base/` is governed. Drill down from there: `browse_memory` on folders of interest,
-`ask_memory scope="vault"` for content, targeted `read_memory` for individual files. Use adoption output to decide whether to save a manifest, copy selected originals into Sources, or compile selected material into governed notes; do not rewrite the old vault by default. **Never
+`search_memory scope="vault"` for content, targeted `read_memory` for individual files. Use adoption output to decide whether to save a manifest, copy selected originals into Sources, or compile selected material into governed notes; do not rewrite the old vault by default. **Never
 bulk-read a vault file-by-file to answer a structural question** — the report
 answers in one call what would otherwise cost hundreds of reads.
 
@@ -130,7 +130,7 @@ is in **`audit-checks.md`**.
   mark it; if irrelevant, archive into an `_archive/` subfolder. (`review_memory`'s
   `stale_review` check **surfaces** old/cold/low-inbound conclusions as *review
   candidates* for you to judge — but never auto-decays, down-ranks, hides, or moves
-  anything; review surfacing has no effect on `ask_memory`/`find` ordering.
+  anything; review surfacing has no effect on `search_memory`/`find` ordering.
   Surfacing a candidate ≠ a forgetting curve. Authored typed relations DO
   legitimately inform retrieval ranking — that is connectivity you wrote, not
   decay the system invented.)

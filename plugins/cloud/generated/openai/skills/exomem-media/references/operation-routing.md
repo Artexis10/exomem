@@ -26,7 +26,7 @@ and index updates are determined by the operation, not the caller.
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see the media transport guidance below), not this tool | `Evidence/<scope>/` |
-| **edit** | In-place edit through one `edit_memory` tool. New clients send required nested `operation` with one `kind`: `replace_body`, `replace_tags`, `replace_string`, `batch_replace`, `edit_section`, `patch_frontmatter`, or `fill_row`. See `operations.md` for fields. Bumps `updated:` | the page |
+| **edit** | In-place edit through one `edit_note` tool. New clients send required nested `operation` with one `kind`: `replace_body`, `replace_tags`, `replace_string`, `batch_replace`, `edit_section`, `patch_frontmatter`, or `fill_row`. See `operations.md` for fields. Bumps `updated:` | the page |
 | **observe_memory** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove require the current parent `expected_hash` and unit `expected_fingerprint`. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
 | **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
@@ -146,7 +146,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   `read_media(path, max_frames=8, start_sec=?, end_sec=?)` — it returns
   sampled keyframes INLINE as JPEG image blocks (no download round-trip needed),
   preceded by per-frame timestamps. The comprehension companion to visual search:
-  `ask_memory` locates the moment (`clip_match_at`), `read_media` shows it — an
+  `search_memory` locates the moment (`clip_match_at`), `read_media` shows it — an
   overview call first, then zoom with `start_sec`/`end_sec` around that timestamp.
   Bounded and read-only (default 8 frames, hard cap 16, JPEG ≤768px); soft-fails
   with a clear code when the server lacks the media extra.
@@ -208,8 +208,8 @@ reference for the canonical operation leaves that product commands route to.
 - "what's in the trash," "undelete," "put it back" → **list_trash** / **recover_from_trash** (Tier 2)
 
 **Implicit (no explicit ask) — proactive engagement:**
-- topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **ask_memory** first, fold the hits into the answer
-- a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**remember**, then report the path
+- topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **search_memory** first, fold the hits into the answer
+- a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**create_note**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
 - the user states an intent or commits to work -> resolve workflow posture, inspect Planning, then update an existing matching item before creating an inbox item
 - the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection; never transition Planning automatically

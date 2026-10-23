@@ -8,7 +8,7 @@ env the client passes, the transport, the shape the service really answers with,
 and the token file surviving between two processes that never share memory.
 
 No paid model session is involved, and no model at all: the service is a stub
-`http.server` bound to 127.0.0.1 that answers `/api/activate_context` from a
+`http.server` bound to 127.0.0.1 that answers `/api/recall_context` from a
 script of packets. Nothing outside loopback is contacted and no state is written
 outside `tmp_path` — `HOME`, `EXOMEM_HOOK_HOME` and `EXOMEM_CONFIG_PATH` all
 point into it, so the real `~/.cache` is never touched.
@@ -47,7 +47,7 @@ CHECKPOINT_SCRIPT = HOOKS / "exomem_continuation_checkpoint.py"
 
 SESSION = "journey-session"
 API_KEY = "journey-key"
-ROUTE = "/api/activate_context"
+ROUTE = "/api/recall_context"
 
 TURN_ONE = "Remind me what the Cargo Sled is rated for before I load it this week."
 TURN_TWO = "What did we decide about the winter schedule for the northern corridor?"
@@ -352,7 +352,7 @@ def test_the_shipped_hook_walks_a_working_set_session(tmp_path: Path) -> None:
             "- collection: Depot stock "
             "[Knowledge Base/Records/Depot Stock/_collection.md]"
         )
-        assert "`anchor`" in lines[3] and "activate_context" in lines[3]
+        assert "`anchor`" in lines[3] and "recall_context" in lines[3]
         # The reminder FOLLOWS, because nothing resolved and ordinary recall may
         # still be wanted.
         assert second.rstrip().endswith("skip.")
@@ -388,7 +388,7 @@ def test_the_shipped_hook_walks_a_working_set_session(tmp_path: Path) -> None:
     fifth = _prompt(RETRIEVE_SCRIPT, _env(home, tmp_path, stub.port), TURN_FIVE)
 
     assert fifth.startswith("[Exomem native MCP activation]")
-    assert "activate_context" in fifth
+    assert "recall_context" in fifth
     assert HEADER_HEAD not in fifth
 
 

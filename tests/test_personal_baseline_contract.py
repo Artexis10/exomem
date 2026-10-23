@@ -697,7 +697,7 @@ def test_reduced_surface_keeps_command_free_baseline_authority_mapping(
         surface="test",
         profile="baseline-reduced",
         tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory"),
+        product_commands=("bootstrap", "search_memory"),
     )
     with active_surface(descriptor), library_scope():
         engagement = commands.op_bootstrap(tmp_path, profile=profile)["engagement"]

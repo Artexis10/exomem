@@ -163,7 +163,7 @@ The read-side hook suppresses obvious control/status prompts like `continue`,
 `merge it`, and `are you done?`, and can optionally upgrade that reminder to real
 retrieved KB content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy
 `KB_RETRIEVE_INJECT` name still works) — or, with
-`EXOMEM_RETRIEVE_INJECT=working_set`, to a compiled `activate_context` packet
+`EXOMEM_RETRIEVE_INJECT=working_set`, to a compiled `recall_context` packet
 under a data header, bounded by `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default
 4,000). For Codex, run
 `exomem install-hook --client codex`; for Claude Code, `exomem install-hook` —
@@ -390,7 +390,7 @@ exomem exposes typed MCP tools for common knowledge-base work:
 
 | Tool | Purpose |
 | --- | --- |
-| `activate_context` | Compile durable context for a raw turn, with no query: returns a map or resolves which anchors the turn is about, with a bounded working-memory packet, or abstains. |
+| `recall_context` | Compile durable context for a raw turn, with no query: returns a map or resolves which anchors the turn is about, with a bounded working-memory packet, or abstains. |
 | `episode_memory` | Record a bounded recap of what a conversation worked on, decided and left open, so the next session on any client sees it first; inspect an episode's revisions. |
 | `find` | Search notes, sources, entities, and evidence with type/project/tag filters. |
 | `get` | Read a full page or frontmatter. |

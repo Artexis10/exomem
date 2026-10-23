@@ -167,7 +167,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             "Exomem can also help during ordinary work according to your chosen settings. "
             "It does not automatically import every old conversation.\n\n"
             "## Data handling\n\n"
-            "MCP tool arguments, including user turns sent to `activate_context`, reach "
+            "MCP tool arguments, including user turns sent to `recall_context`, reach "
             "the authenticated Exomem Cloud service. Reads return authorized account "
             "content; successful writes persist governed memory in that account. OAuth "
             "selects the account. This package does not import a local vault, read local "

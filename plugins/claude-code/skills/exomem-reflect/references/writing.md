@@ -9,7 +9,7 @@ a new entity after resolve-before-create follows `proactive_capture`.
 
 Resolve entity candidates against the active entity registry and selected knowledge packs.
   Call `connect_memory(operation="resolve-entity", name=...)` first. If one active page
-  matches, use `edit_memory` for a small stable-fact correction or the canonical
+  matches, use `edit_note` for a small stable-fact correction or the canonical
   relation workflow for a new connection. If none matches, use
   `connect_memory(operation="create-entity")` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
@@ -29,7 +29,7 @@ user used for it (a Latin title for a name they wrote in Japanese, or the
 reverse), add a native-script alias: the user's own spelling.
 
 - At capture: `connect_memory(operation="create-entity", aliases=[...])`.
-- On an existing page: `edit_memory` with `{"kind": "patch_frontmatter",
+- On an existing page: `edit_note` with `{"kind": "patch_frontmatter",
   "field": "aliases", "value": [...current, "<the user's spelling>"],
   "expected_hash": ...}` and a `why`; the list replaces the field, so keep the
   current aliases.
@@ -62,7 +62,7 @@ Use this loop whenever a durable conclusion should enter Exomem:
 
 1. Partition durable candidates by retrieval question, subject/domain, episode,
    and epistemic role before choosing destinations. Reuse current relevant
-   recall; call `ask_memory` only for missing prior notes or sources.
+   recall; call `search_memory` only for missing prior notes or sources.
 2. Assess scope/title fit for each candidate home. An open or similar page has
    no automatic priority. Read selected exact units/pages only as needed; keep
    coherent details together and route independently reusable clusters separately.
@@ -76,13 +76,13 @@ Use this loop whenever a durable conclusion should enter Exomem:
    claim explicitly; never recreate an "original" from the derivative. If the
    conclusion came from live work with nothing external captured, `sources: []`
    is honest and valid.
-4. Draft the typed page at the right layer: `capture_source` for raw source, `remember` for a compiled conclusion, `connect_memory` for entity/link work, `observe_memory` or `edit_memory` for guarded corrections, `replace_memory` for supersession.
+4. Draft the typed page at the right layer: `capture_source` for raw source, `create_note` for a compiled conclusion, `connect_memory` for entity/link work, `observe_memory` or `edit_note` for guarded corrections, `supersede_note` for supersession.
 5. Reuse meaningful links established by the current search/read context. When
    connections remain unknown, use `connect_memory(operation="suggest-links")`
    on the draft; use `suggest-relations` when direction remains unresolved. Accept only links
    that genuinely clarify provenance or context, and write accepted note-level
    edges under `## Relations` as `- relation_type [[Target]]`. Carry accepted
-   links into the *first* write; do not defer them to a follow-up `edit_memory`.
+   links into the *first* write; do not defer them to a follow-up `edit_note`.
 6. Write, then inspect the result. The default committed response carries
    `warnings` (when the write warned) and an optional `structure_suggestion`.
    The fuller structural checklist — `write_feedback` with `sources.cited`,
@@ -93,7 +93,7 @@ Use this loop whenever a durable conclusion should enter Exomem:
    default** because they cost a whole retrieval pass on the write path; pass
    `suggestions=true` (with `response_detail="full"`) when you want them.
    `write_feedback.suggestions.computed` tells you whether they ran.
-7. If a near-duplicate warning fires, prefer `edit_memory` or `replace_memory` over a parallel page. If suggestions are useful, add them with a follow-up `edit_memory`.
+7. If a near-duplicate warning fires, prefer `edit_note` or `supersede_note` over a parallel page. If suggestions are useful, add them with a follow-up `edit_note`.
 8. If the write returned a `structure_suggestion`, handle it as below.
 9. Report one line: `Saved -> <path>`.
 
@@ -107,7 +107,7 @@ acknowledge durable work; extraction finishes asynchronously. Do not claim to ha
 read extracted content before public status/read proves it exists.
 
 Author related observations and accepted connections in the initial note where
-possible. On an existing page, `edit_memory` with `operation.kind="batch_replace"`
+possible. On an existing page, `edit_note` with `operation.kind="batch_replace"`
 can combine known string changes into one guarded mutation. It is not an atomic
 multi-page transaction. Keep conflicting canonical edits ordered; run independent
 reads or artifact work concurrently only within the active client's capabilities.
@@ -184,8 +184,8 @@ These rules are non-negotiable.
    the same append-only tree (into a themed sub-folder) is allowed via
    `move_file`; crossing the boundary is forbidden.
 
-3. **Propose before writing compiled material.** For `remember`,
-   `connect_memory` entity writes, and `replace_memory` (and any hand-edit of
+3. **Propose before writing compiled material.** For `create_note`,
+   `connect_memory` entity writes, and `supersede_note` (and any hand-edit of
    `_Schema/` files), show the proposed content (or diff) and wait for
    confirmation. The exception is `capture_source` (raw capture),
    `preserve_evidence` (raw evidence), and read-only recall/review operations.
@@ -269,8 +269,8 @@ most-specific scope first. A typical starter set:
 For **patterns** that apply across multiple projects, use `projects:` (plural
 list) instead of `project:` (singular), e.g. `projects: [project-alpha, project-beta]`.
 
-**Auto-registration of new project keys.** The `remember`, `replace_memory`,
-`edit_memory` (frontmatter-patch), and `connect_memory` (decision-entity)
+**Auto-registration of new project keys.** The `create_note`, `supersede_note`,
+`edit_note` (frontmatter-patch), and `connect_memory` (decision-entity)
 writers auto-append unknown
 slug-shaped project keys to `_Schema/project-keys.yaml` and create the matching
 `Notes/Research/<Folder>/` directory on first use — no manual YAML edit needed.
@@ -320,12 +320,12 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    `suggest-relations` when direction matters — to surface related existing
    pages you'd otherwise miss.
 5. **Skill shows the draft, waits for confirmation.** You can revise inline.
-6. **On confirm: calls `remember` to write the page**, updates the relevant
+6. **On confirm: calls `create_note` to write the page**, updates the relevant
    `index.md`, appends to `log.md`, and reports paths. The write result carries
    any near-duplicate `warning`, and a `suggestions` block only when the call
    asked for one with `suggestions=true` **and** `response_detail="full"` —
-   wire in the relevant links via **edit_memory** (or, for a genuine duplicate,
-   prefer `replace_memory` over a parallel page).
+   wire in the relevant links via **edit_note** (or, for a genuine duplicate,
+   prefer `supersede_note` over a parallel page).
 
 When you approve a scope of multiple files upfront, the workflow collapses to a
 single batch write (see Write discipline § 3, batch waiver).
@@ -406,11 +406,11 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
 - Marking an existing page `superseded`.
 
 **Proceed without asking:**
-- Proactive `ask_memory` for context (read-only).
+- Proactive `search_memory` for context (read-only).
 - Capturing a clear stepping-stone conclusion whose type and scope are
   unambiguous — write under the standing waiver and report the path.
 - `capture_source` and `preserve_evidence` operations — raw capture.
-- `ask_memory`, `read_memory`, `browse_memory`, and `review_memory` — read-only.
+- `search_memory`, `read_memory`, `browse_memory`, and `review_memory` — read-only.
 - `triage_memory` — writes only portable review state (Inbox, activation, and
   relation-queue identities are namespaced apart); it never edits a note.
 - Updating `index.md`, `log.md`, and `ingested_into:` frontmatter after a
@@ -431,20 +431,20 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
   to its `ingested_into:` frontmatter, atomically with the citation, which takes
   it out of the unprocessed backlog. Omitting `sources` on a research-note,
   insight, failure or pattern only warns.
-- **Edits.** A source-changing `edit_memory` validates the complete final
+- **Edits.** A source-changing `edit_note` validates the complete final
   `sources` list and updates back-references atomically. An unrelated edit may
   leave a legacy unresolved citation; list that debt with
   `review_memory(mode="audit", categories=["unresolved_source_citation"])`.
 - **Frontmatterless pages.** Body and section edits work on ordinary Markdown
   without synthesizing YAML. Frontmatter and take-row operations still require
   frontmatter.
-- **Suggestions.** `remember(suggestions=true)` adds a `suggestions` block of
+- **Suggestions.** `create_note(suggestions=true)` adds a `suggestions` block of
   existing pages the note should probably link to (read it with
   `response_detail="full"`). It costs one retrieval pass over the corpus, so it
   is off by default; duplicate and overlap warnings run either way, and
   `write_feedback.suggestions.computed` says which happened.
 - **Relation recovery.** When `RELATION_DISPOSITION_STALE` or
-  `RELATION_DISPOSITION_MISSING` blocks an `edit_memory`, replay the identical
+  `RELATION_DISPOSITION_MISSING` blocks an `edit_note`, replay the identical
   operation with `validate_only=true`, then commit with the returned
   `transition_token` and `relation_review_hash`, `relation_disposition="reviewed_none"`
   and a `relation_review_reason`. The hash is the relation review's, never the

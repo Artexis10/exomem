@@ -310,7 +310,7 @@ def test_fetch_via_rest_success_returns_hits(monkeypatch: pytest.MonkeyPatch) ->
     result = hook_mod._fetch_via_rest("what did I conclude about X?", "secret-key")
 
     assert result == hits
-    assert captured["url"] == "http://127.0.0.1:8765/api/ask_memory"
+    assert captured["url"] == "http://127.0.0.1:8765/api/search_memory"
     assert captured["method"] == "POST"
     assert captured["headers"]["Authorization"] == "Bearer secret-key"
     assert captured["body"] == {
@@ -331,7 +331,7 @@ def test_fetch_via_rest_respects_exomem_host(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
     hook_mod._fetch_via_rest("prompt", "key")
-    assert captured["url"] == "http://10.0.0.5:8765/api/ask_memory"
+    assert captured["url"] == "http://10.0.0.5:8765/api/search_memory"
 
 
 @pytest.mark.parametrize(
@@ -355,7 +355,7 @@ def test_fetch_via_rest_uses_valid_port_override(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
     hook_mod._fetch_via_rest("prompt", "key")
-    assert captured["url"] == "http://127.0.0.1:9123/api/ask_memory"
+    assert captured["url"] == "http://127.0.0.1:9123/api/search_memory"
 
 
 def test_fetch_via_rest_rejects_invalid_port_without_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -430,7 +430,7 @@ def test_fetch_via_cli_success_invokes_expected_command(monkeypatch: pytest.Monk
 
     assert result == hits
     assert captured["cmd"] == [
-        "/usr/local/bin/exomem", "ask_memory",
+        "/usr/local/bin/exomem", "search_memory",
         "--detail", "compact",
         "--limit", "3",
         "--mode", "hybrid",

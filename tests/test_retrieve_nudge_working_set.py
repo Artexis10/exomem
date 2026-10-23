@@ -429,7 +429,7 @@ def test_an_ambiguous_abstention_hands_the_senses_to_the_agent() -> None:
     assert "Knowledge Base/Notes/Insights/northern-corridor-hub.md" in block
     assert block.endswith(hook._WORKING_SET_AMBIGUITY_LINE)
     assert "anchor" in hook._WORKING_SET_AMBIGUITY_LINE
-    assert "activate_context" in hook._WORKING_SET_AMBIGUITY_LINE
+    assert "recall_context" in hook._WORKING_SET_AMBIGUITY_LINE
     assert "- unit:" not in block
     assert "- state:" not in block
 
@@ -531,7 +531,7 @@ def test_an_unresolved_turn_hands_its_worded_candidates_to_the_agent() -> None:
     )
     assert lines[3] == hook._WORKING_SET_UNRESOLVED_LINE
     assert "anchor" in hook._WORKING_SET_UNRESOLVED_LINE
-    assert "activate_context" in hook._WORKING_SET_UNRESOLVED_LINE
+    assert "recall_context" in hook._WORKING_SET_UNRESOLVED_LINE
 
 
 def test_retrieval_only_candidates_are_never_rendered() -> None:
@@ -698,7 +698,7 @@ def test_the_anchor_instruction_is_the_same_one_in_both_abstentions() -> None:
     # The ambiguity line's bytes are a contract already asserted above; the
     # refactor into a shared instruction must not have moved them.
     assert hook._WORKING_SET_AMBIGUITY_LINE == (
-        "Two senses match this turn. Call `activate_context` again with `anchor` "
+        "Two senses match this turn. Call `recall_context` again with `anchor` "
         "set to the ref you mean."
     )
 
@@ -882,7 +882,7 @@ def test_the_working_set_rung_posts_to_the_activation_route(
     packet = hook._fetch_packet_via_rest(PROMPT, "sekret", "TOKEN-0", 1.0)
 
     assert packet is not None
-    assert seen["url"].endswith("/api/activate_context")
+    assert seen["url"].endswith("/api/recall_context")
     assert seen["body"]["turn"] == PROMPT
     assert seen["body"]["continuity"] == "TOKEN-0"
 
@@ -965,7 +965,7 @@ def test_the_cli_rung_separates_the_turn_from_the_options(
 
     argv = seen["argv"]
     assert argv[-2:] == ["--", "--purpose"]
-    assert argv[1] == "activate_context"
+    assert argv[1] == "recall_context"
 
 
 def test_the_stub_cli_rung_keeps_its_argv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1818,7 +1818,7 @@ def test_a_named_page_menu_now_offers_the_anchor_remedy() -> None:
     block = hook._format_working_set_block(_unresolved_packet(NAMED_PAGES), 4000)
     closing = block.splitlines()[-1]
 
-    assert "activate_context" in closing, closing
+    assert "recall_context" in closing, closing
     assert "`anchor`" in closing, closing
     lines = block.splitlines()
     assert lines[1].startswith("- page: Girvan slot decision "), lines

@@ -29,7 +29,7 @@ local reminders, not the saved preference. The section below describes
 **Proactive retrieval (read) — quiet, surface only hits.** When a turn
 references something the KB plausibly holds — a project, a domain, a named
 entity, or phrasings like "what did I conclude about X," "have I looked at Y,"
-"where did we land on Z" — run a quiet `ask_memory` **first** and fold what you find
+"where did we land on Z" — run a quiet `search_memory` **first** and fold what you find
 into the answer. Don't narrate the search; mention the KB only when it returned
 something relevant, and cite the page(s) you used. A miss means "not found in
 what I searched," never "it doesn't exist." An empty result does not itself
@@ -69,13 +69,13 @@ is made**, or **an observed outcome or event is reported** — capture it:
   brand-new ground is first-class: it becomes the first page on that topic, which
   is how the corpus grows.
 - Raw material -> `capture_source`. A durable conclusion -> draft with
-  `remember` or `connect_memory`, run
+  `create_note` or `connect_memory`, run
   `connect_memory(operation="suggest-links")`, use `suggest-relations` when
   directional meaning matters, and run the near-duplicate check first,
   then write and report one line: `Saved -> <path>`.
 - Resolve entity candidates against the active entity registry and selected knowledge packs.
   Call `connect_memory(operation="resolve-entity", name=...)` first. If one active page
-  matches, use `edit_memory` for a small stable-fact correction or the canonical
+  matches, use `edit_note` for a small stable-fact correction or the canonical
   relation workflow for a new connection. If none matches, use
   `connect_memory(operation="create-entity")` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
@@ -105,7 +105,7 @@ is made**, or **an observed outcome or event is reported** — capture it:
   review-category call, skip it honestly: no local scan, model, embedding, or
   due-state substitute. The active agent remains the sole semantic decider.
 - The guardrails that remain are the ones that matter: dedupe (prefer
-  **edit_memory**/**replace_memory** over a parallel page; surface a near-duplicate warning when
+  **edit_note**/**supersede_note** over a parallel page; surface a near-duplicate warning when
   it fires) and clean links.
 - A carried-out method is a landing like any other, and it is the one most often
   missed, because it arrives as ordinary conversation rather than as a
@@ -219,7 +219,7 @@ That disposition does not claim an authored resolution, and no operation univers
 ## Passing the conversation to activation
 
 In a longer conversation, or when the user's words lean on attachments, pass
-`conversation` to `activate_context` beside the verbatim `turn` (never
+`conversation` to `recall_context` beside the verbatim `turn` (never
 rewrite the turn), only when live engagement warrants recall and that context
 is needed to resolve the current subject. Do not send full history or unrelated
 earlier turns. Every field is optional:
@@ -267,19 +267,19 @@ fix to the user; never save one they have not agreed to, unless it is the
 learning advisory below.
 
 **Correct the packet with a pick.** When the user says which page they meant,
-call `activate_context` again with the same turn and `anchor` set to that
+call `recall_context` again with the same turn and `anchor` set to that
 page. If the turn's words never reached it, the packet may carry one
 `learning` advisory: the user's own words (`turn_terms`), the target, how
 often this happened, and the writers that would teach the vault, each with the
 `expected_hash` it must carry. It writes nothing.
 
-- **A name** (`family: "name"`): `edit_memory` with
+- **A name** (`family: "name"`): `edit_note` with
   `{kind: "patch_frontmatter", field: "learned_aliases", value: [...current,
   "<the user's name for it>"], expected_hash}` and a `why`. The list replaces
   the field, so keep `current`. A learned name changes what activates only:
   never a link, an owner alias or who the page is. It needs a word of its
   own (not a stopword or filler), a single ASCII word needs three letters,
-  at most eight per page and 64 characters each; `edit_memory` warns about one
+  at most eight per page and 64 characters each; `edit_note` warns about one
   the index will skip.
 - **A referential cue** (`family: "referential_cue"`): the words this user
   says to mean "continue". `schema_memory(subject="activation-conventions",

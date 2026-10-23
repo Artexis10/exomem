@@ -87,7 +87,7 @@ def test_notes_naming_a_page_by_a_variant_spelling_make_one_proposal(tmp_path: P
     }
     assert all(item["sig"] for item in row["evidence"])
     route = row["route"]
-    assert route["tool"] == "edit_memory"
+    assert route["tool"] == "edit_note"
     assert route["args"]["path"] == fx.ENTITY
     assert route["args"]["operation"] == {"kind": "patch_frontmatter", "field": "aliases"}
     # Only one alias proposal: a referrer is never a subject of its own.
@@ -112,7 +112,7 @@ def test_the_served_item_names_the_page_the_referrers_and_the_spelling(tmp_path:
     assert {entry["title"] for entry in item["evidence"]} == {"Pump restart", "Pump drain"}
     assert {entry["spelling"] for entry in item["evidence"]} == {fx.VARIANT}
     assert fx.VARIANT in item["why"]
-    assert item["route"]["tool"] == "edit_memory"
+    assert item["route"]["tool"] == "edit_note"
     # item and context revalidate to the same fingerprint the list served.
     assert upkeep.item(vault, item["ref"])["item"]["fingerprint"] == item["fingerprint"]
     context = upkeep.context(vault, item["ref"], expected_fingerprint=item["fingerprint"])

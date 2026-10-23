@@ -24,6 +24,7 @@ from conftest import initialize_vault_state_offline
 
 from exomem import commands as commands_module
 from exomem import server as server_module
+from exomem.command_surface import Command
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
@@ -73,8 +74,8 @@ def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch, tmp_pa
     for cmd in commands_module.PRODUCT_COMMANDS:
         if "mcp" not in cmd.surfaces:
             continue  # note: hand-registered for MCP, checked below
-        assert ann[cmd.name]["readOnlyHint"] is cmd.read_only, (
-            f"{cmd.name}: readOnlyHint={ann[cmd.name]['readOnlyHint']} "
+        assert ann[cmd.public_name]["readOnlyHint"] is cmd.read_only, (
+            f"{cmd.name}: readOnlyHint={ann[cmd.public_name]['readOnlyHint']} "
             f"but registry cli_writes={cmd.cli_writes}"
         )
 
@@ -90,14 +91,14 @@ def test_destructive_hint_only_for_overwrite_ops(
         if "mcp" not in cmd.surfaces or cmd.read_only:
             continue
         expected = cmd.name in commands_module.DESTRUCTIVE_OPS
-        assert ann[cmd.name]["destructiveHint"] is expected, (
-            f"{cmd.name}: destructiveHint={ann[cmd.name]['destructiveHint']} expected {expected}"
+        assert ann[cmd.public_name]["destructiveHint"] is expected, (
+            f"{cmd.name}: destructiveHint={ann[cmd.public_name]['destructiveHint']} expected {expected}"
         )
 
 
 def test_ask_memory_is_a_safe_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # The public recall command remains a safe read.
-    a = _live_annotations(_build_server(monkeypatch, tmp_path))["ask_memory"]
+    a = _live_annotations(_build_server(monkeypatch, tmp_path))["search_memory"]
     assert a["readOnlyHint"] is True
     assert a["destructiveHint"] is False
     assert a["openWorldHint"] is False
@@ -127,12 +128,25 @@ def test_review_question_is_not_advertised_or_classified_as_a_read() -> None:
     )
 
 
-def test_adoption_tool_has_its_public_title(
+def test_product_titles_reach_both_mcp_title_fields(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     tools = asyncio.run(_build_server(monkeypatch, tmp_path).list_tools())
-    adoption = next(tool.to_mcp_tool() for tool in tools if tool.name == "adoption_studio")
-    assert adoption.annotations.title == "Adopt Existing Memory"
+    wire = {tool.name: tool.to_mcp_tool() for tool in tools}
+    for command in commands_module.PRODUCT_COMMANDS:
+        if "mcp" not in command.surfaces:
+            continue
+        assert command.public_title
+        tool = wire[command.public_name]
+        assert tool.title == tool.annotations.title == command.public_title
+
+
+def test_non_product_title_defaults_to_the_public_name() -> None:
+    command = Command(
+        name="internal_read", leaf=lambda: None, params=(), surfaces=frozenset(),
+        preferred_name="public_read",
+    )
+    assert command.mcp_annotations.title == "Public Read"
 
 
 def test_api_reference_contract_is_stable_across_python_docstring_indentation(monkeypatch) -> None:

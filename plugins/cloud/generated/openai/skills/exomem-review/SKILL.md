@@ -2,7 +2,7 @@
 name: exomem-review
 description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
 metadata:
-  skill_contract: 1496455827106c6207692ebd02e7b121402a2f56a64e44698ef8409ea3150b65
+  skill_contract: f9fcf1d6d18ac082cf8e3b7861a24bef6ff82c1f3f7234eb5140a13ea8b3354a
   version: "0.2.0"
 ---
 
@@ -17,7 +17,7 @@ or inspect stale, contradictory, disconnected, or unprocessed material.
 
 ## Portable operating rules
 
-Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
@@ -42,11 +42,11 @@ identity after an uncertain commit.
 ## Workflow
 1. Start with `review_memory(mode="attention")` for the ranked review queue.
 2. Use `review_memory(mode="audit")` when the user asks for broader health checks or specific categories.
-3. For unprocessed sources, use `compile_source` before writing a compiled note with `remember`, passing those source paths as `sources:` so the source leaves the unprocessed queue.
+3. For unprocessed sources, use `prepare_note` before writing a compiled note with `create_note`, passing those source paths as `sources:` so the source leaves the unprocessed queue.
 4. For relation debt, inspect `connect_memory(operation="suggest-relations")` or
    `suggest-links`; write accepted note edges under `## Relations`, never from
    semantic proximity alone.
-5. For stale or contradictory compiled notes, read the relevant pages with `read_memory` and decide keep, `edit_memory`, `replace_memory`, `maintain_memory`, or leave alone.
+5. For stale or contradictory compiled notes, read the relevant pages with `read_memory` and decide keep, `edit_note`, `supersede_note`, `maintain_memory`, or leave alone.
 6. For recurring unregistered relation labels, propose promotion with `schema_memory(subject="relations")` rather than rewriting the notes that use them.
 7. Use `triage_memory` only after an explicit decision to dismiss, snooze, or
    reopen an Inbox item, and lead its `why` with a review reason code —
@@ -118,7 +118,7 @@ Do not auto-delete. Do not treat queue presence as proof something is wrong. Do
 not auto-accept suggested relations or batch risky mutations without user
 confirmation.
 
-<!-- exomem-semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d -->
+<!-- exomem-semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2 -->
 ## Semantic authoring contract
 
 Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
@@ -143,7 +143,7 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Exact applicability: obtain `bootstrap(profile="compact", section="authoring")` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(profile="full")` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `schema_memory(subject="note-types", operation="inspect")` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
-- Routes: use `remember` for a new compiled note, `replace_memory` for a replacement, `observe_memory` for one unit, and `edit_memory` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits.
+- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `observe_memory` for one unit, and `edit_note` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
 - Findings: `missing_semantic_unit` means an applicable live-class compiled result has no valid non-empty unit; `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.
 - Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`.
 - Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body.

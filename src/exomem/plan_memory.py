@@ -195,18 +195,19 @@ def plan_memory(
     transition: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Plan intent; record_memory holds outcomes.
+    """Manage intent; record_memory holds outcomes.
 
-    Inspect/query before writes; reread if stale. No time-inferred completion.
+    Inspect/query/validate/history read; others write. Writes select one queried item.
+    Reread if stale; time never proves completion.
     Help: bootstrap(section="records_planning").
 
     Args:
-        collection: Inspect: omit to list.
+        collection: Omit to list.
         plan_id: row plan_id.
-        expected_container_hash: inspect/query snapshot.
+        expected_container_hash: Returned snapshot.
         expected_item_version: row item_version.
-        changes: Update fields.
-        transition: Triage fields.
+        changes: Update.
+        transition: Triage.
     """
     values = locals().copy()
     values.pop("vault_root")

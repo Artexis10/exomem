@@ -95,7 +95,7 @@ def test_the_short_capture_check_keeps_the_incident_rules_by_name():
     for rule in (
         "live policy",
         "no transcripts",
-        "replace_memory supersedes",
+        "supersede_note supersedes",
         "Planning/plan_memory",
         "Records/record_memory",
         "transient code/test/CI",
@@ -131,10 +131,10 @@ def test_the_episode_ask_names_enough_fields_for_a_valid_record():
 
 def test_the_retrieval_texts_keep_recall_the_miss_reading_and_the_skip():
     text = retrieve.REMINDER
-    assert "ask_memory" in text and "cite" in text
+    assert "search_memory" in text and "cite" in text
     assert "not found in that scope" in text
     assert "skip" in text
-    assert "activate_context" in retrieve.REMINDER_POINTER
+    assert "recall_context" in retrieve.REMINDER_POINTER
 
 
 def test_the_retrieval_reminder_keeps_the_two_rules_the_diet_once_dropped():
@@ -143,7 +143,7 @@ def test_the_retrieval_reminder_keeps_the_two_rules_the_diet_once_dropped():
     text = retrieve.REMINDER
     assert "source of truth for prior conclusions" in text
     assert "reuse fresh KB context" in text
-    assert "reminder recurs" in text and "repeat" in text
+    assert "when reminded" in text and "repeat" in text
 
 
 def test_the_maximal_pointer_keeps_the_already_covered_escape():

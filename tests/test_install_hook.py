@@ -2406,6 +2406,27 @@ def test_capture_silent_after_modern_create_entity_write(tmp_path: Path) -> None
     assert r.stdout.strip() == ""
 
 
+@pytest.mark.parametrize("name", ("compile_source", "prepare_note"))
+def test_capture_still_fires_after_read_only_preparation(tmp_path: Path, name: str) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = _transcript(
+        tmp_path,
+        "q?",
+        "The preparation landed on a durable conclusion. " + "x" * 450,
+        assistant_tool=f"mcp__claude_ai_Exomem__{name}",
+    )
+    result = _run(
+        CAPTURE_SCRIPT,
+        {"transcript_path": str(transcript), "session_id": "preparation"},
+        home,
+        {"EXOMEM_PROMINENCE": "maximal"},
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["decision"] == "block"
+
+
 def test_capture_still_fires_after_validate_only_edit(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()

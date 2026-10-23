@@ -411,7 +411,7 @@ def _build_write_feedback(
     }
     if not suggestions_requested:
         suggestions_feedback["route"] = {
-            "tool": "remember",
+            "tool": "create_note",
             "args": {"suggestions": True, "response_detail": "full"},
         }
 

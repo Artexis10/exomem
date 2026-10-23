@@ -639,7 +639,7 @@ def test_the_teaching_lines_survive_a_reduced_surface(vault: Path) -> None:
         surface="test",
         profile="tier-one-only",
         tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory"),
+        product_commands=("bootstrap", "search_memory"),
     )
     with active_surface(descriptor):
         payload = commands.op_bootstrap(vault, section="all")

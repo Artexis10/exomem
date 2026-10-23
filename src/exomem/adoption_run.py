@@ -884,7 +884,7 @@ def finish(
             "at": _now_iso(),
             "recall_check": recall,
             "first_question": f'What do my notes say about "{title}"?',
-            "route": {"tool": "ask_memory", "args": {"query": title}},
+            "route": {"tool": "search_memory", "args": {"query": title}},
             "handoff": _handoff(run),
             "verified_unchanged": verified_unchanged,
             "verified_total": verified_total,

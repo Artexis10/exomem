@@ -50,10 +50,10 @@ def test_memory_arm_uses_real_shipped_tools_and_guidance(tmp_path):
 
     backend = ScriptedModel([
         _call("bootstrap", {"profile": "compact"}, "call-1"),
-        _call("discover_tools", {"names": ["remember"]}, "call-discover"),
-        _call("remember", {"content": "## Observations\n\n- [operating constraint] Project configuration requires bounded retries #reliability\n",
+        _call("discover_tools", {"names": ["create_note"]}, "call-discover"),
+        _call("create_note", {"content": "## Observations\n\n- [operating constraint] Project configuration requires bounded retries #reliability\n",
                            "title": "Project configuration", "note_type": "insight"}, "call-2"),
-        _call("ask_memory", {"query": "Project configuration bounded retries"}, "call-3"),
+        _call("search_memory", {"query": "Project configuration bounded retries"}, "call-3"),
         {"role": "assistant", "content": "Captured."},
     ])
 
@@ -73,7 +73,7 @@ def test_memory_arm_uses_real_shipped_tools_and_guidance(tmp_path):
     result, snapshot, readiness, before = asyncio.run(exercise())
     assert result["status"] == "completed", result.get("reason")
     assert result["tool_calls"] == 4
-    assert snapshot["compiled_count"] > before["compiled_count"], "remember must create a compiled note"
+    assert snapshot["compiled_count"] > before["compiled_count"], "create_note must create a compiled note"
     events = [json.loads(line) for line in (tmp_path / "phase" / "events.jsonl").read_text().splitlines()]
     responses = [e["result"] for e in events if e.get("direction") == "response" and "result" in e]
     assert all(not r.get("isError") for r in responses), responses
