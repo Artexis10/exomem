@@ -745,6 +745,7 @@ def _turn_record(
         "hook_responses": hooks,
         "push_bytes": sum(len(h["push"].encode("utf-8")) for h in hooks),
         "calls": len(calls),
+        "activation_calls": sum(1 for c in calls if c.get("name") == protocol.ACTIVATION_TOOL),
         "calls_served": sum(1 for c in calls if c.get("outcome") == "served"),
         "calls_refused_budget": sum(1 for c in calls if c.get("outcome") == "refused_budget"),
         "calls_refused_filtered": sum(1 for c in calls if c.get("outcome") == "refused_filtered"),

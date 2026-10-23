@@ -273,6 +273,8 @@ def case_table(
                     if attempt["outcome"] == HARNESS_FAULT
                 ],
                 "calls": sum(t["calls"] for t in turns) / len(records),
+                "user_turns": len(turns),
+                "turns_with_activation": sum(1 for t in turns if t["activation_calls"]),
                 "input_tokens": sum(t["input_tokens"] for t in turns) / len(records),
                 "output_tokens": sum(t["output_tokens"] for t in turns) / len(records),
                 "push_bytes": sum(t["push_bytes"] for t in turns) / len(records),
@@ -532,8 +534,16 @@ def secondary(*, cases: Sequence[Case], table: Mapping, arm_ids: Sequence[str]) 
                 "score": sum(r["score"] for r in subset) / len(subset),
                 **{m: _mean([r[m] for r in subset]) for m in _MEASURES},
             }
+        user_turns = sum(row["user_turns"] for _, row in rows)
+        activated = sum(row["turns_with_activation"] for _, row in rows)
         out[arm] = {
             "by_turn_completeness": per_completeness,
+            # M's map reaches the actor only when it obeys the reminder.
+            "activation_share": {
+                "user_turns": user_turns,
+                "with_activation": activated,
+                "share": activated / user_turns if user_turns else None,
+            },
             # Final outcomes that score 0, and every retried attempt's fault.
             "failures_by_kind": _counts(kind for _, row in rows for kind in row["failures"]),
             "harness_faults_by_kind": _counts(
@@ -578,6 +588,19 @@ def usage(layout: Layout, sessions: Mapping[str, Mapping], *, project_sessions: 
             **{k: v * project_sessions for k, v in per_session.items()},
         }
     return out
+
+
+#: The confounds the protocol tells the report to name (design, "Decision and
+#: arms", "Pull budget" and "Secondary measures").
+CONFOUNDS: tuple[str, ...] = (
+    f"Pull budget: A and M have {protocol.PULL_BUDGET_PER_TURN - 1} Exomem calls left after "
+    f"their {protocol.ACTIVATION_TOOL} call, and P has {protocol.PULL_BUDGET_PER_TURN}.",
+    f"Call counts: M's count includes the {protocol.ACTIVATION_TOOL} call that fetches its map, "
+    "and P has no such call.",
+    f"P lacks {protocol.P_FILTERED_TOOL} through a client-side tool filter, while the shared "
+    "server instructions still mention it.",
+    "M - A changes both the packet and the client instructions.",
+)
 
 
 def score_run(
@@ -625,4 +648,5 @@ def score_run(
         "actor_failures": sum(1 for r in sessions.values() if r["outcome"] == ACTOR_FAILURE),
         "deltas": {str(k): v for k, v in deltas.items()},
         "seed": seed,
+        "confounds": CONFOUNDS,
     }

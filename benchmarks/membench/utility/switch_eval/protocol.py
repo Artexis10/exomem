@@ -18,8 +18,12 @@ ARM_IDS: tuple[str, ...] = ("A", "M", "P")
 #: fixes, not vocabulary the data defines.
 READ_TOOLS: tuple[str, ...] = ("activate_context", "ask_memory", "read_memory", "browse_memory")
 
+#: "Decision and arms": the tool that fetches an arm's packet. The hook's
+#: reminder is not a call; this call is, against the pull budget.
+ACTIVATION_TOOL = "activate_context"
+
 #: "Decision and arms": P lacks this tool through a client-side tool filter.
-P_FILTERED_TOOL = "activate_context"
+P_FILTERED_TOOL = ACTIVATION_TOOL
 
 #: "Decision": the setting whose default the evaluation decides.
 PACKET_SETTING = "EXOMEM_ACTIVATION_PACKET"

@@ -417,7 +417,8 @@ def test_scoring_refuses_a_run_whose_failed_repeat_lost_its_record(tmp_path: Pat
 
 def test_usage_and_the_failure_report_read_every_attempt_not_only_the_last(tmp_path: Path) -> None:
     layout = Layout(tmp_path / "run")
-    turn = {"calls": 1, "input_tokens": 100, "output_tokens": 10, "push_bytes": 0, "wall_seconds": 1.0, "hook_responses": []}
+    turn = {"calls": 1, "activation_calls": 0, "input_tokens": 100, "output_tokens": 10, "push_bytes": 0,
+            "wall_seconds": 1.0, "hook_responses": []}  # fmt: skip
     record = _session(
         layout, "case-1", "A", 1,
         AttemptResult(HARNESS_FAULT, "rate_limit", turns=[turn]),
@@ -433,6 +434,23 @@ def test_usage_and_the_failure_report_read_every_attempt_not_only_the_last(tmp_p
 
     assert scored["usage"]["totals"] == {"input_tokens": 300, "output_tokens": 30, "wall_seconds": 3.0, "attempts": 3}
     assert scored["secondary"]["A"]["harness_faults_by_kind"] == {"rate_limit": 1, "transport": 1}
+
+
+def test_the_activation_share_counts_user_turns_with_an_activate_context_call_not_calls(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    def turn(calls: int, activation_calls: int) -> dict:
+        return {"calls": calls, "activation_calls": activation_calls, "input_tokens": 0, "output_tokens": 0,
+                "push_bytes": 0, "wall_seconds": 0.0, "hook_responses": []}  # fmt: skip
+    # M obeys the reminder on one of its two user turns, and activates twice there.
+    record = _session(layout, "case-1", "M", 1, AttemptResult(OK, answer="An answer.", turns=[turn(3, 2), turn(1, 0)]))
+    verdict = {"required": {}, "forbidden": {}, "contaminated": None}
+
+    scored = score_run(
+        layout, cases=[_case("case-1")], sessions={record["session_id"]: record}, verdicts={record["session_id"]: verdict},
+        arm_ids=["M"], repeats=1, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0,
+    )  # fmt: skip
+
+    assert scored["secondary"]["M"]["activation_share"] == {"user_turns": 2, "with_activation": 1, "share": 0.5}
 
 
 # The stateless handshake is what the pinned client sends on the 2026-07-28 protocol.
