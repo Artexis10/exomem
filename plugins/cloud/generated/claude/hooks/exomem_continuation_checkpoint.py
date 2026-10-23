@@ -1357,7 +1357,11 @@ def _open_posix_directory(path: Path, *, create: bool, mode: int) -> int:
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(part, mode=mode, dir_fd=current_fd)
+                try:
+                    os.mkdir(part, mode=mode, dir_fd=current_fd)
+                except FileExistsError:
+                    # A concurrent creator still has to pass the secure reopen below.
+                    pass
                 child_fd = os.open(part, flags, dir_fd=current_fd)
             if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
                 os.close(child_fd)
@@ -1396,7 +1400,11 @@ def _open_secure_directory(
                 except FileNotFoundError:
                     if not create:
                         raise
-                    current.mkdir(mode=mode)
+                    try:
+                        current.mkdir(mode=mode)
+                    except FileExistsError:
+                        # Reopen and validate the winner through its retained handles.
+                        pass
                     handles.append(_windows_open_path(current, directory=True))
             directory = _SecureDirectory(absolute, windows_handles=handles)
         except BaseException:
