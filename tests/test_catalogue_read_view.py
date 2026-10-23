@@ -164,7 +164,7 @@ def test_encoder_cutover_cannot_cache_old_serving_results_under_the_new_key(
         return []
 
     monkeypatch.setattr(embeddings, "embed_texts", encode)
-    monkeypatch.setattr(embeddings.EmbeddingIndex, "search", search)
+    monkeypatch.setattr(embeddings.EmbeddingIndex, "select_chunks", search)
     monkeypatch.setattr(embeddings.EmbeddingIndex, "search_semantic_units", search)
     degraded: list[str] = []
     hits = find_module.find(
@@ -553,17 +553,21 @@ def test_main_unit_annotations_keep_the_selected_bytes_through_reranking(
     assert "recall_projection" in degraded
 
 
+@pytest.mark.parametrize(
+    "catalogue_available", [True, False], ids=["managed-catalogue", "offline-held-only"],
+)
 def test_selected_pending_annotations_survive_global_retirement(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, catalogue_available: bool,
 ) -> None:
-    """Retirement cannot replace the exact pending page already held by a request."""
-    from exomem import embeddings, pending_recall
+    """Retirement preserves held bytes and leading blanks, including without a catalogue."""
+    from exomem import embeddings, pending_recall, readiness
     from exomem import find as find_module
 
     parent = vault / "Knowledge Base/Notes/pending-annotation.md"
     authored = (
-        "---\ntype: insight\nexomem_id: 74e7c051-bfba-4781-b47f-c5eb59ab3ae2\n---\n\n"
-        "# Pending annotation\n\n- [config] BEFORE ^pending-annotation\n"
+        "---\ntype: insight\nexomem_id: 74e7c051-bfba-4781-b47f-c5eb59ab3ae2\n"
+        "metadata: {priority: 3}\n---\n\n\n"
+        "# Pending annotation\n\n- [config] BEFORE #held ^pending-annotation\n"
     )
     parent.write_text(authored, encoding="utf-8")
     warm_managed_cell(vault)
@@ -571,6 +575,7 @@ def test_selected_pending_annotations_survive_global_retirement(
     before = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
     parent.write_text(authored.replace("BEFORE", "pendingannotationmarker HELD"), encoding="utf-8")
     page = find_module._CACHE.get(parent, vault)
+    assert page.body.startswith("\n")
     overlay = pending_recall.PendingOverlay(
         "ready",
         None,
@@ -588,14 +593,25 @@ def test_selected_pending_annotations_survive_global_retirement(
     )
     current = [overlay]
     monkeypatch.setattr(freshness, "recall_pending_coverage", lambda _root: current[0])
+    filters = {"unit.category": {"$eq": "config"}}
+    if not catalogue_available:
+        monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+        monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
+        filters = {"$and": [
+            {"unit.tags": {"$contains": "held"}},
+            {"page.frontmatter:/metadata/priority": {"$eq": 3}},
+        ]}
 
     def rerank(_query, passages):
         assert lexstore._admitted_catalog_view(vault) is None
-        freshness.on_files_changed(vault, changed=[parent])
-        for scope in freshness.SCOPES:
-            store.apply_catalog_delta(
-                scope, freshness.recall_delta_since(vault, scope, before[scope])
-            )
+        if catalogue_available:
+            freshness.on_files_changed(vault, changed=[parent])
+            for scope in freshness.SCOPES:
+                store.apply_catalog_delta(
+                    scope, freshness.recall_delta_since(vault, scope, before[scope])
+                )
+        else:
+            parent.write_text(authored.replace("BEFORE", "pendingannotationmarker LATER"), encoding="utf-8")
         current[0] = pending_recall.PendingOverlay("ready", None, 2, {})
         return [1.0] * len(passages)
 
@@ -606,7 +622,7 @@ def test_selected_pending_annotations_survive_global_retirement(
         graph=False,
         rerank=True,
         result_level="page",
-        filters={"unit.category": {"$eq": "config"}},
+        filters=filters,
     )
 
     assert current[0].empty

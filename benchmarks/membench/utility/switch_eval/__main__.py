@@ -316,7 +316,12 @@ def _arm_hashes(layout, inputs, specs, trees) -> dict:
 
 
 def cmd_state(args: argparse.Namespace) -> int:
-    from .state import build_arm
+    from .state import StateError, build_arm, validate_build_cpu_threads
+
+    try:
+        validate_build_cpu_threads(args.cpu_threads)
+    except StateError as error:
+        raise SystemExit(f"refused: {error}") from error
 
     layout, inputs, cases, _plan, specs = _context(Path(args.run))
     _stage(layout, inputs, "state")
@@ -325,10 +330,19 @@ def cmd_state(args: argparse.Namespace) -> int:
         for arm in inputs["arms"]:
             source = Path(inputs["trees"][tree]["path"])
             record = build_arm(
-                layout, specs[arm], tree=tree, source_vault=source, parent_env=os.environ
+                layout,
+                specs[arm],
+                tree=tree,
+                source_vault=source,
+                parent_env=os.environ,
+                cpu_threads=args.cpu_threads,
             )
             print(
                 f"arm {arm} tree {tree}: state {record['state_digest'][:16]} vault {record['vault_digest'][:16]} (shared tree build {record['build_seconds']} s)"
+            )
+            budget = record.get("cpu_threads", "unrecorded")
+            print(
+                f"tree {tree}: build CPU override {budget if budget is not None else 'production default'}; resumed {record.get('resumed', 'unrecorded')}"
             )
     hashes = _arm_hashes(layout, inputs, specs, needed)
     (layout.run / "arm-hashes.json").write_text(
@@ -687,7 +701,14 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
         short=short,
         audit=audit,
     )
-    return {**result, "power_step": power_digest}
+    state_builds = {}
+    for tree in sorted({case.tree for case in cases}):
+        record = _load(layout.shared_tree(tree), "state.json")
+        state_builds[tree] = {
+            "cpu_threads": record.get("cpu_threads"),
+            "resumed": record.get("resumed"),
+        }
+    return {**result, "power_step": power_digest, "state_builds": state_builds}
 
 
 def cmd_score(args: argparse.Namespace) -> int:
@@ -724,6 +745,7 @@ def cmd_score(args: argparse.Namespace) -> int:
             state = "holds" if verdict["holds"] else "fails"
         print(f"rule {rule}: {state}")
     print(f"arm-guess audit: {result['arm_guess_audit']['state']}")
+    print(f"state builds: {json.dumps(result['state_builds'], sort_keys=True)}")
     excluded = result["rules"]["5"].get("excluded_no_gold")
     if excluded:
         print(f"rule 5 excludes positives with no gold to lose: {', '.join(excluded)}")
@@ -891,6 +913,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     p = sub.add_parser("state", help="build each tree once and capture each arm surface")
     p.add_argument("--run", required=True)
+    p.add_argument(
+        "--cpu-threads",
+        type=int,
+        help="CPU threads for publication only (default: production budget)",
+    )
     p.set_defaults(func=cmd_state)
 
     p = sub.add_parser("startup-proof-server", help=argparse.SUPPRESS)

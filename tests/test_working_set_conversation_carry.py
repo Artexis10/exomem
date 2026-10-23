@@ -26,6 +26,7 @@ from test_working_set_index import _seed_planning, _seed_structure
 
 from exomem import (
     commands,
+    freshness,
     lexstore,
     working_set_heat,
     working_set_index,
@@ -345,6 +346,7 @@ def test_round7_conversation_footprint_preserves_the_ordinary_budget(cvault: Pat
         "Ottilie Marsh coordinates the estuary team. "
         + "The estuary survey records distinct observations for the next review. " * 8,
     ))
+    freshness.on_files_changed(cvault, changed=[page])
     working_set_index.WorkingSetIndex(cvault).rebuild()
     lexstore.ensure_fresh(cvault)
     working_set_runtime.reset_caches_for_tests()

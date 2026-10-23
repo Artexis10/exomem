@@ -497,7 +497,7 @@ def test_cached_keyword_hit_checks_both_disclosed_child_sources(
     assert timings.cache["hit"] is True
     assert second == []
     assert "recall_projection" in degraded
-    assert "keyword_sources" not in first[0].as_dict()
+    assert "evidence_sources" not in first[0].as_dict()
 
 
 @library_scope()

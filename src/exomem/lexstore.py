@@ -455,11 +455,14 @@ def _ranking_metadata(raw: str) -> RankingPage:
         raise ValueError("invalid ranking frontmatter") from error
     if not isinstance(frontmatter, dict):
         raise ValueError("invalid ranking frontmatter")
-    for key in ("stem_set", "outbound_targets"):  # nosemgrep: ep-word-set -- fixed ranking payload fields
+    for key in ("stem_set", "outbound_targets", "superseded_by"):  # nosemgrep: ep-word-set -- fixed ranking payload fields
         if not isinstance(payload[key], list) or not all(isinstance(value, str) for value in payload[key]):
             raise ValueError("invalid ranking text projection")
     payload["stem_set"] = frozenset(payload["stem_set"])
     payload["outbound_targets"] = tuple(payload["outbound_targets"])
+    payload["superseded_by"] = tuple(payload["superseded_by"])
+    if not isinstance(payload["title"], str):
+        raise ValueError("invalid ranking title")
     return RankingPage(frontmatter=frontmatter, **payload)
 
 
@@ -697,7 +700,8 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: 13: `semantic_units` holds selection-free structural occurrences and
 #: `pages.structure_json` their summary; readers interpret both per operation.
 #: 14: `pages.ranking_json` holds ranking and link inputs from the page snapshot.
-SCHEMA_VERSION = 14
+#: 15: parent structure includes separately versioned prose-carrier positions.
+SCHEMA_VERSION = 15
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -1052,21 +1056,30 @@ class _SelectedUnits:
                 if unit is not None and unit.unit_ref is not None:
                     yield row, unit
 
-    def corpus(self, column: str, parents: set[str]) -> dict[str, list[str]]:
+    def corpus(
+        self, column: str, parents: set[str], representatives: dict[int, str],
+        occurrences: dict[str, list[tuple[int, str, str]]],
+    ) -> dict[str, list[str]]:
         """Stemmed tokens of every referable unit of `parents`, keyed by public ref.
 
         Ranking statistics come from this selected corpus, so a candidate no
         interpretation emits, or an overlapping occurrence, never weighs in.
         """
         rows = self.conn.execute(
-            "SELECT u.unit_ref, u.parent_path, unit_fts.stemmed FROM semantic_units u "
+            "SELECT u.unit_ref, u.parent_path, unit_fts.stemmed, u.rowid FROM semantic_units u "
             "JOIN unit_fts ON unit_fts.rowid = u.rowid "
             f"WHERE u.{column} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
             (json.dumps(sorted(parents), ensure_ascii=False),),
         )
         corpus: dict[str, list[str]] = {}
         for row, unit in self.served(rows):
-            corpus.setdefault(str(unit.unit_ref), str(row[2]).split())
+            ref = str(unit.unit_ref)
+            if ref not in corpus:
+                corpus[ref] = str(row[2]).split()
+                representatives[int(row[3])] = ref
+            # Retain identities without text; ambiguous hit precedence still
+            # belongs to the original candidate SQL traversal.
+            occurrences.setdefault(ref, []).append((int(row[3]), str(row[1]), str(row[0])))
         return corpus
 
 
@@ -2433,6 +2446,8 @@ CATALOGUE_RANKING_CONTRACT_VIOLATION = "catalogue_ranking_withheld_row"
 class _AdmittedStatisticsEntry:
     fingerprint: bytes
     statistics: Any
+    representatives: Mapping[int, str] | None = None
+    occurrences: Mapping[str, tuple[tuple[int, str, str], ...]] | None = None
 
 
 @dataclass
@@ -3396,6 +3411,8 @@ class EligibilityMetadata:
     frame_ts: float | None
     units: tuple[dict[str, Any], ...] = ()
     ranking: RankingPage | None = None
+    occurrences: tuple[tuple[SemanticUnitLexicalHit, Any, Mapping[str, Any], str], ...] = ()
+    content_hash: str | None = None
 
 
 def parent_children_result(
@@ -3433,6 +3450,7 @@ def eligibility_metadata_result(
     include_units: bool = False,
     parents_only: bool = False,
     include_ranking: bool = False,
+    include_occurrences: bool = False,
 ) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
     """Exact filter views and parent hints from one proven catalogue snapshot.
 
@@ -3448,6 +3466,7 @@ def eligibility_metadata_result(
         lambda conn: _eligibility_metadata_query(
             vault_root, conn, paths, include_units=include_units, parents_only=parents_only,
             include_ranking=include_ranking,
+            include_occurrences=include_occurrences,
         ),
         "lexical eligibility metadata query failed (%s); filter eligibility declines",
     )
@@ -3461,6 +3480,7 @@ def _eligibility_metadata_query(
     include_units: bool,
     parents_only: bool = False,
     include_ranking: bool = False,
+    include_occurrences: bool = False,
 ) -> dict[str, EligibilityMetadata]:
     from .vocabulary.registry import RegistryError
 
@@ -3492,8 +3512,9 @@ def _eligibility_metadata_query(
                 None if payload is None else payload["media_file"],
                 None if payload is None else payload["frame_ts"],
                 ranking=None if ranking is None else _ranking_metadata(ranking),
+                content_hash=content_hash,
             )
-        if not include_units:
+        if not (include_units or include_occurrences):
             return result
         # Each page's units as its selected interpretation emits them; a page
         # the caller may not see keeps no units and is never interpreted.
@@ -3505,6 +3526,7 @@ def _eligibility_metadata_query(
             (json.dumps(sorted(result), ensure_ascii=False),),
         )
         units: dict[str, list[dict[str, Any]]] = {}
+        occurrences: dict[str, list[tuple]] = {}
         for row, served in view.served(unit_rows):
             path, verdict, check_by = row[1], row[17], row[18]
             unit = dict(
@@ -3521,11 +3543,16 @@ def _eligibility_metadata_query(
             if check_by is not None:
                 unit["check_by"] = date.fromisoformat(check_by)
             units.setdefault(str(path), []).append(unit)
+            if include_occurrences:
+                parent = view.parents.parent(str(path))
+                occurrences.setdefault(str(path), []).append((_unit_hit(row, served, None), parent, unit, str(row[0])))
         view.require_complete()
         from dataclasses import replace
 
         for path, values in units.items():
-            result[path] = replace(result[path], units=tuple(values))
+            result[path] = replace(
+                result[path], units=tuple(values), occurrences=tuple(occurrences.get(path, ())),
+            )
     except RegistryError:
         # Unavailable definitions are a dependent outcome, not a corrupt snapshot.
         raise
@@ -4972,6 +4999,7 @@ class LexicalStore:
             " tags_canonical_json TEXT,"
             " UNIQUE(parent_path, unit_ref))"
         )
+        self._create_frequency_revision_triggers(conn, "semantic_units")
 
     def _create_frequency_revision_triggers(
         self, conn: sqlite3.Connection, table: str
@@ -5082,6 +5110,7 @@ class LexicalStore:
                 "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts "
                 f"USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
+            self._create_frequency_revision_triggers(conn, "unit_fts_content")
         except sqlite3.Error as e:
             log.debug(
                 "lexical FTS/trigram virtual tables unavailable (%s); "
@@ -8245,6 +8274,40 @@ class LexicalStore:
             context.generation = generation
         return context.admitted_paths
 
+    def _admitted_unit_statistics(
+        self, conn: sqlite3.Connection, scope: str, parents: set[str], view: _SelectedUnits,
+    ) -> _AdmittedStatisticsEntry:
+        """Selected-unit figures and first-occurrence row identities for this snapshot."""
+        from . import bm25 as bm25_module
+
+        admitted = {path for path in parents if view.parents.allowed(path)}
+        digest = hashlib.blake2b(
+            "\0".join(sorted(admitted)).encode("utf-8", "surrogatepass"), digest_size=16,
+        ).hexdigest()
+        # This technical tag separates unit statistics from page statistics.
+        key = ("semantic-units", scope, *self._snapshot_generation(conn), digest,
+               view.interpretations.dependency())
+        with self._term_frequency_cache_lock:
+            cached = self._admitted_statistics.get(key)
+        if cached is not None:
+            return cached
+        representatives: dict[int, str] = {}
+        occurrences: dict[str, list[tuple[int, str, str]]] = {}
+        corpus = view.corpus(
+            "in_vault" if scope == "vault" else "in_kb", admitted, representatives, occurrences,
+        )
+        view.require_complete()
+        call_spans.measure(call_spans.STATS_REBUILT)
+        entry = _AdmittedStatisticsEntry(
+            b"", bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
+            MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
+        )
+        with self._term_frequency_cache_lock:
+            if len(self._admitted_statistics) >= _ADMITTED_STATISTICS_MAX:
+                self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
+            self._admitted_statistics[key] = entry
+        return entry
+
     @staticmethod
     def _frequency_revision(conn: sqlite3.Connection) -> str:
         row = conn.execute("SELECT value FROM meta WHERE key = 'frequency_revision'").fetchone()
@@ -9276,22 +9339,18 @@ class LexicalStore:
 
         def query(conn: sqlite3.Connection) -> list[SemanticUnitLexicalHit]:
             tokens: list[str] = []
+            view = _SelectedUnits(self.vault_root, conn, admitted=admitted_parent_paths)
+            statistics = None
             if query_units is not None and term_budget is not None:
                 measured = [stem for unit in query_units for stem in unit.stems]
                 if admitted_parent_paths is None:
                     frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
                 else:
-                    # Frequencies over the admitted parents' selected units only.
-                    view = _SelectedUnits(self.vault_root, conn, admitted=admitted_parent_paths)
-                    corpus = [
-                        set(tokens)
-                        for tokens in view.corpus(
-                            "in_vault" if scope == "vault" else "in_kb", admitted_parent_paths
-                        ).values()
-                    ]
-                    view.require_complete()
-                    frequencies = {token: sum(token in doc for doc in corpus) for token in measured}
-                    pages = len(corpus)
+                    statistics = self._admitted_unit_statistics(conn, scope, admitted_parent_paths, view)
+                    frequencies = {
+                        token: statistics.statistics.document_frequency.get(token, 0) for token in measured
+                    }
+                    pages = statistics.statistics.pages
                 kept, _counted, _dropped = select_query_units(
                     query_units, frequencies, pages, term_budget,
                 )
@@ -9306,6 +9365,7 @@ class LexicalStore:
                 allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
                 excluded_categories_by_parent=excluded_categories_by_parent,
                 registry_scope=registry_scope,
+                selected_units=view, statistics=statistics,
             )
 
         return self._serve_from_ready_catalog_result(
@@ -9333,6 +9393,8 @@ class LexicalStore:
         admitted_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
         registry_scope: str | None = None,
+        selected_units: _SelectedUnits | None = None,
+        statistics: _AdmittedStatisticsEntry | None = None,
     ) -> list[SemanticUnitLexicalHit]:
         """Units whose own selected meaning matches, ranked, then limited to `k`.
 
@@ -9342,14 +9404,17 @@ class LexicalStore:
         branch-preserving disjunction: a unit must match one clause on its
         own category and kind together.
         """
-        from . import bm25 as bm25_module
-
+        # Content-only callers also pin row identities and their ranking tokens
+        # together. The caller closes this operation's read connection.
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
         col = "in_vault" if scope == "vault" else "in_kb"
-        view = _SelectedUnits(self.vault_root, conn, admitted=admitted_parent_paths)
+        view = selected_units or _SelectedUnits(self.vault_root, conn, admitted=admitted_parent_paths)
         plans = view.plans(
             categories=categories, kinds=kinds, clauses=dnf_clauses, registry_scope=registry_scope
         )
-        predicate, params = view.predicate(plans)
+        predicate, predicate_params = view.predicate(plans)
+        params = list(predicate_params)
         clauses = [f"u.{col} = 1", predicate]
         for paths in (allowed_parent_paths, admitted_parent_paths):
             if paths is not None:
@@ -9376,15 +9441,58 @@ class LexicalStore:
         if ranked and admitted_parent_paths is not None:
             # Statistics over the admitted parents' selected units, keyed and
             # tie-broken by public identity as the ranked hits are.
-            corpus = view.corpus(col, admitted_parent_paths)
-            candidates = {
-                str(unit.unit_ref): (row, unit)
-                for row, unit in view.served(
-                    conn.execute(f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE {where}", params)
+            statistics = statistics or self._admitted_unit_statistics(conn, scope, admitted_parent_paths, view)
+            representatives = statistics.representatives or {}
+            occurrences = statistics.occurrences or {}
+            match = " OR ".join(f'"{token}"' for token in tokens)
+            candidate_tokens = {}
+            candidates = {}
+            ambiguous = set()
+            for (representative,) in conn.execute("SELECT rowid FROM unit_fts WHERE unit_fts MATCH ?", (match,)):
+                ref = representatives.get(representative)
+                if ref is None or allowed_unit_refs is not None and ref not in allowed_unit_refs:
+                    continue
+                winner = None
+                eligible = 0
+                for rowid, path, key in occurrences[ref]:
+                    if allowed_parent_paths is not None and path not in allowed_parent_paths:
+                        continue
+                    if conn.execute(
+                        f"SELECT 1 FROM semantic_units u WHERE u.rowid = ? AND {predicate}",
+                        [rowid, *predicate_params],
+                    ).fetchone() is None:
+                        continue
+                    unit = view.unit(path, key)
+                    if unit is not None and wanted((key, path), unit):
+                        winner = (rowid, unit)
+                        eligible += 1
+                if winner is None:
+                    continue
+                if eligible > 1:
+                    ambiguous.add(ref)
+                else:
+                    rowid, unit = winner
+                    row = conn.execute(
+                        f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE u.rowid = ?", (rowid,),
+                    ).fetchone()
+                    candidates[ref] = (row, unit)
+                stemmed = conn.execute("SELECT stemmed FROM unit_fts WHERE rowid = ?", (representative,)).fetchone()
+                # First-representative tokens rank the last eligible alias;
+                # neither a matching alias nor a predicate changes those tokens.
+                candidate_tokens[ref] = str(stemmed[0]).split()
+            if ambiguous:
+                # Duplicate refs retain the original unordered SELECT authority.
+                # This compatibility fallback still scans candidate content; its bound remains unmet.
+                keys = {(path, key) for ref in ambiguous for _rowid, path, key in occurrences[ref]}
+                rows = conn.execute(
+                    f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE {where}", params,
                 )
-                if wanted(row, unit) and str(unit.unit_ref) in corpus
-            }
-            scored = bm25_module.score_token_corpus(corpus, tokens, k, allowed_paths=set(candidates))
+                for row, unit in view.served(row for row in rows if (str(row[1]), str(row[0])) in keys):
+                    if wanted(row, unit) and str(unit.unit_ref) in ambiguous:
+                        candidates[str(unit.unit_ref)] = (row, unit)
+            scored = statistics.statistics.score(
+                {ref: candidate_tokens[ref] for ref in candidates}, tokens, k,
+            )
             hits = [_unit_hit(*candidates[ref], score) for ref, score in scored]
         else:
             if ranked:
@@ -9745,6 +9853,7 @@ class LexicalStore:
             "p.eligibility_view_json IS NOT NULL", "p.content_hash IS NOT NULL",
             "p.ranking_json IS NOT NULL", "NOT EXISTS (SELECT 1 FROM pending WHERE path = p.path)",
         ))
+        # Keep MATCH first: older SQLite otherwise probes tri once per admitted page.
         # JSON keys are the private transport of frozen pending parser facts.
         rows = conn.execute(
             "WITH pending AS MATERIALIZED ("
@@ -9755,7 +9864,7 @@ class LexicalStore:
             "json_extract(value, '$.parseable') AS parseable FROM json_each(?)), "
             "matched AS (SELECT p.path, p.emitted_parent_path AS parent, p.updated, p.content_hash AS hash, "
             "json_extract(p.eligibility_view_json, '$.media_file') AS media_file, 1 AS priority, 0 AS ordinal "
-            "FROM tri JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses) + " "
+            "FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses) + " "
             "UNION ALL SELECT path, parent, updated, hash, media_file, 0, ordinal "
             "FROM pending WHERE matches = 1 AND parseable = 1), "
             "parents AS (SELECT m.*, CASE WHEN overlay.path IS NOT NULL THEN overlay.parseable "

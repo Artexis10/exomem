@@ -233,6 +233,8 @@ class RankingPage:
     stem_set: frozenset[str]
     letter_script: str | None
     outbound_targets: tuple[str, ...]
+    title: str = ""
+    superseded_by: tuple[str, ...] = ()
 
     @classmethod
     def from_page(cls, page: ParsedPage) -> RankingPage:
@@ -251,6 +253,8 @@ class RankingPage:
             stem_set=page.stem_set,
             letter_script=page.letter_script,
             outbound_targets=find_results.wikilink_targets(page.body),
+            title=page.title,
+            superseded_by=tuple(page.superseded_by),
         )
 
 
@@ -304,8 +308,8 @@ class Hit:
     result_type: str | None = None
     mixed_units_truncated: int = 0
     snapshot_hash: str | None = None
-    # Managed keyword excerpts and annotations can disclose separate child snapshots.
-    keyword_sources: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    # Selected excerpts and annotations can disclose separate source snapshots.
+    evidence_sources: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     # Release-plane annotation, attached by `governance.egress.annotate_hits`
     # strictly AFTER `find()` returns (design D2). It is per-principal, so it
     # must never be present on a candidate stored in the shared `_FIND_CACHE`
