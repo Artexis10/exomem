@@ -103,8 +103,9 @@ def test_ranking_views_equal_parsed_pages_without_reading_markdown(
 
 
 @library_scope()
-def test_warm_hybrid_hydrates_only_output_after_corpus_growth(
-    vault: Path, warm_managed_cell, monkeypatch, walk_sentinel
+@pytest.mark.parametrize("mode", ["hybrid", "keyword"])
+def test_warm_page_recall_hydrates_only_output_after_corpus_growth(
+    vault: Path, warm_managed_cell, monkeypatch, walk_sentinel, mode: str,
 ) -> None:
     """Temporal ranking and multipliers must not hydrate every lexical candidate."""
     for index in range(60):
@@ -114,7 +115,7 @@ def test_warm_hybrid_hydrates_only_output_after_corpus_growth(
     reads = _PageReadSentinel(vault)
     reads.install(monkeypatch)
     walks = walk_sentinel(vault, current_thread_only=True)
-    kwargs = dict(query="rankcatalogue latest", scope="kb-only", limit=4, graph=False, rerank=False)
+    kwargs = dict(query="rankcatalogue latest", scope="kb-only", limit=4, graph=False, rerank=False, mode=mode)
     first = find_module.find(vault, **kwargs)
     assert len(first) == 4
     assert reads.count <= 4, reads.report()
@@ -172,6 +173,10 @@ def test_unparseable_parent_keeps_the_same_generation_collapse(
         recall_paths={child, parent}, metadata_paths=metadata.keys(),
     )
     assert actual == expected == [parent]
+    keyword = find_module.find(
+        vault, query="rankcatalogue latest", mode="keyword", scope="kb-only", graph=False,
+    )
+    assert [hit.path for hit in keyword] == [child]
 
 
 @library_scope()
@@ -320,8 +325,9 @@ def test_managed_graph_and_fusion_equal_the_same_generation_parsed_oracle(
 
 
 @library_scope()
+@pytest.mark.parametrize("mode", ["hybrid", "keyword"])
 def test_many_matching_frames_hydrate_only_the_selected_parent_and_frame(
-    vault: Path, warm_managed_cell, monkeypatch
+    vault: Path, warm_managed_cell, monkeypatch, mode: str,
 ) -> None:
     parent = _write(vault, "clip", "media_type: video\nupdated: 2026-10-01\n", "Parent transcript.")
     children = []
@@ -336,9 +342,178 @@ def test_many_matching_frames_hydrate_only_the_selected_parent_and_frame(
     reads = _PageReadSentinel(vault)
     reads.install(monkeypatch)
     hits = find_module.find(
-        vault, query="rankcatalogue latest", scope="kb-only", graph=False, rerank=False,
+        vault, query="rankcatalogue latest", scope="kb-only", graph=False, rerank=False, mode=mode,
     )
     assert [hit.path for hit in hits] == [parent]
     assert hits[0].scene_frame in [child[:-3] for child in children]
     assert "rankcatalogue latest" in hits[0].excerpt
     assert reads.count == 2, reads.report()
+
+
+@library_scope()
+@pytest.mark.parametrize("parent_first", [True, False], ids=["parent-nearest-frame", "separate-children"])
+def test_keyword_group_sources_keep_exhaustive_frame_precedence(
+    vault: Path, warm_managed_cell, monkeypatch, parent_first: bool,
+) -> None:
+    from exomem import readiness, scene_frames
+
+    video = f"{kb_dirname()}/Evidence/group.mp4"
+    frame_dir = vault / (video + ".frames")
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    for index, timestamp in enumerate((5.0, 75.0)):
+        (frame_dir / scene_frames.frame_filename(index, timestamp)).write_bytes(b"frame")
+    annotation = video + ".frames/" + scene_frames.frame_filename(1, 75.0)
+    parent = _write(
+        vault, "group-parent",
+        f"media_type: video\nevidence_file: {video}\nupdated: 2026-10-02\n",
+        "[00:05] groupneedle parent text." if parent_first else "Parent transcript.",
+    )
+    first = _write(
+        vault, "group-first", f"parent_media: {parent[:-3]}\nupdated: 2026-10-01\n",
+        "groupneedle first child excerpt.",
+    )
+    later = _write(
+        vault, "group-later", f"parent_media: {parent[:-3]}\nevidence_file: {annotation}\n"
+        "frame_ts: 75.0\nupdated: 2026-09-30\n", "groupneedle later child annotation.",
+    )
+    warm_managed_cell(vault)
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    kwargs = dict(query="groupneedle", mode="keyword", scope="kb-only", graph=False, limit=1)
+    with monkeypatch.context() as oracle:
+        oracle.setattr(readiness, "runtime_managed", lambda: False)
+        expected = [hit.as_dict() for hit in find_module.find(vault, **kwargs)]
+    find_module.reset_page_and_result_caches()
+    reads = _PageReadSentinel(vault)
+    reads.install(monkeypatch)
+
+    actual = [hit.as_dict() for hit in find_module.find(vault, **kwargs)]
+
+    assert actual == expected
+    assert actual[0]["path"] == parent
+    assert actual[0]["scene_match_at"] == ("0:05" if parent_first else "1:15")
+    assert ("parent text" if parent_first else "first child excerpt") in actual[0]["excerpt"]
+    assert reads.count == (1 if parent_first else 3), reads.report()
+    assert {Path(path).relative_to(vault).as_posix() for path, _caller in reads.read} == (
+        {parent} if parent_first else {parent, first, later}
+    )
+
+
+@library_scope()
+def test_keyword_child_can_emit_an_authorized_parent_outside_the_raw_scope(
+    vault: Path, warm_managed_cell,
+) -> None:
+    parent = "Reference/outside-video.md"
+    path = vault / parent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("---\nmedia_type: video\nupdated: 2026-10-01\n---\n\nParent transcript.\n")
+    _write(vault, "inside-frame", f"parent_media: {parent[:-3]}\n", "outsideparentneedle child excerpt.")
+    warm_managed_cell(vault)
+
+    hits = find_module.find(vault, query="outsideparentneedle", mode="keyword", scope="kb-only", graph=False)
+
+    assert [hit.path for hit in hits] == [parent]
+    assert "child excerpt" in hits[0].excerpt
+
+
+@library_scope()
+@pytest.mark.parametrize("selected_parent", [False, True], ids=["unread-parent", "selected-parent"])
+def test_keyword_parent_deletion_keeps_the_admitted_groups_without_refill(
+    vault: Path, warm_managed_cell, monkeypatch, selected_parent: bool,
+) -> None:
+    from exomem import find_types
+
+    parent = _write(
+        vault, "drift-parent", f"updated: {'2026-12-01' if selected_parent else '2026-01-01'}\n",
+        "Parent transcript.",
+    )
+    child = _write(
+        vault, "drift-child", f"parent_media: {parent[:-3]}\nupdated: 2026-12-02\n",
+        "groupdriftmarker child evidence.",
+    )
+    ordinary = _write(vault, "drift-ordinary", "updated: 2026-10-01\n", "groupdriftmarker ordinary evidence.")
+    before = (vault / parent).read_bytes()
+    warm_managed_cell(vault)
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "16")
+    store = lexstore.get_store(vault)
+    select = store._keyword_groups_query
+    changed = False
+
+    def delete_after_selection(*args, **kwargs):
+        nonlocal changed
+        groups = select(*args, **kwargs)
+        if not changed:
+            changed = True
+            (vault / parent).unlink()
+        return groups
+
+    monkeypatch.setattr(store, "_keyword_groups_query", delete_after_selection)
+    reads = _PageReadSentinel(vault)
+    reads.install(monkeypatch)
+    degraded = []
+    kwargs = dict(query="groupdriftmarker", mode="keyword", scope="kb-only", graph=False, limit=1)
+    hits = find_module.find(vault, degraded_out=degraded, **kwargs)
+
+    assert [hit.path for hit in hits] == ([] if selected_parent else [ordinary])
+    assert all(Path(path).relative_to(vault).as_posix() != child for path, _caller in reads.read)
+    if selected_parent:
+        assert "recall_projection" in degraded
+        (vault / parent).write_bytes(before)
+        timings = find_types.FindTimings()
+        recovered = find_module.find(vault, timings=timings, **kwargs)
+        assert [hit.path for hit in recovered] == [parent]
+        assert timings.cache["hit"] is False
+
+
+@library_scope()
+@pytest.mark.parametrize("changed_source", ["excerpt", "annotation"])
+def test_cached_keyword_hit_checks_both_disclosed_child_sources(
+    vault: Path, warm_managed_cell, monkeypatch, changed_source: str,
+) -> None:
+    from exomem import find_types
+
+    parent = _write(vault, "cached-parent", "updated: 2026-10-03\n", "Parent transcript.")
+    excerpt = _write(
+        vault, "cached-excerpt", f"parent_media: {parent[:-3]}\nupdated: 2026-10-02\n",
+        "cachechildmarker excerpt evidence.",
+    )
+    annotation = _write(
+        vault, "cached-annotation", f"parent_media: {parent[:-3]}\nupdated: 2026-10-01\n"
+        "evidence_file: Evidence/frame.jpg\nframe_ts: 75.0\n", "cachechildmarker annotation evidence.",
+    )
+    warm_managed_cell(vault)
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "16")
+    kwargs = dict(query="cachechildmarker", mode="keyword", scope="kb-only", graph=False, limit=1)
+    first = find_module.find(vault, **kwargs)
+    assert [hit.path for hit in first] == [parent]
+    assert first[0].as_dict()["scene_frame"] == "Evidence/frame.jpg"
+    assert "excerpt evidence" in first[0].excerpt
+
+    path = vault / (excerpt if changed_source == "excerpt" else annotation)
+    path.write_text(path.read_text() + "Later bytes without a corpus event.\n")
+    timings = find_types.FindTimings()
+    degraded = []
+    second = find_module.find(vault, timings=timings, degraded_out=degraded, **kwargs)
+
+    assert timings.cache["hit"] is True
+    assert second == []
+    assert "recall_projection" in degraded
+    assert "keyword_sources" not in first[0].as_dict()
+
+
+@library_scope()
+@pytest.mark.parametrize("parent_exists", [False, True], ids=["missing-parent", "present-parent"])
+def test_keyword_admission_denies_a_child_with_a_denied_referenced_parent(
+    vault: Path, warm_managed_cell, parent_exists: bool,
+) -> None:
+    parent = f"{kb_dirname()}/Notes/denied-parent.md"
+    if parent_exists:
+        _write(vault, "denied-parent", body="Parent transcript.")
+    _write(vault, "denied-child", f"parent_media: {parent[:-3]}\n", "deniedparentmarker child evidence.")
+    warm_managed_cell(vault)
+
+    hits = find_module.find(
+        vault, query="deniedparentmarker", mode="keyword", scope="kb-only", graph=False,
+        admit_path=lambda path: path != parent,
+    )
+
+    assert hits == []
