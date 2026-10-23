@@ -559,6 +559,56 @@ def _candidate_rich_unit(item: RichUnitCandidate) -> SemanticUnit:
     return unit
 
 
+def materialize_structural_unit(
+    body: str, selected: UnitStructure, occurrence: Mapping[str, Any], *,
+    content: str, category_raw: str, category_key: str, tags: tuple[str, ...],
+    context: str | None, parent_ref: str | None, path: str,
+) -> SemanticUnit:
+    """Bind stored parser facts to a checked canonical slice without parsing Markdown."""
+    start, end = occurrence["start_offset"], occurrence["end_offset"]
+    if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(body)):
+        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+    text = body[start:end]
+    if _source_hash(text) != selected.source_hash:
+        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+    start_line, end_line = body.count("\n", 0, start) + 1, body.count("\n", 0, end) + 1
+    if (start_line, end_line) != (selected.line, selected.end_line):
+        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+    span = SourceSpan(
+        start_line, start - body.rfind("\n", 0, start),
+        end_line, end - body.rfind("\n", 0, end), start, end, text,
+    )
+    if selected.form == "rich":
+        block = semantic_blocks.SemanticBlock(
+            type=selected.kind, title=occurrence["title"], level=occurrence["level"],
+            line=selected.line, end_line=selected.end_line, body=content,
+            metadata=dict(occurrence["metadata"]), relations=list(selected.relations),
+        )
+        unit, _ = _rich_unit(block, span=span, path=path, line_by_number={})
+    else:
+        unit = SemanticUnit(
+            form=selected.form, kind=selected.kind, kind_raw=selected.kind, kind_key=selected.kind,
+            category_raw=category_raw, category_key=category_key, category=selected.category,
+            content=content, span=span, source_hash=selected.source_hash, tags=tags,
+            context=context, anchor=selected.anchor,
+        )
+    neutral = unit
+    if selected.form == "rich":
+        # Identity facts use core relation parsing, independently of selected meaning.
+        relations, _ = semantic_blocks._parse_relations(
+            tuple(semantic_blocks.SemanticRelationCandidate(**row) for row in occurrence["relations"]),
+            _core_relations(),
+        )
+        neutral = replace(unit, relations=relations)
+    signature = hashlib.sha256(_stable_json(_semantic_unit_signature(neutral)).encode("utf-8")).hexdigest()
+    if signature != occurrence["identity"]["signature"]:
+        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+    return replace(
+        unit, category=selected.category, parent_ref=parent_ref,
+        unit_ref=selected.unit_ref, fingerprint=selected.fingerprint,
+    )
+
+
 def candidate_units(candidates: SemanticUnitCandidates) -> tuple[SemanticUnit, ...]:
     """Every unit some selected interpretation could emit, unbound and kind-free.
 

@@ -64,6 +64,8 @@ from membench.utility.switch_eval.tap import (
 )
 from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 
+from exomem.runtime_resources import CPU_THREADS_ENV
+
 # A stand-in MCP server: answers initialize, tools/list and tools/call; with
 # --crash-on-call exits mid-call, as a crashing server under test would, and
 # with --exit-at-start exits before it reads a message, as a broken build would.
@@ -950,7 +952,8 @@ print(json.dumps({{"structured_output": guess}}))
 """
 
 
-def test_the_arm_guess_audit_shows_its_lane_exactly_the_judge_view_of_each_original_item(tmp_path: Path) -> None:
+def test_the_arm_guess_audit_shows_its_lane_exactly_the_judge_view_of_each_original_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(CPU_THREADS_ENV, "8")
     layout = Layout(tmp_path / "run")
     case = _case("case-1", required=(Required("release-freeze", "The release is frozen."),))
     sessions = [_session(layout, "case-1", arm, repeat, AttemptResult(OK, answer="The release is frozen."))
@@ -961,7 +964,9 @@ def test_the_arm_guess_audit_shows_its_lane_exactly_the_judge_view_of_each_origi
         _write_verdict(layout, "codex", item_id, {"r1": "used"})
     guesser = tmp_path / "client" / "guesser"
     guesser.parent.mkdir()
-    guesser.write_text(STAND_IN_GUESSER.format(python=sys.executable), encoding="utf-8")
+    script = STAND_IN_GUESSER.format(python=sys.executable)
+    script = script.replace("\n", f"\nimport os\nassert {CPU_THREADS_ENV!r} not in os.environ\n", 1)
+    guesser.write_text(script, encoding="utf-8")
     guesser.chmod(0o755)
 
     unblinded = unblind(layout, routes=["codex"], expected=item_set.arm_key)
@@ -1302,6 +1307,7 @@ def test_an_interrupted_build_retries_without_nesting_state(tmp_path: Path, monk
     with pytest.raises(RuntimeError, match="interrupted proof"):
         state.build_arm(layout, spec, tree="snapshot", source_vault=source, parent_env={})
     record = state.build_arm(layout, spec, tree="snapshot", source_vault=source, parent_env={})
+    assert record["resumed"] is True
     assert signatures == [record["vault_signature_digest"]] * 2
     assert (layout.shared_tree("snapshot") / "state" / "index.sqlite").is_file()
     assert not (layout.shared_tree("snapshot") / "state" / "state").exists()
@@ -1309,12 +1315,13 @@ def test_an_interrupted_build_retries_without_nesting_state(tmp_path: Path, monk
 
 
 def test_the_real_startup_wrapper_refuses_unconverged_media(tmp_path: Path) -> None:
+    """Catch writes during real startup; this canary does not exercise the media-queue join."""
     import os
     import shutil
 
-    from epistemic.journeys.f27_replay import REPO_ROOT
     from membench.utility.switch_eval import state
 
+    REPO_ROOT = Path(__file__).resolve().parents[1]
     source = tmp_path / "source"
     shutil.copytree(REPO_ROOT / "src" / "exomem" / "_scaffold" / "_Schema", source / "Knowledge Base" / "_Schema")
     attachment = source / "Knowledge Base" / "attachment.txt"
@@ -1329,3 +1336,136 @@ def test_the_real_startup_wrapper_refuses_unconverged_media(tmp_path: Path) -> N
         state.prove_quiescence(slot, spec, env=state._child_env(os.environ, slot, spec), out=out, before=before)
     assert (slot.vault / "Knowledge Base" / "attachment.txt.md").is_file()
     assert json.loads((out / "quiescence.json").read_text())["content_unchanged"] is False
+
+
+def test_state_cpu_threads_reach_only_the_builder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import state
+    from membench.utility.switch_eval.session import session_env
+
+    layout = Layout(tmp_path / "run")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "page.md").write_text("Frozen content.")
+    spec = arm_specs()["P"]
+    inputs = {"arms": ["P"], "trees": {"snapshot": {"path": str(source)}}}
+    monkeypatch.setattr(
+        cli,
+        "_context",
+        lambda path: (layout, inputs, [SimpleNamespace(tree="snapshot")], [], {"P": spec}),
+    )
+    monkeypatch.setattr(cli, "_stage", lambda *args: None)
+    monkeypatch.setattr(state, "effective_online_cpus", lambda: 2)
+    monkeypatch.setenv(CPU_THREADS_ENV, "99")
+    # The product promotes this legacy name to the setting above at import.
+    monkeypatch.setenv("KB_MCP_CPU_THREADS", "7")
+    real_run = subprocess.run
+    observed = []
+
+    def built(*args, **kwargs):
+        (layout.slot / "state").mkdir()
+        (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
+        code = f"import json, os; print(json.dumps({{'vectors': {{'state': 'current'}}, 'cpu_threads': os.environ.get({CPU_THREADS_ENV!r})}}))"
+        result = real_run(
+            [sys.executable, "-c", code],
+            env=kwargs["env"],
+            cwd=kwargs["cwd"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        observed.append(json.loads(result.stdout)["cpu_threads"])
+        return result
+
+    def surface(slot, spec, *, env, out):
+        assert CPU_THREADS_ENV not in env
+        assert "KB_MCP_CPU_THREADS" not in env
+        return {}
+
+    def proof(slot, spec, *, env, out, before):
+        assert CPU_THREADS_ENV not in env
+        assert "KB_MCP_CPU_THREADS" not in env
+        return {"content_unchanged": True, "signatures_unchanged": True}
+
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", surface)
+    monkeypatch.setattr(state, "prove_quiescence", proof)
+    assert cli.main(["state", "--run", str(layout.run), "--cpu-threads", "2"]) == 0
+    assert observed == ["2"]
+    record = json.loads((layout.shared_tree("snapshot") / "state.json").read_text())
+    assert record["cpu_threads"] == 2
+    assert record["resumed"] is False
+    frozen_hashes = json.loads((layout.run / "arm-hashes.json").read_text())
+    arm_record_path = layout.arm_tree("P", "snapshot") / "state.json"
+    arm_record = json.loads(arm_record_path.read_text())
+    arm_record["cpu_threads"] = 1
+    arm_record_path.write_text(json.dumps(arm_record))
+    assert cli._arm_hashes(layout, inputs, {"P": spec}, ["snapshot"]) == frozen_hashes
+    slot = state.prepare_session_slot(layout, "P", "snapshot", "cpu-isolation")
+    result = real_run(
+        [sys.executable, "-c", f"import os; print(os.environ.get({CPU_THREADS_ENV!r}, 'unset'))"],
+        env=session_env({CPU_THREADS_ENV: "99"}, slot, spec),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "unset"
+    state.recover_session_vault(layout)
+    slot.wipe()
+    for invalid in (0, 3):
+        with pytest.raises(SystemExit, match="--cpu-threads must be between 1 and 2"):
+            cli.main(["state", "--run", str(layout.run), "--cpu-threads", str(invalid)])
+
+
+def test_an_interrupted_arm_copy_retries_from_the_shared_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from membench.utility.switch_eval import state
+
+    layout = Layout(tmp_path / "run")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "page.md").write_text("Frozen content.")
+    builds = []
+    captures = []
+
+    def built(*args, **kwargs):
+        builds.append(1)
+        (layout.slot / "state").mkdir()
+        (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
+        return subprocess.CompletedProcess(
+            args[0], 0, json.dumps({"vectors": {"state": "current"}}), ""
+        )
+
+    def surface(slot, spec, **kwargs):
+        captures.append(spec.arm_id)
+        if captures == ["P", "M"]:
+            raise RuntimeError("interrupted arm capture")
+        return {}
+
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", surface)
+    monkeypatch.setattr(
+        state,
+        "prove_quiescence",
+        lambda *args, **kwargs: {"content_unchanged": True, "signatures_unchanged": True},
+    )
+    state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source, parent_env={})
+    with pytest.raises(RuntimeError, match="interrupted arm capture"):
+        state.build_arm(
+            layout, arm_specs()["M"], tree="snapshot", source_vault=source, parent_env={}
+        )
+    record = state.build_arm(
+        layout, arm_specs()["M"], tree="snapshot", source_vault=source, parent_env={}
+    )
+    assert record["arm"] == "M"
+    assert builds == [1]
+    assert captures == ["P", "M", "M"]
+    assert (
+        layout.arm_tree("M", "snapshot") / "state" / "index.sqlite"
+    ).read_bytes() == b"built state"
+    assert not (layout.arm_tree("M", "snapshot") / "state" / "state").exists()

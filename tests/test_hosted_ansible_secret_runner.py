@@ -7,10 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from benchmark_capabilities import (
-    has_posix_executable_scripts,
-    require_mount_type_inspection,
-)
+from benchmark_capabilities import has_posix_executable_scripts
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "infra" / "scripts" / "ansible_with_sops.sh"
@@ -31,10 +28,11 @@ def _write_executable(path: Path, body: str) -> None:
 
 
 def test_ansible_secret_runner_requires_tmpfs_before_decrypting(tmp_path: Path) -> None:
-    # The runner proves the workspace is tmpfs with `findmnt`, which macOS does
-    # not ship. Without it the refusal under test is unreachable -- the runner
-    # stops one step earlier, on its own missing-tool refusal.
-    require_mount_type_inspection()
+    # ext4 is a documented filesystem type; pytest's own directory can use tmpfs.
+    _write_executable(tmp_path / "findmnt", "#!/bin/sh\nprintf 'ext4\\n'\n")
+    decrypt_marker = tmp_path / "decryption-attempted"
+    fake_sops = tmp_path / "sops"
+    _write_executable(fake_sops, '#!/bin/sh\n: > "$TEST_DECRYPT_MARKER"\nexit 2\n')
 
     encrypted = tmp_path / "secret.v1.sops.json"
     encrypted.write_text('{"sops":{}}', encoding="utf-8")
@@ -51,10 +49,17 @@ def test_ansible_secret_runner_requires_tmpfs_before_decrypting(tmp_path: Path) 
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "EXOMEM_SECRET_TMPFS_DIR": str(tmp_path)},
+        env={
+            **os.environ,
+            "EXOMEM_SECRET_TMPFS_DIR": str(tmp_path),
+            "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
+            "SOPS_BIN": str(fake_sops),
+            "TEST_DECRYPT_MARKER": str(decrypt_marker),
+        },
     )
     assert result.returncode != 0
     assert "must be tmpfs or ramfs" in result.stderr
+    assert not decrypt_marker.exists()
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,10 @@ from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .embedding_index import ChunkRef
 
 from . import find_policy, find_results, find_types
 from .find_types import FindTimings, GraphProvenance, ParsedPage, RankingPage
@@ -155,7 +158,7 @@ class CandidateBundle:
     clip_ranking: list[str]
     graph_ranking: list[str]
     temporal_ranking: list[str]
-    chunk_text_by_path: dict[str, str]
+    chunk_text_by_path: dict[str, str | ChunkRef]
     bm25_score_by_path: dict[str, float]
     vector_score_by_path: dict[str, float]
     clip_score_by_path: dict[str, float]
@@ -394,7 +397,7 @@ def collect_candidates(
     lane_statuses: dict[str, dict[str, Any]] = {}
 
     vector_ranking: list[str] = []
-    chunk_text_by_path: dict[str, str] = {}
+    chunk_text_by_path: dict[str, str | ChunkRef] = {}
     vector_score_by_path: dict[str, float] = {}
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         if capture_trace:
@@ -470,7 +473,8 @@ def collect_candidates(
                 with _span(timings, "vector.search"):
                     chunk_hits = []
                     for source in sources:
-                        hits = source.search(
+                        search = source.select_chunks if isinstance(source, embeddings.EmbeddingIndex) else source.search
+                        hits = search(
                             query_vec,
                             k=candidate_k * 3,
                             allowed_paths=semantic_paths,
@@ -489,7 +493,7 @@ def collect_candidates(
                             current = recall_migration.current_in_build(vault_root, idx, {hit[0] for hit in hits})
                             hits = [hit for hit in hits if hit[0] in current]
                         chunk_hits.extend(hits)
-                best_per_file: dict[str, tuple[float, str]] = {}
+                best_per_file: dict[str, tuple[float, str | ChunkRef]] = {}
                 for fp, _idx, ctext, score in chunk_hits:
                     existing = best_per_file.get(fp)
                     if existing is None or score > existing[0]:

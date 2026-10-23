@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -303,6 +304,36 @@ def test_cold_publication_refuses_malformed_semantic_unit_metadata(live, monkeyp
             "WHERE parent_path = ?", (PAGE,),
         )
     assert not owner.publication_ready(PAGE)
+
+
+def test_cold_publication_reuses_older_coverage_without_ignoring_existing_fields(live) -> None:
+    """An additive carrier namespace must not force unchanged vectors through the encoder."""
+    from exomem import embedding_index
+
+    vault, target, encoder = live
+    target.write_text(_source(["- [config_rule] Keep WAL enabled ^keep"]), encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    index = embeddings.get_embedding_index(vault)
+    key = embedding_index.COVERAGE_PREFIX + PAGE
+    with sqlite3.connect(index.path) as connection:
+        coverage = json.loads(connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()[0])
+        assert coverage.pop("prose_carriers") == {
+            "format": 1, "body_length": len(semantic_index.current_parent_index_state(vault, target).body),
+            "owned": [], "withheld": [],
+        }
+        connection.execute("UPDATE meta SET value = ? WHERE key = ?", (json.dumps(coverage), key))
+    encoder.calls.clear()
+
+    recovered = embeddings.reconstruct_publication(vault, target)
+
+    assert recovered is not None and recovered.current(vault)
+    assert encoder.calls == []
+    for changed in (False, 1):
+        with sqlite3.connect(index.path) as connection:
+            coverage["structural_complete"] = changed
+            connection.execute("UPDATE meta SET value = ? WHERE key = ?", (json.dumps(coverage), key))
+        assert embeddings.reconstruct_publication(vault, target) is None
+    assert encoder.calls == []
 
 
 def test_a_stored_vector_of_another_width_is_not_reused(live, monkeypatch) -> None:

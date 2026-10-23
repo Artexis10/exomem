@@ -29,6 +29,8 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import REPO_ROOT, refuse_unsafe_out_dir
 
+from exomem.runtime_resources import CPU_THREADS_ENV, effective_online_cpus
+
 from . import protocol
 from .arms import ArmSpec, canonical_json, profile_settings, sha256_text
 from .tap import HANDSHAKE_METHODS
@@ -214,8 +216,13 @@ def python_executable() -> str:
     return sys.executable
 
 
+#: The product's settings, and the legacy ``KB_*`` names it promotes to them at
+#: import: an inherited one would change what a child runs with.
+PRODUCT_ENV_PREFIXES = ("EXOMEM_", "KB_")
+
+
 def _child_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[str, str]:
-    env = {key: value for key, value in parent.items() if not key.startswith("EXOMEM_")}
+    env = {key: value for key, value in parent.items() if not key.startswith(PRODUCT_ENV_PREFIXES)}
     env.update(product_env(slot, spec))
     env["PYTHONPATH"] = str(REPO_ROOT / "benchmarks")
     return env
@@ -571,11 +578,24 @@ def prove_quiescence(
     return report
 
 
+def validate_build_cpu_threads(cpu_threads: int | None) -> None:
+    available = effective_online_cpus()
+    if cpu_threads is not None and not 1 <= cpu_threads <= available:
+        raise StateError(f"--cpu-threads must be between 1 and {available}")
+
+
 def build_tree(
-    layout: Layout, spec: ArmSpec, *, tree: str, source_vault: Path, parent_env: Mapping[str, str]
+    layout: Layout,
+    spec: ArmSpec,
+    *,
+    tree: str,
+    source_vault: Path,
+    parent_env: Mapping[str, str],
+    cpu_threads: int | None = None,
 ) -> dict:
     """Publish one tree baseline; packet mode does not affect index construction."""
 
+    validate_build_cpu_threads(cpu_threads)
     target = layout.shared_tree(tree)
     snapshot_digest = tree_digest(source_vault)
     profile = profile_settings(spec.profile)
@@ -587,6 +607,7 @@ def build_tree(
                 f"tree {tree}: snapshot or retrieval profile changed; build a fresh run"
             )
         return record
+    resumed = target.exists() or layout.slot.exists()
     if (target / "state").exists():
         shutil.rmtree(target / "state")
     # An interrupted proof may have returned the original here. Reuse it, never copy it.
@@ -595,6 +616,10 @@ def build_tree(
         layout, returned if returned.exists() else source_vault, move_vault=returned.exists()
     )
     env = _child_env(parent_env, slot, spec)
+    # Only publication gets the speed override; all server proofs keep serving defaults.
+    build_env = dict(env)
+    if cpu_threads is not None:
+        build_env[CPU_THREADS_ENV] = str(cpu_threads)
     target.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     completed = subprocess.run(  # noqa: S603 - the harness's own builder entry point
@@ -606,7 +631,7 @@ def build_tree(
             "--vault",
             str(slot.vault),
         ],
-        env=env,
+        env=build_env,
         cwd=slot.cwd,
         capture_output=True,
         text=True,
@@ -629,6 +654,8 @@ def build_tree(
         "vault_signatures": signature_manifest(slot.vault),
         "vault_signature_digest": signature_digest(slot.vault),
         "build": build,
+        "cpu_threads": cpu_threads,
+        "resumed": resumed,
     }
     # Freeze a baseline before the proof server can add process-local activity.
     shutil.move(str(slot.state), str(target / "state"))
@@ -658,7 +685,13 @@ def build_tree(
 
 
 def build_arm(
-    layout: Layout, spec: ArmSpec, *, tree: str, source_vault: Path, parent_env: Mapping[str, str]
+    layout: Layout,
+    spec: ArmSpec,
+    *,
+    tree: str,
+    source_vault: Path,
+    parent_env: Mapping[str, str],
+    cpu_threads: int | None = None,
 ) -> dict:
     """Copy the tree baseline for this arm and capture its own product surface."""
 
@@ -668,8 +701,17 @@ def build_arm(
         record = json.loads((target / "state.json").read_text(encoding="utf-8"))
         _require_build_proof(record)
         return record
-    shared = build_tree(layout, spec, tree=tree, source_vault=source_vault, parent_env=parent_env)
+    shared = build_tree(
+        layout,
+        spec,
+        tree=tree,
+        source_vault=source_vault,
+        parent_env=parent_env,
+        cpu_threads=cpu_threads,
+    )
     target.mkdir(parents=True, exist_ok=True)
+    if (target / "state").exists():
+        shutil.rmtree(target / "state")
     shutil.copytree(layout.shared_tree(tree) / "state", target / "state", symlinks=True)
     surface = shared.get("first_surface")
     if surface is None:
@@ -744,13 +786,9 @@ def recover_session_vault(layout: Layout) -> str | None:
         )
     if held.exists():
         if source.exists():
-            # Only a checked original in custody can displace an unpublished build remnant.
-            if custody.get("shared") and not (source.parent / "state.json").exists():
-                shutil.rmtree(source)
-            else:
-                raise StateError(
-                    f"session {custody['session']}: both vault locations exist; preserved {held}"
-                )
+            raise StateError(
+                f"session {custody['session']}: both vault locations exist; preserved {held}"
+            )
         _rename_vault(held, source)
     receipt.unlink()
     return digest
