@@ -588,6 +588,8 @@ def run_judge(
 
     if route not in ROUTES:
         raise JudgeError(f"unknown judge route {route!r}")
+    if out_dir is None:
+        record_first_route(layout, route)
     items = read_items(layout) if items is None else list(items)
     out_dir = out_dir or layout.judge / "verdicts" / route
     out_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -617,6 +619,23 @@ def run_judge(
         launcher=launcher,
     )
     return {"route": route, "judged_now": judged, "items": len(items)}
+
+
+def record_first_route(layout: Layout, route: str) -> None:
+    """Record the route that started judging the run's items, once: its
+    agreement decides whether the recovery route must stand with it."""
+
+    path = layout.judge / "first-route.json"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"route": route}), encoding="utf-8")
+
+
+def first_route(layout: Layout) -> str:
+    path = layout.judge / "first-route.json"
+    if not path.exists():
+        raise UnblindingError("no record of the route that judged first")
+    return json.loads(path.read_text(encoding="utf-8"))["route"]
 
 
 def judge_manifest(layout: Layout, route: str) -> dict:
@@ -737,12 +756,18 @@ def unblind(layout: Layout, *, routes: Sequence[str], expected: Mapping[str, Map
             raise UnblindingError(
                 f"route {route} has not judged {len(missing)} items; judging is not complete"
             )
-    # Design, "Judge noise": low required-item agreement on the first route
-    # makes the other family's judge part of every standing verdict.
-    first = agreement(load_verdicts(layout, routes[0]), rejudge_pairs(arm_key))
+    # Design, "Judge noise": the route that judged first always stands, and
+    # its low required-item agreement makes the other family's judge part of
+    # every standing verdict through the tie-break.
+    judged_first = first_route(layout)
+    if judged_first not in routes:
+        raise UnblindingError(
+            f"route {judged_first} judged first, so its verdicts must stand; routes {list(routes)} drop it"
+        )
+    first = agreement(load_verdicts(layout, judged_first), rejudge_pairs(arm_key))
     if first["recovery_required"] and len(routes) < 2:
         raise UnblindingError(
-            f"route {routes[0]}'s required-item agreement is {first['required']['rate']:.2f}, "
+            f"route {judged_first}'s required-item agreement is {first['required']['rate']:.2f}, "
             f"below {protocol.REQUIRED_AGREEMENT_FLOOR}: the recovery route must judge every item "
             "and stand with it"
         )

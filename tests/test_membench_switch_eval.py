@@ -33,6 +33,7 @@ from membench.utility.switch_eval.judge import (
     build_items,
     exomem_tool_names,
     item_payload,
+    record_first_route,
     tie_break,
     unblind,
     validate_verdict,
@@ -142,6 +143,8 @@ def _case(
 
 
 def _write_verdict(layout: Layout, route: str, item_id: str, required: dict[str, str]) -> None:
+    """A stand-in for ``route`` judging ``item_id``; as in a judge run, the first route to judge is recorded."""
+    record_first_route(layout, route)
     folder = layout.judge / "verdicts" / route
     folder.mkdir(parents=True, exist_ok=True)
     verdict = {"item_id": item_id, "required": required, "forbidden": {}, "contaminated": None, "span": None}
@@ -621,6 +624,23 @@ def test_scoring_on_one_judge_is_refused_when_its_agreement_calls_for_recovery(t
         unblind(layout, routes=["codex"], expected=item_set.arm_key)
 
 
+def test_scoring_on_the_recovery_route_alone_is_refused_once_recovery_was_required(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    case = _case("case-1", required=(Required("release-freeze", "The release is frozen."),))
+    sessions = [_session(layout, "case-1", arm, 1, AttemptResult(OK, answer="The release is frozen.")) for arm in protocol.ARM_IDS]
+    item_set = build_items([case], sessions, seed=7, inputs_digest="inputs", tool_names=())
+    write_items(layout, item_set)
+    # Codex judged first and contradicts itself on every re-judged copy; Claude then judged every item.
+    for item_id, entry in item_set.arm_key.items():
+        _write_verdict(layout, "codex", item_id, {"r1": "missing" if entry["rejudge_of"] else "used"})
+    for item_id in item_set.arm_key:
+        _write_verdict(layout, "claude", item_id, {"r1": "used"})
+
+    # Dropping the noisy first judge would skip the tie-break that recovery prescribes.
+    with pytest.raises(UnblindingError):
+        unblind(layout, routes=["claude"], expected=item_set.arm_key)
+
+
 def test_unblinding_refuses_an_arm_key_that_names_another_arm_for_a_session(tmp_path: Path) -> None:
     layout = Layout(tmp_path / "run")
     sessions = [_session(layout, "case-1", arm, 1, AttemptResult(OK, answer="An answer.")) for arm in protocol.ARM_IDS]
@@ -765,6 +785,7 @@ def test_the_tie_break_needs_the_arm_key_and_runs_only_after_unblinding(tmp_path
     )
     first = {"required": {"r1": "used"}, "forbidden": {"f1": "absent"}, "contaminated": None}
     second = {"required": {"r1": "missing"}, "forbidden": {"f1": "asserted_as_current"}, "contaminated": None}
+    record_first_route(layout, "codex")
     for route, verdict in (("codex", first), ("claude", second)):
         (layout.judge / "verdicts" / route).mkdir(parents=True)
         for item_id in ("item-m", "item-a"):

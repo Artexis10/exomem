@@ -873,7 +873,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = sub.add_parser("audit", help="the arm-guess audit and its re-judge, after judging")
     p.add_argument("--run", required=True)
     p.add_argument(
-        "--routes", default="codex", help="the judge routes whose verdicts stand, first route first"
+        "--routes",
+        default="codex",
+        help="the judge routes whose verdicts stand; the route that judged first must be one",
     )
     p.add_argument("--model", required=True, help="the audit lane's Opus model ID")
     p.add_argument("--effort", help="the audit lane's reasoning effort")
@@ -882,7 +884,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = sub.add_parser("score", help="unblind and score")
     p.add_argument("--run", required=True)
     p.add_argument(
-        "--routes", default="codex", help="the judge routes whose verdicts stand, first route first"
+        "--routes",
+        default="codex",
+        help="the judge routes whose verdicts stand; the route that judged first must be one",
     )
     p.add_argument(
         "--split",
