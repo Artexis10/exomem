@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import shutil
 from pathlib import Path
 
 import pytest
-from test_context_catalogue import _built, _write
+from test_context_catalogue import _built, _page, _write
 from test_context_views import (
     OWNER,
     SECRET,
@@ -139,6 +140,7 @@ def test_conversation_does_not_change_the_map(vault: Path, monkeypatch: pytest.M
     second = _activate(vault, turn="A different question", conversation={"focus": "Something else", "refs": [TIDE], "recent": [{"role": "user", "text": "Earlier work"}]}, trigger="task_refresh")
     assert first["map"] == second["map"]
     assert first["continuity"] == second["continuity"]
+    assert first["generation"]["conversation"] == second["generation"]["conversation"] == "absent"
 
 
 def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,7 +164,10 @@ def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_pa
     assert THREAD_W not in json.dumps(guests[0])
 
 
-@pytest.mark.parametrize("forgery", ["path", "description", "state"])
+@pytest.mark.parametrize("forgery", [
+    "path", "description", "state", "anchor", "activity", "lifecycle_class", "state.source",
+    "topics", "superseded_by", "extra.path", "links[].path", "evidence",
+])
 def test_the_guard_drops_a_forged_map_item(vault: Path, monkeypatch: pytest.MonkeyPatch, forgery: str) -> None:
     """The map restores its caller's pinned items before the shared strict path and state decisions."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
@@ -171,6 +176,7 @@ def test_the_guard_drops_a_forged_map_item(vault: Path, monkeypatch: pytest.Monk
     _withhold(vault, SECRET, ceiling=0)
     _built(vault).close()
     packet = _activate(vault, _external())
+    original = copy.deepcopy(packet["map"])
     if forgery == "path":
         forged = {"kind": "note", "path": SECRET, "ref": SECRET, "title": "Restricted fixture", "description": "Hidden."}
         packet["map"]["items"].append(forged)
@@ -178,11 +184,97 @@ def test_the_guard_drops_a_forged_map_item(vault: Path, monkeypatch: pytest.Monk
         forged = next(item for item in packet["map"]["items"] if item.get("path"))
         if forgery == "description":
             forged["description"] = "Forged [[secret-cluster]] prose."
-        else:
+        elif forgery == "state":
             forged["state"] = {"statement": "Forged", "path": SECRET, "as_of": "2026-10-01"}
+        elif forgery == "state.source":
+            forged["state"] = {**(forged.get("state") or {}), "source": SECRET}
+        elif forgery == "extra.path":
+            forged["extra"] = {"path": SECRET}
+        elif forgery == "links[].path":
+            forged["links"] = [{"path": SECRET}]
+        elif forgery in ("topics", "evidence"):
+            forged[forgery] = [SECRET]
+        else:
+            forged[forgery] = SECRET
     with principal.request_scope(_external()):
         guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
     assert guarded is not None
     assert SECRET not in json.dumps(guarded)
     assert "Forged" not in json.dumps(guarded)
     assert guarded["map"]["items"]
+    assert guarded["map"] == original
+
+
+@pytest.mark.parametrize("field", ["overflow", "description", "ref", "reason"])
+def test_the_guard_restores_the_compiled_map_block(vault: Path, monkeypatch: pytest.MonkeyPatch, field: str) -> None:
+    """Forging block prose or its ref must not change the compiled map sent to the caller."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=True)
+    _built(vault).close()
+    packet = _activate(vault, _external())
+    original = copy.deepcopy(packet["map"])
+    packet["map"][field] = "Forged block text."
+    with principal.request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
+    assert guarded is not None
+    assert guarded["map"] == original
+
+
+def test_notes_without_map_rows_still_point_to_the_unfiled_map(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A visible ordinary note must not be reported as an empty catalogue."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setattr(project_keys, "load_project_registry", lambda _root: project_keys.ProjectRegistry({}, {}))
+    shutil.rmtree(vault / "Knowledge Base")
+    _page(vault, "unfiled-note")
+    _built(vault).close()
+    packet = _activate(vault)
+    assert packet["map"]["items"] == []
+    assert "reason" not in packet["map"]
+    assert context_views.UNFILED_REF in packet["map"]["overflow"]
+    with principal.request_scope(OWNER):
+        unfiled = context_views.read_view(vault, context_views.UNFILED_REF)
+    assert len(unfiled["items"]) == 1
+
+
+def test_equal_rendered_lines_do_not_select_an_extra_entry(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Copied pages can retain a ref and display; fitting one line must serve only that row."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setattr(project_keys, "load_project_registry", lambda _root: project_keys.ProjectRegistry({}, {}))
+    shutil.rmtree(vault / "Knowledge Base")
+    for name in ("copy-one", "copy-two"):
+        _write(
+            vault, f"Knowledge Base/Entities/People/{name}.md",
+            "---\ntype: entity\nentity_type: person\nstatus: active\n"
+            "exomem_id: 2fb2961f-0e12-4f5d-8372-a013bd7c921a\n"
+            f"title: {'Copied profile ' * 12}\nsummary: {'Shared description. ' * 12}\n---\n\nBody.\n",
+        )
+    _built(vault).close()
+    with principal.request_scope(OWNER):
+        view = context_views.compile_view(vault, context_views.MAP_REF)
+    lines = [context_views.map_item_line(context_views._map_item(view, row)) for row in view.rows]
+    assert len(lines) == 2 and lines[0] == lines[1]
+    _, overflow = context_views.map_within(view, 100_000)
+    budget = len("Index of what exists.") + len(lines[0]) + len(overflow) + 2
+    assert budget >= 500
+    packet = _activate(vault, max_chars=budget)
+    assert len(packet["map"]["items"]) == 1
+    assert packet["map"]["overflow"].startswith("Not shown: 1.")
+    assert packet["budget"]["used_chars"] <= budget
+
+
+def test_a_topic_with_only_a_withheld_member_cannot_be_injected(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bypassing the compiler cannot introduce an owner's topic into a guest's served map."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=True)
+    _withhold(vault, THREAD_W, ceiling=0)
+    _built(vault).close()
+    owner = _activate(vault)
+    topic = next(item for item in owner["map"]["items"] if item["ref"] == context_views.topic_ref("fleet"))
+    caller = _external("marketing")
+    packet = _activate(vault, caller, purpose="marketing")
+    original = copy.deepcopy(packet["map"])
+    packet["map"]["items"].append(topic)
+    with principal.request_scope(caller):
+        guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]), purpose="marketing")
+    assert guarded is not None
+    assert guarded["map"] == original

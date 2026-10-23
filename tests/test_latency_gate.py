@@ -922,24 +922,49 @@ def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free
 def test_maps_packet_stays_bounded_at_scale(
     tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole maps request obeys the existing absolute and scale bounds, including its guard."""
+    """An owner cache hit must not hide the cost of rebuilding an owner or restricted map."""
     from synth_vault import gen_entity_overlay
+    from test_governance_egress import _external
+
+    from exomem import commands, context_views, working_set_runtime
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     measured = {}
     for notes, entities in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
         vault = _build_dense_vault(tmp_path, notes)
         gen_entity_overlay(vault, entities, seed=23)
-        compiler_ms, packet = _measure_working_set(vault)
-        assert packet["abstained"] is False, packet.get("abstention")
-        assert packet["map"]["items"]
-        assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
-        measured[notes] = {"median_ms": compiler_ms, "stages": packet["timings"]["stages"]}
-        assert compiler_ms < CEIL_WORKING_SET_MS, measured
-    small_ms, large_ms = (measured[notes]["median_ms"] for notes in (N_NOTES, N_NOTES_LARGE))
-    bound = max(small_ms * CEIL_WORKING_SET_RATIO, small_ms + WORKING_SET_RATIO_SLACK_MS)
-    print("maps activation latency " + json.dumps({"measurements": measured, "ratio_bound_ms": bound}, sort_keys=True))
-    assert large_ms < bound, measured
+        _prepare_working_set_vault(vault)
+        commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup
+        measured[notes] = {}
+        for mode in ("owner_cache_hit", "owner_cleared", "restricted"):
+            caller = _external() if mode == "restricted" else principal.owner_principal(surface="library")
+            with principal.request_scope(caller):
+                assert context_views.CallerView.current(vault).restricted == (mode == "restricted")
+                packets = []
+                for _ in range(3):
+                    working_set_runtime.reset_caches_for_tests(packets_only=True)
+                    if mode == "owner_cleared":
+                        with context_views._OWNER_MAPS_LOCK:
+                            context_views._OWNER_MAPS.clear()
+                    gc.collect()
+                    packet = commands.op_activate_context(vault, turn=WORKING_SET_TURN, include_timings=True)
+                    assert packet["abstained"] is False, packet.get("abstention")
+                    assert packet["map"]["items"]
+                    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+                    packets.append(packet)
+                measured[notes][mode] = {
+                    "median_ms": statistics.median(_compiler_ms(packet["timings"]) for packet in packets),
+                    "stage_median_ms": {
+                        stage: statistics.median(packet["timings"]["stages"][stage]["ms"] for packet in packets)
+                        for stage in packets[0]["timings"]["stages"]
+                    },
+                }
+    print("maps activation latency " + json.dumps(measured, sort_keys=True))
+    for mode in ("owner_cleared", "restricted"):
+        small_ms, large_ms = (measured[notes][mode]["median_ms"] for notes in (N_NOTES, N_NOTES_LARGE))
+        assert max(small_ms, large_ms) < CEIL_WORKING_SET_MS, measured
+        bound = max(small_ms * CEIL_WORKING_SET_RATIO, small_ms + WORKING_SET_RATIO_SLACK_MS)
+        assert large_ms < bound, {"mode": mode, "bound_ms": bound, "measurements": measured}
 
 
 # --- Retrieval-carry bound (bound-request-latency-across-surfaces). A turn

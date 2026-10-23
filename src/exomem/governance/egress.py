@@ -3554,12 +3554,14 @@ def guard_working_set(
     if isinstance(map_block, dict) and isinstance(map_block.get("items"), list):
         from .. import context_views
 
-        # Reuse the read-view guard's generation-pinned items before collecting any prose references.
         caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
-        mapped = [item for item in map_block["items"] if isinstance(item, Mapping)]
-        map_block["items"] = context_views.pinned_items(
-            vault_root, map_block.get("ref"), map_block.get("generation"), mapped, caller
+        map_block = guarded["map"] = context_views.pinned_map_block(vault_root, map_block, caller)
+        map_block["items"] = _guard_view_items(
+            vault_root, map_block, caller=caller, policy=policy, release_gate_active=release_gate_active,
+            who=who, purpose=purpose,
         )
+        # Pins preserve compiled display; release filtering only removes fields, text or items, so the cap holds.
+        guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
 
     ctx = _packet_release(
         vault_root,
@@ -3589,15 +3591,8 @@ def guard_working_set(
             for item in witness.get("anchors", ())
         )):
             intent_resolution["status"] = "unavailable"
-    if isinstance(map_block, dict) and isinstance(map_block.get("items"), list):
-        guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
     if ctx is None:
         return guarded
-    if isinstance(map_block, dict) and isinstance(map_block.get("items"), list):
-        map_block["items"] = [kept for kept in (
-            _guarded_view_item(item, ctx) for item in map_block["items"]
-        ) if kept is not None]
-        guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
     decisions, withheld = ctx.decisions, ctx.withheld
     frozen, invalid_refs = ctx.frozen, ctx.invalid_refs
     #: Sections whose removals are reported. `ambiguity` and `missing` are
@@ -4482,6 +4477,24 @@ def _guarded_view_item(item: Mapping[str, Any], ctx: _PacketRelease) -> dict[str
     return kept
 
 
+def _guard_view_items(
+    vault_root: Path, response: Mapping[str, Any], *, caller: Any, policy: Policy,
+    release_gate_active: bool, who: RequestPrincipal, purpose: str | None,
+) -> list[dict[str, Any]]:
+    """Restore the compiled items, then apply the current release decisions for every view consumer."""
+    from .. import context_views
+
+    mapped = [item for item in response["items"] if isinstance(item, Mapping)]
+    items = context_views.pinned_items(vault_root, response.get("ref"), response.get("generation"), mapped, caller)
+    ctx = _packet_release(
+        vault_root, {"anchors": items}, AnnotatedHits(hits=[]), policy=policy,
+        release_gate_active=release_gate_active, who=who, purpose=purpose, record="all",
+    )
+    if ctx is None:
+        return items
+    return [kept for kept in (_guarded_view_item(item, ctx) for item in items) if kept is not None]
+
+
 def guard_view_response(
     vault_root: Path,
     response: Mapping[str, Any],
@@ -4513,23 +4526,12 @@ def guard_view_response(
         _record_blocked_outcome(who.audience_id)
         return {**response, "items": [], "continuation": None}
     guarded = copy.deepcopy(dict(response))
-    mapped = [item for item in guarded["items"] if isinstance(item, Mapping)]
     # The caller's view the compile built: the same principal argument, so the same binding.
     caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
-    guarded["items"] = context_views.pinned_items(vault_root, guarded.get("ref"), guarded.get("generation"), mapped, caller)
-    ctx = _packet_release(
-        vault_root,
-        {"anchors": guarded["items"]},
-        AnnotatedHits(hits=[]),
-        policy=policy,
-        release_gate_active=release_gate_active,
-        who=who,
-        purpose=purpose,
-        record="all",
+    guarded["items"] = _guard_view_items(
+        vault_root, guarded, caller=caller, policy=policy, release_gate_active=release_gate_active,
+        who=who, purpose=purpose,
     )
-    if ctx is None:
-        return guarded
-    guarded["items"] = [kept for kept in (_guarded_view_item(item, ctx) for item in guarded["items"]) if kept is not None]
     return guarded
 
 

@@ -7,8 +7,8 @@ stand, and nothing it interprets is stored.
 The caller's view comes first. Every row is filtered by what the caller may
 see BEFORE it is ordered, counted, paged, hashed or compared with a pending
 change, so no entry the caller cannot see moves a byte the caller receives.
-`read_memory` serves a view through `read_view`; the activation packet will
-serve the map through `compile_view` and `map_within`. Every item a view serves
+`read_memory` serves a view through `read_view`; activation serves a budgeted
+map through `activation_packet` and `map_within`. Every item a view serves
 is pinned under its generation (`served_items`), and the terminal guard serves
 the pinned item (`pinned_items`), so both of its passes serve the text that the
 generation was computed from.
@@ -32,7 +32,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +90,9 @@ MAP_KIND_SHARES: dict[str, float] = {
     KIND_COLLECTION: 0.2,
     KIND_THREAD: 0.2,
 }
+
+#: The current-state resolver's wire fields, with the statement first and its attribution after it.
+STATE_FIELDS = ("statement", "as_of", "source", "path")  # nosemgrep: ep-word-set -- Fixed current-state wire fields.
 
 _TOKEN_VERSION = 1
 _NOT_FOUND = "NOT_FOUND: memory identifier is unavailable"
@@ -561,8 +564,7 @@ def map_item_line(item: Mapping[str, Any]) -> str:
     state = item.get("state")
     if isinstance(state, Mapping) and state.get("statement"):
         text += f"; {state['statement']}"
-        # nosemgrep: ep-word-set -- The current-state resolver fixes these wire fields.
-        details = [f"{key}: {state[key]}" for key in ("as_of", "source", "path") if state.get(key)]
+        details = [f"{key}: {state[key]}" for key in STATE_FIELDS[1:] if state.get(key)]
         if details:
             text += " (" + "; ".join(details) + ")"
     return f"{text} [{item['ref']}]"
@@ -575,13 +577,16 @@ def _map_item(view: View, row: Row) -> dict[str, Any]:
     return item
 
 
-def map_within(view: View, max_chars: int) -> tuple[str, ...]:
-    """The map as whole lines that fit `max_chars`, ending with a line that names the domain maps for the rest.
+def map_within(
+    view: View, max_chars: int, *, item_for: Callable[[Row], Mapping[str, Any]] | None = None,
+) -> tuple[tuple[int, ...], str]:
+    """The indices of whole map lines that fit `max_chars`, and the closing domain-map pointer.
 
     Each row kind first gets its share of the budget (`MAP_KIND_SHARES`), in map order, stopping at
     its first line that does not fit; what is left then goes to the next lines in map order. A line is
     never cut. The last line is always present: the map carries no note and no retired entry, so it
-    points at the domain maps that do. Returns nothing when even that line does not fit.
+    points at the domain maps that do. An empty pointer means even that line did not fit.
+    `item_for` resolves state lazily, only for rows whose lines the budget can consider.
     """
     rows = list(view.rows)
 
@@ -595,8 +600,20 @@ def map_within(view: View, max_chars: int) -> tuple[str, ...]:
     reserve = len(tail(0)) + 1
     budget = max_chars + 1 - reserve
     if budget < 0:
-        return ()
-    lines = [map_item_line(_map_item(view, row)) for row in rows]
+        return (), ""
+    costs: dict[int, int] = {}
+
+    def cost(index: int, remaining: int) -> int:
+        if index not in costs:
+            row = rows[index]
+            # State can only add text, so a base line that cannot fit needs no state read.
+            base = len(map_item_line(row.item())) + 1
+            if base > remaining:
+                return base
+            item = item_for(row) if item_for is not None else _map_item(view, row)
+            costs[index] = len(map_item_line(item)) + 1
+        return costs[index]
+
     chosen: set[int] = set()
     used = 0
     for kind, share in MAP_KIND_SHARES.items():
@@ -604,26 +621,74 @@ def map_within(view: View, max_chars: int) -> tuple[str, ...]:
         for index, row in enumerate(rows):
             if row.kind != kind:
                 continue
-            cost = len(lines[index]) + 1
-            if spent + cost > allowance:
+            size = cost(index, allowance - spent)
+            if spent + size > allowance:
                 break
             chosen.add(index)
-            spent += cost
+            spent += size
         used += spent
     for index in range(len(rows)):
         if index in chosen:
             continue
-        cost = len(lines[index]) + 1
-        if used + cost > budget:
+        size = cost(index, budget - used)
+        if used + size > budget:
             break
         chosen.add(index)
-        used += cost
-    shown = [lines[index] for index in sorted(chosen)]
-    return (*shown, tail(len(shown)))
+        used += size
+    return tuple(sorted(chosen)), tail(len(chosen))
+
+
+@dataclass(frozen=True, slots=True)
+class _ActivationMap:
+    view: View
+    selected: tuple[int, ...]
+    overflow: str
+    empty: bool
+
+
+def _activation_map(prepared: _Prepared, max_chars: int, timings: find_types.FindTimings | None) -> _ActivationMap:
+    """Budget before reading state; only candidate rows pay the current-state resolver's cost."""
+    catalogue, caller = prepared.catalogue, prepared.caller
+    assert catalogue is not None
+    world = _world(catalogue, caller)
+    rows = tuple(_view_rows(prepared.target, prepared.key, world, prepared.registries))
+    states: dict[str, dict[str, Any]] = {}
+    view = View(
+        prepared.ref, READY, None, prepared.unlisted or any(caller.sees(path) for path in catalogue.pending()), rows,
+        None if caller.restricted else catalogue.graph_state(), states,
+    )
+    available = True
+    index = working_set_index.WorkingSetIndex(prepared.root)
+    anchors = None
+
+    def item_for(row: Row) -> Mapping[str, Any]:
+        nonlocal available, anchors
+        if available and row.kind in (KIND_ANCHOR, KIND_COLLECTION):
+            try:
+                if anchors is None:
+                    anchors = {anchor.anchor_id: anchor for anchor in index.anchors()}
+                anchor = anchors.get(row.entry_id)
+                if anchor is not None:
+                    # A single-row batch stops state work as soon as the budget is full.
+                    states.update(_anchor_states(prepared.root, (anchor,), caller, index.token()))
+            except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
+                states.clear()
+                available = False
+        return _map_item(view, row)
+
+    try:
+        with find_types.timing_span(timings, "working_set.map_state"):
+            selected, overflow = map_within(view, max_chars, item_for=item_for)
+    finally:
+        index.close()
+    # Activation tokens describe the budgeted map received; read_memory retains its whole-view generation.
+    items = [_map_item(view, rows[index]) for index in selected]
+    generation = _digest(json.dumps([items, available, overflow, not world.rows, view.stale, view.graph], sort_keys=True))
+    return _ActivationMap(replace(view, generation=generation, state_available=available), selected, overflow, not world.rows)
 
 
 # The activation cache shares the existing packet cache's resource bound. Restricted builds never enter it.
-_OWNER_MAPS: OrderedDict[tuple[Any, ...], View] = OrderedDict()
+_OWNER_MAPS: OrderedDict[tuple[Any, ...], _ActivationMap] = OrderedDict()
 _OWNER_MAPS_LOCK = threading.Lock()
 
 
@@ -661,47 +726,47 @@ def _activation_packet(
             **activation_conventions.load_conventions(root).generation_block(),
         }
         view = _usable(prepared)
+        description = "Index of what exists."
         if view is None:
             assert catalogue is not None
             key = (
                 Path(root).absolute(), catalogue.token(), prepared.registries.digest if prepared.registries is not None else "",
                 str(generation.get("freshness_key") or ""), prepared.caller.binding,
                 metadata.get("index_generation"), metadata["roles_hash"], metadata["conventions_hash"],
-                prepared.unlisted, tuple(catalogue.pending()),
+                prepared.unlisted, tuple(catalogue.pending()), max_chars,
             )
             with _OWNER_MAPS_LOCK:
-                view = None if prepared.caller.restricted else _OWNER_MAPS.get(key)
-                if view is not None:
+                compiled = None if prepared.caller.restricted else _OWNER_MAPS.get(key)
+                if compiled is not None:
                     _OWNER_MAPS.move_to_end(key)
-            with find_types.timing_span(timings, "working_set.map", source="cache" if view else "computed"):
-                if view is None:
-                    view = _compile(prepared, timings=timings)
-                    if not prepared.caller.restricted and view.state_available and catalogue.token() == key[1]:
+            with find_types.timing_span(timings, "working_set.map", source="cache" if compiled else "computed"):
+                if compiled is None:
+                    compiled = _activation_map(prepared, max_chars - len(description) - 1, timings)
+                    if not prepared.caller.restricted and compiled.view.state_available and catalogue.token() == key[1]:
                         with _OWNER_MAPS_LOCK:
-                            _OWNER_MAPS[key] = view
+                            _OWNER_MAPS[key] = compiled
                             _OWNER_MAPS.move_to_end(key)
                             while len(_OWNER_MAPS) > CACHE_SIZE:
                                 _OWNER_MAPS.popitem(last=False)
                 else:
                     with find_types.timing_span(timings, "working_set.map_state", source="cache"):
                         pass
+            view = compiled.view
         metadata["map_generation"] = view.generation
         packet = working_set.abstained_packet(reason=view.state, max_chars=max_chars, generation=metadata)
         if view.state != READY:
             return packet
-        description = "Index of what exists."
-        lines = map_within(view, max_chars - len(description) - 1)
-        selected = frozenset(lines[:-1])
-        rows = [row for row in view.rows if map_item_line(_map_item(view, row)) in selected]
+        rows = [view.rows[index] for index in compiled.selected]
         items = served_items(root, view, rows, prepared.caller)
         block = _response(view, items, None)
         block["description"] = description
-        if lines:
-            block["overflow"] = lines[-1]
-        if not view.rows:
+        if compiled.overflow:
+            block["overflow"] = compiled.overflow
+        if compiled.empty:
             block["reason"] = "empty"
         if not view.state_available:
             block["state_available"] = False
+        _PINS.add(_pin_key(root, view.ref, prepared.caller, view.generation), (), block=block)
         packet["map"] = block
         packet["budget"]["used_chars"] = map_packet_chars(block)
         packet["abstained"] = False
@@ -776,16 +841,16 @@ def _states(vault_root: Path, rows: Sequence[Row], caller: CallerView) -> dict[s
     index = working_set_index.WorkingSetIndex(vault_root)
     try:
         anchors = [anchor for anchor in index.anchors() if anchor.anchor_id in wanted]
-        entries = working_set_state.current_state_for(
-            vault_root,
-            anchors=anchors,
-            purpose=caller.purpose,
-            visible=caller.visible,
-            index_generation=index.token()[1],
-            index_token=index.token(),
-        )
+        return _anchor_states(vault_root, anchors, caller, index.token())
     finally:
         index.close()
+
+
+def _anchor_states(vault_root: Path, anchors: Sequence[Any], caller: CallerView, token: tuple[int, int, int]) -> dict[str, dict[str, Any]]:
+    entries = working_set_state.current_state_for(
+        vault_root, anchors=anchors, purpose=caller.purpose, visible=caller.visible,
+        index_generation=token[1], index_token=token,
+    )
     entry_of_ref = {anchor_ref(anchor): anchor.anchor_id for anchor in anchors}
     return {entry_of_ref[str(entry["anchor"])]: _served_state(entry) for entry in entries if str(entry.get("anchor")) in entry_of_ref}
 
@@ -796,7 +861,7 @@ def _served_state(entry: Mapping[str, Any]) -> dict[str, Any]:
     So whether a page that the statement links to exists, or is withheld, changes no byte of it.
     The guard checks the page the state was read from, never the pages its statement mentions.
     """
-    state = {key: entry[key] for key in ("statement", "as_of", "source", "path") if entry.get(key) is not None}
+    state = {key: entry[key] for key in STATE_FIELDS if entry.get(key) is not None}
     if isinstance(state.get("statement"), str):
         state["statement"] = _unlinked(state["statement"])
     return state
@@ -876,8 +941,11 @@ class _Pins:
         #: For each key, the items served under it, by `_identity`, then by entry id.
         self._pages: OrderedDict[tuple[str, ...], dict[tuple[object, ...], dict[str, dict[str, Any]]]] = OrderedDict()
         self._count = 0
+        self._blocks: dict[tuple[str, ...], dict[str, Any]] = {}
 
-    def add(self, key: tuple[str, ...], served: Iterable[tuple[str, dict[str, Any]]]) -> None:
+    def add(
+        self, key: tuple[str, ...], served: Iterable[tuple[str, dict[str, Any]]], *, block: Mapping[str, Any] | None = None,
+    ) -> None:
         with self.lock:
             page = self._pages.pop(key, {})
             for entry_id, item in served:
@@ -885,8 +953,11 @@ class _Pins:
                 self._count += entry_id not in alike
                 alike[entry_id] = copy.deepcopy(item)
             self._pages[key] = page
-            while self._count > PINNED_ITEMS_MAX and len(self._pages) > 1:
-                _, dropped = self._pages.popitem(last=False)
+            if block is not None:
+                self._blocks[key] = copy.deepcopy(dict(block))
+            while (self._count > PINNED_ITEMS_MAX or len(self._pages) > PINNED_ITEMS_MAX) and len(self._pages) > 1:
+                dropped_key, dropped = self._pages.popitem(last=False)
+                self._blocks.pop(dropped_key, None)
                 self._count -= sum(len(alike) for alike in dropped.values())
 
     def page(self, key: tuple[str, ...]) -> dict[tuple[object, ...], dict[str, dict[str, Any]]]:
@@ -941,6 +1012,19 @@ def pinned_items(
     if not caller.domains_admitted:
         out = [{**item, "topics": []} if "topics" in item else item for item in out if item.get("kind") != KIND_TOPIC]
     return out
+
+
+def pinned_map_block(vault_root: Path, block: Mapping[str, Any], caller: CallerView) -> dict[str, Any]:
+    """The entire budgeted activation map as compiled, so untrusted block fields cannot reach the wire."""
+    generation = block.get("generation")
+    if isinstance(generation, str):
+        with _PINS.lock:
+            key = _pin_key(vault_root, MAP_REF, caller, generation)
+            _PINS.page(key)
+            pinned = _PINS._blocks.get(key)
+            if pinned is not None:
+                return copy.deepcopy(pinned)
+    return {"ref": MAP_REF, "items": [], "continuation": None}
 
 
 def _response(

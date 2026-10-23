@@ -6853,6 +6853,7 @@ def _op_activate_context_body(
         if packet_mode == "maps":
             # Maps never inherit an anchors token through the wrapper's abstention carry.
             packet["generation"]["continuity_thread"] = "absent"
+            packet["generation"]["conversation"] = working_set_conversation_module.ABSENT
         return packet
 
     packet_mode = working_set_runtime_module.activation_packet_mode()
@@ -7039,6 +7040,7 @@ def _op_activate_context_body(
             return _abstain(activation_result_module.UNAVAILABLE)
         _withhold_vault_generation(vault_root, packet)
         packet["generation"]["continuity_thread"] = "absent"
+        packet["generation"]["conversation"] = working_set_conversation_module.ABSENT
         map_generation = packet["generation"].get("map_generation")
         if map_generation is not None and not packet.get("abstained"):
             # Maps carry no anchor refs or conversation thread. The visible digest is the token's whole subject.

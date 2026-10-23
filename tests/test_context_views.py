@@ -164,7 +164,7 @@ def test_a_withheld_page_changes_no_byte_a_restricted_caller_receives(
         _withhold(root, THREAD_W, ceiling=0)
         _built(root)
 
-    def read_everything(root: Path) -> tuple[dict[str, object], dict[str, object], tuple[str, ...], int]:
+    def read_everything(root: Path) -> tuple[dict[str, object], dict[str, object], tuple[tuple[int, ...], str], int]:
         owner = {ref: _outcome(root, ref) for ref in (*REFS, cv.topic_ref("fleet"))}  # the owner first, to warm
         _cold()
         guest = {ref: _outcome(root, ref, _external()) for ref in (*REFS, cv.topic_ref("fleet"))}
@@ -224,15 +224,16 @@ def test_map_within_returns_whole_lines_that_fit_and_name_the_domain_maps(vault:
     order = [row.ref for row in view.rows]
 
     for budget in (400, 700, 1500, 100_000):
-        lines = cv.map_within(view, budget)
-        assert lines[-1].startswith("Not shown: ") and cv.UNFILED_REF in lines[-1]
+        indices, overflow = cv.map_within(view, budget)
+        lines = [*(cv.map_item_line(cv._map_item(view, view.rows[index])) for index in indices), overflow]
+        assert overflow.startswith("Not shown: ") and cv.UNFILED_REF in overflow
         assert len("\n".join(lines)) <= budget
         shown = [line.rpartition("[")[2].removesuffix("]") for line in lines[:-1]]
         assert all(ref in order for ref in shown)  # each line is a whole row, not a cut one
         assert shown == [ref for ref in order if ref in shown]  # in map order
         assert lines[-1].startswith(f"Not shown: {len(order) - len(shown)}.")
     assert cv.map_within(view, 100_000)[-1].startswith("Not shown: 0.")
-    assert cv.map_within(view, 20) == ()  # not even the closing line fits
+    assert cv.map_within(view, 20) == ((), "")  # not even the closing line fits
 
 
 def test_paging_the_map_returns_every_entry_exactly_once(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
