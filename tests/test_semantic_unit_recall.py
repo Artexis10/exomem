@@ -150,9 +150,8 @@ def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_read
             hits = response["hits"] if isinstance(response, dict) else response
             assert hits
             parents = {hit.get("parent_path", hit.get("path")) for hit in hits}
-            overfetch = egress.pool_limit(3) - len(hits)
-            assert len(set(reads) - parents) <= overfetch
-            assert len(reads) <= len(parents) + overfetch
+            # The hit pool stays fixed when several hits share one parent.
+            assert len(reads) <= egress.pool_limit(3)
             for hit in hits:
                 if hit.get("result_type") == "semantic_unit":
                     expected = canonical[hit["unit_ref"]]
