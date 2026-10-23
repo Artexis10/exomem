@@ -9,9 +9,9 @@ see BEFORE it is ordered, counted, paged, hashed or compared with a pending
 change, so no entry the caller cannot see moves a byte the caller receives.
 `read_memory` serves a view through `read_view`; activation serves a budgeted
 map through `activation_packet` and `map_within`. A compile records what it
-served in its own request (`served_items`), and each pass of the terminal guard
-serves that record again (`pinned_items`), never the items it is handed. So both
-passes serve the text that the generation was computed from.
+served in its own invocation (`served_items`), and each pass of the terminal
+guard serves that record again (`pinned_items`), never the items it is handed.
+So both passes serve the text that the generation was computed from.
 
 A caller that may not read the domain registry gets nothing from it: no topic,
 no topic key and no domain map. Every topic ref then reads as an unknown one.
@@ -293,7 +293,8 @@ class _Registries:
     def digest(self) -> str:
         """Identity of what the memberships and the topic rows read: the domains, their aliases, the project keys.
 
-        Only the owner's map cache keys on it. A generation never does: it covers the served rows alone.
+        Only the owner's map cache keys on it, and only an owner's request reads it, because it reads the
+        project registry whatever the caller may read. A generation never does: it covers the served rows alone.
         """
         if self._digest is None:
             domains = [self.taxonomy.domains[key].as_dict() for key in sorted(self.taxonomy.domains)]
@@ -980,20 +981,21 @@ def _activation_packet(
         description = "Index of what exists."
         if view is None:
             assert catalogue is not None
-            key = (
+            # Only a caller who may use the owner cache builds its key: the key reads every registry.
+            key = None if prepared.caller.restricted else (
                 Path(root).absolute(), catalogue.token(), prepared.registries.digest if prepared.registries is not None else "",
                 str(generation.get("freshness_key") or ""), prepared.caller.binding,
                 metadata.get("index_generation"), metadata["roles_hash"], metadata["conventions_hash"],
                 prepared.unlisted, tuple(catalogue.pending()), max_chars,
             )
             with _OWNER_MAPS_LOCK:
-                compiled = None if prepared.caller.restricted else _OWNER_MAPS.get(key)
+                compiled = None if key is None else _OWNER_MAPS.get(key)
                 if compiled is not None:
                     _OWNER_MAPS.move_to_end(key)
             with find_types.timing_span(timings, "working_set.map", source="cache" if compiled else "computed"):
                 if compiled is None:
                     compiled = _activation_map(prepared, max_chars - len(description) - 1, timings)
-                    if not prepared.caller.restricted and compiled.view.state_available and catalogue.token() == key[1]:
+                    if key is not None and compiled.view.state_available and catalogue.token() == key[1]:
                         with _OWNER_MAPS_LOCK:
                             _OWNER_MAPS[key] = compiled
                             _OWNER_MAPS.move_to_end(key)
@@ -1182,15 +1184,15 @@ DISPLAY_FIELDS = ("title", "description", "description_origin")  # nosemgrep: ep
 class _Served:
     """What one compile served for one response: its rows, with their entry ids, and their states.
 
-    `missing` is a profile's own markers. `block` and `limit` are set for the activation map only:
-    the block's own fields and the packet's character limit that the block was budgeted for.
+    `missing` is a profile's own markers. `block` and `limits` are set for the activation map only:
+    the block's own fields and the packet character limits that the block was budgeted for.
     """
 
     rows: tuple[Row | ProfileLine, ...]
     states: dict[str, Any] | None
     missing: tuple[dict[str, Any], ...] = ()
     block: dict[str, Any] | None = None
-    limit: int | None = None
+    limits: frozenset[int] = frozenset()
 
 
 def _served_key(
@@ -1215,12 +1217,13 @@ def served_items(
     vault_root: Path, view: View, rows: Sequence[Row | ProfileLine], caller: CallerView, *,
     continuation: str | None = None, block: Mapping[str, Any] | None = None, limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """The items `rows` are served as. The request that compiled them keeps them for the terminal guard.
+    """The items `rows` are served as. The invocation that compiled them keeps them for the terminal guard.
 
     The record is kept under the view's ref, its generation, the caller and the page's position (the
-    continuation the response carries) in the request's own store (`principal.request_served`), so
-    nothing another request does can change or evict it, and it ends with the request. Outside any
-    request scope nothing is kept, and the guard then serves no item.
+    continuation the response carries) in the invocation's own store (`principal.invocation_served`),
+    so nothing another invocation does can change or evict it, and it ends with the invocation. Outside
+    any invocation nothing is kept, and the guard then serves no item. An activation map's record also
+    names each packet character `limit` that its block was budgeted for.
     """
     served = _Served(
         tuple(rows),
@@ -1228,14 +1231,19 @@ def served_items(
         copy.deepcopy(view.missing or ()),
         # The block keeps its `items` key, empty, so a restored block keeps its key order.
         None if block is None else copy.deepcopy({**block, "items": []}),
-        limit,
+        frozenset() if limit is None else frozenset((limit,)),
     )
-    store = principal_module.request_served()
+    store = principal_module.invocation_served()
     if store is not None and view.generation is not None:
         key = _served_key(vault_root, view.ref, caller, view.generation, continuation)
-        # One request that served two different pages under one key cannot say which one a
-        # response is, so the key then holds no record and the guard serves no item.
-        store[key] = served if store.get(key, served) == served else None
+        held = store.get(key, served)
+        # A map's generation covers its block, so one block budgeted again for another packet adds that
+        # packet's limit. One invocation that served two different pages under one key cannot say which
+        # one a response is, so the key then holds no record and the guard serves no item.
+        if held is not None and replace(held, limits=served.limits) == served:
+            store[key] = replace(served, limits=held.limits | served.limits)
+        else:
+            store[key] = None
     return _items(served)
 
 
@@ -1244,17 +1252,17 @@ def _record(
 ) -> _Served | None:
     if not isinstance(ref, str) or not isinstance(generation, str) or not isinstance(continuation, str | None):
         return None
-    store = principal_module.request_served()
+    store = principal_module.invocation_served()
     return None if store is None else store.get(_served_key(vault_root, ref, caller, generation, continuation))
 
 
 def pinned_items(vault_root: Path, response: Mapping[str, Any], caller: CallerView) -> list[dict[str, Any]]:
-    """The items this request's compile served for `response`, read again from its record.
+    """The items this invocation's compile served for `response`, read again from its record.
 
     The terminal guard serves these in place of the items it is given, and reads none of those. A
     response is named by its ref, its generation and its continuation (the page's position), for
     this caller. So both guard passes serve the text the generation was computed from, and a release
-    strip in the first pass cannot change what the second pass serves. A response that this request
+    strip in the first pass cannot change what the second pass serves. A response that this invocation
     never compiled for this caller, under the admissions that stand now, gets no item.
     """
     served = _record(vault_root, response.get("ref"), response.get("generation"), response.get("continuation"), caller)
@@ -1262,7 +1270,7 @@ def pinned_items(vault_root: Path, response: Mapping[str, Any], caller: CallerVi
 
 
 def pinned_missing(vault_root: Path, response: Mapping[str, Any], caller: CallerView) -> list[dict[str, Any]]:
-    """The profile markers this request's compile served for `response`, as `pinned_items` reads its items."""
+    """The profile markers this invocation's compile served for `response`, as `pinned_items` reads its items."""
     served = _record(vault_root, response.get("ref"), response.get("generation"), response.get("continuation"), caller)
     return [] if served is None else copy.deepcopy(list(served.missing))
 
@@ -1286,7 +1294,7 @@ def profile_markers(vault_root: Path, missing: Iterable[Mapping[str, Any]]) -> l
 
 
 def pinned_map_block(vault_root: Path, packet: Mapping[str, Any], caller: CallerView) -> dict[str, Any] | None:
-    """The activation map that this request compiled for `packet`, or None when it compiled none.
+    """The activation map that this invocation compiled for `packet`, or None when it compiled none.
 
     The block is chosen by the packet's own `map_generation` and must be the one compiled for the
     packet's character limit; the block's own `generation` must agree with it. So an untrusted
@@ -1300,8 +1308,10 @@ def pinned_map_block(vault_root: Path, packet: Mapping[str, Any], caller: Caller
     map_generation = generation.get("map_generation")
     if block.get("generation") != map_generation:
         return None
+    limit = budget.get("limit_chars")
     served = _record(vault_root, MAP_REF, map_generation, None, caller)
-    if served is None or served.block is None or served.limit != budget.get("limit_chars"):
+    # `bool` is an `int` equal to 0 or 1, so only an exact `int` names a limit.
+    if served is None or served.block is None or type(limit) is not int or limit not in served.limits:
         return None
     return {**copy.deepcopy(served.block), "items": _items(served)}
 

@@ -175,7 +175,7 @@ def test_the_guard_drops_a_forged_map_item(vault: Path, monkeypatch: pytest.Monk
     _write(vault, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# Restricted fixture\n\nHidden.\n")
     _withhold(vault, SECRET, ceiling=0)
     _built(vault).close()
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         packet = _activate(vault, _external())
         original = copy.deepcopy(packet["map"])
         if forgery == "path":
@@ -211,7 +211,7 @@ def test_the_guard_restores_the_compiled_map_block(vault: Path, monkeypatch: pyt
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _world(vault, with_w=True)
     _built(vault).close()
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         packet = _activate(vault, _external())
         original = copy.deepcopy(packet["map"])
         packet["map"][field] = "Forged block text."
@@ -230,7 +230,7 @@ def test_a_map_compiled_for_a_larger_packet_is_never_served(vault: Path, monkeyp
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _world(vault, with_w=True)
     _built(vault).close()
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         small = _activate(vault, _external(), max_chars=500)
         large = _activate(vault, _external(), max_chars=8000)
         assert len(large["map"]["items"]) > len(small["map"]["items"])  # the control: two different maps
@@ -251,7 +251,7 @@ def test_a_map_that_another_request_compiled_is_never_served(vault: Path, monkey
     _built(vault).close()
     packet = _activate(vault, _external())
     assert packet["map"]["items"]
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
     assert guarded is not None
     assert (guarded["abstained"], guarded["abstention"], guarded["generation"]["map_generation"]) == (True, {"reason": "unavailable"}, None)
@@ -309,10 +309,74 @@ def test_a_topic_with_only_a_withheld_member_cannot_be_injected(vault: Path, mon
     owner = _activate(vault)
     topic = next(item for item in owner["map"]["items"] if item["ref"] == context_views.topic_ref("fleet"))
     caller = _external("marketing")
-    with principal.request_scope(caller):
+    with principal.request_scope(caller), principal.invocation_scope():
         packet = _activate(vault, caller, purpose="marketing")
         original = copy.deepcopy(packet["map"])
         packet["map"]["items"].append(topic)
         guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]), purpose="marketing")
     assert guarded is not None
     assert guarded["map"] == original
+
+
+def test_a_withheld_project_registry_edited_after_readiness_leaves_a_restricted_map_unchanged(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller who may not read the project registry never loads it, so no edit of it reaches that caller.
+
+    The edit lands after the catalogue is ready and is one that no loader can parse.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    # Freeze only caller-local token fields, so the complete packets can be compared.
+    monkeypatch.setattr(working_set_runtime, "new_thread", lambda: ("fixture-thread", 1_800_000_000_000_000_000))
+    encode = working_set_runtime.encode_continuity
+    monkeypatch.setattr(working_set_runtime, "encode_continuity", lambda **kw: encode(**{**kw, "minted_ns": 1_800_000_000_000_000_000}))
+    _world(vault, with_w=False)
+    registry = vault / project_keys.registry_relpath()
+    _withhold(vault, project_keys.registry_relpath(), ceiling=0)
+    _built(vault).close()
+    before = _activate(vault, _external(), max_chars=1000)
+    assert before["map"]["state"] == "ready" and before["map"]["items"]
+    prepare = context_views._prepare
+
+    def prepare_then_edit(*args, **kwargs):
+        prepared = prepare(*args, **kwargs)
+        assert prepared.state == context_views.READY and not prepared.caller.projects_admitted
+        registry.write_text(registry.read_text(encoding="utf-8") + "\nunused: " + "[" * 1200 + "0" + "]" * 1200 + "\n")
+        return prepared
+
+    monkeypatch.setattr(context_views, "_prepare", prepare_then_edit)
+    assert _activate(vault, _external(), max_chars=1000) == before
+
+
+def test_each_activation_in_a_library_scope_keeps_its_record_only_while_it_runs(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A library scope spans many invocations. Each one is served from its own record, which ends with it."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=False)
+    _built(vault).close()
+    with principal.library_scope():
+        smaller = _activate(vault, max_chars=7900)
+        larger = _activate(vault, max_chars=8000)
+        assert principal.invocation_served() is None
+        for _ in range(20):
+            assert _activate(vault, max_chars=8000)["map"]["state"] == "ready"
+            assert principal.invocation_served() is None
+    # The control: both packets select the same rows, so their maps share one generation.
+    assert smaller["generation"]["map_generation"] == larger["generation"]["map_generation"]
+    assert smaller["map"]["state"] == larger["map"]["state"] == "ready"
+    assert smaller["map"]["items"] == larger["map"]["items"]
+
+
+def test_two_maps_budgeted_in_one_invocation_are_both_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One invocation that compiles the same rows for two packet sizes keeps a record for each size."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=False)
+    _built(vault).close()
+    with principal.request_scope(_external()), principal.invocation_scope():
+        smaller = _activate(vault, _external(), max_chars=7900)
+        larger = _activate(vault, _external(), max_chars=8000)
+        guarded = [egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[])) for packet in (smaller, larger)]
+    assert smaller["generation"]["map_generation"] == larger["generation"]["map_generation"]
+    assert smaller["map"]["state"] == larger["map"]["state"] == "ready"
+    assert [packet["map"] for packet in guarded] == [smaller["map"], larger["map"]]

@@ -7015,6 +7015,24 @@ def active_direct_mutation_guard(vault_root: os.PathLike[str] | str, *, state_ro
     return boundary in _ACTIVE_DIRECT_MUTATION_GUARDS.get()
 
 
+def _invocation_provenance(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Give each dispatched command one record of what it served, for its own guard passes only.
+
+    Outermost, so a store-routed call fills the same record from the store's thread. Under the
+    MCP surface this joins the record that the surface opened for its second pass.
+    """
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        from .governance import principal as principal_module
+
+        with principal_module.invocation_scope():
+            return function(command, *injected, **kwargs)
+
+    return wrapped
+
+
 def _foreground_command_activity(
     function: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -7254,6 +7272,7 @@ def _foreground_priority_request(func):
     return wrapped
 
 
+@_invocation_provenance
 @_foreground_command_activity
 @_fixed_projected_command_completion
 @_restricted_refusal_floor

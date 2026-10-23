@@ -79,12 +79,13 @@ _REQUEST_PRINCIPAL: ContextVar[RequestPrincipal | None] = ContextVar(
     "exomem_request_principal", default=None
 )
 
-# What the request's own compiles served, for the terminal guard's passes over
-# the same request (`context_views`). The outermost `request_scope` owns it and
-# a nested one joins it, so a compile and both guard passes share it. A thread
-# that runs part of the request in a copied context mutates the same mapping.
-_REQUEST_SERVED: ContextVar[dict[Any, Any] | None] = ContextVar(
-    "exomem_request_served", default=None
+# What one product invocation's compiles served, for the terminal guard's passes
+# over the same invocation (`context_views`). `invocation_scope` owns it, so a
+# compile and every guard pass of one invocation share it, and it ends with that
+# invocation. A thread that runs part of the invocation in a copied context
+# mutates the same mapping.
+_INVOCATION_SERVED: ContextVar[dict[Any, Any] | None] = ContextVar(
+    "exomem_invocation_served", default=None
 )
 
 # The host's explicit binding of one remote OAuth identity as the owner. It is
@@ -547,25 +548,36 @@ def effective_principal() -> RequestPrincipal:
     return most_restrictive_principal(surface="unbound")
 
 
-def request_served() -> dict[Any, Any] | None:
-    """What this request's compiles served, or None outside any `request_scope`."""
-    return _REQUEST_SERVED.get()
+def invocation_served() -> dict[Any, Any] | None:
+    """What this invocation's compiles served, or None outside any `invocation_scope`."""
+    return _INVOCATION_SERVED.get()
+
+
+@contextmanager
+def invocation_scope() -> Iterator[None]:
+    """Keep what one product invocation serves for its own guard passes, and discard it at the end.
+
+    One invocation is one MCP tool call with its second pass, one REST request, one CLI
+    command or one library call: through the dispatcher, or to a leaf that guards its own
+    result. The outermost scope owns the record and a nested one joins it, so the dispatcher's
+    scope joins the MCP surface's. A `request_scope` or `library_scope` that spans many
+    invocations neither opens nor extends it.
+    """
+    token = _INVOCATION_SERVED.set({}) if _INVOCATION_SERVED.get() is None else None
+    try:
+        yield
+    finally:
+        if token is not None:
+            _INVOCATION_SERVED.reset(token)
 
 
 @contextmanager
 def request_scope(principal: RequestPrincipal) -> Iterator[None]:
-    """Bind one principal for a nested, task-local surface invocation.
-
-    The outermost scope also owns the request's record of what it served, and
-    discards it on exit; a nested scope joins it.
-    """
+    """Bind one principal for a nested, task-local surface invocation."""
     token = _REQUEST_PRINCIPAL.set(principal)
-    served = _REQUEST_SERVED.set({}) if _REQUEST_SERVED.get() is None else None
     try:
         yield
     finally:
-        if served is not None:
-            _REQUEST_SERVED.reset(served)
         _REQUEST_PRINCIPAL.reset(token)
 
 

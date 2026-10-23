@@ -7019,20 +7019,22 @@ def _op_activate_context_body(
         if working_set_module.budget_exhausted("working_set.catalogue"):
             return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
         try:
-            packet = context_views_module.activation_packet(
-                vault_root, budget, purpose=purpose, timings=timings,
-                generation={
-                    **generation_stub,
-                    "freshness_key": working_set_runtime_module._key_text(freshness_key),
-                    "index_generation": evidence_token[1] if evidence_token else 0,
-                },
-            )
-            if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
-                return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
-            with find_types.timing_span(timings, "working_set.guard"):
-                guarded = egress_module.guard_working_set(
-                    vault_root, packet, egress_module.AnnotatedHits(hits=[]), purpose=purpose
+            # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
+            with principal_module.invocation_scope():
+                packet = context_views_module.activation_packet(
+                    vault_root, budget, purpose=purpose, timings=timings,
+                    generation={
+                        **generation_stub,
+                        "freshness_key": working_set_runtime_module._key_text(freshness_key),
+                        "index_generation": evidence_token[1] if evidence_token else 0,
+                    },
                 )
+                if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
+                    return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+                with find_types.timing_span(timings, "working_set.guard"):
+                    guarded = egress_module.guard_working_set(
+                        vault_root, packet, egress_module.AnnotatedHits(hits=[]), purpose=purpose
+                    )
             if guarded is None:
                 return _abstain(activation_result_module.WITHHELD, generation=packet["generation"])
             packet = guarded

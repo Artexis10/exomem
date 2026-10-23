@@ -89,7 +89,7 @@ def _cold() -> None:
 
 def _ask(vault: Path, ref: str, caller: Any = None, **options: Any) -> dict[str, Any]:
     """One read through the command path and the terminal egress filter, as `caller` (default: the owner)."""
-    with principal.request_scope(caller or OWNER):
+    with principal.request_scope(caller or OWNER), principal.invocation_scope():
         result = commands.op_read_memory(vault, path=ref, **options)
         return egress.postfilter("read_memory", result, vault, request_kwargs={"path": ref, **options})
 
@@ -350,7 +350,7 @@ def test_the_guard_drops_a_forged_view_item_that_names_a_withheld_page(vault: Pa
     _built(vault)
     harbour = cv.topic_ref("harbour")
     _cold()
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         page = commands.op_read_memory(vault, path=harbour)
         forged = {**page, "items": [*page["items"], {"path": SECRET, "ref": SECRET, "title": "Forged"}]}
         guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": harbour})
@@ -371,7 +371,7 @@ def test_a_forged_description_leaves_the_guard_as_the_entrys_own(vault: Path) ->
     _built(vault)
     harbour = cv.topic_ref("harbour")
     _cold()
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         page = commands.op_read_memory(vault, path=harbour)
         forged = {
             **page,
@@ -491,7 +491,7 @@ def test_a_caller_who_may_not_read_the_domain_registry_learns_nothing_from_it(
     assert "Quays and moorings." not in json.dumps(pages)
 
     # A topic item forged into a real page leaves the guard with nothing of the registry.
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         page = commands.op_read_memory(vault, path=cv.MAP_REF)
         forged = {**page, "items": [*page["items"], {"kind": "topic", "ref": registered, "title": "F", "description": "F"}]}
         guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": cv.MAP_REF})
@@ -511,7 +511,7 @@ def test_both_guard_passes_serve_the_text_their_generation_was_compiled_from(vau
     def mooring(response: dict[str, Any]) -> dict[str, Any]:
         return next(item for item in response["items"] if item.get("path") == MOORING)
 
-    with principal.request_scope(OWNER):
+    with principal.request_scope(OWNER), principal.invocation_scope():
         compiled = commands.op_read_memory(vault, path=harbour)
         publish("Changed after the compile.")
         first = egress.postfilter("read_memory", compiled, vault, request_kwargs={"path": harbour})
@@ -532,14 +532,14 @@ def test_a_request_keeps_its_items_while_other_requests_record_thousands_between
         owner = cv.CallerView.current(vault)
 
     def one_request(n: int) -> None:
-        with principal.request_scope(OWNER):
+        with principal.request_scope(OWNER), principal.invocation_scope():
             cv.served_items(vault, view, view.rows, dataclasses.replace(owner, binding=f"other-request-{n}"))
 
     def other_requests() -> None:
         for n in range(1000):
             contextvars.Context().run(one_request, n)  # each in a context of its own, as a server runs a request
 
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         compiled = commands.op_read_memory(vault, path=cv.MAP_REF)
         other_requests()
         first = egress.postfilter("read_memory", compiled, vault, request_kwargs={"path": cv.MAP_REF})
@@ -550,6 +550,22 @@ def test_a_request_keeps_its_items_while_other_requests_record_thousands_between
     assert compiled["items"] and first["items"] == second["items"] == compiled["items"]
 
 
+def test_an_mcp_read_serves_its_items_through_both_guard_passes(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The MCP surface guards a result again after the dispatcher has. Both passes read the one invocation's record."""
+    import asyncio
+
+    from test_activate_context_surface import _surface_server
+
+    _world(vault, with_w=False)
+    _built(vault)
+    mcp = _surface_server(monkeypatch)
+    with principal.library_scope():
+        result = asyncio.run(mcp.call_tool("read_memory", {"path": cv.MAP_REF}, run_middleware=False))
+        assert principal.invocation_served() is None  # the record ended with the call
+    served = result.structured_content["items"]
+    assert served and served == _ask(vault, cv.MAP_REF)["items"]
+
+
 def test_a_release_strip_in_the_first_pass_does_not_change_what_the_second_serves(vault: Path) -> None:
     """A released bridge loses provenance fields in the first pass. The second pass still serves it."""
     from test_governance_bridges import _write_bridge_fixture
@@ -557,7 +573,7 @@ def test_a_release_strip_in_the_first_pass_does_not_change_what_the_second_serve
     bridge = f"{KB}/Products/workload-constraint.md"
     _write_bridge_fixture(vault, approval=True, source_title="resource", bridge_path=bridge)
     _built(vault)
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         compiled = commands.op_read_memory(vault, path=cv.MAP_REF)
         first = egress.postfilter("read_memory", compiled, vault, request_kwargs={"path": cv.MAP_REF})
         second = egress.postfilter("read_memory", first, vault, request_kwargs={"path": cv.MAP_REF})

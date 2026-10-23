@@ -476,8 +476,9 @@ def bind_vault(
         # Resolve the canonical audience at the MCP boundary, beside the
         # existing `mcp_retry_scope()` identity derivation (design D5). Bound
         # for the whole invocation so every read leaf under it decides against
-        # the same principal; stdio resolves to `owner`.
-        with context, principal_module.request_scope(principal):
+        # the same principal; stdio resolves to `owner`. The invocation's
+        # record of what it served also covers the second pass below.
+        with context, principal_module.request_scope(principal), principal_module.invocation_scope():
             if command is None:
                 return leaf(*injected, **kwargs)
             from .commands import invocation_is_read_only

@@ -1007,7 +1007,7 @@ def test_restricted_view_reads_under_a_withholding_policy_are_reported_not_gated
             for _ in range(4):  # the first read warms the decision memo and is left out
                 gc.collect()
                 started = time.perf_counter()
-                with principal.request_scope(_external()):
+                with principal.request_scope(_external()), principal.invocation_scope():
                     result = commands.op_read_memory(vault, path=ref)
                     result = egress.postfilter("read_memory", result, vault, request_kwargs={"path": ref})
                 samples.append((time.perf_counter() - started) * 1000)

@@ -323,7 +323,7 @@ def test_the_profile_guard_drops_an_unpinned_item_naming_a_withheld_page(vault: 
     ref = cv.topic_profile_ref("harbour")
     forged = {"kind": kind, "ref": "invented", "anchor": HUB, "text": "Forged prose",
               "provenance": {"path": SECRET, "level": "unit", "anchor": HUB}}
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         response = _ask(vault, ref, _external())
         guarded = egress.postfilter("read_memory", {**response, "items": [*response["items"], forged]}, vault,
                                    request_kwargs={"path": ref})
@@ -340,7 +340,7 @@ def test_profile_pins_replace_forged_literals(vault: Path) -> None:
     lexstore.ensure_fresh(vault)
     _cold()
     ref = cv.topic_profile_ref("harbour")
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         response = _ask(vault, ref, _external())
         assert set(cv.PROFILE_SECTIONS) <= {item["kind"] for item in response["items"]}
         forged = copy.deepcopy(response)
@@ -442,7 +442,7 @@ def test_profile_reports_lane_truncation_and_live_notice_removal(vault: Path) ->
     lexstore.ensure_fresh(vault)
     _cold()
     ref = cv.topic_profile_ref("harbour")
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         response = _ask(vault, ref, _external())
         assert response["missing"] and all(entry["reason"] == "lane_truncated" for entry in response["missing"])
         # The revocation lands between the compile and the guard passes of one request.
@@ -508,7 +508,7 @@ def test_a_forged_missing_marker_never_reaches_the_wire(vault: Path) -> None:
     lexstore.ensure_fresh(vault)
     _cold()
     ref = cv.topic_profile_ref("harbour")
-    with principal.request_scope(_external()):
+    with principal.request_scope(_external()), principal.invocation_scope():
         response = _ask(vault, ref, _external())
         forged = {**response, "missing": [
             {"role": "Confidential label secret-cluster", "reason": "lane_truncated"},
