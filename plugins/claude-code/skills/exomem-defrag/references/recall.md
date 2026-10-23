@@ -21,11 +21,12 @@ Modes:
 Empty queries degrade to filtered-most-recent regardless of mode.
 
 **Scope — the vault is bigger than the KB:**
-- `scope="kb"` (default) searches `Knowledge Base/` first and **auto-widens to
-  the whole vault** when the KB doesn't fill `limit`. Content in sibling folders
-  is reachable, not silently invisible. Widened hits carry `outside_kb: true`.
+- `scope="kb"` (default) searches only `Knowledge Base/`.
+  For a non-empty query, `widen_outside_kb=true` reserves up to `limit - 1`
+  result slots for eligible sibling pages, even when KB matches fill `limit`.
+  Widened hits carry `outside_kb: true`.
 - `scope="vault"` searches eligible candidates across the whole vault.
-  `scope="kb-only"` is the strict opt-out (KB only, never widens).
+  `scope="kb-only"` stays inside the KB and ignores widening.
   Scope does not override recall admission or governance.
 - **Records and Planning use structured recall.** Ordinary recall admits their
   valid collection manifests, but excludes raw items, logs and derived summaries.
