@@ -1717,12 +1717,13 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
         entered.set()
         assert release.wait(5)
 
-    with monkeypatch.context() as queue_timeout, ThreadPoolExecutor(max_workers=1) as executor:
-        queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+    with ThreadPoolExecutor(max_workers=1) as executor:
         occupied = executor.submit(server.call, occupy)
         try:
             assert entered.wait(2)
-            with pytest.raises(OpError) as busy:
+            # The short budget belongs to the queued request, after setup owns the thread.
+            with monkeypatch.context() as queue_timeout, pytest.raises(OpError) as busy:
+                queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
                 call(service.root, "record_memory", action="append", collection=CID,
                      item={"title": "Never accepted"}, item_key=LATER, why="queue timeout")
             assert busy.value.code == "COLLECTION_STORE_BUSY"
@@ -1730,7 +1731,7 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
             assert busy.value.details["committed"] is False
         finally:
             release.set()
-        occupied.result(timeout=5)
+            occupied.result(timeout=5)
     assert titles(service.root, CID) == ["Canonical"]
 
 
