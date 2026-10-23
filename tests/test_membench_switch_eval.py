@@ -66,6 +66,24 @@ from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 
 from exomem.runtime_resources import CPU_THREADS_ENV
 
+
+def test_arm_filters_keep_published_read_tools_and_remove_only_activation_from_pull_only() -> None:
+    from exomem.commands import product_commands_for
+
+    commands = {command.name: command for command in product_commands_for("mcp")}
+    published = {command.public_name for command in commands.values()}
+    activation = commands["activate_context"].public_name
+    search = commands["ask_memory"].public_name
+    specs = arm_specs()
+
+    assert set(specs["A"].tools) <= published
+    assert specs["A"].tools == specs["M"].tools
+    assert activation in specs["A"].tools
+    assert search in specs["P"].tools
+    assert set(specs["P"].tools) == set(specs["A"].tools) - {activation}
+    assert protocol.ACTIVATION_TOOL == protocol.P_FILTERED_TOOL == activation
+
+
 # A stand-in MCP server: answers initialize, tools/list and tools/call; with
 # --crash-on-call exits mid-call, as a crashing server under test would, and
 # with --exit-at-start exits before it reads a message, as a broken build would.
