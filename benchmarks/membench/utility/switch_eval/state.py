@@ -3,11 +3,10 @@
 Exomem keys a vault's machine-local state by the vault's resolved path
 (``state_paths.vault_state_dir``), so state built for one path is not found
 under another. Every build and every session therefore runs in one fixed slot
-inside the run directory: ``slot/vault`` and ``slot/state``. A build leaves its
-result in ``arms/<arm>/<tree>/`` with a digest. A session moves the vault
-back into the slot and copies machine state. It returns the unchanged vault
-before wiping the slot. Nothing
-here reads or writes the user's own state root or a running service: every
+inside the run directory: ``slot/vault`` and ``slot/state``. Each tree keeps
+one built vault and state baseline under ``built-trees/<tree>/``. Each arm holds a
+copy of machine state. A session moves the original vault into the slot and
+returns it unchanged before wiping the slot. Nothing here reads or writes the user's own state root or a running service: every
 product location is pinned under the slot (see :func:`product_env`).
 """
 
@@ -16,7 +15,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -59,6 +60,34 @@ def tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def signature_manifest(root: Path) -> dict[str, list[int]]:
+    """Stat-only catalog signatures for every regular file and symlink."""
+
+    manifest = {}
+    for path in sorted(root.rglob("*")):
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            manifest[path.relative_to(root).as_posix()] = [
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+                info.st_size,
+            ]
+    return manifest
+
+
+def signature_digest(root: Path) -> str:
+    return sha256_text(canonical_json(signature_manifest(root)))
+
+
+def _write_json_atomically(receipt: Path, custody: Mapping) -> None:
+    temporary = receipt.with_suffix(".tmp")
+    try:
+        temporary.write_text(json.dumps(custody), encoding="utf-8")
+        os.replace(temporary, receipt)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @dataclass(frozen=True)
 class Layout:
     """Every path the run writes, all under one run directory."""
@@ -85,6 +114,9 @@ class Layout:
 
     def arm_tree(self, arm: str, tree: str) -> Path:
         return self.inside(self.run / "arms" / arm / tree)
+
+    def shared_tree(self, tree: str) -> Path:
+        return self.inside(self.run / "built-trees" / tree)
 
     def arm_dir(self, arm: str) -> Path:
         return self.inside(self.run / "arms" / arm)
@@ -198,6 +230,45 @@ def prepare_build_slot(layout: Layout, source_vault: Path) -> Slot:
     return slot
 
 
+def converge_media(vault: Path) -> dict:
+    """Run complete product discovery passes and drain admitted media work to a fixed point."""
+
+    from exomem import media_processing, server_runtime
+
+    from .tap import READY_TIMEOUT_SECONDS
+
+    passes = []
+    written: set[str] = set()
+    deadline = time.monotonic() + READY_TIMEOUT_SECONDS
+    worker = None
+    try:
+        while True:
+            # Extraction can add media. Cover every current candidate on each pass.
+            limit = max(1, sum(1 for path in vault.rglob("*") if path.is_file()))
+            before = signature_manifest(vault)
+            if not passes:
+                worker = server_runtime._start_media_worker(vault)
+            attempted = media_processing.reconcile_all_media(
+                vault, limit=limit, propagate_transient_errors=True
+            )
+            if worker is not None:
+                worker.join(timeout=max(0.01, deadline - time.monotonic()))
+            after = signature_manifest(vault)
+            changed = {
+                name for name in before.keys() | after.keys() if before.get(name) != after.get(name)
+            }
+            written.update(changed)
+            passes.append({"attempted": attempted, "files_written": len(changed)})
+            if not changed:
+                break
+            if time.monotonic() >= deadline:
+                raise StateError("media did not converge before the build deadline")
+    finally:
+        if worker is not None:
+            worker.stop()
+    return {"passes": passes, "files_written": len(written)}
+
+
 def build_state(vault: Path) -> dict:
     """Runs in the builder child: the product's own fresh bootstrap, then the
     derived indexes the existing harness publishes, then the context catalogue.
@@ -226,8 +297,10 @@ def build_state(vault: Path) -> dict:
         **recall_migration.status(vault),
         "seconds": round(time.monotonic() - vector_started, 3),
     }
+    convergence = converge_media(vault)
     catalogue = ContextCatalogue(vault).rebuild()
     return {
+        "convergence": convergence,
         "vectors": vectors,
         "anchors": len(publication.anchors),
         "indexed_pages": publication.indexed_pages,
@@ -239,7 +312,13 @@ def build_state(vault: Path) -> dict:
 
 
 def mcp_server_entry(
-    slot: Slot, spec: ArmSpec, *, log: Path, server_stderr: Path, skip_ready_gate: bool = False
+    slot: Slot,
+    spec: ArmSpec,
+    *,
+    log: Path,
+    server_stderr: Path,
+    skip_ready_gate: bool = False,
+    startup_marker: Path | None = None,
 ) -> dict:
     """The ``--mcp-config`` server entry: the tap in front of the stdio server."""
 
@@ -261,9 +340,16 @@ def mcp_server_entry(
             "--",
             python_executable(),
             "-m",
-            "exomem",
-            "--transport",
-            "stdio",
+            *(
+                [
+                    "membench.utility.switch_eval",
+                    "startup-proof-server",
+                    "--marker",
+                    str(startup_marker),
+                ]
+                if startup_marker is not None
+                else ["exomem", "--transport", "stdio"]
+            ),
         ],
         "env": product_env(slot, spec),
     }
@@ -291,7 +377,13 @@ _HANDSHAKES: dict[str, tuple[dict, dict]] = {
 
 
 def _ask_surface(
-    slot: Slot, spec: ArmSpec, *, env: Mapping[str, str], out: Path, method: str
+    slot: Slot,
+    spec: ArmSpec,
+    *,
+    env: Mapping[str, str],
+    out: Path,
+    method: str,
+    startup_proof: bool = False,
 ) -> tuple[str, list[dict]]:
     """One connection: the handshake ``method``, then ``tools/list``.
 
@@ -302,12 +394,16 @@ def _ask_surface(
     handshake_params, list_params = _HANDSHAKES[method]
     name = method.replace("/", "-")
     stderr = out / f"surface-{name}-server.stderr"
+    marker = out / "startup-complete.json"
+    if startup_proof:
+        marker.unlink(missing_ok=True)
     entry = mcp_server_entry(
         slot,
         spec,
         log=out / f"surface-{name}-tap.jsonl",
         server_stderr=stderr,
-        skip_ready_gate=True,
+        skip_ready_gate=not startup_proof,
+        startup_marker=marker if startup_proof else None,
     )
     proc = subprocess.Popen(  # noqa: S603 - the harness's own tap and server
         [entry["command"], *entry["args"]],
@@ -317,7 +413,21 @@ def _ask_surface(
         text=True,
         env={**env, **entry["env"]},
         cwd=slot.cwd,
+        start_new_session=True,
     )
+    responses: queue.Queue[str | None] = queue.Queue()
+
+    def pump() -> None:
+        try:
+            for line in proc.stdout:
+                responses.put(line)
+        finally:
+            responses.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    from .tap import READY_TIMEOUT_SECONDS
+
+    deadline = time.monotonic() + READY_TIMEOUT_SECONDS + 60
 
     def send(message: dict) -> None:
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n")
@@ -325,7 +435,13 @@ def _ask_surface(
 
     def ask(request_id: int, request: str, params: dict) -> dict:
         send({"id": request_id, "method": request, "params": params})
-        for line in proc.stdout:
+        while True:
+            try:
+                line = responses.get(timeout=max(0.01, deadline - time.monotonic()))
+            except queue.Empty as error:
+                raise StateError(f"server setup timed out; see {stderr}") from error
+            if line is None:
+                break
             message = json.loads(line)
             if message.get("id") == request_id:
                 if "error" in message:
@@ -340,9 +456,27 @@ def _ask_surface(
         if method == "initialize":
             send({"method": "notifications/initialized"})
         tools = ask(2, "tools/list", list_params)["tools"]
+        if startup_proof:
+            while not marker.exists():
+                if proc.poll() is not None or time.monotonic() >= deadline:
+                    raise StateError(f"server startup did not finish; see {stderr}")
+                time.sleep(0.05)
+            observed = json.loads(marker.read_text(encoding="utf-8"))
+            if observed.get("outcome") != "complete":
+                raise StateError(f"server startup failed: {observed}; see {stderr}")
     finally:
-        proc.stdin.close()
-        proc.wait(timeout=60)
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise StateError(f"server shutdown timed out; see {stderr}") from None
+    if proc.returncode != 0:
+        raise StateError(f"server exited {proc.returncode}; see {stderr}")
     return answered.get("instructions") or "", tools
 
 
@@ -380,17 +514,77 @@ def capture_surface(slot: Slot, spec: ArmSpec, *, env: Mapping[str, str], out: P
     return surface
 
 
-def build_arm(
+def startup_proof_server(marker: Path) -> int:
+    """Observe exact product activation and its admitted media queue in the probe only."""
+
+    from exomem import server_runtime
+    from exomem.__main__ import main
+
+    from .tap import READY_TIMEOUT_SECONDS
+
+    activate = server_runtime.LocalRuntimeActivation._activate
+
+    def observed(owner) -> None:
+        try:
+            activate(owner)
+            if owner._shutdown.is_set():
+                raise RuntimeError("startup stopped before completion")
+            if owner.media_worker is not None:
+                owner.media_worker.join(timeout=READY_TIMEOUT_SECONDS)
+            _write_json_atomically(marker, {"outcome": "complete"})
+        except BaseException as error:
+            _write_json_atomically(marker, {"outcome": "failed", "error": type(error).__name__})
+            raise
+
+    # No product completion signal exists; this observer changes no activation work.
+    server_runtime.LocalRuntimeActivation._activate = observed
+    return main(["--transport", "stdio"])
+
+
+def prove_quiescence(
+    slot: Slot, spec: ArmSpec, *, env: Mapping[str, str], out: Path, before: Mapping
+) -> dict:
+    """Admit a fresh server, finish startup and media work, then check the stopped vault."""
+
+    started = time.monotonic()
+    _ask_surface(slot, spec, env=env, out=out, method="server/discover", startup_proof=True)
+    after = signature_manifest(slot.vault)
+    prior = before["vault_signatures"]
+    counts: dict[str, int] = {}
+    for name in prior.keys() | after.keys():
+        if prior.get(name) != after.get(name):
+            extension = Path(name).suffix.lower() or "(none)"
+            counts[extension] = counts.get(extension, 0) + 1
+    report = {
+        "content_unchanged": tree_digest(slot.vault) == before["vault_digest"],
+        "signatures_unchanged": after == prior,
+        "changed_files_by_extension": dict(sorted(counts.items())),
+        "seconds": round(time.monotonic() - started, 3),
+    }
+    (out / "quiescence.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if not report["content_unchanged"] or not report["signatures_unchanged"]:
+        raise StateError(
+            f"fresh server changed the vault; changed files by extension: {report['changed_files_by_extension']}; preserved {slot.vault}"
+        )
+    return report
+
+
+def build_tree(
     layout: Layout, spec: ArmSpec, *, tree: str, source_vault: Path, parent_env: Mapping[str, str]
 ) -> dict:
-    """Build one arm's state for one tree once, capture its surface, record digests."""
+    """Publish one tree baseline; packet mode does not affect index construction."""
 
-    target = layout.arm_tree(spec.arm_id, tree)
+    target = layout.shared_tree(tree)
+    snapshot_digest = tree_digest(source_vault)
+    profile = profile_settings(spec.profile)
     if (target / "state.json").exists():
         record = json.loads((target / "state.json").read_text(encoding="utf-8"))
-        _require_vector_build(record)
+        _require_build_proof(record)
+        if record["snapshot_digest"] != snapshot_digest or record["profile"] != profile:
+            raise StateError(
+                f"tree {tree}: snapshot or retrieval profile changed; build a fresh run"
+            )
         return record
-    snapshot_digest = tree_digest(source_vault)
     slot = prepare_build_slot(layout, source_vault)
     env = _child_env(parent_env, slot, spec)
     target.mkdir(parents=True, exist_ok=True)
@@ -413,27 +607,74 @@ def build_arm(
     (target / "build.stdout").write_text(completed.stdout, encoding="utf-8")
     (target / "build.stderr").write_text(completed.stderr, encoding="utf-8")
     if completed.returncode != 0:
-        raise StateError(
-            f"arm {spec.arm_id} tree {tree}: the state build exited {completed.returncode}; see {target}"
-        )
+        raise StateError(f"tree {tree}: state build exited {completed.returncode}; see {target}")
     build = json.loads(completed.stdout.strip().splitlines()[-1])
-    surface = capture_surface(slot, spec, env=env, out=target)
-    for name in ("vault", "state"):
-        if (target / name).exists():
-            shutil.rmtree(target / name)
-        shutil.move(str(slot.root / name), str(target / name))
+    # The first arm's surface is captured before freezing the vault, as the protocol requires.
+    surface_out = layout.arm_tree(spec.arm_id, tree)
+    surface = capture_surface(slot, spec, env=env, out=surface_out)
     record = {
-        "arm": spec.arm_id,
         "tree": tree,
+        "profile": profile,
         "source_vault": str(source_vault),
         "snapshot_digest": snapshot_digest,
-        "vault_digest": tree_digest(target / "vault"),
-        "state_digest": tree_digest(target / "state"),
+        "vault_digest": tree_digest(slot.vault),
+        "vault_signatures": signature_manifest(slot.vault),
+        "vault_signature_digest": signature_digest(slot.vault),
         "build": build,
-        "build_seconds": round(time.monotonic() - started, 2),
-        "surface": surface,
     }
+    # Freeze a baseline before the proof server can add process-local activity.
+    shutil.move(str(slot.state), str(target / "state"))
+    shutil.copytree(target / "state", slot.state, symlinks=True)
+    _write_json_atomically(
+        layout.run / "slot-vault.json",
+        {
+            "arm": spec.arm_id,
+            "tree": tree,
+            "session": f"quiescence-{tree}",
+            "digest": record["vault_digest"],
+            "signatures": record["vault_signature_digest"],
+            "shared": True,
+        },
+    )
+    record["quiescence"] = prove_quiescence(slot, spec, env=env, out=target, before=record)
+    recover_session_vault(layout)
+    record.update(
+        state_digest=tree_digest(target / "state"),
+        build_seconds=round(time.monotonic() - started, 2),
+    )
     slot.wipe()
+    (target / "state.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    # Reuse this capture only for the arm that supplied the tree's first environment.
+    record["first_surface"] = surface
+    return record
+
+
+def build_arm(
+    layout: Layout, spec: ArmSpec, *, tree: str, source_vault: Path, parent_env: Mapping[str, str]
+) -> dict:
+    """Copy the tree baseline for this arm and capture its own product surface."""
+
+    recover_session_vault(layout)
+    target = layout.arm_tree(spec.arm_id, tree)
+    if (target / "state.json").exists():
+        record = json.loads((target / "state.json").read_text(encoding="utf-8"))
+        _require_build_proof(record)
+        return record
+    shared = build_tree(layout, spec, tree=tree, source_vault=source_vault, parent_env=parent_env)
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(layout.shared_tree(tree) / "state", target / "state", symlinks=True)
+    surface = shared.get("first_surface")
+    if surface is None:
+        slot = _prepare_session_slot(layout, spec.arm_id, tree, f"surface-{spec.arm_id}", shared)
+        try:
+            surface = capture_surface(
+                slot, spec, env=_child_env(parent_env, slot, spec), out=target
+            )
+        finally:
+            recover_session_vault(layout)
+            slot.wipe()
+    record = {**shared, "arm": spec.arm_id, "surface": surface}
+    record.pop("first_surface", None)
     (target / "state.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
 
@@ -443,10 +684,14 @@ def load_arm_state(layout: Layout, arm: str, tree: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def _require_vector_build(record: Mapping) -> None:
-    # Older snapshots lack vectors and would restart the same incomplete sessions.
+def _require_build_proof(record: Mapping) -> None:
+    # Old snapshots lack the startup proofs required before any arm can use them.
     if record.get("build", {}).get("vectors", {}).get("state") != "current":
         raise StateError("arm state lacks completed vector publication; build a fresh run")
+    if not record.get("quiescence", {}).get("signatures_unchanged") or not record.get(
+        "vault_signature_digest"
+    ):
+        raise StateError("state lacks startup quiescence and signature proof; build a fresh run")
 
 
 def _rename_vault(source: Path, destination: Path) -> None:
@@ -471,14 +716,23 @@ def recover_session_vault(layout: Layout) -> str | None:
     if not receipt.exists():
         return None
     custody = json.loads(receipt.read_text(encoding="utf-8"))
-    source = layout.arm_tree(custody["arm"], custody["tree"]) / "vault"
+    # Old custody predates shared trees; return it before refusing the old build format.
+    source = (
+        layout.shared_tree(custody["tree"])
+        if custody.get("shared")
+        else layout.arm_tree(custody["arm"], custody["tree"])
+    ) / "vault"
     held = Slot(layout.slot).vault
     location = held if held.exists() else source
     digest = tree_digest(location) if location.is_dir() else None
-    if digest != custody["digest"]:
+    signatures = signature_digest(location) if location.is_dir() else None
+    if digest != custody["digest"] or (
+        "signatures" in custody and signatures != custody["signatures"]
+    ):
         raise StateError(
-            f"session {custody['session']}: vault digest changed; "
-            f"preserved at {location}; expected {custody['digest']}, got {digest}"
+            f"session {custody['session']}: vault digest changed (content or signatures); "
+            f"preserved at {location}. Inspect it, then remove the failed run at {layout.run} "
+            "and rebuild state from the frozen snapshot in a new run."
         )
     if held.exists():
         if source.exists():
@@ -497,25 +751,45 @@ def prepare_session_slot(layout: Layout, arm: str, tree: str, session: str = "un
     record = load_arm_state(layout, arm, tree)
     if record is None:
         raise StateError(f"arm {arm} tree {tree} has no built state; run the state stage first")
-    _require_vector_build(record)
+    _require_build_proof(record)
+    return _prepare_session_slot(layout, arm, tree, session, record)
+
+
+def _prepare_session_slot(
+    layout: Layout, arm: str, tree: str, session: str, record: Mapping
+) -> Slot:
     slot = Slot(layout.slot)
     slot.wipe()
     for path in (slot.runtime, slot.cwd, slot.hook_home):
         path.mkdir(parents=True)
-    source = layout.arm_tree(arm, tree)
-    for name, key in (("vault", "vault_digest"), ("state", "state_digest")):
-        if tree_digest(source / name) != record[key]:
+    source = layout.shared_tree(tree) / "vault"
+    machine_state = layout.arm_tree(arm, tree) / "state"
+    for name, path, key in (
+        ("vault", source, "vault_digest"),
+        ("state", machine_state, "state_digest"),
+    ):
+        if tree_digest(path) != record[key]:
             raise StateError(f"arm {arm} tree {tree}: {name} does not match its build digest")
-    # Write custody before rename so an interrupt on either side can recover it.
-    (layout.run / "slot-vault.json").write_text(
-        json.dumps(
-            {"arm": arm, "tree": tree, "session": session, "digest": record["vault_digest"]}
-        ),
-        encoding="utf-8",
+    signatures = signature_digest(source)
+    if signatures != record["vault_signature_digest"]:
+        raise StateError(
+            f"arm {arm} tree {tree}: vault signatures differ from the build; rebuild state"
+        )
+    # Publish custody atomically before rename so either side of an interrupt can recover it.
+    _write_json_atomically(
+        layout.run / "slot-vault.json",
+        {
+            "arm": arm,
+            "tree": tree,
+            "session": session,
+            "digest": record["vault_digest"],
+            "signatures": signatures,
+            "shared": True,
+        },
     )
     try:
-        _rename_vault(source / "vault", slot.vault)
-        shutil.copytree(source / "state", slot.state, symlinks=True)
+        _rename_vault(source, slot.vault)
+        shutil.copytree(machine_state, slot.state, symlinks=True)
         if tree_digest(slot.state) != record["state_digest"]:
             raise StateError(
                 f"arm {arm} tree {tree}: the session state copy differs from its build"

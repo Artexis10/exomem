@@ -217,7 +217,7 @@ def _strings(value: object) -> list[str]:
 
 
 def _vault_pages(layout: Layout, arm: str, tree: str) -> list[str]:
-    vault = layout.arm_tree(arm, tree) / "vault"
+    vault = layout.shared_tree(tree) / "vault"
     if not vault.exists():
         return []
     return sorted(p.relative_to(vault).as_posix() for p in vault.rglob("*.md") if p.is_file())

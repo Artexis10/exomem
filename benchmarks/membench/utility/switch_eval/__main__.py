@@ -6,7 +6,7 @@ Run from the repository root with the benchmarks on the path::
 
 1. ``synthetic`` builds the synthetic vaults and writes their key and case files.
 2. ``prepare`` records the run's inputs and plan in the run directory.
-3. ``state`` builds each arm's state once per tree and captures its surface.
+3. ``state`` builds each tree once, copies state per arm, and captures each surface.
 4. ``run`` plays every session; ``run --dry-run`` prints them and runs nothing.
 5. ``judge`` checks the chain, writes the blind items and runs one judge route.
 6. ``audit`` runs the arm-guess audit and its re-judge after judging is complete.
@@ -321,14 +321,14 @@ def cmd_state(args: argparse.Namespace) -> int:
     layout, inputs, cases, _plan, specs = _context(Path(args.run))
     _stage(layout, inputs, "state")
     needed = sorted({case.tree for case in cases})
-    for arm in inputs["arms"]:
-        for tree in needed:
+    for tree in needed:
+        for arm in inputs["arms"]:
             source = Path(inputs["trees"][tree]["path"])
             record = build_arm(
                 layout, specs[arm], tree=tree, source_vault=source, parent_env=os.environ
             )
             print(
-                f"arm {arm} tree {tree}: state {record['state_digest'][:16]} vault {record['vault_digest'][:16]} ({record['build_seconds']} s)"
+                f"arm {arm} tree {tree}: state {record['state_digest'][:16]} vault {record['vault_digest'][:16]} (shared tree build {record['build_seconds']} s)"
             )
     hashes = _arm_hashes(layout, inputs, specs, needed)
     (layout.run / "arm-hashes.json").write_text(
@@ -337,6 +337,12 @@ def cmd_state(args: argparse.Namespace) -> int:
     for arm, record in hashes.items():
         print(f"arm {arm}: arm hash {record['arm_hash']}")
     return 0
+
+
+def cmd_startup_proof_server(args: argparse.Namespace) -> int:
+    from .state import startup_proof_server
+
+    return startup_proof_server(Path(args.marker))
 
 
 def cmd_build_state(args: argparse.Namespace) -> int:
@@ -883,9 +889,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p.set_defaults(func=cmd_prepare)
 
-    p = sub.add_parser("state", help="build each arm's state once per tree")
+    p = sub.add_parser("state", help="build each tree once and capture each arm surface")
     p.add_argument("--run", required=True)
     p.set_defaults(func=cmd_state)
+
+    p = sub.add_parser("startup-proof-server", help=argparse.SUPPRESS)
+    p.add_argument("--marker", required=True)
+    p.set_defaults(func=cmd_startup_proof_server)
 
     p = sub.add_parser("build-state", help=argparse.SUPPRESS)
     p.add_argument("--vault", required=True)

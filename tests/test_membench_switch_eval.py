@@ -69,6 +69,12 @@ from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 # with --exit-at-start exits before it reads a message, as a broken build would.
 FAKE_SERVER = """
 import json, sys, time
+from pathlib import Path
+if "--startup-marker" in sys.argv:
+    marker = Path(sys.argv[sys.argv.index("--startup-marker") + 1])
+    if "--write-vault" in sys.argv:
+        Path(sys.argv[sys.argv.index("--write-vault") + 1]).write_text("startup sidecar")
+    marker.write_text(json.dumps({"outcome": "complete"}))
 if "--exit-at-start" in sys.argv:
     sys.exit(2)
 crash = "--crash-on-call" in sys.argv
@@ -1090,19 +1096,22 @@ def test_the_tie_break_needs_the_arm_key_and_runs_only_after_unblinding(tmp_path
 @pytest.fixture
 def built_slot_tree(tmp_path: Path) -> Layout:
     """A built arm with nested text and binary files and disposable machine state."""
-    from membench.utility.switch_eval.state import tree_digest
+    from membench.utility.switch_eval.state import signature_digest, tree_digest
 
     layout = Layout(tmp_path / "run")
     arm = layout.arm_tree("P", "snapshot")
-    (arm / "vault" / "notes").mkdir(parents=True)
-    (arm / "vault" / "notes" / "page.md").write_text("A frozen observation.")
-    (arm / "vault" / "attachment.bin").write_bytes(bytes(range(256)))
-    (arm / "vault" / "_schema.yaml").write_text("schema: 1")
-    (arm / "state").mkdir()
+    shared = layout.shared_tree("snapshot")
+    (shared / "vault" / "notes").mkdir(parents=True)
+    (shared / "vault" / "notes" / "page.md").write_text("A frozen observation.")
+    (shared / "vault" / "attachment.bin").write_bytes(bytes(range(256)))
+    (shared / "vault" / "_schema.yaml").write_text("schema: 1")
+    (arm / "state").mkdir(parents=True)
     (arm / "state" / "index.sqlite").write_bytes(b"machine state")
     (arm / "state.json").write_text(json.dumps({
-        "vault_digest": tree_digest(arm / "vault"), "state_digest": tree_digest(arm / "state"),
+        "vault_digest": tree_digest(shared / "vault"), "state_digest": tree_digest(arm / "state"),
         "build": {"vectors": {"state": "current"}},
+        "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
+        "vault_signature_digest": signature_digest(shared / "vault"),
     }))
     return layout
 
@@ -1111,7 +1120,7 @@ def test_restoring_and_recovering_a_slot_preserves_every_file_signature(built_sl
     from membench.utility.switch_eval.state import prepare_session_slot, recover_session_vault
 
     layout = built_slot_tree
-    source = layout.arm_tree("P", "snapshot") / "vault"
+    source = layout.shared_tree("snapshot") / "vault"
     before = {p.relative_to(source): (p.stat().st_mtime_ns, p.stat().st_ctime_ns, p.stat().st_size)
               for p in source.rglob("*") if p.is_file()}
     slot = prepare_session_slot(layout, "P", "snapshot", "first-session")
@@ -1138,7 +1147,7 @@ def test_a_session_that_changes_the_vault_stops_the_run_and_preserves_it(built_s
     with pytest.raises(RunAborted, match=f"{inputs.planned.session_id}.*vault digest changed"):
         run_session(inputs, tmp_path / "session", executor)
     assert changed.read_text() == "changed"
-    assert not (layout.arm_tree("P", "snapshot") / "vault").exists()
+    assert not (layout.shared_tree("snapshot") / "vault").exists()
     # Recovery cannot silently bless the changed vault on a later run either.
     with pytest.raises(StateError, match="vault digest changed"):
         prepare_session_slot(layout, "P", "snapshot", "next-session")
@@ -1156,14 +1165,14 @@ def test_session_exceptions_return_the_unchanged_vault(built_slot_tree: Layout, 
     monkeypatch.setattr(executor, "_execute", interrupted)
     with pytest.raises(type(failure)):
         executor(_inputs(arm="P"), tmp_path / "attempt")
-    assert (layout.arm_tree("P", "snapshot") / "vault" / "notes" / "page.md").read_text() == "A frozen observation."
+    assert (layout.shared_tree("snapshot") / "vault" / "notes" / "page.md").read_text() == "A frozen observation."
     assert not layout.slot.exists()
     assert not (layout.run / "slot-vault.json").exists()
 
 
 def test_the_builder_publishes_vectors_and_the_active_pointer(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import numpy as np
-    from membench.utility.switch_eval.state import build_state, tree_digest
+    from membench.utility.switch_eval.state import build_state
 
     from exomem import embedding_backend, embeddings, index_paths, recall_migration, state_paths
 
@@ -1184,6 +1193,7 @@ def test_the_builder_publishes_vectors_and_the_active_pointer(vault: Path, monke
             pass
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     monkeypatch.delenv(recall_migration.REEMBED_ENV, raising=False)
     monkeypatch.setattr(embeddings, "MODEL_NAME", "fixture/encoder")
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
@@ -1197,11 +1207,69 @@ def test_the_builder_publishes_vectors_and_the_active_pointer(vault: Path, monke
         assert sidecar.is_file()
         assert embeddings.get_embedding_index(vault).file_mtimes()
         assert built["vectors"]["state"] == "current"
-        before = tree_digest(sidecar.parent)
-        pointer.unlink()
-        assert tree_digest(sidecar.parent) != before
-        print(f"Synthetic vector publication (fixture encoder): {built['vectors']['seconds']}s")
     finally:
         embeddings.unload_model()
         embeddings.clear_embedding_indexes()
         recall_migration.reset_for_tests()
+
+
+def test_a_same_bytes_rewrite_cannot_return_as_pristine(built_slot_tree: Layout) -> None:
+    import os
+
+    from membench.utility.switch_eval.state import (
+        StateError,
+        prepare_session_slot,
+        recover_session_vault,
+    )
+
+    layout = built_slot_tree
+    slot = prepare_session_slot(layout, "P", "snapshot", "rewrite-session")
+    page = slot.vault / "notes" / "page.md"
+    content = page.read_bytes()
+    # An atomic same-content rewrite changes ctime even when mtime is restored.
+    replacement = page.with_suffix(".new")
+    replacement.write_bytes(content)
+    info = page.stat()
+    os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
+    replacement.replace(page)
+    with pytest.raises(StateError, match="rewrite-session.*signatures.*rebuild state"):
+        recover_session_vault(layout)
+    assert page.read_bytes() == content
+    assert (layout.run / "slot-vault.json").exists()
+    assert not (layout.shared_tree("snapshot") / "vault").exists()
+
+
+def test_a_startup_write_refuses_the_build_instead_of_blessing_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from membench.utility.switch_eval import state
+
+    layout = Layout(tmp_path / "run")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "page.md").write_text("Frozen content.")
+    server = tmp_path / "stand_in_server.py"
+    server.write_text(FAKE_SERVER)
+    spec = replace(arm_specs()["P"], tools=("read_memory",))
+    real_entry = state.mcp_server_entry
+
+    def stand_in_entry(*args, **kwargs):
+        entry = real_entry(*args, **kwargs)
+        child = [sys.executable, str(server)]
+        if kwargs.get("startup_marker") is not None:
+            child += ["--startup-marker", str(kwargs["startup_marker"]), "--write-vault", str(layout.slot / "vault" / "attachment.txt.md")]
+        entry["args"][entry["args"].index("--") + 1:] = child
+        return entry
+
+    def built(*args, **kwargs):
+        (layout.slot / "state").mkdir()
+        (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({"vectors": {"state": "current"}}), "")
+
+    monkeypatch.setattr(state, "mcp_server_entry", stand_in_entry)
+    monkeypatch.setattr(state.subprocess, "run", built)
+    with pytest.raises(state.StateError, match="fresh server changed the vault.*'.md': 1"):
+        state.build_arm(layout, spec, tree="snapshot", source_vault=source, parent_env={})
+    proof = json.loads((layout.shared_tree("snapshot") / "quiescence.json").read_text())
+    assert proof["content_unchanged"] is False
+    assert proof["changed_files_by_extension"] == {".md": 1}
+    assert (layout.slot / "vault" / "attachment.txt.md").read_text() == "startup sidecar"
+    assert not (layout.shared_tree("snapshot") / "state.json").exists()
