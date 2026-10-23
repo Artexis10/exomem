@@ -32,6 +32,7 @@ from . import (
     memory_refs,
     project_keys,
     schema,
+    source_capture,
     source_taxonomy,
     tag_variants,
     temporal,
@@ -116,6 +117,7 @@ class AddResult:
     vocabulary_resolution: dict[str, str] | None = None
     # One line per source kind or domain this capture registered on first use.
     vocabulary_receipt: list[str] = field(default_factory=list)
+    capture_outcome: source_capture.CaptureOutcome | None = None
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -134,6 +136,8 @@ class AddResult:
             out["vocabulary_resolution"] = self.vocabulary_resolution
         if self.vocabulary_receipt:
             out["vocabulary_receipt"] = list(self.vocabulary_receipt)
+        if self.capture_outcome is not None:
+            out["capture_outcome"] = self.capture_outcome
         return out
 
 
@@ -226,6 +230,8 @@ def add(
     supersede: Sequence[tuple[str, str]] = (),
     defer_fanout_to_terminal: bool = False,
     raw_protection: bool = False,
+    source_identity: source_capture.SourceIdentity | None = None,
+    capture_input_digest: str | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -253,6 +259,16 @@ def add(
     """
     from .governance import raw_protection as raw_guard
 
+    if source_identity is not None:
+        # The command holds the mutation guard across lookup and this write.
+        source_identity = source_capture.validate_identity(source_identity)
+        source_capture.require_authority(vault_root)
+        if capture_input_digest is None:
+            capture_input_digest = source_capture.capture_digest(
+                vault_root, content=content, title=title, source_type=source_type or "", url=url,
+                tags=tags, why_captured=why_captured, domain=domain, projects=projects,
+                slug=slug, raw_protection=raw_protection,
+            )
     if raw_protection and artifact is None:
         with tempfile.TemporaryDirectory(prefix="exomem-raw-source-") as staging:
             original = Path(staging) / "source.txt"
@@ -264,6 +280,7 @@ def add(
                 adoption_seed=adoption_seed, extra_frontmatter=extra_frontmatter,
                 supersede=supersede, defer_fanout_to_terminal=defer_fanout_to_terminal,
                 raw_protection=True,
+                source_identity=source_identity, capture_input_digest=capture_input_digest,
             )
     # An artifact's identity is read before validation, because the page body
     # is synthesized from it when the caller supplied no text — and
@@ -398,6 +415,14 @@ def add(
         connector_boundary.require_create(vault_root, (folder_path / f"{date_iso}-{filename_slug}.md").relative_to(vault_root).as_posix())
     except ValueError as error:
         raise AddError(code="WRITE_REFUSED", missing=[], reason="target is unavailable") from error
+    if source_identity is not None:
+        existing = source_capture.find_capture(vault_root, source_identity)
+        if existing is not None:
+            path, reference, original_digest = existing
+            source_capture.require_authority(vault_root)
+            if original_digest != capture_input_digest:
+                raise source_capture.SourceCaptureError("SOURCE_IDENTITY_CONFLICT: identity already binds different capture inputs")
+            return AddResult(path=path, ref=reference, warnings=[], capture_outcome="reused")
     if adoption_seed is not None:
         actual_destination = folder_path.relative_to(vault_root).as_posix()
         if adoption_seed.get("destination") != actual_destination:
@@ -493,6 +518,8 @@ def add(
         artifact_digest=artifact_digest,
         artifact_size=artifact_size,
         adoption_receipt=adoption_receipt,
+        source_identity=source_identity,
+        capture_input_digest=capture_input_digest,
         extra_lines=episode_lines or (),
     )
     supersede_writes = _supersede_writes(
@@ -615,6 +642,11 @@ def add(
         else ()
     )
     try:
+        def validate_bindings() -> None:
+            taxonomy_plan.recheck_bindings(vault_root)
+            if source_identity is not None:
+                source_capture.require_authority(vault_root)
+
         if defer_fanout_to_terminal:
             publication_intents: list[object] = []
             created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
@@ -624,11 +656,13 @@ def add(
                 required_guards=required_guards,
                 post_commit_fanout=False,
                 publication_intents_out=publication_intents,
-                _validate_prepared_bindings=lambda: taxonomy_plan.recheck_bindings(vault_root),
+                _validate_prepared_bindings=validate_bindings,
             )
         else:
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
-                               _validate_prepared_bindings=lambda: taxonomy_plan.recheck_bindings(vault_root))
+                               _validate_prepared_bindings=validate_bindings)
+    except source_capture.SourceCaptureError:
+        raise
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
@@ -756,6 +790,7 @@ def add(
         adoption=adoption_receipt,
         vocabulary_resolution=domain_binding.as_dict() if domain_binding is not None else None,
         vocabulary_receipt=taxonomy_plan.receipt(),
+        capture_outcome="created" if source_identity is not None else None,
     )
 
 
@@ -1127,6 +1162,8 @@ def _render_source(
     artifact_digest: str | None = None,
     artifact_size: int | None = None,
     adoption_receipt: Mapping[str, object] | None = None,
+    source_identity: source_capture.SourceIdentity | None = None,
+    capture_input_digest: str | None = None,
     extra_lines: Sequence[str] = (),
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
@@ -1150,6 +1187,11 @@ def _render_source(
     if projects:
         lines.append("projects: [" + ", ".join(projects) + "]")
     lines.append(f"captured: {date_iso}")
+    if source_identity is not None:
+        import json
+
+        lines.append("source_identity: " + json.dumps(source_identity))
+        lines.append(f"capture_input_digest: {yaml_scalar(capture_input_digest)}")
     lines.extend(extra_lines)
     if artifact_rel:
         media_type = _media_type_for(artifact_name or artifact_rel)

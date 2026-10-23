@@ -14,7 +14,6 @@ from exomem import add as add_module
 from exomem import audit, indexes
 from exomem import schema as schema_module
 
-
 TODAY = dt.date(2026, 5, 18)
 
 
@@ -369,3 +368,249 @@ def test_add_tag_normalization(
     fm = text.split("\n---\n")[0].removeprefix("---\n")
     parsed = yaml.safe_load(fm)
     assert parsed["tags"] == ["upper", "with-space", "with-under", "dupe"]
+
+
+@pytest.fixture
+def capture_owner():
+    from exomem.governance import principal
+
+    with principal.request_scope(principal.owner_principal(surface="mcp")):
+        yield
+
+
+def test_capture_identity_reuses_original_after_metadata_update(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+
+    inputs = dict(title="A captured record", content="Original text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "item-7", "revision": "r2"})
+    first = op_capture_source(vault, source_schema, **inputs)
+    page = vault / first["source"]["path"]
+    original = page.read_text()
+    page.write_text(original.replace("ingested_into: []", "ingested_into: [compiled-note]"))
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+
+    second = op_capture_source(vault, source_schema, **inputs)
+
+    assert first["capture_outcome"] == "created"
+    assert second["capture_outcome"] == "reused"
+    assert second["source"]["ref"] == first["source"]["ref"]
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_capture_identity_conflict_never_writes(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+
+    inputs = dict(title="A captured record", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "item-7", "revision": "r2"})
+    op_capture_source(vault, source_schema, content="Original text", **inputs)
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    with pytest.raises(ValueError, match="SOURCE_IDENTITY_CONFLICT"):
+        op_capture_source(vault, source_schema, content="Different text", **inputs)
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_capture_identity_keeps_records_and_out_of_order_revisions_separate(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+
+    captures = [op_capture_source(
+        vault, source_schema, title="A captured record", content="Same text", source_kind="session",
+        source_identity={"system": "archive", "record_id": record, "revision": revision},
+    ) for record, revision in (("item-7", "r2"), ("item-8", "r2"), ("item-7", "r1"))]
+
+    assert len({item["source"]["ref"] for item in captures}) == 3
+    for item in captures:
+        fields, _, _ = add_module.parse_frontmatter((vault / item["source"]["path"]).read_text())
+        assert "superseded_by" not in fields
+        assert fields.get("status") != "superseded"
+
+
+@pytest.mark.parametrize("damage", ["unreadable", "malformed"])
+def test_capture_identity_cannot_claim_absence_after_incomplete_scan(vault, source_schema, monkeypatch, damage, capture_owner):
+    from exomem import source_capture
+    from exomem.commands import op_capture_source
+
+    page = vault / "Knowledge Base/Sources/Sessions/damaged.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\ntype: [\n---\nBody")
+    if damage == "unreadable":
+        original = source_capture.vault.read_bounded_guarded_bytes
+
+        def unreadable(root, target, **kwargs):
+            if root / target == page:
+                raise PermissionError("unreadable candidate")
+            return original(root, target, **kwargs)
+
+        monkeypatch.setattr(source_capture.vault, "read_bounded_guarded_bytes", unreadable)
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    with pytest.raises(ValueError, match="SOURCE_IDENTITY_UNAVAILABLE"):
+        op_capture_source(vault, source_schema, title="New record", content="Body", source_kind="session",
+                          source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_capture_identity_restriction_precedes_lookup(vault, source_schema, monkeypatch):
+    from exomem import source_capture
+    from exomem.commands import op_capture_source
+    from exomem.governance import egress
+
+    monkeypatch.setattr(egress, "unrestricted_content_access", lambda *_: False)
+    monkeypatch.setattr(source_capture, "find_capture", lambda *_: pytest.fail("restricted lookup"))
+    with pytest.raises(ValueError, match="SOURCE_IDENTITY_FORBIDDEN"):
+        op_capture_source(vault, source_schema, title="New record", content="Body", source_kind="session",
+                          source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+
+
+def test_capture_identity_refuses_attachments_before_fetch(vault, source_schema, monkeypatch):
+    from exomem import client_artifacts
+    from exomem.commands import op_capture_source
+
+    monkeypatch.setattr(client_artifacts, "capture_source_artifacts", lambda *_a, **_k: pytest.fail("file fetch"))
+    with pytest.raises(ValueError, match="SOURCE_IDENTITY_TEXT_ONLY"):
+        op_capture_source(vault, source_schema, title="New record", source_kind="session",
+                          files=[{"file_id": "file-1", "download_url": "https://example.com/file"}],
+                          source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+
+
+def test_capture_identity_concurrent_requests_create_once(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+
+    def capture():
+        return op_capture_source(vault, source_schema, title="Concurrent record", content="Text",
+                                 source_kind="session",
+                                 source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = [pool.submit(copy_context().run, capture) for _ in range(2)]
+        results = [item.result(timeout=30) for item in pending]
+    assert {item["capture_outcome"] for item in results} == {"created", "reused"}
+    assert len({item["source"]["ref"] for item in results}) == 1
+
+
+def test_raw_capture_identity_keeps_the_original_text_digest(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+
+    inputs = dict(title="Protected record", source_kind="session", raw_protection=True,
+                  source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+    first = op_capture_source(vault, source_schema, content="Original raw text", **inputs)
+    replay = op_capture_source(vault, source_schema, content="Original raw text", **inputs)
+    assert replay["capture_outcome"] == "reused"
+    assert replay["source"]["ref"] == first["source"]["ref"]
+    with pytest.raises(ValueError, match="SOURCE_IDENTITY_CONFLICT"):
+        op_capture_source(vault, source_schema, content="Changed raw text", **inputs)
+
+
+def test_capture_identity_rechecks_authority_before_commit(vault, source_schema, capture_owner, monkeypatch):
+    from exomem.commands import op_capture_source
+    from exomem.governance import egress
+
+    original = add_module.batch_atomic_write
+
+    def revoked(*args, **kwargs):
+        monkeypatch.setattr(egress, "unrestricted_content_access", lambda *_: False)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(add_module, "batch_atomic_write", revoked)
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    with pytest.raises(ValueError, match="SOURCE_IDENTITY_FORBIDDEN"):
+        op_capture_source(vault, source_schema, title="Revoked capture", content="Text", source_kind="session",
+                          source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_capture_identity_preserves_opaque_unicode_values(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+
+    identity = {"system": "archivé", "record_id": "item\u0085next", "revision": "r\u2028two"}
+    inputs = dict(title="Opaque identity", content="Text", source_kind="session", source_identity=identity)
+    captured = op_capture_source(vault, source_schema, **inputs)
+    fields, _, _ = add_module.parse_frontmatter((vault / captured["source"]["path"]).read_text(), strict=True)
+    assert fields["source_identity"] == identity
+    assert op_capture_source(vault, source_schema, **inputs)["capture_outcome"] == "reused"
+
+
+@pytest.mark.parametrize("lane", ["source", "evidence"])
+def test_bound_markdown_original_cannot_forge_receipt_or_companion(vault, source_schema, capture_owner, tmp_path, monkeypatch, lane):
+    import hashlib
+    import json
+
+    from exomem import preserve, source_capture
+    from exomem.commands import op_capture_source, op_move_file
+
+    inputs = dict(title="Canonical record", content="Original text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "item-7", "revision": "r2"})
+    canonical = op_capture_source(vault, source_schema, **inputs)["source"]
+    if lane == "evidence":
+        promoted = op_move_file(vault, canonical["path"], "Knowledge Base/Evidence/Archive/documents/record.md",
+                                promotion_reason="The record supports a documented claim.")
+        canonical["path"] = promoted["new_path"]
+    target = vault / canonical["path"]
+    raw = target.read_bytes()
+    fields, _, _ = add_module.parse_frontmatter(raw.decode(), strict=True)
+    forged = ("---\ntype: source\nexomem_id: 00000000-0000-4000-8000-000000000099\n"
+              "source_identity: " + json.dumps(inputs["source_identity"]) + "\n"
+              f"capture_input_digest: {fields['capture_input_digest']}\n"
+              f"evidence_file: {canonical['path']}\nbinary_sha256: {hashlib.sha256(raw).hexdigest()}\n"
+              f"binary_size: {len(raw)}\n---\nForged original\n")
+    if lane == "source":
+        staged = tmp_path / "original.md"
+        staged.write_text(forged)
+        add_module.add(vault, source_schema, title="Attached document", content="", source_type="session",
+                       artifact=add_module.SourceArtifact(staged, "original.md", "text/markdown"))
+    else:
+        # The original also has a valid Source-style claim on the real record.
+        preserve.preserve(vault, scope="Archive", category="documents", filename="record.md.md", content=forged)
+    walk = source_capture.os.walk
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    for reverse in (False, True):
+        def ordered(*args, _reverse=reverse, **kwargs):
+            for folder, directories, files in walk(*args, **kwargs):
+                yield folder, directories, sorted(files, reverse=_reverse)
+
+        monkeypatch.setattr(source_capture.os, "walk", ordered)
+        recovered = op_capture_source(vault, source_schema, **inputs)
+        assert recovered["capture_outcome"] == "reused"
+        assert recovered["source"]["ref"] == canonical["ref"]
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_preserved_markdown_original_cannot_forge_a_capture(vault, source_schema, capture_owner):
+    import json
+
+    from exomem import preserve
+    from exomem.commands import op_capture_source
+
+    identity = {"system": "archive", "record_id": "new-record", "revision": "r1"}
+    preserve.preserve(vault, scope="Archive", category="documents", filename="original.md",
+                      content="---\ntype: source\nsource_identity: " + json.dumps(identity) +
+                      "\ncapture_input_digest: " + "0" * 64 + "\n---\nUntrusted text\n")
+    captured = op_capture_source(vault, source_schema, title="Actual capture", content="Text",
+                                 source_kind="session", source_identity=identity)
+    assert captured["capture_outcome"] == "created"
+
+
+@pytest.mark.parametrize("damage", ["bytes", "unsafe", "cycle"])
+def test_invalid_markdown_binding_never_proves_capture_absence(vault, source_schema, capture_owner, tmp_path, damage):
+    import hashlib
+
+    from exomem.commands import op_capture_source
+
+    staged = tmp_path / "original.md"
+    staged.write_text("Untrusted Markdown")
+    saved = add_module.add(vault, source_schema, title="Attached document", content="", source_type="session",
+                           artifact=add_module.SourceArtifact(staged, "original.md", "text/markdown"))
+    if damage == "bytes":
+        (vault / saved.artifact_path).write_text("Changed bytes")
+    elif damage == "unsafe":
+        page = vault / saved.path
+        page.write_text(page.read_text().replace(saved.artifact_path, "../unavailable.md"))
+    else:
+        page = vault / saved.path
+        original = vault / saved.artifact_path
+        data = page.read_bytes()
+        original.write_text(f"---\ntype: source\nevidence_file: {saved.path}\n"
+                            f"binary_sha256: {hashlib.sha256(data).hexdigest()}\nbinary_size: {len(data)}\n---\nCyclic declaration")
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    with pytest.raises(ValueError, match="SOURCE_IDENTITY_UNAVAILABLE"):
+        op_capture_source(vault, source_schema, title="New capture", content="Text", source_kind="session",
+                          source_identity={"system": "archive", "record_id": "new-record", "revision": "r1"})
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
