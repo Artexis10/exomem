@@ -89,6 +89,8 @@ def test_a_reseed_keeps_current_profile_rows_usable_after_a_governed_write(
             watcher.stop()
             assert watcher.start()
             assert watcher.wait_until_seeded(15)
+            # The fixture drain owns publication after the resumed watcher proves its seed.
+            watcher.stop()
         after = freshness.recall_checkpoint(vault, "kb")
         assert after.instance_id == before.instance_id and after.generation != before.generation
 

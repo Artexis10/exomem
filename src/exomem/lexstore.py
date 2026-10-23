@@ -9853,6 +9853,7 @@ class LexicalStore:
             "p.eligibility_view_json IS NOT NULL", "p.content_hash IS NOT NULL",
             "p.ranking_json IS NOT NULL", "NOT EXISTS (SELECT 1 FROM pending WHERE path = p.path)",
         ))
+        # Keep MATCH first: older SQLite otherwise probes tri once per admitted page.
         # JSON keys are the private transport of frozen pending parser facts.
         rows = conn.execute(
             "WITH pending AS MATERIALIZED ("
@@ -9863,7 +9864,7 @@ class LexicalStore:
             "json_extract(value, '$.parseable') AS parseable FROM json_each(?)), "
             "matched AS (SELECT p.path, p.emitted_parent_path AS parent, p.updated, p.content_hash AS hash, "
             "json_extract(p.eligibility_view_json, '$.media_file') AS media_file, 1 AS priority, 0 AS ordinal "
-            "FROM tri JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses) + " "
+            "FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses) + " "
             "UNION ALL SELECT path, parent, updated, hash, media_file, 0, ordinal "
             "FROM pending WHERE matches = 1 AND parseable = 1), "
             "parents AS (SELECT m.*, CASE WHEN overlay.path IS NOT NULL THEN overlay.parseable "
