@@ -1985,6 +1985,7 @@ def test_one_artifact_batch_publishes_each_pending_custody_once(
             if component not in {
                 derived_receipts.DerivedComponent.GRAPH,
                 derived_receipts.DerivedComponent.WRITE_ADVISORY,
+                *derived_receipts.UNACKNOWLEDGED_COMPONENTS,
             }
         }
     assert "prepared" not in states

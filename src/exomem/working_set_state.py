@@ -70,11 +70,15 @@ def bounded_statement(text: str, limit: int = STATEMENT_MAX_CHARS) -> str:
     """
     if len(text) <= limit:
         return text
-    cut = text[:limit]
-    opened = cut.rfind("[[")
-    if opened != -1 and cut.find("]]", opened) == -1:
-        return cut[:opened].rstrip()
-    return cut
+    return without_open_link(text[:limit])
+
+
+def without_open_link(text: str) -> str:
+    """`text` with a trailing `[[link` that never closes removed, for any cut a caller made itself."""
+    opened = text.rfind("[[")
+    if opened != -1 and text.find("]]", opened) == -1:
+        return text[:opened].rstrip()
+    return text
 
 
 def _named_current_page(

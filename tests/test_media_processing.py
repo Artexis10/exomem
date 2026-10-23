@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from exomem import commands as commands_module
-from exomem import media_jobs, media_worker
+from exomem import graph_sync, media_jobs, media_worker
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 
@@ -1356,6 +1356,8 @@ def test_caller_supplied_completed_text_backfills_missing_provenance_in_place(
     assert _job_count(vault) == 0
 
 
+# Cursor progress depends on canonical media state, not graph convergence.
+@graph_sync.standalone_join_waived()
 def test_bounded_reconcile_skips_converged_prefix_and_advances_later_work(
     vault: Path,
 ) -> None:

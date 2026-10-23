@@ -8,7 +8,7 @@
     }
   },
   "activate_context": {
-    "description": "Compile bounded authorized context; abstain rather than guess.\n\nFollow live recall policy; reuse held context. For long threads or attachments,\npass conversation as needed. origin=focus marks agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nIf the subject is unknown, clarify first. Preserve source identity and scope.\nDue items and refresh grant no writes.",
+    "description": "Compile bounded authorized context; abstain rather than guess.\n\nReuse live recall policy and held context. For long threads/attachments,\nuse conversation as needed. origin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2727,7 +2727,7 @@
     }
   },
   "read_memory": {
-    "description": "Read a page or exact semantic unit selected by recall or known ref.\n\nunit_ref returns that current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.",
+    "description": "Read a page or exact semantic unit selected by recall or known ref.\n\nunit_ref returns that current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.\nAlso reads the paged views exomem://map, exomem://map/topic/<domain key>\nand exomem://map/unfiled.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2770,6 +2770,11 @@
         "history_continuation": {
           "type": "string",
           "description": "Position from the previous revision_history envelope."
+        },
+        "continuation": {
+          "maxLength": 1024,
+          "type": "string",
+          "description": "Next-page token of a view."
         }
       },
       "required": [
@@ -3197,6 +3202,24 @@
             "canonical"
           ],
           "type": "object"
+        },
+        "summary": {
+          "type": "string",
+          "description": "Optional one-line page description, at most 1024 characters."
+        },
+        "topics": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Domain key or list of keys; new keys register with this write."
         },
         "response_detail": {
           "default": "compact",

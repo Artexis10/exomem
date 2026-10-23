@@ -713,9 +713,9 @@ def _measure_working_set(vault: Path) -> tuple[float, dict]:
             vault, turn=WORKING_SET_TURN, include_timings=True
         )
 
-    packet = call()
-    samples = [_compiler_ms(call()["timings"]) for _ in range(3)]
-    return statistics.median(samples), packet
+    call()  # startup warmup is outside the measured steady-state samples
+    packets = [call() for _ in range(3)]
+    return statistics.median(_compiler_ms(packet["timings"]) for packet in packets), packets[-1]
 
 
 @pytest.mark.timeout(300)
@@ -916,6 +916,109 @@ def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free
         f"context compiler scaled {small_ms:.1f}ms @ {N_NOTES} to "
         f"{large_ms:.1f}ms @ {N_NOTES_LARGE} (bound {bound:.1f}ms)"
     )
+
+
+@pytest.mark.timeout(600)
+def test_maps_packet_stays_bounded_at_scale(
+    tmp_path: Path, model_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An owner cache hit must not hide the cost of rebuilding an owner or restricted map."""
+    from synth_vault import gen_entity_overlay
+    from test_governance_egress import _external
+
+    from exomem import commands, context_views, working_set_runtime
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    measured = {}
+    for notes, entities in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
+        vault = _build_dense_vault(tmp_path, notes)
+        gen_entity_overlay(vault, entities, seed=23)
+        _prepare_working_set_vault(vault)
+        commands.op_activate_context(vault, turn=WORKING_SET_TURN)  # startup warmup
+        measured[notes] = {}
+        for mode in ("owner_cache_hit", "owner_cleared", "restricted"):
+            caller = _external() if mode == "restricted" else principal.owner_principal(surface="library")
+            with principal.request_scope(caller):
+                assert context_views.CallerView.current(vault).restricted == (mode == "restricted")
+                packets = []
+                for _ in range(3):
+                    working_set_runtime.reset_caches_for_tests(packets_only=True)
+                    if mode == "owner_cleared":
+                        with context_views._OWNER_MAPS_LOCK:
+                            context_views._OWNER_MAPS.clear()
+                    gc.collect()
+                    packet = commands.op_activate_context(vault, turn=WORKING_SET_TURN, include_timings=True)
+                    assert packet["abstained"] is False, packet.get("abstention")
+                    assert packet["map"]["items"]
+                    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+                    packets.append(packet)
+                measured[notes][mode] = {
+                    "median_ms": statistics.median(_compiler_ms(packet["timings"]) for packet in packets),
+                    "stage_median_ms": {
+                        stage: statistics.median(packet["timings"]["stages"][stage]["ms"] for packet in packets)
+                        for stage in packets[0]["timings"]["stages"]
+                    },
+                }
+    print("maps activation latency " + json.dumps(measured, sort_keys=True))
+    for mode in ("owner_cleared", "restricted"):
+        small_ms, large_ms = (measured[notes][mode]["median_ms"] for notes in (N_NOTES, N_NOTES_LARGE))
+        assert max(small_ms, large_ms) < CEIL_WORKING_SET_MS, measured
+        # A map walks the catalogue by design; the 8,609 ms decision-memo cliff still fails this linear bound.
+        bound = small_ms * (N_NOTES_LARGE / N_NOTES) * CEIL_WORKING_SET_RATIO + WORKING_SET_RATIO_SLACK_MS
+        assert large_ms < bound, {"mode": mode, "bound_ms": bound, "measurements": measured}
+
+
+@pytest.mark.timeout(900)
+def test_restricted_view_reads_under_a_withholding_policy_are_reported_not_gated(
+    tmp_path: Path, model_free,
+) -> None:
+    """A restricted caller decides every catalogue entry its view reads, and a policy makes each
+    decision real work. The maps gate above runs with no policy, where every decision is free,
+    so this reports the warm cost of a map, an anchor profile and a topic profile at 2k and 8k
+    notes with one page withheld. It is not gated: a slow read here is a finding to report."""
+    from synth_vault import gen_entity_overlay
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import commands, context_catalogue, context_views
+    from exomem.governance import egress
+
+    measured = {}
+    for notes, entities in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
+        vault = _build_dense_vault(tmp_path, notes)
+        people = gen_entity_overlay(vault, entities, seed=23)
+        schema = vault / "Knowledge Base/_Schema/source-taxonomy.yaml"
+        schema.parent.mkdir(parents=True, exist_ok=True)
+        schema.write_text("schema_version: 1\ndomains:\n  measured: {label: Measured, path_label: Measured}\n")
+        filed = sorted((vault / "Knowledge Base").glob("*/note-000[0-3]*.md")) + [vault / rel for rel in people[:6]]
+        for page in filed:
+            text = page.read_text(encoding="utf-8")
+            page.write_text(text.replace("tags: [", "topics: [measured]\ntags: [", 1), encoding="utf-8")
+        withheld = filed[0].relative_to(vault).as_posix()
+        _withhold(vault, withheld, ceiling=0)
+        _prepare_working_set_vault(vault)
+        refs = {
+            "map": context_views.MAP_REF,
+            "anchor_profile": context_views.anchor_profile_ref(people[0]),
+            "topic_profile": context_views.topic_profile_ref("measured"),
+        }
+        measured[notes] = {}
+        for view, ref in refs.items():
+            samples = []
+            for _ in range(4):  # the first read warms the decision memo and is left out
+                gc.collect()
+                started = time.perf_counter()
+                with principal.request_scope(_external()), principal.invocation_scope():
+                    result = commands.op_read_memory(vault, path=ref)
+                    result = egress.postfilter("read_memory", result, vault, request_kwargs={"path": ref})
+                samples.append((time.perf_counter() - started) * 1000)
+                assert result["state"] == context_views.READY and result["items"], (view, result.get("state"))
+                assert all(item.get("path") != withheld for item in result["items"])
+            measured[notes][view] = {
+                "first_ms": round(samples[0], 1), "warm_median_ms": round(statistics.median(samples[1:]), 1),
+            }
+        measured[notes]["catalogue_entries"] = len(context_catalogue.ContextCatalogue(vault).entries())
+    print("\n[reported, not gated] restricted view reads " + json.dumps(measured, sort_keys=True))
 
 
 # --- Retrieval-carry bound (bound-request-latency-across-surfaces). A turn
@@ -1250,9 +1353,9 @@ def test_a_rule_admitting_a_large_folder_is_reported_not_gated(
     than against a slow-but-correct compile.
     """
     import yaml
+    from synth_vault import gen_entity_overlay
 
     from exomem import activation_conventions as ac_module
-    from synth_vault import gen_entity_overlay
 
     vault = _build_dense_vault(tmp_path, N_NOTES)
     gen_entity_overlay(vault, 500, seed=19)

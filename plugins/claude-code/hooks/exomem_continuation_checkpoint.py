@@ -40,6 +40,10 @@ def local_credentials():
     return module
 
 
+# Shared filenames for the retrieve hook's per-client, per-session map state.
+ACTIVATION_MAP_GENERATION_SUFFIX = ".map-generation"
+ACTIVATION_MAP_OVERHEAD_SUFFIX = ".map-overhead"
+
 SCHEMA_VERSION = 1
 EVENT_CONTRACT_VERSION = 1
 OUTPUT_CONTRACT_VERSION = 1
@@ -447,7 +451,7 @@ def _rearm_nudges(home: Path, session_id: str) -> None:
 
 
 def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
-    """Drop this session's continuity token. Called on EVERY lifecycle event the
+    """Drop this session's continuity token and map state on EVERY lifecycle event the
     client delivers, because every one of them ends the run of turns the token
     described: a compaction rewrites the context it was minted against, and a
     session boundary starts a new one.
@@ -456,10 +460,16 @@ def _clear_activation_token(home: Path, client: str, session_id: str) -> None:
     ever ignored by the server as stale, and a token that is dropped early only
     costs the next turn its qualifier.
     """
-    try:
-        unlink_nudge_file(activation_token_path(home, client, session_id))
-    except (OSError, ValueError):
-        pass
+    token = activation_token_path(home, client, session_id)
+    for path in (
+        token,
+        token.with_suffix(ACTIVATION_MAP_GENERATION_SUFFIX),
+        token.with_suffix(ACTIVATION_MAP_OVERHEAD_SUFFIX),
+    ):
+        try:
+            unlink_nudge_file(path)
+        except (OSError, ValueError):
+            pass
 
 
 def _state_root_binding(home: Path, client: str) -> str:
