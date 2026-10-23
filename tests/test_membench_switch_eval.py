@@ -1273,3 +1273,59 @@ def test_a_startup_write_refuses_the_build_instead_of_blessing_it(tmp_path: Path
     assert proof["changed_files_by_extension"] == {".md": 1}
     assert (layout.slot / "vault" / "attachment.txt.md").read_text() == "startup sidecar"
     assert not (layout.shared_tree("snapshot") / "state.json").exists()
+
+
+def test_an_interrupted_build_retries_without_nesting_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from membench.utility.switch_eval import state
+
+    layout = Layout(tmp_path / "run")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "page.md").write_text("Frozen content.")
+    spec = arm_specs()["P"]
+    signatures = []
+
+    def built(*args, **kwargs):
+        (layout.slot / "state").mkdir()
+        (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({"vectors": {"state": "current"}}), "")
+
+    def proof(slot, *args, **kwargs):
+        signatures.append(state.signature_digest(slot.vault))
+        if len(signatures) == 1:
+            raise RuntimeError("interrupted proof")
+        return {"content_unchanged": True, "signatures_unchanged": True}
+
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {})
+    monkeypatch.setattr(state, "prove_quiescence", proof)
+    with pytest.raises(RuntimeError, match="interrupted proof"):
+        state.build_arm(layout, spec, tree="snapshot", source_vault=source, parent_env={})
+    record = state.build_arm(layout, spec, tree="snapshot", source_vault=source, parent_env={})
+    assert signatures == [record["vault_signature_digest"]] * 2
+    assert (layout.shared_tree("snapshot") / "state" / "index.sqlite").is_file()
+    assert not (layout.shared_tree("snapshot") / "state" / "state").exists()
+    assert (layout.shared_tree("snapshot") / "vault" / "page.md").read_text() == "Frozen content."
+
+
+def test_the_real_startup_wrapper_refuses_unconverged_media(tmp_path: Path) -> None:
+    import os
+    import shutil
+
+    from epistemic.journeys.f27_replay import REPO_ROOT
+    from membench.utility.switch_eval import state
+
+    source = tmp_path / "source"
+    shutil.copytree(REPO_ROOT / "src" / "exomem" / "_scaffold" / "_Schema", source / "Knowledge Base" / "_Schema")
+    attachment = source / "Knowledge Base" / "attachment.txt"
+    attachment.write_text("A synthetic text attachment.")
+    layout = Layout(tmp_path / "run")
+    slot = state.prepare_build_slot(layout, source)
+    spec = replace(arm_specs()["P"], profile="neutral-lexical")
+    before = {"vault_digest": state.tree_digest(slot.vault), "vault_signatures": state.signature_manifest(slot.vault)}
+    out = tmp_path / "proof"
+    out.mkdir()
+    with pytest.raises(state.StateError, match="fresh server changed the vault"):
+        state.prove_quiescence(slot, spec, env=state._child_env(os.environ, slot, spec), out=out, before=before)
+    assert (slot.vault / "Knowledge Base" / "attachment.txt.md").is_file()
+    assert json.loads((out / "quiescence.json").read_text())["content_unchanged"] is False

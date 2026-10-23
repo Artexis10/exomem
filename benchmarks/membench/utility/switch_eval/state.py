@@ -35,6 +35,7 @@ from .tap import HANDSHAKE_METHODS
 from .tap import __file__ as TAP_SCRIPT
 
 SERVER_NAME = "exomem"
+MEDIA_CONVERGENCE_TIMEOUT_SECONDS = 1200.0
 
 
 class StateError(RuntimeError):
@@ -220,13 +221,16 @@ def _child_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[str
     return env
 
 
-def prepare_build_slot(layout: Layout, source_vault: Path) -> Slot:
+def prepare_build_slot(layout: Layout, source_vault: Path, *, move_vault: bool = False) -> Slot:
     recover_session_vault(layout)
     slot = Slot(layout.slot)
     slot.wipe()
     for path in (slot.runtime, slot.cwd, slot.hook_home):
         path.mkdir(parents=True)
-    shutil.copytree(source_vault, slot.vault, symlinks=True)
+    if move_vault:
+        _rename_vault(source_vault, slot.vault)
+    else:
+        shutil.copytree(source_vault, slot.vault, symlinks=True)
     return slot
 
 
@@ -235,11 +239,9 @@ def converge_media(vault: Path) -> dict:
 
     from exomem import media_processing, server_runtime
 
-    from .tap import READY_TIMEOUT_SECONDS
-
     passes = []
     written: set[str] = set()
-    deadline = time.monotonic() + READY_TIMEOUT_SECONDS
+    deadline = time.monotonic() + MEDIA_CONVERGENCE_TIMEOUT_SECONDS
     worker = None
     try:
         while True:
@@ -585,7 +587,13 @@ def build_tree(
                 f"tree {tree}: snapshot or retrieval profile changed; build a fresh run"
             )
         return record
-    slot = prepare_build_slot(layout, source_vault)
+    if (target / "state").exists():
+        shutil.rmtree(target / "state")
+    # An interrupted proof may have returned the original here. Reuse it, never copy it.
+    returned = target / "vault"
+    slot = prepare_build_slot(
+        layout, returned if returned.exists() else source_vault, move_vault=returned.exists()
+    )
     env = _child_env(parent_env, slot, spec)
     target.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -736,9 +744,13 @@ def recover_session_vault(layout: Layout) -> str | None:
         )
     if held.exists():
         if source.exists():
-            raise StateError(
-                f"session {custody['session']}: both vault locations exist; preserved {held}"
-            )
+            # Only a checked original in custody can displace an unpublished build remnant.
+            if custody.get("shared") and not (source.parent / "state.json").exists():
+                shutil.rmtree(source)
+            else:
+                raise StateError(
+                    f"session {custody['session']}: both vault locations exist; preserved {held}"
+                )
         _rename_vault(held, source)
     receipt.unlink()
     return digest
