@@ -73,7 +73,9 @@ def check_sessions(
     problems: list[str] = []
     sessions: dict[str, dict] = {}
     for planned in plan:
-        record = load_session(layout.sessions / planned["session_id"])
+        record = load_session(
+            layout.session_dir(planned["case_id"], planned["arm"], planned["repeat"])
+        )
         if record is None:
             problems.append(f"session {planned['session_id']}: no final record")
             continue
@@ -228,7 +230,7 @@ def case_table(
             reached, off_target = [], []
             for record in records:
                 delivered = _delivered_refs(
-                    layout.sessions / record["session_id"], record, pages[key]
+                    layout.session_dir(case.case_id, arm, record["repeat"]), record, pages[key]
                 )
                 reached.append(len(delivered & expected) / len(expected) if expected else None)
                 off_target.append(len(delivered - expected) / len(delivered) if delivered else None)

@@ -460,7 +460,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     limit = args.max_sessions or len(plan)
     ran = 0
     for planned in plan:
-        session_dir = layout.sessions / planned["session_id"]
+        session_dir = layout.session_dir(planned["case_id"], planned["arm"], planned["repeat"])
         record = load_session(session_dir)
         if record is not None:
             if record["outcome"] in (HARNESS_FAULT, STRUCK):

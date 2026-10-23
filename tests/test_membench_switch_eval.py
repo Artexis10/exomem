@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from membench.utility.switch_eval import protocol, stats
 from membench.utility.switch_eval.arms import arm_specs
-from membench.utility.switch_eval.cases import load_cases
+from membench.utility.switch_eval.cases import Case, load_cases
 from membench.utility.switch_eval.judge import (
     ITEM_FIELDS,
     JudgeError,
@@ -36,6 +36,7 @@ from membench.utility.switch_eval.session import (
     RunAborted,
     SessionInputs,
     classify,
+    plan_sessions,
     run_session,
 )
 from membench.utility.switch_eval.state import Layout
@@ -107,6 +108,14 @@ def _inputs(case_id: str = "case-1", arm: str = "A") -> SessionInputs:
         files={"instructions.md": "Pull before the answer."},
         state_digests={"vault": "v1", "state": "s1"},
     )
+
+
+def _case(case_id: str, *, kind: str = "miss", group: str | None = None, expects_memory: bool = True) -> Case:
+    return Case(
+        case_id=case_id, split=protocol.SPLIT_HELDOUT, kind=kind, group=group or case_id, tree="snapshot",
+        turns=("What did we decide about the release?",), scored_turn=0, turn_completeness="complete",
+        expects_memory=expects_memory,
+    )  # fmt: skip
 
 
 # -- the statistic ------------------------------------------------------------
@@ -260,6 +269,17 @@ def test_a_harness_fault_is_retried_with_identical_inputs(tmp_path: Path) -> Non
 
     struck = run_session(_inputs("case-2"), tmp_path / "faulting", always_faulting)
     assert struck["outcome"] == HARNESS_FAULT and struck["attempts"] == 1 + protocol.HARNESS_FAULT_RETRIES
+
+
+def test_a_case_id_that_climbs_out_of_the_run_directory_still_writes_inside_it(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    (planned,) = plan_sessions([_case("../../escaped-case")], arm_ids=["A"], repeats=1, seed=0)
+
+    session_dir = layout.session_dir(planned.case_id, planned.arm, planned.repeat)
+    run_session(_inputs(planned.case_id), session_dir, lambda inputs, attempt_dir: AttemptResult(OK, answer="An answer."))
+
+    (written,) = tmp_path.rglob("session.json")
+    assert written.resolve().is_relative_to(layout.sessions.resolve())
 
 
 # The stateless handshake is what the pinned client sends on the 2026-07-28 protocol.

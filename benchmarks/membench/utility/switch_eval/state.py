@@ -73,15 +73,30 @@ class Layout:
     def slot(self) -> Path:
         return self.run / "slot"
 
+    def inside(self, path: Path) -> Path:
+        """``path``, refused unless it resolves under the run directory: a name
+        that comes from a key or a case file never places a write elsewhere."""
+
+        if not path.resolve().is_relative_to(self.run.resolve()):
+            raise StateError(f"{path} resolves outside the run directory {self.run}")
+        return path
+
     def arm_tree(self, arm: str, tree: str) -> Path:
-        return self.run / "arms" / arm / tree
+        return self.inside(self.run / "arms" / arm / tree)
 
     def arm_dir(self, arm: str) -> Path:
-        return self.run / "arms" / arm
+        return self.inside(self.run / "arms" / arm)
 
     @property
     def sessions(self) -> Path:
         return self.run / "sessions"
+
+    def session_dir(self, case_id: str, arm: str, repeat: int) -> Path:
+        """A session's directory, named by a digest of its plan entry, so no
+        case id reaches a path."""
+
+        name = hashlib.sha256(json.dumps([case_id, arm, repeat]).encode()).hexdigest()[:16]
+        return self.inside(self.sessions / f"session-{name}")
 
     @property
     def judge(self) -> Path:
