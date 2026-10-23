@@ -1,6 +1,6 @@
 # Context roles — the lenses a context packet is assembled through.
 #
-# When an agent calls `activate_context` with a raw turn, the server resolves
+# When an agent calls `recall_context` with a raw turn, the server resolves
 # which durable anchors the turn is about and then fills a small working-memory
 # packet. A ROLE is one question that packet answers about an anchor: what is
 # this thing, what am I allowed to do with it, what state is it in now, what is

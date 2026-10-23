@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 from lme.native_agent import AgentLimits, RunEnvelope
 from membench.utility.action_world import ActionWorld
 from membench.utility.actor import UtilityBroker, phase_messages, run_phase
@@ -91,6 +92,36 @@ def test_memory_arm_has_world_and_shipped_memory_tools():
     assert "discover_tools" in available
     assert "read_file" in available
     assert "apply_config" in available
+
+
+@pytest.mark.parametrize("arm", ["control", "memory"])
+def test_preferred_memory_catalogue_keeps_compatibility_within_arm_admission(arm):
+    cell = FakeCell()
+    cell.schemas = {
+        "create_note": FakeCell.schemas["remember"],
+        "recall_context": FakeCell.schemas["ask_memory"],
+        "unknown_memory": FakeCell.schemas["ask_memory"],
+    }
+    broker = _broker(arm, cell=cell)
+    arguments = {"title": "Durable conclusion"}
+    for name in ("remember", "create_note"):
+        result, _ = asyncio.run(broker.tool(name, arguments, phase="experience"))
+        assert bool(result.get("isError")) is (arm == "control")
+    assert cell.calls == ([] if arm == "control" else [
+        ("remember", arguments), ("create_note", arguments),
+    ])
+    discovery = {"names": ["remember", "create_note"]}
+    result, loaded = asyncio.run(broker.tool("discover_tools", discovery, phase="experience"))
+    if arm == "memory":
+        assert result == {"loaded": ["create_note"]}
+        assert loaded == ["create_note"]
+    else:
+        assert result["isError"] is True
+        assert loaded == []
+    assert discovery == {"names": ["remember", "create_note"]}
+    for name in ("activate_context", "recall_context", "unknown_memory"):
+        result, _ = asyncio.run(broker.tool(name, {}, phase="experience"))
+        assert result["isError"] is True
 
 
 def test_same_tool_policy_applies_to_all_three_phases():

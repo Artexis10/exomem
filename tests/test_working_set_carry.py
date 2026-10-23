@@ -1463,7 +1463,7 @@ def test_the_hook_renders_the_named_pages_as_its_menu(carry_vault: Path, budget_
     # the activation index (U7).
     closing = block.splitlines()[-1]
     assert "`anchor`" in closing, closing
-    assert "activate_context" in closing, closing
+    assert "recall_context" in closing, closing
 
 
 def test_a_dropped_page_is_never_carried(vault: Path) -> None:

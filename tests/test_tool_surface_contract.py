@@ -134,8 +134,8 @@ def test_registry_content_and_operation_guidance_covers_every_write_shape() -> N
     manage = _command("manage_memory_file")
     assert "create, overwrite, and append" in manage.description
     assert "same semantic precommit contract" in manage.description
-    assert "remember" in manage.description
-    assert "replace_memory" in manage.description
+    assert "create_note" in manage.description
+    assert "supersede_note" in manage.description
     for parameter in ("operation", "content"):
         assert "Semantic authoring" not in _param(manage, parameter).help
 
@@ -209,12 +209,12 @@ def test_mcp_rest_openapi_and_cli_help_inherit_registry_guidance(
     compact = "- [category] content #tags (context) ^anchor"
     identity = semantic_authoring.contract_identity()
     for name in AUTHORING_TOOLS:
-        assert identity in tools[name]["description"]
-    assert compact in tools["remember"]["description"]
-    assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in tools["remember"][
+        assert identity in tools[_command(name).public_name]["description"]
+    assert compact in tools["create_note"]["description"]
+    assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in tools["create_note"][
         "inputSchema"
     ]["properties"]["content"]["description"]
-    assert "transitions to live" in tools["edit_memory"]["description"]
+    assert "transitions to live" in tools["edit_note"]["description"]
     assert "same semantic precommit contract" in tools["manage_memory_file"]["description"]
 
     client = TestClient(mcp.http_app())
@@ -222,7 +222,7 @@ def test_mcp_rest_openapi_and_cli_help_inherit_registry_guidance(
         "/api/openapi.json",
         headers={"Authorization": "Bearer synthetic-test-key"},
     ).json()
-    remember_schema = openapi["paths"]["/api/remember"]["post"]["requestBody"][
+    remember_schema = openapi["paths"]["/api/create_note"]["post"]["requestBody"][
         "content"
     ]["application/json"]["schema"]
     assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in remember_schema[
@@ -280,7 +280,7 @@ def test_govern_memory_response_detail_default_is_command_scoped(
     assert tools["govern_memory"]["inputSchema"]["properties"]["response_detail"][
         "default"
     ] == "full"
-    assert tools["remember"]["inputSchema"]["properties"]["response_detail"][
+    assert tools["create_note"]["inputSchema"]["properties"]["response_detail"][
         "default"
     ] == "compact"
 
@@ -341,7 +341,7 @@ def test_generated_capability_document_projects_registry_contract() -> None:
     assert contract.content_digest in generated
     assert "- [category] content #tags (context) ^anchor" in generated
     for name in AUTHORING_TOOLS:
-        assert f"### `{name}`" in generated
+        assert f"### `{_command(name).public_name}`" in generated
         assert semantic_authoring.render_tool_guidance(name) in generated
 
 
@@ -389,7 +389,7 @@ def test_mcp_only_empty_environment_is_sufficient_to_author(
     tools = _mcp_tools(mcp)
     bootstrap = _call_bootstrap(mcp)
     contract = bootstrap["semantic_authoring"]
-    remember_schema = tools["remember"]["inputSchema"]
+    remember_schema = tools["create_note"]["inputSchema"]
     assert contract["semantic_roles"]["category"] != contract["semantic_roles"]["tag"]
     assert contract["semantic_roles"]["kind"] != contract["semantic_roles"]["category"]
     assert "content" in remember_schema["properties"]
@@ -444,7 +444,7 @@ def test_mcp_remember_carries_neighbour_domain_decision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mcp = _build_server(tmp_path, monkeypatch)
-    decision_schema = _mcp_tools(mcp)["remember"]["inputSchema"]["properties"][
+    decision_schema = _mcp_tools(mcp)["create_note"]["inputSchema"]["properties"][
         "vocabulary_decision"
     ]
     decision_object = decision_schema
@@ -683,12 +683,12 @@ def test_the_server_tells_every_client_to_activate_context_first(
 
     instructions = mcp.instructions or ""
 
-    assert "activate_context" in instructions
+    assert "recall_context" in instructions
     assert "verbatim" in instructions
     assert "bootstrap" in instructions and "first" in instructions
-    assert "All tools named here belong to this server" in instructions
+    assert "Named tools belong to this server" in instructions
     assert "When recall is warranted" in instructions
     tools = asyncio.run(mcp.list_tools())
-    assert "activate_context" in {tool.name for tool in tools}
+    assert "recall_context" in {tool.name for tool in tools}
     # Short enough that a client which truncates server instructions keeps it.
     assert len(instructions) <= 900

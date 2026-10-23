@@ -211,7 +211,7 @@ def test_rest_openapi_self_doc(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.status_code == 200, r.text
     doc = r.json()
     assert doc["openapi"].startswith("3.1")
-    assert "/api/ask_memory" in doc["paths"] and "/api/remember" in doc["paths"]
+    assert "/api/search_memory" in doc["paths"] and "/api/create_note" in doc["paths"]
 
 
 def test_rest_openapi_disabled_without_key(vault, monkeypatch: pytest.MonkeyPatch) -> None:

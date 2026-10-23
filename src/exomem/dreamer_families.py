@@ -1136,7 +1136,7 @@ def _alias_view(
         ],
         "evidence_count": len(referrers) + 1,
         "route": {
-            "tool": "edit_memory",
+            "tool": "edit_note",
             "args": {
                 "path": subject,
                 "operation": {"kind": "patch_frontmatter", "field": "aliases"},
@@ -1215,7 +1215,7 @@ def _alias_stored(ctx: Context, key: str) -> dict[str, Any] | None:
         ],
         "evidence_count": carriers + len(referrers),
         "route": {
-            "tool": "edit_memory",
+            "tool": "edit_note",
             "args": {
                 "path": subject,
                 "operation": {"kind": "patch_frontmatter", "field": "aliases"},
@@ -1429,7 +1429,7 @@ def _tag_view(
         ],
         "evidence_count": len(others) + 1,
         "route": {
-            "tool": "edit_memory",
+            "tool": "edit_note",
             "args": {"path": subject, "operation": {"kind": "replace_tags"}},
         },
         "reason_code": "tag_spelling_variant",
@@ -1482,7 +1482,7 @@ def _tag_fallback(ctx: Context, key: str, firsts: list[tuple[str, str]]) -> dict
         ],
         "evidence_count": len(firsts),
         "route": {
-            "tool": "edit_memory",
+            "tool": "edit_note",
             "args": {"path": subject, "operation": {"kind": "replace_tags"}},
         },
         "reason_code": "tag_spelling_variant",
@@ -1615,7 +1615,7 @@ def _category_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]
             "proposal_key": key,
             "evidence": [subject_entry],
             "route": {
-                "tool": "edit_memory",
+                "tool": "edit_note",
                 "args": {"path": rel_path, "operation": {"kind": "replace_string"}},
             },
             "reason_code": reason,
@@ -2019,7 +2019,7 @@ def _profile_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None:
         ],
         "evidence_count": len(referrers) + 1,
         "route": {
-            "tool": "edit_memory",
+            "tool": "edit_note",
             "args": {
                 "path": subject,
                 "operation": {"kind": "patch_frontmatter", "field": "summary"},

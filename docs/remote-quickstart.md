@@ -305,7 +305,7 @@ the new packaged digest as `pending_tool_surface_sha256` with
 `refresh_required: true`; do not claim it is already registered. After the new
 service is deployed, confirm `/health/ready.mcp_tool_surface_sha256` matches the
 pending digest, refresh or recreate the Personal Plugin, and verify from a fresh
-conversation that `bootstrap` and `ask_memory` both invoke. If that verified
+conversation that `bootstrap` and `search_memory` both invoke. If that verified
 digest is still the current packaged surface, promote it to
 `registered_tool_surface_sha256`, clear the pending value, and set
 `refresh_required: false`. If a newer surface landed meanwhile, promote only

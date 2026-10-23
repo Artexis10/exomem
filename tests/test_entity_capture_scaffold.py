@@ -15,7 +15,7 @@ def test_capture_workflow_checks_existing_entity_before_create() -> None:
     assert "active entity registry" in text
     assert "selected knowledge packs" in text
     assert 'connect_memory(operation="resolve-entity"' in text
-    assert "edit_memory" in text
+    assert "edit_note" in text
     assert 'connect_memory(operation="create-entity")' in text
     assert "single incidental mention" in text
 

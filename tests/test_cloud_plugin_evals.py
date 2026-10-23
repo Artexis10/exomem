@@ -303,6 +303,29 @@ def test_recall_checks_can_pass_without_becoming_native_evidence():
     assert checks.evaluate_trace(trace(), case("grounded-recall"), IDENTITY)["ok"]
 
 
+def test_preferred_recall_calls_and_capabilities_keep_grounded_trace_valid():
+    from exomem.command_surface import resolve_command
+    from exomem.commands import PRODUCT_COMMANDS
+
+    value = trace()
+    for observation in value["observations"]:
+        if observation.get("kind") == "tool":
+            command = resolve_command(observation["name"], PRODUCT_COMMANDS)
+            observation["name"] = command.public_name
+    capabilities = value["observations"][1]["result"]["active_capabilities"]
+    capabilities["available_product_tools"] = [
+        resolve_command(name, PRODUCT_COMMANDS).public_name
+        for name in capabilities["available_product_tools"]
+    ]
+    original = copy.deepcopy(value)
+
+    assert checks.evaluate_trace(value, case("grounded-recall"), IDENTITY) == {
+        "ok": True,
+        "issues": [],
+    }
+    assert value == original
+
+
 def capture_trace():
     value = trace("proactive-outcome")
     value["observations"].insert(-1, tool("ask_memory", {"query": "sample dry run"}, {"hits": []}))

@@ -264,7 +264,7 @@ def test_the_advisory_carries_the_writers_guards(learning_vault: Path) -> None:
     page = (learning_vault / SLED).read_text(encoding="utf-8")
     assert name == {
         "family": "name",
-        "tool": "edit_memory",
+        "tool": "edit_note",
         "path": SLED,
         "field": "learned_aliases",
         "current": [],

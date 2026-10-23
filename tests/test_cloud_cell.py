@@ -541,9 +541,9 @@ def test_cloud_tool_list_allows_staged_adoption(
         assert "process_media" in names
         assert "read_media" not in names
         assert "configure_memory" in names
-        assert "activate_context" in names
-        assert "ask_memory" in names
-        assert "remember" in names
+        assert "recall_context" in names
+        assert "search_memory" in names
+        assert "create_note" in names
     finally:
         _teardown_activation(mcp)
 
@@ -709,7 +709,7 @@ def test_standalone_server_unaffected_by_cloud_module(
         names = {tool.name for tool in tools}
         # The standalone server keeps commands cloud mode would exclude.
         assert "adopt_vault" in names or "adopt_vault" not in commands_module.PRODUCT_PUBLIC_NAMES
-        assert "ask_memory" in names
+        assert "search_memory" in names
     finally:
         _teardown_activation(mcp)
 

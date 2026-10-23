@@ -89,13 +89,13 @@ def test_the_line_is_in_the_recall_contract_at_balanced_and_maximal(level: str) 
 def test_the_line_is_absent_at_light_and_off(level: str) -> None:
     """A level that recalls only on request must not instruct an unprompted call."""
     assert prominence.ACTIVATION_CARRIER_LINE not in prominence.CONTRACTS[level].recall
-    assert "activate_context" not in prominence.CONTRACTS[level].recall
+    assert "recall_context" not in prominence.CONTRACTS[level].recall
 
 
 def test_the_line_instructs_both_the_call_and_the_disambiguation() -> None:
     line = prominence.ACTIVATION_CARRIER_LINE
 
-    assert "activate_context" in line
+    assert "recall_context" in line
     assert "anchor" in line
     assert "ambiguous" in line
     # One line, so a carrier with no line breaks to be re-wrapped by a client.
@@ -360,4 +360,4 @@ def test_the_scaffold_states_the_activation_call_exactly_once() -> None:
     shipped skill drift apart."""
     loop = _recall_loop(SCAFFOLD_SKILL.read_text(encoding="utf-8"))
 
-    assert sum(line.count("activate_context") for line in loop) == 1
+    assert sum(line.count("recall_context") for line in loop) == 1

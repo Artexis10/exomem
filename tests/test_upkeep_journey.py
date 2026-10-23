@@ -43,7 +43,8 @@ def _clean():
 
 
 def _tool(vault: Path, name: str, **kwargs):
-    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
+    command = commands.resolve_command(name, commands.PRODUCT_COMMANDS)
+    assert command is not None, name
     return invoke_command(command, vault, **kwargs)
 
 

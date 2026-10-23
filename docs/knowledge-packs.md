@@ -47,7 +47,7 @@ Each pack is a JSON object with these required fields:
 | `suggested_folders` | Governed KB locations the pack commonly uses; selection does not create them. |
 | `suggested_workflows` | Beginner-facing workflows with `title`, `intent`, `route`, and `example`. |
 | `primitives` | Durable primitives the pack commonly uses. |
-| `actions` | Simple actions the pack supports. Existing packs may use legacy product verbs `save`, `adopt`, `ask`, `prove`, `review`, `update`, `connect`; new packs may also use `remember`, `capture`, and `maintain`. |
+| `actions` | Simple actions the pack supports. Existing packs may use legacy product verbs `save`, `adopt`, `ask`, `prove`, `review`, `update`, `connect`; new packs may also use `create_note`, `capture`, and `maintain`. |
 | `examples` | User-facing prompts that should route to this pack. |
 | `signals` | Structural tokens used by adoption scans to suggest the pack. |
 
@@ -113,8 +113,8 @@ Packs do not bypass governance. They help agents choose product commands:
 | Simple action | Product command |
 | --- | --- |
 | `capture` raw material | `capture_source`; use `preserve_evidence` or `transfer_artifact` for Evidence |
-| `remember` durable conclusion | `remember`; use `replace_memory` for supersession |
-| `ask` | `ask_memory`, optionally `read_memory` or `ask_memory(deep=true)` |
+| `create_note` durable conclusion | `create_note`; use `supersede_note` for supersession |
+| `ask` | `search_memory`, optionally `read_memory` or `search_memory(deep=true)` |
 | `review` | `review_memory` |
 | `connect` | `connect_memory` |
 | `adopt` | `adopt_vault(mode="scan-only")` before copy/compile modes |

@@ -35,11 +35,11 @@ losslessly; the server never guesses a language, pronunciation, or translation.
 
 ## Context descriptions and topics
 
-`remember` accepts an optional `summary`: a scalar string of one line, at most
+`create_note` accepts an optional `summary`: a scalar string of one line, at most
 1024 characters. It stores the description in the page's `summary` field.
 
 `topics` declares topic membership through a domain key or a list of domain
-keys. `remember` and `edit_memory` frontmatter patches resolve aliases and
+keys. `create_note` and `edit_note` frontmatter patches resolve aliases and
 replace deprecated keys, then store a list of canonical keys. They register
 new keys in the same write and warn when a key resembles an existing domain.
 Invalid keys and directory collisions refuse the write.
@@ -137,7 +137,7 @@ the page to its kind's folder and rewrites every link to it.
 | `bridge_scope` | all-or-none | descriptive lowercase slug; it never grants access or changes scope membership |
 | `bridge_review` | all-or-none | ISO date for derived review-queue surfacing; it does not itself expire an otherwise exact release |
 
-Use the normal reviewed `remember` or `replace_memory` flow to author these
+Use the normal reviewed `create_note` or `supersede_note` flow to author these
 fields. A bridge draft remains unreleased until a separate exact release grant
 is owner-reviewed and committed through governance.
 

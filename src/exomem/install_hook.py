@@ -1901,7 +1901,9 @@ def _refresh_metadata(
     ):
         raise ValueError("invalid checkpoint allowance")
     operations = {
-        command.name: command.read_only for command in commands.product_commands_for("mcp")
+        name: command.read_only
+        for command in commands.product_commands_for("mcp")
+        for name in command.callable_names
     }
     source_paths = {
         "commands.py": Path(commands.__file__),

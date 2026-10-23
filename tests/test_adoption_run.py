@@ -399,7 +399,7 @@ def test_finish_runs_recall_check_and_first_question(tmp_path: Path) -> None:
     recall = finished["finish"]["recall_check"]
     assert recall["ok"] is True
     assert "Quarterly Planning Notes" in finished["finish"]["first_question"]
-    assert finished["finish"]["route"]["tool"] == "ask_memory"
+    assert finished["finish"]["route"]["tool"] == "search_memory"
     manifest_path = finished["finish"]["manifest_path"]
     assert manifest_path is not None
     assert manifest_path.startswith("Knowledge Base/_Adoption/")

@@ -76,4 +76,4 @@ def test_the_scaffold_line_names_conversation_and_attachments_generically() -> N
     line = next(line for line in text.splitlines() if "also pass `conversation`" in line)
     assert "focus" in line and "attachment" in line and "never rewrite the turn" in line
     # The carrier line itself is untouched: it is pinned byte for byte elsewhere.
-    assert "call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`." in text
+    assert "call `recall_context` with the turn verbatim; on `ambiguous`, call again with `anchor`." in text
