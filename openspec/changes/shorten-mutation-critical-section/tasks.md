@@ -213,6 +213,12 @@ authority and can be rolled back independently.
       Evidence: PR #1501 measured the final-seal hold on a synthetic 1,000-note vault, ran the graph suites, and merged after independent review, privacy, strict OpenSpec checks and green CI.
 - [ ] 9.4 Deliver through the normal release process and verify the live personal
       service's write and graph outcomes before claiming the incident resolved.
+- [ ] 9.5 End an uncommitted final republication seal when a writer queues;
+      retain exact publication proof and distinguish deferral from failed proof.
+      Prove writer progress during source-byte and both membership checks,
+      withheld availability before the writer commits, and no rebuild on deferral.
+      Complete independent review, affected suites and ordinary source delivery.
+      Keep the installed write and graph acceptance in 9.4 open until observed.
 
 ## 10. Capture survives contention
 

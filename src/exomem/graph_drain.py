@@ -369,14 +369,12 @@ def _recover_once(vault_root: Path) -> bool:
         return False
 
 
-def _republish_once(vault_root: Path) -> bool:
-    """Restore a stranded availability marker. Never raises; True when restored."""
+def _republish_once(vault_root: Path) -> bool | None:
+    """Restore a stranded marker; None defers for foreground work. Never raises."""
     from . import epistemic_graph
 
     try:
-        return bool(
-            epistemic_graph.EpistemicGraphIndex(vault_root).republish_availability_if_current()
-        )
+        return epistemic_graph.EpistemicGraphIndex(vault_root).republish_availability_if_current()
     except Exception:  # noqa: BLE001 - the graph stays unavailable, so the signal stays
         log.warning("graph drain: availability republication failed", exc_info=True)
         return False
@@ -519,12 +517,13 @@ def _work_once(vault_root: Path) -> int:
         # never ran, and a whole-vault rebuild would be spent on a sidecar
         # whose rows may already match disk. Each step declines on its own
         # when it cannot help, and the rebuild is still there when all do.
-        if (
-            _cover_unacknowledged_checkpoint(vault_root)
-            or _republish_once(vault_root)
-            or _request_full_rebuild(vault_root)
-        ):
+        if _cover_unacknowledged_checkpoint(vault_root):
             processed += 1
+        else:
+            republished = _republish_once(vault_root)
+            # Deferral retains availability debt; only a declined proof needs a rebuild.
+            if republished is True or (republished is False and _request_full_rebuild(vault_root)):
+                processed += 1
     return processed
 
 
