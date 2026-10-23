@@ -1429,10 +1429,15 @@ class FileWatcher:
             except Exception:  # noqa: BLE001 - discovery must never kill the watcher
                 log.exception("file watcher: periodic media reconciliation failed")
         if seed:
-            return baselines_current and all(
+            seeded = baselines_current and all(
                 freshness.recall_is_live(self._vault_root, scope)
                 for scope in freshness.SCOPES
             )
+            if seeded:
+                from . import lexstore
+
+                lexstore.rebase_inherited_catalog_lineage(self._vault_root)
+            return seeded
         policy = self._watcher_policy()
         drift_admission = 0
         if drifted:

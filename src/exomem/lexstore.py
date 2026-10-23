@@ -1810,14 +1810,14 @@ def full_rebuild_in_flight(vault_root: Path) -> bool:
 
 
 def rebase_inherited_catalog_lineage(vault_root: Path) -> tuple[str, ...]:
-    """Make an inherited, proven-current catalog a delta origin for this process.
+    """Make a proven-current catalog a delta origin for this registry baseline.
 
-    Warm-up calls this after it proves the catalog it inherited, so the first
-    governed write after a worker replacement stays an O(delta) upsert instead
-    of stranding a scope behind a foreign checkpoint (see
-    `LexicalStore.rebase_inherited_checkpoints`).
+    Warm-up and registry reseeds use the same exact-state proof. Standbys
+    must leave the serving process's catalog untouched until promotion.
     """
-    if not maintained_content_index_enabled():
+    from . import service_standby
+
+    if not maintained_content_index_enabled() or service_standby.in_standby():
         return ()
     try:
         return get_store(vault_root).rebase_inherited_checkpoints()
@@ -6309,7 +6309,7 @@ class LexicalStore:
         return witnessed
 
     def rebase_inherited_checkpoints(self) -> tuple[str, ...]:
-        """Re-stamp an inherited, exactly-current catalog in this registry's lineage.
+        """Re-stamp an exactly-current catalog in this registry's lineage.
 
         A replacement process inherits a catalog whose stored checkpoints name
         the previous registry instance. Admission compares projected state
@@ -6321,10 +6321,11 @@ class LexicalStore:
         the same attestation `_bless` makes after a write: the rows are
         untouched, and admission trusts nothing it did not already trust.
 
-        Only the serving process's repair owner calls this (warm-up after a
-        successful proof); a standby publishes nothing. A busy barrier, or any
-        scope that is not state-equal, is left as it is: a later write then
-        hands that scope to repair instead. Returns the scopes re-stamped.
+        A same-process reseed also discards history without changing rows.
+        The same state-equality proof rebases its stored checkpoints safely.
+        Only the serving process calls this; a standby publishes nothing.
+        A busy barrier or unequal scope keeps its checkpoint, so a later write
+        hands that scope to repair. Returns the scopes re-stamped.
         """
         from . import freshness as freshness_module
         from .vault import VaultLockError
@@ -6358,7 +6359,7 @@ class LexicalStore:
                         if (
                             live is None
                             or stored is None
-                            or stored.instance_id == live.instance_id
+                            or stored == live
                             or _checkpoint_state(stored) is None
                             or _checkpoint_state(stored) != _checkpoint_state(live)
                         ):

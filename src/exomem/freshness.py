@@ -2042,6 +2042,10 @@ def rebaseline(vault_root: Path) -> dict[str, bool]:
                 vault_root,
                 scope,
             )
+    from . import lexstore
+
+    # Reuse exact catalog-state proof before the next write advances this baseline.
+    lexstore.rebase_inherited_catalog_lineage(vault_root)
     return result
 
 
