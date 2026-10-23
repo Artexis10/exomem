@@ -446,10 +446,10 @@ def power_step(
         return [*design, *reserve[:additions]]
 
     def further_turns(rule: str, delta: float) -> dict:
-        """A lower bound on the keyed turns a short rule still needs past the
-        keyed reserve: each further turn is taken as an ordinary turn in a group
-        of its own that expects memory, the most a turn can add to any rule. It
-        is a projection to plan a widening with, never a power figure."""
+        """The keyed turns a short rule still needs past the keyed reserve, at
+        best: each further turn is taken as an ordinary turn in a group of its
+        own that expects memory, so turns that share a group need more. It is
+        a projection to plan a widening with, never a power figure."""
 
         if not pools[KIND_ORDINARY] or (rule == "1" and KIND_ORDINARY not in effects):
             return {"needed": None, "reason": "no development ordinary turns to project from"}
@@ -470,7 +470,7 @@ def power_step(
         while high - low > 1:
             middle = (low + high) // 2
             low, high = (low, middle) if reaches(middle) else (middle, high)
-        return {"needed": high, "lower_bound": True}
+        return {"needed": high}
 
     floors = {"1": 0.0, "2": protocol.DELTA_FLOOR, "3": protocol.DELTA_FLOOR}
     tables: dict[str, list[dict]] = {rule: [] for rule in floors}
@@ -532,9 +532,9 @@ def power_step(
             "with fewer calls"
         ),
         "projection": (
-            "for a short rule, a lower bound on further keyed turns past the keyed reserve, "
-            "each taken as an ordinary turn in its own group that expects memory, searched up "
-            f"to {PROJECTION_LIMIT}; not a power figure"
+            "for a short rule, the further keyed turns past the keyed reserve it needs at best: "
+            "each is taken as an ordinary turn in its own group that expects memory, searched up "
+            f"to {PROJECTION_LIMIT}; turns that share a group need more; not a power figure"
         ),
         "simulations": simulations,
         "seed": seed,

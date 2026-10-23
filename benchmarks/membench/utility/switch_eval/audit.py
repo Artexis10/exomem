@@ -6,8 +6,9 @@ original item, and never a verdict, a key or the arm key, and guesses the arm
 through a structured-output schema. Every item guessed right on evidence that
 describes tools or the retrieval process is re-judged with that span removed,
 mixed in with as many controls, unchanged copies of original items drawn from
-all of them, by every standing judge route with the judge it judged with. Scoring then recomputes each rule
-with the re-judged verdicts on the flagged items (``score.score_run``).
+all of them, by every standing judge route with the judge it judged with.
+Scoring then recomputes each rule with the re-judged verdicts on the flagged
+items (``score.score_run``).
 """
 
 from __future__ import annotations

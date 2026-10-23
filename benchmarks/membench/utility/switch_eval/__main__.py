@@ -782,7 +782,7 @@ def cmd_power(args: argparse.Namespace) -> int:
         further = rule["more_keyed_turns"]
         if rule["short"]:
             needed = (
-                f"at least {further['needed']} more keyed turns, a lower bound"
+                f"{further['needed']} more keyed turns at best (each its own group, expecting memory)"
                 if further["needed"] is not None
                 else further.get("reason")
                 or f"more than {further['searched_up_to']} more keyed turns"
