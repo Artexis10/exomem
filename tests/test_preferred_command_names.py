@@ -215,3 +215,8 @@ def test_standalone_hooks_keep_both_spellings_in_step_with_the_registry() -> Non
         assert capture._successful_kb_write(tool) is False
         tool["input"]["validate_only"] = False
         assert capture._successful_kb_write(tool) is True
+    preparation = resolve_command("prepare_note", commands.PRODUCT_COMMANDS)
+    assert preparation.read_only is True
+    assert capture._PREPARATION_TOOL_SUFFIXES == (preparation.name, preparation.public_name)
+    for name in preparation.callable_names:
+        assert capture._successful_kb_write({"name": f"mcp__exomem__{name}"}) is False

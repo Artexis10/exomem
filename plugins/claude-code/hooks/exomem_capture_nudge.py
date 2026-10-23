@@ -130,6 +130,8 @@ _KB_WRITE = re.compile(
     r")",
     re.I,
 )
+# Preparation only returns a proposal; standalone deployers copy bytes and cannot import the registry.
+_PREPARATION_TOOL_SUFFIXES = ("compile_source", "prepare_note")
 
 #: The capture check, one short line on every fire. It names the rules that prevent known
 #: incidents and points at the installed skill or portable operating contract.
@@ -503,6 +505,8 @@ def _successful_kb_write(tool: dict) -> bool:
     if tool.get("failed"):
         return False
     name = str(tool.get("name") or "")
+    if name.lower().rsplit("__", 1)[-1] in _PREPARATION_TOOL_SUFFIXES:
+        return False
     tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
     # `operation` for the mixed tools that use it; `action` for the two
     # structured-collection commands, whose selector is spelled `action`. Without

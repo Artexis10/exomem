@@ -295,6 +295,10 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             tools = capabilities.get("available_product_tools", [])
             if not isinstance(tools, list) or any(not isinstance(t, str) for t in tools):
                 return _report(issues + ["bootstrap_observation_invalid"])
+            tools = {
+                command.name if (command := resolve_command(name, _product_commands())) else name
+                for name in tools
+            }
             if capabilities.get("profile") != identity["profile"] or not {
                 "activate_context",
                 "read_memory",
