@@ -9,8 +9,9 @@ Run from the repository root with the benchmarks on the path::
 3. ``state`` builds each arm's state once per tree and captures its surface.
 4. ``run`` plays every session; ``run --dry-run`` prints them and runs nothing.
 5. ``judge`` checks the chain, writes the blind items and runs one judge route.
-6. ``score`` unblinds, applies the tie-break when two routes judged, and scores.
-7. ``power`` runs the power step on a scored development run.
+6. ``audit`` runs the arm-guess audit and its re-judge after judging is complete.
+7. ``score`` unblinds, applies the tie-break when two routes judged, and scores.
+8. ``power`` runs the power step on a scored development run.
 
 Exit codes: 0 done, 2 refused or aborted, 3 run void, 75 paused on a quota.
 """
@@ -584,12 +585,14 @@ def cmd_judge(args: argparse.Namespace) -> int:
     return 0
 
 
-def _score(layout, inputs, cases, plan, specs, args) -> dict:
-    from .judge import UnblindingError, build_items, resolved_verdicts, unblind
-    from .score import check_judge_inputs, check_sessions, score_run
+def _standing(layout, inputs, cases, plan, routes: Sequence[str], stages: Sequence[str]):
+    """The chain checks after judging, then the unblinding: the captured
+    sessions, the checked arm key and what the items are built from."""
 
-    routes = args.routes.split(",")
-    problems = _stage_problems(layout, inputs, (*_STAGES_BEFORE_JUDGING, "judge"))
+    from .judge import UnblindingError, build_items, unblind
+    from .score import check_judge_inputs, check_sessions
+
+    problems = _stage_problems(layout, inputs, stages)
     hashes = json.loads((layout.run / "arm-hashes.json").read_text(encoding="utf-8"))
     session_problems, sessions = check_sessions(layout, plan=plan, arm_hashes=hashes)
     problems += session_problems
@@ -603,7 +606,63 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
         unblinded = unblind(layout, routes=routes, expected=rebuilt.arm_key)
     except UnblindingError as error:
         raise SystemExit(f"chain check failed after judging: {error}") from error
+    return sessions, unblinded, built_from
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    from .audit import run_guesses, run_rejudge, write_rejudge_set
+    from .judge import JudgeError, UnblindingError
+
+    layout, inputs, cases, plan, specs = _context(Path(args.run))
+    _stage(layout, inputs, "audit")
+    stages = (*_STAGES_BEFORE_JUDGING, "judge")
+    _sessions, unblinded, built_from = _standing(
+        layout, inputs, cases, plan, args.routes.split(","), stages
+    )
+    client = inputs["client"]
+    try:
+        guessed = run_guesses(
+            layout,
+            unblinded,
+            model=args.model,
+            effort=args.effort,
+            claude=client["executable"],
+            launcher=client["launcher"],
+        )
+        items = write_rejudge_set(
+            layout,
+            unblinded,
+            seed=built_from["seed"],
+            inputs_digest=built_from["inputs_digest"],
+        )
+        rejudged = run_rejudge(
+            layout, unblinded, items, claude=client["executable"], launcher=client["launcher"]
+        )
+    except UnblindingError as error:
+        raise SystemExit(f"chain check failed: {error}") from error
+    except JudgeError as error:
+        print(f"paused: {error}; rerun this stage to resume", file=sys.stderr)
+        return EXIT_PAUSED
+    print(json.dumps({**guessed, "rejudge_items": len(items), "rejudged_now": rejudged}, indent=2))
+    return 0
+
+
+def _score(layout, inputs, cases, plan, specs, args) -> dict:
+    from .audit import load_audit
+    from .judge import UnblindingError, resolved_verdicts
+    from .score import score_run
+
+    routes = args.routes.split(",")
+    audited = ("audit",) if layout.audit.exists() else ()
+    stages = (*_STAGES_BEFORE_JUDGING, "judge", *audited)
+    sessions, unblinded, built_from = _standing(layout, inputs, cases, plan, routes, stages)
     verdicts = resolved_verdicts(layout, unblinded)
+    try:
+        audit = load_audit(
+            layout, unblinded, seed=built_from["seed"], inputs_digest=built_from["inputs_digest"]
+        )
+    except UnblindingError as error:
+        raise SystemExit(f"chain check failed after judging: {error}") from error
     deltas, short, power_digest = _power_settings(args)
     result = score_run(
         layout,
@@ -617,6 +676,7 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
         seed=inputs["seed"],
         project_sessions=args.project_sessions,
         short=short,
+        audit=audit,
     )
     return {**result, "power_step": power_digest}
 
@@ -654,6 +714,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         else:
             state = "holds" if verdict["holds"] else "fails"
         print(f"rule {rule}: {state}")
+    print(f"arm-guess audit: {result['arm_guess_audit']['state']}")
     excluded = result["rules"]["5"].get("excluded_no_gold")
     if excluded:
         print(f"rule 5 excludes positives with no gold to lose: {', '.join(excluded)}")
@@ -808,6 +869,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--judge-effort", help="the judge's reasoning effort")
     p.add_argument("--items-only", action="store_true")
     p.set_defaults(func=cmd_judge)
+
+    p = sub.add_parser("audit", help="the arm-guess audit and its re-judge, after judging")
+    p.add_argument("--run", required=True)
+    p.add_argument(
+        "--routes", default="codex", help="the judge routes whose verdicts stand, first route first"
+    )
+    p.add_argument("--model", required=True, help="the audit lane's Opus model ID")
+    p.add_argument("--effort", help="the audit lane's reasoning effort")
+    p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("score", help="unblind and score")
     p.add_argument("--run", required=True)

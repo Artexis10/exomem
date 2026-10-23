@@ -76,6 +76,16 @@ MIN_GROUPS = 6
 #: "Rule" 4: M contaminates no more cases than A does, plus at most one.
 CONTAMINATION_TOLERANCE = 1
 
+#: "Arm-guess audit": the evidence kinds the audit schema fixes, a closed set
+#: the protocol names. Only the first one flags an item for the re-judge.
+AUDIT_EVIDENCE_KINDS: tuple[str, ...] = (
+    "describes_tools_or_retrieval",
+    "answer_content",
+    "no_basis",
+)
+AUDIT_FLAGGED_KIND = AUDIT_EVIDENCE_KINDS[0]
+AUDIT_NO_BASIS = AUDIT_EVIDENCE_KINDS[2]
+
 #: "Measures and judging": the verdict schema's closed values.
 REQUIRED_VERDICTS: tuple[str, ...] = ("used", "missing", "contradicted")
 FORBIDDEN_VERDICTS: tuple[str, ...] = ("asserted_as_current", "mentioned_as_past", "absent")

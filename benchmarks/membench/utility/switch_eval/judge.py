@@ -19,7 +19,7 @@ import math
 import os
 import re
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -288,9 +288,6 @@ def write_items(layout: Layout, item_set: ItemSet) -> None:
         ),
         encoding="utf-8",
     )
-    (layout.judge / "schema.json").write_text(
-        json.dumps(judge_schema(), indent=2), encoding="utf-8"
-    )
     (layout.unblinding / "arm-key.json").write_text(
         json.dumps(item_set.arm_key, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -311,8 +308,10 @@ def read_items(layout: Layout) -> list[dict]:
 # --------------------------------------------------------------------------
 
 
-def judge_prompt(item: Mapping) -> str:
-    instructions = (TEXTS / "judge.md").read_text(encoding="utf-8").strip()
+def judge_prompt(item: Mapping, *, text: str = "judge.md") -> str:
+    """One item's prompt: the instructions in ``texts/<text>``, then the item."""
+
+    instructions = (TEXTS / text).read_text(encoding="utf-8").strip()
     return (
         instructions + "\n\nThe item:\n\n" + json.dumps(item, indent=2, ensure_ascii=False) + "\n"
     )
@@ -461,53 +460,46 @@ def _refuse_tool_use(stdout: str) -> None:
             raise JudgeError(f"the judge ran a tool ({item.get('type')}); its verdict is not blind")
 
 
-def run_judge(
-    layout: Layout,
+def run_structured(
+    items: Sequence[Mapping],
     *,
     route: str,
     model: str,
     effort: str | None,
+    schema: Mapping,
+    prompt_for: Callable[[Mapping], str],
+    validate: Callable[[Mapping, object], dict],
+    out_dir: Path,
+    sandbox: Path,
     claude: str = "claude",
     launcher: Sequence[str] = (),
-) -> dict:
-    """Judge every item not yet judged on ``route``; resumable item by item.
+) -> int:
+    """Answer every item not yet answered in ``out_dir``, one headless call per
+    item through ``route``'s structured output; resumable item by item.
 
     A failed item is retried, then the stage stops with the item named: a
     spent quota and a broken route look alike from here, and both resume
-    by running the stage again.
+    by running the stage again. Returns the items answered now.
     """
 
     if route not in ROUTES:
         raise JudgeError(f"unknown judge route {route!r}")
-    items = read_items(layout)
-    out_dir = layout.judge / "verdicts" / route
     out_dir.mkdir(parents=True, exist_ok=True)
-    sandbox = layout.judge / "sandbox"
     sandbox.mkdir(parents=True, exist_ok=True)
-    empty_mcp = layout.judge / "no-mcp.json"
+    schema_path = out_dir.with_name(f"{out_dir.name}-schema.json")
+    schema_path.write_text(json.dumps(schema, indent=2), encoding="utf-8")
+    empty_mcp = sandbox.parent / "no-mcp.json"
     empty_mcp.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
-    manifest = out_dir.parent / f"{route}-judge.json"
-    record = {
-        "route": route,
-        "model": model,
-        "effort": effort,
-        "limitations": list(ROUTE_LIMITATIONS[route]),
-    }
-    if manifest.exists() and json.loads(manifest.read_text(encoding="utf-8")) != record:
-        raise JudgeError(
-            f"route {route} was started with another judge; one judge judges every item"
-        )
-    manifest.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    log_path = out_dir.parent / f"{route}-attempts.jsonl"
-    # The launching agent session's variables would make the judge a nested
-    # child of that session; the judge starts as a plain headless run instead.
+    log_path = out_dir.with_name(f"{out_dir.name}-attempts.jsonl")
+    # The launching agent session's variables would make the call a nested
+    # child of that session; it starts as a plain headless run instead.
     env = {**environment_floor(os.environ)[0], **CLIENT_PINS}
-    judged = 0
+    answered = 0
     for item in items:
         target = out_dir / f"{item['item_id']}.json"
         if target.exists():
             continue
-        prompt = judge_prompt(item)
+        prompt = prompt_for(item)
         if len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES:
             raise JudgeError(
                 f"item {item['item_id']}'s prompt exceeds one argv string; it cannot be judged as built"
@@ -519,7 +511,7 @@ def run_judge(
                 argv = codex_argv(
                     model=model,
                     effort=effort or "",
-                    schema=layout.judge / "schema.json",
+                    schema=schema_path,
                     out=raw_path,
                     sandbox=sandbox,
                     prompt=prompt,
@@ -531,7 +523,7 @@ def run_judge(
                         executable=claude,
                         model=model,
                         effort=effort,
-                        schema=judge_schema(),
+                        schema=schema,
                         prompt=prompt,
                         mcp_config=empty_mcp,
                     ),
@@ -558,7 +550,7 @@ def run_judge(
                 else:
                     raw_path.write_text(completed.stdout, encoding="utf-8")
                     payload = json.loads(completed.stdout).get("structured_output")
-                verdict = validate_verdict(item, payload)
+                answer = validate(item, payload)
             except (JudgeError, OSError, json.JSONDecodeError, AttributeError) as error:
                 last_error = str(error)
                 with open(log_path, "a", encoding="utf-8") as log:
@@ -569,23 +561,85 @@ def run_judge(
                         + "\n"
                     )
                 continue
-            target.write_text(json.dumps(verdict, indent=2, sort_keys=True), encoding="utf-8")
-            judged += 1
+            target.write_text(json.dumps(answer, indent=2, sort_keys=True), encoding="utf-8")
+            answered += 1
             break
         else:
             raise JudgeError(
                 f"item {item['item_id']} failed {_ITEM_ATTEMPTS} times on route {route}: {last_error}"
             )
+    return answered
+
+
+def run_judge(
+    layout: Layout,
+    *,
+    route: str,
+    model: str,
+    effort: str | None,
+    claude: str = "claude",
+    launcher: Sequence[str] = (),
+    items: Sequence[Mapping] | None = None,
+    out_dir: Path | None = None,
+) -> dict:
+    """Judge every item not yet judged on ``route``: the run's items into
+    ``judge/verdicts/<route>``, or ``items`` into ``out_dir``. One judge judges
+    every item a route judges, so the route's manifest refuses another."""
+
+    if route not in ROUTES:
+        raise JudgeError(f"unknown judge route {route!r}")
+    items = read_items(layout) if items is None else list(items)
+    out_dir = out_dir or layout.judge / "verdicts" / route
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    manifest = out_dir.with_name(f"{out_dir.name}-judge.json")
+    record = {
+        "route": route,
+        "model": model,
+        "effort": effort,
+        "limitations": list(ROUTE_LIMITATIONS[route]),
+    }
+    if manifest.exists() and json.loads(manifest.read_text(encoding="utf-8")) != record:
+        raise JudgeError(
+            f"route {route} was started with another judge; one judge judges every item"
+        )
+    manifest.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    judged = run_structured(
+        items,
+        route=route,
+        model=model,
+        effort=effort,
+        schema=judge_schema(),
+        prompt_for=judge_prompt,
+        validate=validate_verdict,
+        out_dir=out_dir,
+        sandbox=layout.judge / "sandbox",
+        claude=claude,
+        launcher=launcher,
+    )
     return {"route": route, "judged_now": judged, "items": len(items)}
 
 
-def load_verdicts(layout: Layout, route: str) -> dict[str, dict]:
-    out_dir = layout.judge / "verdicts" / route
+def judge_manifest(layout: Layout, route: str) -> dict:
+    """The judge a route's first pass ran with: its model and effort."""
+
+    path = layout.judge / "verdicts" / f"{route}-judge.json"
+    if not path.exists():
+        raise UnblindingError(f"route {route} has no judge manifest")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_answers(out_dir: Path) -> dict[str, dict]:
+    """Every stored answer in one route's directory, by item id."""
+
     if not out_dir.exists():
         return {}
     return {
         path.stem: json.loads(path.read_text(encoding="utf-8")) for path in out_dir.glob("*.json")
     }
+
+
+def load_verdicts(layout: Layout, route: str) -> dict[str, dict]:
+    return load_answers(layout.judge / "verdicts" / route)
 
 
 def agreement(verdicts: Mapping[str, Mapping], pairs: Sequence[tuple[str, str]]) -> dict:

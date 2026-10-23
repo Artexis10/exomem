@@ -11,6 +11,8 @@ import json
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 
+import numpy as np
+
 from . import protocol, stats
 from .arms import sha256_text
 from .cases import KIND_MISS, KIND_ORDINARY, SYNTHETIC_POSITIVE, SYNTHETIC_TWIN, Case
@@ -479,13 +481,17 @@ def rules(
 
     for number in (1, 2, 3):
         out[str(number)] = _inconclusive(out[str(number)], number, short=short)
-    out["switch"] = all(
-        out[str(n)]["holds"] and not out[str(n)]["inconclusive"] for n in range(1, 6)
-    )
+    out["switch"] = _switch(out)
     return out
 
 
-def decide(decided: Mapping, *, void: bool, split: str) -> str:
+def _switch(decided: Mapping) -> bool:
+    return all(
+        decided[str(n)]["holds"] and not decided[str(n)]["inconclusive"] for n in range(1, 6)
+    )
+
+
+def decide(decided: Mapping, *, void: bool, split: str, audited: bool) -> str:
     """What the rules decide. A switch needs all five, so one rule that fails
     conclusively keeps anchors; otherwise a rule that is not evaluable or reads
     as inconclusive leaves the decision open and says why. The product default
@@ -502,7 +508,11 @@ def decide(decided: Mapping, *, void: bool, split: str) -> str:
     ]
     if open_parts:
         return "; ".join(open_parts)
-    return "switch to maps" if not void and split == protocol.SPLIT_HELDOUT else "keep anchors"
+    if void or split != protocol.SPLIT_HELDOUT:
+        return "keep anchors"
+    # Without the audit, no rule has been checked for a verdict that the
+    # judge's arm leakage carried; the cost of waiting is one audit stage.
+    return "switch to maps" if audited else "inconclusive: the arm-guess audit has not run"
 
 
 # --------------------------------------------------------------------------
@@ -604,6 +614,73 @@ CONFOUNDS: tuple[str, ...] = (
 )
 
 
+#: Harness knob: bootstrap draws for the audit's guess-accuracy interval.
+BOOTSTRAP_DRAWS = 2000
+
+
+def _verdict_core(verdict: Mapping) -> tuple:
+    return (verdict["required"], verdict["forbidden"], verdict["contaminated"])
+
+
+def arm_guess_audit(
+    *,
+    cases: Sequence[Case],
+    sessions: Mapping[str, Mapping],
+    verdicts: Mapping[str, Mapping],
+    audit: Mapping,
+    decided: Mapping,
+    redone: Mapping,
+    seed: int,
+) -> dict:
+    """Guess accuracy against chance with a group-clustered bootstrap interval,
+    the confusion table, the share of verdicts that the re-judge changed on the
+    flagged items and on the controls (the noise baseline), and the rules whose
+    verdict flips when the flagged items' re-judged verdicts stand."""
+
+    group_of = {case.case_id: case.group for case in cases}
+    guesses = audit["guesses"]
+    by_group: dict[str, list[bool]] = {}
+    confusion = {arm: dict.fromkeys(protocol.ARM_IDS, 0) for arm in protocol.ARM_IDS}
+    for session_id, guess in guesses.items():
+        session = sessions[session_id]
+        by_group.setdefault(group_of[session["case_id"]], []).append(
+            guess["arm_guess"] == session["arm"]
+        )
+        confusion[session["arm"]][guess["arm_guess"]] += 1
+    labels = sorted(by_group)
+    hits = np.array([sum(by_group[g]) for g in labels], dtype=float)
+    sizes = np.array([len(by_group[g]) for g in labels], dtype=float)
+    interval = None
+    if labels:
+        draws = np.random.default_rng(seed).integers(
+            0, len(labels), size=(BOOTSTRAP_DRAWS, len(labels))
+        )
+        rates = hits[draws].sum(axis=1) / sizes[draws].sum(axis=1)
+        interval = [float(q) for q in np.quantile(rates, [0.025, 0.975])]
+
+    def changed(rejudged: Mapping[str, Mapping]) -> dict:
+        moved = sum(_verdict_core(v) != _verdict_core(verdicts[s]) for s, v in rejudged.items())
+        return {"items": len(rejudged), "changed_verdicts": moved}
+
+    return {
+        "state": "complete",
+        "items": len(guesses),
+        "groups": len(labels),
+        "accuracy": float(hits.sum() / sizes.sum()) if labels else None,
+        "chance": 1 / len(protocol.ARM_IDS),
+        "interval_95": interval,
+        "bootstrap": {"draws": BOOTSTRAP_DRAWS, "seed": seed, "clustered_by": "group"},
+        "confusion": confusion,
+        "evidence_kinds": _counts(guess["evidence_kind"] for guess in guesses.values()),
+        "flagged": changed(audit["flagged"]),
+        "controls": changed(audit["controls"]),
+        "rules_rejudged": {n: redone[n]["holds"] for n in ("1", "2", "3", "4", "5")},
+        "flips": [
+            n for n in ("1", "2", "3", "4", "5") if decided[n]["holds"] != redone[n]["holds"]
+        ],
+    }
+
+
 def score_run(
     layout: Layout,
     *,
@@ -617,7 +694,11 @@ def score_run(
     seed: int,
     project_sessions: int | None = None,
     short: Collection[int] = (),
+    audit: Mapping | None = None,
 ) -> dict:
+    """Score the run. ``audit`` is what ``audit.load_audit`` reads, or ``None``
+    when the arm-guess audit has not run."""
+
     for rule, delta in deltas.items():
         if not protocol.DELTA_FLOOR <= delta <= protocol.DELTA_CAP:
             raise ValueError(
@@ -627,22 +708,49 @@ def score_run(
         layout, cases=cases, sessions=sessions, verdicts=verdicts, arm_ids=arm_ids, repeats=repeats
     )
     void = len(built["struck"]) > protocol.MAX_STRUCK_CASES
-    decided = rules(
-        cases=cases,
-        table=built["cases"],
-        split=split,
-        deltas=deltas,
-        seed=seed,
-        arm_ids=arm_ids,
-        short=short,
-    )
+    rule_inputs = {
+        "cases": cases,
+        "split": split,
+        "deltas": deltas,
+        "seed": seed,
+        "arm_ids": arm_ids,
+        "short": short,
+    }
+    decided = rules(table=built["cases"], **rule_inputs)
+    audited: dict = {"state": "not run"}
+    if audit is not None:
+        replaced = {**verdicts, **audit["flagged"]}
+        rejudged = case_table(
+            layout,
+            cases=cases,
+            sessions=sessions,
+            verdicts=replaced,
+            arm_ids=arm_ids,
+            repeats=repeats,
+        )
+        audited = arm_guess_audit(
+            cases=cases,
+            sessions=sessions,
+            verdicts=verdicts,
+            audit=audit,
+            decided=decided,
+            redone=rules(table=rejudged["cases"], **rule_inputs),
+            seed=seed,
+        )
+        for number in audited["flips"]:
+            decided[number]["inconclusive"].append(
+                f"rule {number}: its verdict flips when the arm-guess audit's flagged items "
+                "are re-judged without their spans"
+            )
+        decided["switch"] = _switch(decided)
     return {
         "split": split,
         "diagnostic": split != protocol.SPLIT_HELDOUT,
         "void": void,
         "struck": built["struck"],
         "rules": decided,
-        "decision": decide(decided, void=void, split=split),
+        "decision": decide(decided, void=void, split=split, audited=audit is not None),
+        "arm_guess_audit": audited,
         "secondary": secondary(cases=cases, table=built["cases"], arm_ids=arm_ids),
         "usage": usage(layout, sessions, project_sessions=project_sessions),
         "cases": built["cases"],

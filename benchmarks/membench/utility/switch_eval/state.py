@@ -103,6 +103,10 @@ class Layout:
         return self.run / "judge"
 
     @property
+    def audit(self) -> Path:
+        return self.run / "audit"
+
+    @property
     def unblinding(self) -> Path:
         return self.run / "unblinding"
 

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from membench.utility.switch_eval import protocol, stats
 from membench.utility.switch_eval.arms import arm_specs
+from membench.utility.switch_eval.audit import run_guesses
 from membench.utility.switch_eval.cases import Case, Required, load_cases
 from membench.utility.switch_eval.judge import (
     ITEM_FIELDS,
@@ -229,7 +230,7 @@ def test_a_run_whose_rules_are_not_evaluable_decides_nothing() -> None:
     # Arms A and P only: every rule needs M, so no rule is evaluable.
     decided = rules(cases=[], table={}, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "P"])
 
-    assert decide(decided, void=False, split=protocol.SPLIT_HELDOUT).startswith("not evaluable: arms M and A")
+    assert decide(decided, void=False, split=protocol.SPLIT_HELDOUT, audited=True).startswith("not evaluable: arms M and A")
 
 
 def test_rule_1_pools_the_memory_expecting_miss_cases_with_the_memory_expecting_ordinary_turns() -> None:
@@ -274,7 +275,7 @@ def test_a_rule_with_fewer_than_six_groups_reads_as_inconclusive_not_as_failed()
     decided = rules(cases=cases, table=table, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "M"])
 
     assert decided["1"]["inconclusive"]
-    assert "inconclusive: rule 1" in decide(decided, void=False, split=protocol.SPLIT_HELDOUT)
+    assert "inconclusive: rule 1" in decide(decided, void=False, split=protocol.SPLIT_HELDOUT, audited=True)
 
 
 def test_a_failed_rule_that_the_power_step_found_short_reads_as_inconclusive_not_as_harm() -> None:
@@ -291,7 +292,7 @@ def test_a_failed_rule_that_the_power_step_found_short_reads_as_inconclusive_not
     decided = rules(cases=cases, table=table, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "M"], short={2})
 
     assert not decided["2"]["holds"] and decided["2"]["inconclusive"]
-    assert decide(decided, void=False, split=protocol.SPLIT_HELDOUT) != "keep anchors"
+    assert decide(decided, void=False, split=protocol.SPLIT_HELDOUT, audited=True) != "keep anchors"
 
 
 # -- the judge's view ---------------------------------------------------------
@@ -609,6 +610,75 @@ def test_unblinding_refuses_an_arm_key_that_names_another_arm_for_a_session(tmp_
 
     with pytest.raises(UnblindingError):
         unblind(layout, routes=["codex"], expected=item_set.arm_key)
+
+
+# A stand-in for the audit lane's client: records the item each prompt shows and guesses A.
+STAND_IN_GUESSER = """#!{python}
+import json, sys
+from pathlib import Path
+prompt = sys.argv[sys.argv.index("-p") + 1]
+item = json.loads(prompt.split("The item:\\n\\n", 1)[1])
+with open(Path(__file__).with_name("shown.jsonl"), "a", encoding="utf-8") as shown:
+    shown.write(json.dumps(item) + "\\n")
+guess = {{"item_id": item["item_id"], "arm_guess": "A", "confidence": 0.4, "evidence_span": None, "evidence_kind": "no_basis"}}
+print(json.dumps({{"structured_output": guess}}))
+"""
+
+
+def test_the_arm_guess_audit_shows_its_lane_exactly_the_judge_view_of_each_original_item(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    case = _case("case-1", required=(Required("release-freeze", "The release is frozen."),))
+    sessions = [_session(layout, "case-1", arm, repeat, AttemptResult(OK, answer="The release is frozen."))
+                for arm in protocol.ARM_IDS for repeat in (1, 2)]  # fmt: skip
+    item_set = build_items([case], sessions, seed=7, inputs_digest="inputs", tool_names=())
+    write_items(layout, item_set)
+    for item_id in item_set.arm_key:
+        _write_verdict(layout, "codex", item_id, {"r1": "used"})
+    guesser = tmp_path / "client" / "guesser"
+    guesser.parent.mkdir()
+    guesser.write_text(STAND_IN_GUESSER.format(python=sys.executable), encoding="utf-8")
+    guesser.chmod(0o755)
+
+    unblinded = unblind(layout, routes=["codex"], expected=item_set.arm_key)
+    run_guesses(layout, unblinded, model="stand-in", effort=None, claude=str(guesser), launcher=())
+
+    shown = [json.loads(line) for line in (guesser.parent / "shown.jsonl").read_text(encoding="utf-8").splitlines()]
+    originals = [item for item in item_set.items if not item_set.arm_key[item["item_id"]]["rejudge_of"]]
+    # No arm, session, verdict or re-judged copy: each original item's judge view, once.
+    assert sorted(shown, key=lambda i: i["item_id"]) == sorted(originals, key=lambda i: i["item_id"])
+
+
+def test_a_rule_whose_verdict_flips_without_the_flagged_spans_reads_as_inconclusive(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    cases = [_case(f"case-{n}", kind="ordinary", required=(Required("release-freeze", "The release is frozen."),))
+             for n in range(6)]  # fmt: skip
+    sessions, verdicts = {}, {}
+    for case in cases:
+        for arm in protocol.ARM_IDS:
+            record = _session(layout, case.case_id, arm, 1, AttemptResult(OK, answer="The release is frozen."))
+            sessions[record["session_id"]] = record
+            verdicts[record["session_id"]] = {"required": {"r1": "used" if arm == "M" else "missing"}, "forbidden": {}, "contaminated": None}
+    # The auditor named every M answer from its talk of the map; without that span the judge finds the fact missing.
+    audit = {
+        "guesses": {sid: {"arm_guess": r["arm"], "confidence": 0.9, "evidence_kind": "describes_tools_or_retrieval",
+                          "evidence_span": "I read the map."} for sid, r in sessions.items()},
+        "flagged": {sid: {**verdicts[sid], "required": {"r1": "missing"}} for sid, r in sessions.items() if r["arm"] == "M"},
+        "controls": {},
+    }  # fmt: skip
+
+    scored = score_run(
+        layout, cases=cases, sessions=sessions, verdicts=verdicts, arm_ids=list(protocol.ARM_IDS), repeats=1,
+        split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, audit=audit,
+    )  # fmt: skip
+
+    assert scored["rules"]["3"]["holds"]
+    assert any("arm-guess audit" in reason for reason in scored["rules"]["3"]["inconclusive"])
+
+
+def test_a_run_whose_arm_guess_audit_has_not_run_does_not_switch() -> None:
+    decided = {str(n): {"evaluable": True, "holds": True, "inconclusive": []} for n in range(1, 6)}
+
+    assert decide(decided, void=False, split=protocol.SPLIT_HELDOUT, audited=False).startswith("inconclusive")
 
 
 def test_the_tie_break_needs_the_arm_key_and_runs_only_after_unblinding(tmp_path: Path) -> None:
