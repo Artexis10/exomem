@@ -315,16 +315,35 @@ def rules(
     has = set(arm_ids).__contains__
     out: dict[str, dict] = {}
 
+    # Rule 1 pools the cases that expect memory: the miss cases and the
+    # ordinary turns, each in their groups (amendment 1).
+    memory = {
+        kind: [c.case_id for c in in_split if c.kind == kind and c.expects_memory]
+        for kind in (KIND_MISS, KIND_ORDINARY)
+    }
+    expecting = memory[KIND_MISS] + memory[KIND_ORDINARY]
     if not (has("M") and has("A")):
         out["1"] = _not_evaluable("arms M and A are not both in the run")
-    elif not miss:
-        out["1"] = _not_evaluable(f"no {split} miss cases")
+    elif not expecting:
+        out["1"] = _not_evaluable(f"no {split} cases that expect memory")
     else:
-        test = stats.compare(_differences(table, miss, "M", "A"), groups, seed=seed)
+        differences = _differences(table, expecting, "M", "A")
+        test = stats.compare(differences, groups, seed=seed)
+        # The miss stratum was selected for A's failure, so it inflates M - A;
+        # the report gives each stratum with its share of the pool.
+        strata = {
+            kind: {
+                "cases": len(ids),
+                "share": len(ids) / len(expecting),
+                "mean_difference": _mean([differences.get(c) for c in ids]),
+            }
+            for kind, ids in memory.items()
+        }
         out["1"] = {
             "evaluable": True,
             "holds": test["superiority"]["passes"],
-            "cases": len(miss),
+            "cases": len(expecting),
+            "strata": strata,
             "M_minus_A": test,
         }
 

@@ -170,6 +170,29 @@ def test_a_run_whose_rules_are_not_evaluable_decides_nothing() -> None:
     assert decide(decided, void=False, split=protocol.SPLIT_HELDOUT).startswith("not evaluable: arms M and A")
 
 
+def test_rule_1_pools_the_memory_expecting_miss_cases_with_the_memory_expecting_ordinary_turns() -> None:
+    # Five miss wins alone cannot pass at 0.025 (p = 1/32); with seven ordinary wins they do.
+    cases = [_case(f"miss-{n}") for n in range(5)] + [_case(f"turn-{n}", kind="ordinary") for n in range(7)]
+    # Cases that expect no memory, both lost by M, are not rule 1's.
+    cases += [_case("miss-none", expects_memory=False), _case("turn-none", kind="ordinary", expects_memory=False)]
+    table = {
+        c.case_id: {
+            "M": {"score": float(c.expects_memory), "contaminated": False},
+            "A": {"score": float(not c.expects_memory), "contaminated": False},
+        }
+        for c in cases
+    }
+
+    rule = rules(cases=cases, table=table, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "M"])["1"]
+
+    assert rule["holds"] and rule["cases"] == 12
+    assert rule["M_minus_A"]["superiority"]["p_value"] == pytest.approx(1 / 4096)
+    # The miss stratum was selected for A's failure, so the report shows each stratum's share.
+    assert {name: (s["cases"], s["share"]) for name, s in rule["strata"].items()} == {
+        "miss": (5, pytest.approx(5 / 12)), "ordinary": (7, pytest.approx(7 / 12)),
+    }
+
+
 # -- the judge's view ---------------------------------------------------------
 
 
