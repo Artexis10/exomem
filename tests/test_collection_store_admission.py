@@ -1,11 +1,12 @@
 """Private deferred creation keeps canonical commits ahead of marker admission."""
 
+import hashlib
 import json
 import multiprocessing
 import os
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from io import BytesIO
 from pathlib import PureWindowsPath
@@ -78,6 +79,87 @@ def create(producer, **changes):
     arguments = dict(why="isolated creation", request_id="create", scaffold=False, fence_client=operator)
     arguments.update(changes)
     return admission.create_new(session, manager, manifest_path(), manifest_text(), **arguments)
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_completed_admission_keeps_its_published_intent_and_file_authority(producer, concurrent):
+    """Clearing a completed intent cannot force another snapshot during the final handoff."""
+    from exomem.collection_store import replica, schema
+
+    session, manager, _ = producer
+    assert create(producer)["status"] == "marker_admitted"
+    target = replica.replica_path(session.root)
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    with closing(connection.open_reader(target)) as reader:
+        copied = dict(reader.execute("SELECT key,value FROM store_meta"))
+    historical_intent = copied[authority.PENDING_CREATE]
+    expected_intent = hashlib.sha256(historical_intent.encode()).hexdigest()
+
+    @contextmanager
+    def step(_patience, _cancelled):
+        with manager.mutation_guard(session.root), manager._collection_store.checkout() as writer:
+            yield writer.handle, lambda: True
+
+    if concurrent:
+        result = replica.publish_replica_concurrently(
+            session.root, step=step, deadline=time.monotonic() + 5,
+        )
+    else:
+        with step(0, None) as (handle, check):
+            result = replica.publish_replica(
+                session.root, handle, authority_check=check, deadline=time.monotonic() + 5,
+            )
+    assert result.status == "published", result
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == digest
+    with closing(connection.open_reader(session.path)) as reader:
+        current = dict(reader.execute("SELECT key,value FROM store_meta"))
+    assert authority.PENDING_CREATE not in current
+    assert current[schema.META_PUBLISHED_INTENT_SHA256] == expected_intent
+    assert current[schema.META_COMMIT_SEQ] == copied[schema.META_COMMIT_SEQ]
+    assert replica.file_writer_marker(session.root) == authority.read_marker(session.root)
+
+
+def test_new_intent_during_completed_intent_verification_does_not_borrow_its_proof(producer, monkeypatch):
+    """A concurrent export remains pending even when the installed copy holds a completed create."""
+    from exomem.collection_store import replica
+
+    session, manager, _ = producer
+    assert create(producer)["status"] == "marker_admitted"
+    marker = authority.read_marker(session.root)
+    intent = {"version": 2, "kind": authority.EXPORT, "request_id": "export:next",
+              "plan_id": "next-export", "expected_marker": marker.decode(), "why": "return to files",
+              "exported_at": "20261018T000000Z",
+              "collections": [{name: entry[name] for name in ("collection_id", "manifest_path", "source_path")}
+                              for entry in json.loads(marker)["collections"]]}
+    next_raw = json.dumps(intent)
+    before = replica.replica_path(session.root).read_bytes()
+    original = replica._read_copied_intent
+    changed = False
+
+    def start_export(*args, **kwargs):
+        nonlocal changed
+        raw = original(*args, **kwargs)
+        assert not changed
+        with manager.mutation_guard(session.root), manager._collection_store.checkout() as writer:
+            with writer.handle.transaction() as conn:
+                conn.execute("INSERT INTO store_meta VALUES (?,?)", (authority.PENDING_CREATE, next_raw))
+        changed = True
+        return raw
+
+    @contextmanager
+    def step(_patience, _cancelled):
+        with manager.mutation_guard(session.root), manager._collection_store.checkout() as writer:
+            yield writer.handle, lambda: True
+
+    monkeypatch.setattr(replica, "_read_copied_intent", start_export)
+    result = replica.publish_replica_concurrently(
+        session.root, step=step, deadline=time.monotonic() + 5,
+    )
+    assert result.status == "retry_pending", result
+    assert changed and replica.replica_path(session.root).read_bytes() == before
+    with closing(connection.open_reader(session.path)) as reader:
+        assert reader.execute("SELECT value FROM store_meta WHERE key=?", (authority.PENDING_CREATE,)).fetchone() == (next_raw,)
+    assert replica.file_writer_marker(session.root) is None
 
 
 def test_exact_retry_and_second_create_keep_current_head_and_fence(producer):
