@@ -35,7 +35,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from . import call_spans, deferred_index, semantic_index
-from .derived_receipts import DerivedComponent, DerivedComponentStatus
+from .derived_receipts import EXECUTABLE_COMPONENTS, DerivedComponent, DerivedComponentStatus
 
 if TYPE_CHECKING:
     from .graph_sync import GraphSyncCheckpoint
@@ -109,7 +109,7 @@ _FAST_ACK_FAILED_STATES = frozenset(
 )
 _FAST_ACK_NON_GRAPH_COMPONENTS = tuple(
     component
-    for component in DerivedComponent
+    for component in EXECUTABLE_COMPONENTS
     if component not in {DerivedComponent.GRAPH, DerivedComponent.WRITE_ADVISORY}
 )
 
@@ -174,6 +174,7 @@ def derived_acknowledgement_snapshot(
                 status.failure_code,
             )
             for status in by_component.values()
+            if status.component in EXECUTABLE_COMPONENTS
         )
     )
     return DerivedAcknowledgementSnapshot(
@@ -207,6 +208,7 @@ def superseded_acknowledgement_snapshot(
             sorted(
                 (status.component.value, status.state, status.failure_code)
                 for status in statuses
+                if status.component in EXECUTABLE_COMPONENTS
             )
         ),
     )

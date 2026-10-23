@@ -1512,6 +1512,66 @@ def test_lane_proof_survives_restart_and_retires_at_hydration(tmp_path: Path) ->
     assert _non_retired_rows(vault) == {}
 
 
+def test_rollback_restart_retries_lost_visibility_callback_with_optional_custody(
+    tmp_path: Path,
+) -> None:
+    from exomem import derived_drain
+
+    vault = tmp_path
+    _seed_corpus(vault)
+    rel = "Knowledge Base/Notes/optional-restart.md"
+    before = _page(title="Restart", body="Before.", updated="2026-08-01")
+    after = _page(title="Restart", body="retainedcustodymarker", updated="2026-08-20")
+    _write(vault, rel, before)
+    _prime(vault)
+    receipt = _prepare(
+        vault, batch_id="optional-restart", generation="generation-restart",
+        paths=(_batch_path(rel, before=before, after=after),),
+        required={*_REQUIRED, DerivedComponent.RESOLVER},
+    )
+    _write(vault, rel, after)
+    _prove_and_publish(vault, receipt)
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        # The later producer adds this protocol row; rollback never inserts it.
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "INSERT INTO derived_batch_components(batch_id, component, revision, "
+            "state, attempt_count, next_attempt_at, created_at, updated_at) "
+            "VALUES (?, 'context_catalogue', 1, 'ready', 3, 10, 10, 10)",
+            (receipt.batch_id,),
+        )
+    _publish_lanes(vault, (rel,))
+    # Persistent lane proof cannot substitute for a pending supported component.
+    assert _non_retired_rows(vault) == {rel: "live"}
+
+    assert derived_drain.drain_once(
+        vault, dispatch=lambda _root, _status: True,
+        observe_current_generation=lambda _root: receipt.canonical_generation,
+        limit=16, now=20,
+    ) == 3
+    # The process loses the retirement callback after its final supported commit.
+    assert _non_retired_rows(vault) == {rel: "live"}
+    _reset_overlay()
+    lexstore.clear_stores()
+    assert derived_receipts.recoverable_batch_count(vault) == 1
+    assert derived_drain.drain_once(
+        vault, dispatch=lambda _root, _status: pytest.fail("optional work was dispatched"),
+        observe_current_generation=lambda _root: receipt.canonical_generation,
+        retire_visibility=_pending_module().note_components_completed,
+        limit=1, now=30,
+    ) == 0
+    assert _non_retired_rows(vault) == {}
+    assert _keyword(vault, "retainedcustodymarker") == [rel]
+    assert derived_receipts.recoverable_batch_count(vault) == 0
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT b.state, c.state, c.attempt_count FROM derived_batches AS b "
+            "JOIN derived_batch_components AS c ON c.batch_id = b.batch_id "
+            "WHERE b.batch_id = ? AND c.component = 'context_catalogue'",
+            (receipt.batch_id,),
+        ).fetchone() == ("ready", "ready", 3)
+
+
 def test_pending_projection_excludes_non_recall_candidates(tmp_path: Path) -> None:
     """Finding 4: pending identities join the projection under current policy."""
     vault = tmp_path

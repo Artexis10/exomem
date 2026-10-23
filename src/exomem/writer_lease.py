@@ -680,7 +680,7 @@ def prepare_active_derived_batch(
     session.advisory_prepared_inputs = (
         advisory_inputs if advisory_target is not None else None
     )
-    required_components = set(derived_receipts.DerivedComponent)
+    required_components = set(derived_receipts.EXECUTABLE_COMPONENTS)
     if advisory_target is None:
         required_components.remove(derived_receipts.DerivedComponent.WRITE_ADVISORY)
     return derived_receipts.prepare_batch(
@@ -980,7 +980,7 @@ def _acknowledge_derived_batches_timed(
                     # work that no longer belongs to this batch.
                     statuses.append(status)
                     continue
-                if status.state == "claimed":
+                if status.state == "claimed" and component in derived_receipts.EXECUTABLE_COMPONENTS:
                     where["stage"] = "component_wait"
                     status = _wait_for_derived_component(
                         session.vault_root,

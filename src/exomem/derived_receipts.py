@@ -80,7 +80,7 @@ _ADVISORY_PUBLICATION_OUTCOMES = frozenset(
 
 
 class DerivedComponent(StrEnum):
-    """Closed first-release component vocabulary in deterministic order."""
+    """Closed storage protocol components in deterministic order."""
 
     FRESHNESS = "freshness"
     MEMORY_REFS = "memory_refs"
@@ -91,6 +91,18 @@ class DerivedComponent(StrEnum):
     EMBEDDINGS = "embeddings"
     CLAIMS = "claims"
     WRITE_ADVISORY = "write_advisory"
+    CONTEXT_CATALOGUE = "context_catalogue"
+
+
+# These are fixed storage protocol values, not a content vocabulary.
+# Catalogue custody is readable but this application cannot execute it.
+DEFERRED_COMPONENTS: Final = frozenset({DerivedComponent.CONTEXT_CATALOGUE})
+EXECUTABLE_COMPONENTS: Final = tuple(
+    component for component in DerivedComponent if component not in DEFERRED_COMPONENTS
+)
+_DEFERRED_COMPONENTS_SQL: Final = ", ".join(
+    f"'{component.value}'" for component in DerivedComponent if component in DEFERRED_COMPONENTS
+)
 
 
 _COMPONENT_DEPENDENCIES: Final[dict[DerivedComponent, tuple[DerivedComponent, ...]]] = {
@@ -144,8 +156,15 @@ _COMPONENT_DEPENDENCIES: Final[dict[DerivedComponent, tuple[DerivedComponent, ..
 }
 _COMPONENT_ORDER_SQL: Final = "CASE c.component " + " ".join(
     f"WHEN '{component.value}' THEN {index}"
-    for index, component in enumerate(DerivedComponent)
+    for index, component in enumerate(EXECUTABLE_COMPONENTS)
 ) + " ELSE 99 END"
+# Receipt protocol terminal states determine when supported work is complete.
+_SUPPORTED_COMPONENTS_COMPLETE_SQL: Final = (
+    "NOT EXISTS (SELECT 1 FROM derived_batch_components AS c "
+    "WHERE c.batch_id = b.batch_id "
+    f"AND c.component NOT IN ({_DEFERRED_COMPONENTS_SQL}) "
+    "AND c.state NOT IN ('completed', 'not_required'))"
+)
 
 
 def _bounded(value: object, *, label: str, maximum: int) -> str:
@@ -543,6 +562,25 @@ def _component_status_from_connection(
         "WHERE c.batch_id = ? AND c.component = ?",
         (batch_id, component.value),
     ).fetchone()
+    if row is None and component in DEFERRED_COMPONENTS:
+        batch = connection.execute(
+            "SELECT canonical_generation, created_at FROM derived_batches WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchone()
+        if batch is not None:
+            return DerivedComponentStatus(
+                batch_id=batch_id,
+                component=component,
+                revision=1,
+                lease_revision=0,
+                state="not_required",
+                canonical_generation=str(batch[0]),
+                attempt_count=0,
+                next_attempt_at=float(batch[1]),
+                claim_owner=None,
+                claim_expires_at=None,
+                failure_code=None,
+            )
     if row is None:
         raise KeyError(f"unknown derived component: {batch_id}/{component.value}")
     return DerivedComponentStatus(
@@ -571,6 +609,11 @@ def _receipt_from_connection(
     ).fetchone()
     if batch is None:
         raise KeyError(f"unknown derived batch: {batch_id}")
+    # Only documented protocol extensions are optional; reject unknown rows.
+    for (component,) in connection.execute(
+        "SELECT component FROM derived_batch_components WHERE batch_id = ?", (batch_id,),
+    ):
+        DerivedComponent(str(component))
     paths = tuple(
         DerivedBatchPath(
             rel_path=str(row[0]),
@@ -699,7 +742,8 @@ def _exact_existing(
         for status in existing.components
         if status.state != "not_required"
     )
-    if actual_required != required_components:
+    # Replay matches the original obligations this application can execute.
+    if actual_required - DEFERRED_COMPONENTS != required_components - DEFERRED_COMPONENTS:
         return False
     advisory = connection.execute(
         "SELECT target_rel_path, target_fingerprint "
@@ -729,7 +773,7 @@ def prepare_batch(
     advisory_retention_until: float | None = None,
     now: float | None = None,
 ) -> DerivedBatchReceipt:
-    """Prepare every path/component/visibility/result row in one transaction.
+    """Prepare supported custody in one transaction, preserving the narrow schema.
 
     When ``write_advisory`` custody is required, ``advisory_target_rel_path``
     must name a path in this batch and ``advisory_target_fingerprint`` must be
@@ -875,7 +919,7 @@ def prepare_batch(
                         prepared_at,
                         prepared_at,
                     )
-                    for component in DerivedComponent
+                    for component in EXECUTABLE_COMPONENTS
                 ),
             )
             connection.executemany(
@@ -1028,7 +1072,7 @@ def _promote_ready_components(
             (batch_id,),
         ).fetchall()
     }
-    for component in DerivedComponent:
+    for component in EXECUTABLE_COMPONENTS:
         if states.get(component) not in {"prepared", "reconcile_required"}:
             continue
         if not all(
@@ -1315,7 +1359,8 @@ def _activate_proven_batch(
         "UPDATE derived_batch_components SET state = 'prepared', "
         "claim_owner = NULL, claim_expires_at = NULL, failure_code = NULL, "
         "next_attempt_at = MIN(next_attempt_at, ?), updated_at = ? "
-        "WHERE batch_id = ? AND state IN ('prepared', 'reconcile_required')",
+        "WHERE batch_id = ? AND state IN ('prepared', 'reconcile_required') "
+        f"AND component NOT IN ({_DEFERRED_COMPONENTS_SQL})",
         (now, now, batch_id),
     )
     _promote_ready_components(connection, batch_id, now=now)
@@ -1536,7 +1581,8 @@ def _prove_committed_guarded(
     finally:
         connection.close()
     ready_components = tuple(
-        status.component for status in updated.components if status.state == "ready"
+        status.component for status in updated.components
+        if status.state == "ready" and status.component in EXECUTABLE_COMPONENTS
     )
     return DerivedBatchProof(
         batch_id=updated.batch_id,
@@ -1793,7 +1839,8 @@ def snapshot_pending_visibility(
             "EXISTS (SELECT 1 FROM derived_batch_components AS c "
             "WHERE c.batch_id = r.batch_id AND c.revision = r.component_revision), "
             "b.schema_version, b.mutation_attempt_digest, b.checkpoint_id, b.state, b.created_at, "
-            "(SELECT count(*) FROM derived_batch_components AS c WHERE c.batch_id = r.batch_id) "
+            "(SELECT count(*) FROM derived_batch_components AS c WHERE c.batch_id = r.batch_id "
+            f"AND c.component NOT IN ({_DEFERRED_COMPONENTS_SQL})) "
             "FROM pending_recall_rows AS r "
             "LEFT JOIN derived_batches AS b ON b.batch_id = r.batch_id "
             "LEFT JOIN derived_batch_paths AS p "
@@ -1820,7 +1867,7 @@ def snapshot_pending_visibility(
                 maximum=_MAX_BATCH_ID,
             )
             if batch_id not in grouped:
-                if schema_version != SCHEMA_VERSION or batch_state not in _BATCH_STATES or components != len(DerivedComponent):
+                if schema_version != SCHEMA_VERSION or batch_state not in _BATCH_STATES or components != len(EXECUTABLE_COMPONENTS):
                     raise ValueError("pending visibility receipt is invalid")
                 _digest(attempt_digest, label="mutation_attempt_digest")
                 _bounded(checkpoint, label="checkpoint_id", maximum=_MAX_IDENTITY)
@@ -2323,7 +2370,7 @@ def _record_recovery_failure(
         try:
             row = connection.execute(
                 "SELECT MAX(attempt_count) FROM derived_batch_components "
-                "WHERE batch_id = ? AND state IN "
+                f"WHERE batch_id = ? AND component NOT IN ({_DEFERRED_COMPONENTS_SQL}) AND state IN "
                 "('prepared', 'ready', 'retryable', 'reconcile_required')",
                 (batch_id,),
             ).fetchone()
@@ -2334,7 +2381,8 @@ def _record_recovery_failure(
                 "attempt_count = attempt_count + 1, "
                 "next_attempt_at = MAX(next_attempt_at, ?), updated_at = ?, "
                 "failure_code = ? WHERE batch_id = ? AND state IN "
-                "('prepared', 'ready', 'retryable', 'reconcile_required')",
+                "('prepared', 'ready', 'retryable', 'reconcile_required') "
+                f"AND component NOT IN ({_DEFERRED_COMPONENTS_SQL})",
                 (failed_at + delay, failed_at, failure_code, batch_id),
             )
             connection.execute(
@@ -2378,10 +2426,14 @@ def recover_prepared_batches(
                 "b.state = 'ready' AND EXISTS ("
                 "SELECT 1 FROM pending_recall_rows AS p "
                 "WHERE p.batch_id = b.batch_id AND p.state != 'retired'))) "
-                "AND EXISTS (SELECT 1 FROM derived_batch_components AS c "
-                "WHERE c.batch_id = b.batch_id AND c.state IN "
+                "AND (EXISTS (SELECT 1 FROM derived_batch_components AS c "
+                "WHERE c.batch_id = b.batch_id "
+                f"AND c.component NOT IN ({_DEFERRED_COMPONENTS_SQL}) AND c.state IN "
                 "('prepared', 'ready', 'retryable', 'reconcile_required') "
-                "AND c.next_attempt_at <= ?) "
+                "AND c.next_attempt_at <= ?) OR ("
+                f"{_SUPPORTED_COMPONENTS_COMPLETE_SQL} AND EXISTS ("
+                "SELECT 1 FROM pending_recall_rows AS p "
+                "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))) "
                 "ORDER BY b.updated_at, b.created_at, b.batch_id LIMIT ?",
                 (observed_at, int(limit)),
             ).fetchall()
@@ -2505,6 +2557,13 @@ def recover_prepared_batches(
     return recovered
 
 
+# Ready parents retain optional custody; published visibility can still retire.
+_RETIRABLE_BATCH_SQL: Final = (
+    "(b.state = 'completed' OR (b.state = 'ready' AND "
+    f"{_SUPPORTED_COMPONENTS_COMPLETE_SQL} AND NOT EXISTS ("
+    "SELECT 1 FROM pending_recall_rows AS p "
+    "WHERE p.batch_id = b.batch_id AND p.state = 'prepared')))"
+)
 _RECOVERING_BATCHES_SQL: Final = (
     "SELECT (SELECT count(*) FROM derived_batches AS b WHERE "
     "b.state = 'prepared' OR ("
@@ -2513,7 +2572,8 @@ _RECOVERING_BATCHES_SQL: Final = (
     "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))) + "
     "(SELECT count(DISTINCT p.batch_id) FROM pending_recall_rows AS p "
     "INDEXED BY pending_recall_active CROSS JOIN derived_batches AS b "
-    "ON b.batch_id = p.batch_id WHERE p.state != 'retired' AND b.state = 'completed')"
+    "ON b.batch_id = p.batch_id WHERE p.state != 'retired' AND "
+    f"{_RETIRABLE_BATCH_SQL})"
 )
 _STRANDED_BATCHES_SQL: Final = (
     "SELECT count(*) FROM derived_batches WHERE state = 'reconcile_required'"
@@ -2551,7 +2611,7 @@ def stranded_batch_count(vault_root: Path) -> int:
 
 
 def completed_visibility_batches(vault_root: Path, *, limit: int, now: float) -> tuple[str, ...]:
-    """Select a bounded retirement turn even after a lost completion callback."""
+    """Retry visibility for completed supported work, including ready parents."""
     if limit <= 0 or not deferred_index.store_path(vault_root).exists():
         return ()
     connection = deferred_index._connect(vault_root, create=True)
@@ -2560,7 +2620,7 @@ def completed_visibility_batches(vault_root: Path, *, limit: int, now: float) ->
             "SELECT DISTINCT b.batch_id, b.updated_at, b.created_at "
             "FROM pending_recall_rows AS p INDEXED BY pending_recall_active "
             "CROSS JOIN derived_batches AS b ON b.batch_id = p.batch_id "
-            "WHERE p.state != 'retired' AND b.state = 'completed' "
+            f"WHERE p.state != 'retired' AND {_RETIRABLE_BATCH_SQL} "
             "ORDER BY b.updated_at, b.created_at, b.batch_id LIMIT ?",
             (int(limit),),
         ))
@@ -2580,6 +2640,7 @@ def custody_census(vault_root: Path, *, now: float | None = None) -> dict[str, A
     """Content-free counts and one age for operators: never a path or an id."""
     census: dict[str, Any] = {
         "due_components": 0,
+        "deferred_optional_components": 0,
         "oldest_due_age_seconds": None,
         "recovering_batches": 0,
         "stranded_batches": 0,
@@ -2592,7 +2653,8 @@ def custody_census(vault_root: Path, *, now: float | None = None) -> dict[str, A
         due, oldest = connection.execute(
             "SELECT count(*), MIN(b.created_at) FROM derived_batch_components AS c "
             "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
-            "WHERE b.state = 'ready' AND (c.state = 'ready' OR "
+            "WHERE b.state = 'ready' "
+            f"AND c.component NOT IN ({_DEFERRED_COMPONENTS_SQL}) AND (c.state = 'ready' OR "
             "(c.state = 'retryable' AND c.next_attempt_at <= ?) OR "
             "(c.state = 'claimed' AND c.claim_expires_at <= ?)) "
             "AND NOT EXISTS (SELECT 1 FROM pending_recall_rows AS p "
@@ -2600,6 +2662,13 @@ def custody_census(vault_root: Path, *, now: float | None = None) -> dict[str, A
             (current, current),
         ).fetchone()
         census["due_components"] = int(due or 0)
+        census["deferred_optional_components"] = int(connection.execute(
+            "SELECT count(*) FROM derived_batches AS b INDEXED BY derived_batches_state "
+            "CROSS JOIN derived_batch_components AS c ON c.batch_id = b.batch_id "
+            "WHERE b.state IN ('prepared', 'ready', 'reconcile_required') "
+            f"AND c.component IN ({_DEFERRED_COMPONENTS_SQL}) "
+            "AND c.state NOT IN ('completed', 'not_required', 'aborted', 'superseded')"
+        ).fetchone()[0])
         if oldest is not None:
             census["oldest_due_age_seconds"] = round(max(0.0, current - float(oldest)), 1)
         census["recovering_batches"] = int(
@@ -2770,7 +2839,8 @@ def claim_ready_components(
             rows = connection.execute(
                 "SELECT c.batch_id, c.component, c.revision, c.lease_revision FROM "
                 "derived_batch_components AS c JOIN derived_batches AS b "
-                "ON b.batch_id = c.batch_id WHERE b.state = 'ready' AND ("
+                "ON b.batch_id = c.batch_id WHERE b.state = 'ready' "
+                f"AND c.component NOT IN ({_DEFERRED_COMPONENTS_SQL}) AND ("
                 "c.state = 'ready' OR "
                 "(c.state = 'retryable' AND c.next_attempt_at <= ?) OR "
                 "(c.state = 'claimed' AND c.claim_expires_at <= ?)) AND NOT EXISTS ("
@@ -3043,7 +3113,8 @@ def due_component_count(vault_root: Path, *, now: float | None = None) -> int:
             connection.execute(
                 "SELECT count(*) FROM derived_batch_components AS c "
                 "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
-                "WHERE b.state = 'ready' AND (c.state = 'ready' OR "
+                "WHERE b.state = 'ready' "
+                f"AND c.component NOT IN ({_DEFERRED_COMPONENTS_SQL}) AND (c.state = 'ready' OR "
                 "(c.state = 'retryable' AND c.next_attempt_at <= ?) OR "
                 "(c.state = 'claimed' AND c.claim_expires_at <= ?)) "
                 "AND NOT EXISTS (SELECT 1 FROM pending_recall_rows AS p "
