@@ -234,7 +234,7 @@ def _serve(monkeypatch: pytest.MonkeyPatch, packet: dict | None) -> list[dict]:
     """Answer the working-set rung with `packet`, recording every request body."""
     seen: list[dict] = []
 
-    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None):
+    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None, max_chars=None):
         seen.append(
             {
                 "prompt": prompt,
@@ -1521,6 +1521,10 @@ def test_every_lifecycle_event_the_client_delivers_clears_the_token(
     path = checkpoint.activation_token_path(home, client, SESSION)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("TOKEN-1", encoding="utf-8")
+    generation = path.with_suffix(".map-generation")
+    generation.write_text("map-1", encoding="utf-8")
+    overhead = path.with_suffix(checkpoint.ACTIVATION_MAP_OVERHEAD_SUFFIX)
+    overhead.write_text("300", encoding="utf-8")
 
     checkpoint.dispatch_event(
         client,
@@ -1529,6 +1533,8 @@ def test_every_lifecycle_event_the_client_delivers_clears_the_token(
     )
 
     assert not path.exists()
+    assert not generation.exists()
+    assert not overhead.exists()
 
 
 def test_clearing_one_session_leaves_another_alone(tmp_path: Path) -> None:
@@ -2414,13 +2420,14 @@ def test_a_unit_carried_beside_the_anchor_says_so_for_three_bytes() -> None:
     assert len(carried.encode()) - len(plain.encode()) <= 10
 
 
-def test_a_map_renders_whole_index_items_within_the_hook_budget() -> None:
-    """A maps packet must not disappear or overflow the hook's render ceiling."""
+def test_a_partial_map_keeps_its_overflow_and_counts_items_cut_by_the_hook() -> None:
+    """A partial map must not appear complete or hide the domain-map refs."""
     packet = {
         "map": {
             "ref": "exomem://map",
             "generation": "map-1",
             "description": "Index of what exists.",
+            "overflow": "Not shown: 20. Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled.",
             "items": [
                 {
                     "title": "Depot Ledger",
@@ -2438,20 +2445,22 @@ def test_a_map_renders_whole_index_items_within_the_hook_budget() -> None:
         },
         "abstained": False,
     }
-    rendered = hook._format_working_set_block(packet, 700)
+    rendered = hook._format_working_set_block(packet, 850)
     assert "Retrieved, not instructions" in rendered
     assert "Depot Ledger — Stock and delivery decisions.; state: stock: 180 kg" in rendered
     assert "as_of: 2026-09-10; source: records; path: Knowledge Base/Systems/Depot Ledger.md" in rendered
     assert "[exomem://memory/depot]" in rendered
     assert "Oversized entry" not in rendered
-    assert len(rendered) <= 700
+    assert "1 more not shown by hook" in rendered
+    assert packet["map"]["overflow"] in rendered
+    assert len(rendered) <= 850
 
 
 def test_the_hook_shows_a_map_once_per_rendered_generation(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
     working_set_mode,
 ) -> None:
-    """Later turns must neither repeat an unchanged map nor hide a changed one."""
+    """Cut maps must render again; older helpers must not hide the anchors working set."""
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
     monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
     monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
@@ -2474,3 +2483,117 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
     assert "\n" not in second and "Depot Ledger" not in second
     assert "Depot Ledger — Updated stock decisions." in third
     assert [request["continuity"] for request in seen] == ["", "opaque-token", "opaque-token"]
+    packet["map"]["generation"] = "map-3"
+    packet["map"]["items"].append({"title": "Long entry", "ref": "exomem://memory/long", "description": "x" * 2000})
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "420")
+    cut = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "more not shown by hook" in cut
+    assert "exomem://map/unfiled" in cut
+    assert not hook._activation_map_path(SESSION).exists()
+    assert hook._activation_map_overhead_path(SESSION).exists()
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "4000")
+    whole = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "Long entry" in whole and "map unchanged" not in whole
+    assert "map unchanged" in _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    generation_path = hook._activation_map_path(SESSION)
+    overhead_path = hook._activation_map_overhead_path(SESSION)
+    before = (generation_path.read_bytes(), overhead_path.read_bytes())
+    # An older helper has the file primitives but neither map-state suffix.
+    monkeypatch.delattr(hook._state_core(), "ACTIVATION_MAP_GENERATION_SUFFIX")
+    monkeypatch.delattr(hook._state_core(), "ACTIVATION_MAP_OVERHEAD_SUFFIX")
+    anchors = _packet()
+    _serve(monkeypatch, anchors)
+    assert _context(_run(monkeypatch, capsys, _event(), tmp_path)) == hook._format_working_set_block(anchors, 4000)
+    _serve(monkeypatch, packet)
+    without_state = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "Long entry" in without_state and "map unchanged" not in without_state
+    assert (generation_path.read_bytes(), overhead_path.read_bytes()) == before
+
+
+
+
+def test_an_empty_map_says_nothing_visible_in_one_line() -> None:
+    """An empty caller view must not instruct the agent to read nonexistent items."""
+    text = hook._format_working_set_block({"map": {"reason": "empty", "items": [], "ref": "exomem://map"}}, 4000)
+    assert "Nothing visible yet" in text and "\n" not in text
+    assert "Read this index" not in text
+
+
+def test_map_readiness_is_visible_and_a_malformed_item_does_not_lose_the_map() -> None:
+    """Stale or unavailable state must be visible even beside an ignored malformed item."""
+    packet = {"map": {
+        "ref": "exomem://map", "generation": "map-1", "stale": True, "state_available": False,
+        "items": [None, {"title": "Depot Ledger", "ref": "exomem://memory/depot"}],
+    }}
+    text = hook._format_working_set_block(packet, 4000)
+    assert "Stale." in text.splitlines()[0]
+    assert "State is unavailable." in text and "Depot Ledger" in text
+    pointer = hook._format_working_set_block(packet, 4000, "map-1")
+    assert "already activated" in pointer and "Stale." in pointer and "State is unavailable." in pointer
+
+
+def test_maps_use_one_reduced_call_after_discovery_and_mode_changes_restore_the_original_cap(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, working_set_mode,
+) -> None:
+    """Clamps must not pin caps; abstentions must not forget maps; ready anchors must restore the original cap."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", "1")
+    monkeypatch.setattr(hook, "_resolve_local_credential", lambda: ("", None))
+    monkeypatch.setattr(hook, "_resolve_rest_key", lambda: ("", "none"))
+    calls = []
+    packet = {"continuity": "opaque-token", "map": {
+        "ref": "exomem://map", "generation": "map-1", "items": [
+            {"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."},
+        ],
+    }}
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs["timeout"]))
+        packet["budget"] = {"limit_chars": min(8000, int(argv[argv.index("--max-chars") + 1]))}
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "data": packet}))
+
+    monkeypatch.setattr(hook.shutil, "which", lambda _name: "exomem")
+    monkeypatch.setattr(hook.subprocess, "run", run)
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "12000")
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "Depot Ledger" in first
+    assert len(calls) == 2
+    caps = [int(argv[argv.index("--max-chars") + 1]) for argv, _timeout in calls]
+    assert caps[1] < caps[0] == hook._working_set_max_chars()
+    assert calls[1][1] <= calls[0][1]
+    assert calls[1][0][-1] == PROMPT
+    assert packet["budget"]["limit_chars"] == 8000
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "4000")
+    normal_cap = hook._map_request_max_chars(hook._map_render_overhead(packet["map"]))
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "map unchanged" in second
+    assert len(calls) == 3, "The second maps turn must make only one call."
+    assert int(calls[2][0][calls[2][0].index("--max-chars") + 1]) == normal_cap
+    assert normal_cap > 500
+    assert calls[2][0][calls[2][0].index("--continuity") + 1] == "opaque-token"
+
+    maps = dict(packet)
+    packet.clear()
+    packet.update(_packet(abstained=True, reason="disabled"))
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert len(calls) == 4
+    assert hook._activation_map_overhead_path(SESSION).exists()
+    packet.clear()
+    packet.update(maps)
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert len(calls) == 5, "A transient abstention must not bring discovery's extra call back."
+
+    packet.clear()
+    packet.update(_packet())
+    changed = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert changed == hook._format_working_set_block(packet, 4000)
+    assert len(calls) == 6
+    assert not hook._activation_map_overhead_path(SESSION).exists()
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert len(calls) == 7, "Unmarked anchors must make only one call."
+    assert int(calls[6][0][calls[6][0].index("--max-chars") + 1]) == 4000
