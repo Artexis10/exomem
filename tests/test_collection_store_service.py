@@ -1726,6 +1726,13 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
             assert busy.value.code == "COLLECTION_STORE_BUSY"
             assert busy.value.details["status"] == "retryable"
             assert busy.value.details["committed"] is False
+            diagnostic = busy.value.details["store_thread"]
+            assert diagnostic["alive"] is True and diagnostic["queued_requests"] == 0
+            assert diagnostic["stack_status"] == "captured" and diagnostic["frames"]
+            assert all(set(frame) == {"module", "function", "line"}
+                       and frame["module"].startswith("exomem.") for frame in diagnostic["frames"])
+            assert str(service.root) not in str(busy.value)
+            assert "Never accepted" not in str(busy.value)
         finally:
             release.set()
             occupied.result(timeout=5)

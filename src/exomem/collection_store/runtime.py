@@ -1143,8 +1143,14 @@ class StoreServer:
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)
-                    raise connection.busy(
+                    error = connection.busy(
                         "the collection store did not take this request within the mutation timeout")
+                    try:
+                        error.details["store_thread"] = self._queue_refusal_state()
+                    except Exception:
+                        # Optional diagnostics must not replace the original queue refusal.
+                        pass
+                    raise error
                 self._condition.wait(remaining)
         if not request.done.wait(max(0.0, completion_deadline - time.monotonic())):
             # Accepted work survives the wait deadline so its outcome and replay remain owned.
@@ -1158,6 +1164,32 @@ class StoreServer:
         if request.error is not None:
             raise request.error
         return request.result
+
+    def _queue_refusal_state(self):
+        """Observe the worker at refusal, without paths, source text or frame locals."""
+        import sys
+
+        state = {"alive": self.thread.is_alive(), "queued_requests": len(self._requests),
+                 "stack_status": "unavailable", "frames": [], "frames_truncated": None}
+        frame = None
+        try:
+            frame = sys._current_frames().get(self.thread.ident)
+            if frame is None or not self.thread.is_alive():
+                return state
+            frames = []
+            # Bound the diagnostic walk; only shipped package symbols leave this process.
+            for _ in range(64):
+                if frame is None:
+                    break
+                module = frame.f_globals.get("__name__")
+                if isinstance(module, str) and module.startswith("exomem."):
+                    frames.append({"module": module, "function": frame.f_code.co_name,
+                                   "line": frame.f_lineno})
+                frame = frame.f_back
+            state.update(stack_status="captured", frames=frames, frames_truncated=frame is not None)
+        finally:
+            del frame
+        return state
 
     def _stopping(self):
         return _closed(self.manager)
