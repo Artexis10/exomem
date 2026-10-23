@@ -791,6 +791,8 @@ def test_legacy_edit_reports_identity_backfill_before_review_replay(tmp_path: Pa
     )
     assert 'maintain_memory(mode="backfill-ids")' in finding.remediation
     assert "confirmation" in finding.remediation
+    assert "backfill of missing IDs" in finding.remediation
+    assert finding.remediation.index("identity issues") < finding.remediation.index("confirmation")
     assert "CLI" in finding.remediation
     assert "re-read and validate" in finding.remediation
     assert "transition_token" not in finding.remediation

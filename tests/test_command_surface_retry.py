@@ -1223,6 +1223,8 @@ def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
     remediation = result["error"]["remediation"]
     assert 'maintain_memory(mode="backfill-ids")' in remediation
     assert "confirmation" in remediation
+    assert "backfill of missing IDs" in remediation
+    assert remediation.index("identity issues") < remediation.index("confirmation")
     assert "CLI" in remediation
     assert "re-read and validate" in remediation
 

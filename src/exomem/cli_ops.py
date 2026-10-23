@@ -33,9 +33,9 @@ if TYPE_CHECKING:
 _CODE_PREFIX = re.compile(r"^([A-Z][A-Z0-9_]+):\s*(.*)$", re.DOTALL)
 
 RELATION_REVIEW_STABLE_ID_REMEDIATION = (
-    "Reviewed-none needs a unique valid UUID. Preview "
-    'maintain_memory(mode="backfill-ids"); obtain confirmation for its CLI write, '
-    "then re-read and validate the edit again."
+    'For reviewed-none, preview maintain_memory(mode="backfill-ids"). '
+    "Resolve reported identity issues before confirmation for CLI backfill of "
+    "missing IDs, then re-read and validate."
 )
 
 # Stable, machine-readable codes → a one-line remediation. Only the codes worth a
