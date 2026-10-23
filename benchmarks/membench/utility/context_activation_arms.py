@@ -133,16 +133,17 @@ _SEED_WEIGHT = 7
 _CASE_INDEX_WEIGHT = 13
 
 
-def rotate_arm_order(seed: int, case_index: int) -> tuple[str, ...]:
-    """Rotate :data:`ARM_IDS` by seed and case index (design.md D6: "rotated arm order").
+def rotate_arm_order(seed: int, case_index: int, arm_ids: tuple[str, ...] = ARM_IDS) -> tuple[str, ...]:
+    """Rotate ``arm_ids`` (default :data:`ARM_IDS`) by seed and case index
+    (design.md D6: "rotated arm order").
 
     A pure rotation, not a shuffle: every arm runs exactly once per episode
     regardless of order, so a rotation is sufficient to counter any ordering
-    effect while keeping the five arms' relative sequence auditable by hand.
+    effect while keeping the arms' relative sequence auditable by hand.
     """
 
-    offset = (seed * _SEED_WEIGHT + case_index * _CASE_INDEX_WEIGHT) % len(ARM_IDS)
-    return ARM_IDS[offset:] + ARM_IDS[:offset]
+    offset = (seed * _SEED_WEIGHT + case_index * _CASE_INDEX_WEIGHT) % len(arm_ids)
+    return arm_ids[offset:] + arm_ids[:offset]
 
 
 @dataclass(frozen=True)

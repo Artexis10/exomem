@@ -452,20 +452,27 @@ def build_turn_argv(
     *,
     executable: Path,
     arm: Arm,
-    prompt: str,
+    prompt: str | None,
     mcp_config: Path,
-    session_id: str,
+    session_id: str | None,
     model: str,
-    max_turns: int,
+    max_turns: int | None,
     first: bool,
     append_system_prompt_file: Path | None,
     plugin_dir: Path | None,
+    settings_file: Path | None = None,
 ) -> list[str]:
     """One turn's exact invocation.
 
     The first turn opens a named session; every later turn resumes it, because
     a family about a multi-turn episode measured over ten fresh sessions would
     be measuring ten first turns.
+
+    A driver that plays a whole session in one process passes ``prompt=None``
+    (the turns arrive on stdin as stream-json), ``session_id=None`` (the session
+    is not persisted, so nothing can resume it) and ``max_turns=None`` (no cap
+    on agentic steps). ``settings_file`` adds the client settings that wire a
+    hook without a plugin.
     """
 
     if arm.uses_custom_instructions and append_system_prompt_file is None:
@@ -477,10 +484,11 @@ def build_turn_argv(
     if not arm.uses_plugin and plugin_dir is not None:
         raise JourneySetupError(f"arm {arm.arm_id} takes no plugin directory")
 
-    argv = [
-        str(executable),
-        "-p",
-        prompt,
+    if session_id is None and not first:
+        raise JourneySetupError("a turn without a session id cannot resume a session")
+    argv = [str(executable), "-p"]
+    argv.extend(["--input-format", "stream-json"] if prompt is None else [prompt])
+    argv += [
         "--strict-mcp-config",
         "--mcp-config",
         str(mcp_config),
@@ -496,12 +504,16 @@ def build_turn_argv(
         arm.allowed_tools,
         "--tools",
         arm.tools,
-        "--max-turns",
-        str(max_turns),
-        "--model",
-        model,
     ]
-    argv.extend(["--session-id", session_id] if first else ["--resume", session_id])
+    if max_turns is not None:
+        argv.extend(["--max-turns", str(max_turns)])
+    argv.extend(["--model", model])
+    if session_id is None:
+        argv.append("--no-session-persistence")
+    else:
+        argv.extend(["--session-id", session_id] if first else ["--resume", session_id])
+    if settings_file is not None:
+        argv.extend(["--settings", str(settings_file)])
     if plugin_dir is not None:
         argv.extend(["--plugin-dir", str(plugin_dir)])
     if append_system_prompt_file is not None:
