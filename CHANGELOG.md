@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.134.3](https://github.com/Artexis10/exomem/compare/v0.134.2...v0.134.3) (2026-10-22)
+
+
+### Bug Fixes
+
+* **trace:** attribute source planning and episode housekeeping ([#1987](https://github.com/Artexis10/exomem/issues/1987)) ([7b3cb12](https://github.com/Artexis10/exomem/commit/7b3cb12d46daf3b410dfb8ae7ef66bb043075ddc))
+* **trace:** distinguish semantic search phase timings ([ed5d952](https://github.com/Artexis10/exomem/commit/ed5d952a075170080cbe112bd4bde77ee4ed404e))
+
 ## [0.134.2](https://github.com/Artexis10/exomem/compare/v0.134.1...v0.134.2) (2026-10-22)
 
 
