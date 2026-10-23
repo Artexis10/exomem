@@ -944,6 +944,7 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
     message = (
         f"fast ack {active}; due components {census['due_components']} "
         f"(oldest {'-' if oldest is None else f'{oldest:.0f}s'}); "
+        f"deferred optional components {census['deferred_optional_components']}; "
         f"stranded batches {census['stranded_batches']}; "
         f"recovering {census['recovering_batches']}; pending visibility {shown}"
     )

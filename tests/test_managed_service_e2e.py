@@ -62,11 +62,14 @@ def observe_managed_requests(monkeypatch):
     monkeypatch.setattr(Client, "__aexit__", observed_exit)
 
 
-async def control(root: Path, command: str):
+async def control(root: Path, command: str, *, target=None):
     reader, writer = await asyncio.open_unix_connection(str(root / "managed/control.sock"))
     request = {"command": command}
     if command == "upgrade":
-        request["target"] = {"python": sys.executable, "version": version("exomem")}
+        request["target"] = (
+            {"python": sys.executable, "version": version("exomem")}
+            if target is None else target
+        )
     writer.write(json.dumps(request).encode() + b"\n")
     await writer.drain()
     try:
@@ -76,14 +79,14 @@ async def control(root: Path, command: str):
         await writer.wait_closed()
 
 
-async def transition(root, *, command="upgrade", timeout=60):
+async def transition(root, *, command="upgrade", timeout=60, target=None):
     """Acknowledge an upgrade, then poll the supervisor for its outcome.
 
     The supervisor answers `upgrade` immediately and runs the transition in the
     background, because a standby warm is minutes long and holding the control
     connection open for it turns any client read timeout into a false failure.
     """
-    accepted = await control(root, command)
+    accepted = await control(root, command, target=target)
     assert accepted["accepted"] is True, accepted
     async with asyncio.timeout(timeout):
         while True:
@@ -107,7 +110,10 @@ async def eventually(predicate, timeout=10):
 
 
 @asynccontextmanager
-async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
+async def live_fixture(
+    tmp_path, *, env_file=None, warm_seconds="30", launcher_python=None,
+    initial_target=None, receipt_journey=False,
+):
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
@@ -128,10 +134,27 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
             "EXOMEM_STANDBY_WARM_SECONDS": warm_seconds,
         }
     )
+    if receipt_journey:
+        env.update({
+            "HOME": str(tmp_path / "home"),
+            "XDG_CONFIG_HOME": str(tmp_path / "config"),
+            "XDG_CACHE_HOME": str(tmp_path / "cache"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "EXOMEM_LEXICAL_BACKEND": "fts5",
+            "EXOMEM_WRITER_LEASE_URL": "",
+            "EXOMEM_WRITER_LEASE_TOPOLOGY": "multi-host",
+        })
     log = (tmp_path / "service.log").open("w")
-    command = [sys.executable, str(FIXTURE), "daemon", str(tmp_path), "--port", str(port)]
+    command = [
+        sys.executable if launcher_python is None else str(launcher_python),
+        "-B", "-I", str(FIXTURE), "daemon", str(tmp_path), "--port", str(port),
+    ]
     if env_file is not None:
         command += ["--env-file", str(env_file)]
+    if initial_target is not None:
+        command += ["--initial-target", json.dumps(initial_target)]
+    if receipt_journey:
+        command.append("--receipt-journey")
     child = subprocess.Popen(
         command,
         env=env,
@@ -182,6 +205,112 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
                 except ProcessLookupError:
                     pass
         log.close()
+
+
+def run_receipt_rollback_journey(root, *, launcher_python, capable_python, compatibility_python):
+    """Run one installed journey with three explicit interpreters and an empty root.
+
+    The launcher stays fixed. Graph adoption remains simulated; receipt custody,
+    canonical writes, persistent recall and worker selection run in installed workers.
+    A failed or ambiguous phase stops the journey without a retry.
+    """
+    from fastmcp import Client
+
+    root = Path(root).absolute()
+    root.mkdir(parents=True, exist_ok=True)
+    assert not any(root.iterdir()), "the installed journey needs an empty fixture root"
+    evidence = {"phases": [], "transitions": []}
+
+    async def target(python):
+        # Do not resolve a venv's interpreter symlink into its base interpreter.
+        interpreter = str(Path(python).absolute())
+        probe = await asyncio.create_subprocess_exec(
+            interpreter, "-B", "-I", "-c",
+            "from importlib.metadata import version; print(version('exomem'))",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(probe.communicate(), 10)
+        except BaseException:
+            if probe.returncode is None:
+                probe.kill()
+                await probe.wait()
+            raise
+        assert probe.returncode == 0, stderr.decode(errors="replace")
+        return {"python": interpreter, "version": stdout.decode().strip()}
+
+    async def scenario():
+        launcher = await target(launcher_python)
+        capable = await target(capable_python)
+        compatibility = await target(compatibility_python)
+        assert capable["version"] != compatibility["version"]
+        evidence["targets"] = {"launcher": launcher, "capable": capable, "compatibility": compatibility}
+        child = None
+        try:
+            async with live_fixture(
+                root, launcher_python=launcher["python"], initial_target=compatibility,
+                receipt_journey=True,
+            ) as (url, token, child):
+                async with Client(url, auth=token, mode="legacy", timeout=60) as client:
+                    # These phases are the fixed installed-artifact test procedure.
+                    for phase, selected in (
+                        ("prelude", compatibility), ("capable", capable),
+                        ("compatibility", compatibility), ("restart", compatibility),
+                        ("return", capable),
+                    ):
+                        if phase != "prelude":
+                            result = await transition(root, target=selected)
+                            evidence["transitions"].append(result)
+                            assert result["ok"] and result["handoff"]["standby"] == "ready", result
+                            assert result["active"]["python"] == selected["python"]
+                        (root / "receipt-journey-phase").write_text(phase, encoding="utf-8")
+                        # Call exactly once: retained worker evidence owns any ambiguity.
+                        result = (await client.call_tool("receipt_phase")).data
+                        evidence["phases"].append(result)
+                        assert result["phase"] == phase and result["state"] == "completed"
+                        identity = result["identity"]
+                        assert identity["isolated"]
+                        assert identity["interpreter"] == selected["python"]
+                        assert identity["version"] == selected["version"]
+                        prefix = Path(selected["python"]).parent.parent
+                        for key in ("module_path", "receipts_module_path"):
+                            assert Path(identity[key]).is_relative_to(prefix), identity
+                        if len(evidence["phases"]) > 1:
+                            assert identity["pid"] != evidence["phases"][-2]["identity"]["pid"]
+                starts = [entry for entry in events(root) if entry["kind"] == "supervisor-start"]
+                assert len(starts) == 1
+                evidence["supervisor"] = starts[0]
+                assert starts[0]["pid"] == child.pid
+                assert starts[0]["interpreter"] == launcher["python"]
+                assert starts[0]["version"] == launcher["version"]
+                assert Path(starts[0]["module_path"]).is_relative_to(Path(launcher["python"]).parent.parent)
+        finally:
+            evidence["supervisor_returncode"] = None if child is None else child.poll()
+
+            def workers_exited():
+                evidence["worker_cleanup"] = {}
+                for pid in {phase["identity"]["pid"] for phase in evidence["phases"]}:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        evidence["worker_cleanup"][str(pid)] = "exited"
+                    else:
+                        evidence["worker_cleanup"][str(pid)] = "still_present"
+                return all(state == "exited" for state in evidence["worker_cleanup"].values())
+
+            try:
+                # Sending the fixture's signal does not prove that the worker has exited.
+                await eventually(workers_exited)
+            except TimeoutError:
+                pass  # Preserve the primary phase error or the unchanged cleanup assertion below.
+            (root / "receipt-journey-driver.json").write_text(
+                json.dumps(evidence, indent=2), encoding="utf-8",
+            )
+        assert child.returncode is not None
+        assert set(evidence["worker_cleanup"].values()) == {"exited"}, evidence["worker_cleanup"]
+        return evidence
+
+    return asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("mode", ["auto", "legacy"])

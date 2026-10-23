@@ -31,5 +31,6 @@
     "notes"
   ],
   "short_description": "Proactive, grounded AI memory",
+  "claude_description": "Exomem is a living knowledge base for your AI assistants. Preserve decisions, sources, evidence, relationships and useful conclusions as organised knowledge. Bring relevant context forward, revisit what changed, and find answers grounded in your notes. Continue projects across supported assistants connected to the same account. Requires an existing Exomem Cloud account; registration, invitations and billing happen separately on the website.",
   "claude_tagline": "Living knowledge, proactively grounded in sources"
 }

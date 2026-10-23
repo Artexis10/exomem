@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import subprocess
@@ -44,7 +45,7 @@ async def token(root):
     path.chmod(0o600)
 
 
-def worker(root, socket_path, standby=False):
+def worker(root, socket_path, standby=False, receipt_journey=False):
     from key_value.aio.stores.memory import MemoryStore
     from starlette.middleware import Middleware
     from starlette.responses import JSONResponse
@@ -118,6 +119,17 @@ def worker(root, socket_path, standby=False):
         event(root, "done", marker=marker)
         return {"marker": marker, "pid": os.getpid()}
 
+    if receipt_journey:
+        path = Path(__file__).with_name("receipt_journey.py")
+        spec = importlib.util.spec_from_file_location("receipt_journey_fixture", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        @app.tool
+        async def receipt_phase() -> dict:
+            """Run the explicitly selected receipt phase once in this worker."""
+            return module.run(root)
+
     @app.tool
     async def escaped_child(orphan_after_standby: bool = False) -> dict:
         if orphan_after_standby:
@@ -169,7 +181,7 @@ else:
     )
 
 
-async def daemon(root, port, unit, env_file=None):
+async def daemon(root, port, unit, env_file=None, initial_target=None, receipt_journey=False):
     from exomem.service_ingress import IngressLimits, ServiceIngress
     from exomem.service_manager import (
         Supervisor,
@@ -191,7 +203,9 @@ async def daemon(root, port, unit, env_file=None):
             if "worker" in command:
                 socket_path = self.standby_socket if standby else self.socket_path
                 command = [
-                    sys.executable,
+                    command[0],
+                    "-B",
+                    "-I",
                     __file__,
                     "worker",
                     str(root),
@@ -200,8 +214,10 @@ async def daemon(root, port, unit, env_file=None):
                 ]
                 if standby:
                     command.append("--standby")
+                if receipt_journey:
+                    command.append("--receipt-journey")
             elif "maintain" in command:
-                command = [sys.executable, __file__, "migrate", str(root)]
+                command = [command[0], "-I", __file__, "migrate", str(root)]
             await super()._spawn(command, standby=standby, **options)
 
         def migration_required(self, target):
@@ -212,10 +228,18 @@ async def daemon(root, port, unit, env_file=None):
     runtime = FixtureRuntime(
         directory / "worker.sock", host="127.0.0.1", port=port, environment_file=env_file
     )
-    event(root, "supervisor-start", mark=os.environ.get("EXOMEM_FIXTURE_MARK", ""))
+    import exomem
+
+    event(
+        root, "supervisor-start", mark=os.environ.get("EXOMEM_FIXTURE_MARK", ""),
+        interpreter=sys.executable, version=version("exomem"), module_path=exomem.__file__,
+    )
     manager = Supervisor(
         directory,
-        initial_target={"python": sys.executable, "version": version("exomem")},
+        initial_target=(
+            {"python": sys.executable, "version": version("exomem")}
+            if initial_target is None else initial_target
+        ),
         ingress=ServiceIngress(IngressLimits(heartbeat_interval=0.1)),
         runtime=runtime,
         identity=identity,
@@ -232,11 +256,16 @@ def main():
     parser.add_argument("--unit")
     parser.add_argument("--standby", action="store_true")
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--initial-target", type=json.loads)
+    parser.add_argument("--receipt-journey", action="store_true")
     args = parser.parse_args()
     if args.mode == "daemon":
-        asyncio.run(daemon(args.root, args.port, args.unit, args.env_file))
+        asyncio.run(daemon(
+            args.root, args.port, args.unit, args.env_file,
+            args.initial_target, args.receipt_journey,
+        ))
     elif args.mode == "worker":
-        worker(args.root, args.socket, standby=args.standby)
+        worker(args.root, args.socket, standby=args.standby, receipt_journey=args.receipt_journey)
     else:
         for name in ("worker.pid", "escaped.pid"):
             path = args.root / name

@@ -324,6 +324,39 @@ def test_settled_component_snapshot_never_invokes_timed_wait(
     assert terminal["advisory_sync"] == "completed"
 
 
+def test_retained_optional_claim_does_not_spend_acknowledgement_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = DerivedReceiptProtocolFake()
+    _install_protocol(monkeypatch, fake)
+    settled = _status_callback({})
+
+    def retained_status(root, receipt, component):  # noqa: ANN001
+        status = settled(root, receipt, component)
+        if component in derived_receipts.DEFERRED_COMPONENTS:
+            return replace(status, state="claimed", claim_owner="capable-worker")
+        return status
+
+    fake.inject("component_status", *(retained_status for _ in range(64)))
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("optional claim consumed acknowledgement waiting")
+
+    monkeypatch.setattr(writer_lease, "_wait_for_derived_component", forbidden)
+    terminal, target = _invoke_batch(tmp_path, response_detail="full")
+
+    assert terminal["status"] == "committed"
+    assert terminal["derived_sync"] == "completed"
+    assert target.read_text(encoding="utf-8") == "# Fast\n"
+    assert all(
+        set(kwargs["required_components"]) <= set(derived_receipts.EXECUTABLE_COMPONENTS)
+        for kwargs in _prepare_calls(fake)
+    )
+    assert {item["component"] for item in terminal["diagnostics"]["derived_components"]} == {
+        component.value for component in derived_receipts.EXECUTABLE_COMPONENTS
+    }
+
+
 def test_absent_component_flight_never_invokes_timed_wait(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1080,6 +1113,6 @@ def test_superseded_batch_reports_store_state_without_an_advisory_ref(
     )
     diagnostics = terminal["diagnostics"]["derived_components"]
     assert {item["component"] for item in diagnostics} == {
-        component.value for component in derived_receipts.DerivedComponent
+        component.value for component in derived_receipts.EXECUTABLE_COMPONENTS
     }
     assert {item["state"] for item in diagnostics} == {"superseded"}

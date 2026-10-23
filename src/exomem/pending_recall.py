@@ -69,7 +69,8 @@ _RETIREMENT_LANES: Final[dict[str, str]] = {
 #: The only components Design Decisions 4 and 6 allow to omit the pending
 #: generation: vector and graph lanes contribute proven-current generations
 #: only and disclose their pending coverage instead, and advisory work is
-#: noncanonical background review. Every OTHER required component -- including
+#: noncanonical background review. Deferred protocol custody is outside recall.
+#: Every OTHER required component -- including
 #: one added after this module was written -- must prove completion before the
 #: overlay stops shadowing, because ordinary recall reads through it.
 _OMITTABLE_COMPONENTS: Final[frozenset[str]] = frozenset(
@@ -78,6 +79,7 @@ _OMITTABLE_COMPONENTS: Final[frozenset[str]] = frozenset(
         derived_receipts.DerivedComponent.EMBEDDINGS.value,
         derived_receipts.DerivedComponent.CLAIMS.value,
         derived_receipts.DerivedComponent.WRITE_ADVISORY.value,
+        *(component.value for component in derived_receipts.DEFERRED_COMPONENTS),
     }
 )
 

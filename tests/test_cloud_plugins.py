@@ -50,6 +50,37 @@ def test_claude_directory_manifest_declares_privacy_policy(tmp_path: Path) -> No
         assert manifest["privacyPolicyUrl"] == definition["privacy"]
 
 
+def test_claude_upload_description_keeps_long_copy_out_of_the_manifest(tmp_path: Path) -> None:
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
+    with zipfile.ZipFile(tmp_path / "claude.zip") as archive:
+        manifest = json.loads(archive.read(".claude-plugin/plugin.json"))
+        assert manifest["description"] == definition["claude_description"]
+        assert 0 < len(manifest["description"]) <= 500
+        assert definition["description"] in archive.read("README.md").decode()
+    with zipfile.ZipFile(tmp_path / "openai.zip") as archive:
+        manifest = json.loads(archive.read("plugin.json"))
+        assert manifest["description"] == definition["description"]
+
+
+@pytest.mark.parametrize("length", [500, 501])
+def test_claude_upload_description_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, length: int
+) -> None:
+    definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
+    definition["claude_description"] = "x" * length
+    monkeypatch.setattr(cloud_plugins, "_definition", lambda _: definition)
+    if length > 500:
+        with pytest.raises(ValueError, match="Claude plugin description"):
+            cloud_plugins.build_packages(ROOT, tmp_path)
+        assert not (tmp_path / "claude.zip").exists()
+    else:
+        cloud_plugins.build_packages(ROOT, tmp_path)
+        with zipfile.ZipFile(tmp_path / "claude.zip") as archive:
+            manifest = json.loads(archive.read(".claude-plugin/plugin.json"))
+            assert manifest["description"] == definition["claude_description"]
+
+
 def test_claude_directory_links_and_icon_are_complete(tmp_path: Path) -> None:
     cloud_plugins.build_packages(ROOT, tmp_path)
     definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())

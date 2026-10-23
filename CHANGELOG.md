@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.134.6](https://github.com/Artexis10/exomem/compare/v0.134.5...v0.134.6) (2026-10-23)
+
+### Bug Fixes
+
+* Read retained catalogue receipts without rejecting historical mutation replay.
+  Preserve deferred catalogue work while the earlier application runs its supported projections.
+  Recover recall visibility after a lost completion callback without discarding deferred work.
+
+This maintenance release keeps the 0.134 application surface.
+Use a catalogue-capable release to execute retained catalogue work.
+
 ## [0.134.5](https://github.com/Artexis10/exomem/compare/v0.134.4...v0.134.5) (2026-10-23)
 
 

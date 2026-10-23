@@ -9,6 +9,10 @@ the `product-cloud` surface. Self-hosted Claude Code remains the separate
 `plugins/claude-code` package; historical Hosted Alpha packages are not current
 Cloud distributions.
 
+The shared `description` supplies the full README and OpenAI listing copy.
+`claude_description` supplies Claude's manifest summary. The build rejects an
+empty summary or one above Claude's 500-character upload limit.
+
 ## Build and check
 
 From a checkout with the pinned project uv available:

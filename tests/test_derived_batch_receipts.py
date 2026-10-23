@@ -148,6 +148,141 @@ def _commit_and_prove(vault: Path, receipt, target: Path, after: bytes):
     return proof
 
 
+def _retain_catalogue_row(vault: Path, batch_id: str, *, state: str) -> None:
+    # Inject the documented later protocol row; the installed journey exercises
+    # its producer's wider schema, which this maintenance release never writes.
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "INSERT INTO derived_batch_components(batch_id, component, revision, "
+            "state, lease_revision, claim_owner, claim_expires_at, attempt_count, "
+            "next_attempt_at, created_at, updated_at, failure_code) "
+            "VALUES (?, 'context_catalogue', 1, ?, 7, ?, ?, 4, 200, 10, 10, NULL)",
+            (batch_id, state, "capable-worker" if state == "claimed" else None,
+             300.0 if state == "claimed" else None),
+        )
+
+
+def test_retained_completed_catalogue_replays_without_new_mutation_authority(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, target, before, after = _prepare_one(vault, batch_id="retained-history")
+    _commit_and_prove(vault, receipt, target, after)
+    [claimed] = protocol.claim_ready_components(
+        vault, owner="original-worker", limit=1, lease_seconds=30, now=20,
+    )
+    assert protocol.complete_component(
+        vault, claimed, current_generation=receipt.canonical_generation, now=21,
+    )
+    _retain_catalogue_row(vault, receipt.batch_id, state="completed")
+
+    # The unchanged earlier reader fails here while converting the retained
+    # context_catalogue row through its nine-value enum.
+    proof = protocol.prove_committed(
+        vault, receipt, current_generation="later-generation", now=30,
+    )
+    assert proof.outcome == "ready"
+    assert proof.canonical_replay_authorized is False
+    replay = _prepare(
+        vault, batch_id=receipt.batch_id,
+        paths=(_path(protocol, receipt.paths[0].rel_path, before=before, after=after),),
+        required={protocol.DerivedComponent.LEXSTORE},
+    )
+    assert replay.state == "completed"
+    assert target.read_bytes() == after
+
+    with pytest.raises(ValueError, match="different custody"):
+        _prepare(vault, batch_id=receipt.batch_id, paths=receipt.paths, required=())
+    _write(target, b"unrelated bytes")
+    assert protocol.prove_committed(
+        vault, replay, current_generation="later-generation", now=31,
+    ).outcome == "reconcile_required"
+    assert target.read_bytes() == b"unrelated bytes"
+
+
+@pytest.mark.parametrize("optional_state", ["prepared", "ready", "retryable", "claimed"])
+def test_rollback_drain_preserves_optional_custody_and_supported_acknowledgement(
+    vault: Path, optional_state: str,
+) -> None:
+    from exomem import doctor, index_sync
+
+    protocol = _protocol()
+    receipt, target, _before, after = _prepare_one(vault)
+    _commit_and_prove(vault, receipt, target, after)
+    _retain_catalogue_row(vault, receipt.batch_id, state=optional_state)
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        original = connection.execute(
+            "SELECT * FROM derived_batch_components WHERE component = 'context_catalogue'"
+        ).fetchone()
+    dispatched = []
+    assert _drain().drain_once(
+        vault, dispatch=lambda _root, status: dispatched.append(status.component) or True,
+        observe_current_generation=lambda _root: receipt.canonical_generation,
+        limit=16, now=400,
+    ) == 1
+    assert dispatched == [protocol.DerivedComponent.LEXSTORE]
+    statuses = [protocol.component_status(vault, receipt, component)
+                for component in protocol.DerivedComponent]
+    assert index_sync.derived_acknowledgement_snapshot(statuses).derived_sync == "completed"
+    assert protocol.due_component_count(vault, now=400) == 0
+    census = protocol.custody_census(vault, now=400)
+    assert census["due_components"] == 0
+    assert census["deferred_optional_components"] == 1
+    check = doctor._check_fast_ack_custody(vault)
+    assert check.details["deferred_optional_components"] == 1
+    assert "deferred optional components 1" in check.message
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT * FROM derived_batch_components WHERE component = 'context_catalogue'"
+        ).fetchone() == original
+        assert connection.execute(
+            "SELECT state FROM derived_batches WHERE batch_id = ?", (receipt.batch_id,),
+        ).fetchone() == ("ready",)
+
+
+def test_recovery_failure_does_not_spend_optional_attempts_or_backoff(vault: Path) -> None:
+    protocol = _protocol()
+    receipt, target, _before, after = _prepare_one(vault, now=1)
+    _write(target, after)
+    _retain_catalogue_row(vault, receipt.batch_id, state="prepared")
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        original = connection.execute(
+            "SELECT * FROM derived_batch_components WHERE component = 'context_catalogue'"
+        ).fetchone()
+
+    def unavailable(_root):
+        raise RuntimeError("checkpoint unavailable")
+
+    assert protocol.recover_prepared_batches(
+        vault, observe_current_generation=unavailable,
+        visibility_publisher=lambda _root, _receipt: True, limit=1, now=3,
+    ) == 0
+    supported = protocol.component_status(vault, receipt, protocol.DerivedComponent.LEXSTORE)
+    assert supported.attempt_count == 1
+    assert supported.next_attempt_at == 8
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT * FROM derived_batch_components WHERE component = 'context_catalogue'"
+        ).fetchone() == original
+
+
+def test_unknown_retained_component_is_not_treated_as_optional(vault: Path) -> None:
+    protocol = _protocol()
+    receipt, target, _before, after = _prepare_one(vault)
+    _write(target, after)
+    _retain_catalogue_row(vault, receipt.batch_id, state="prepared")
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE derived_batch_components SET component = 'unknown_required_projection' "
+            "WHERE component = 'context_catalogue'"
+        )
+    with pytest.raises(ValueError, match="unknown_required_projection"):
+        protocol.prove_committed(vault, receipt, current_generation=receipt.canonical_generation)
+    assert target.read_bytes() == after
+
+
 def test_additive_migration_preserves_legacy_semantic_graph_and_full_receipts(
     vault: Path,
 ) -> None:
@@ -268,6 +403,7 @@ def test_derived_batch_records_every_closed_component_explicitly(vault: Path) ->
         "embeddings",
         "claims",
         "write_advisory",
+        "context_catalogue",
     ]
     assert {
         status.component: status.state for status in receipt.components
@@ -283,6 +419,20 @@ def test_derived_batch_records_every_closed_component_explicitly(vault: Path) ->
         )
         for component in protocol.DerivedComponent
     }
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        stored = connection.execute(
+            "SELECT component FROM derived_batch_components WHERE batch_id = ?",
+            (receipt.batch_id,),
+        ).fetchall()
+        assert {row[0] for row in stored} == {
+            component.value for component in protocol.EXECUTABLE_COMPONENTS
+        }
+        # The original CHECK remains narrow; the absent optional row is virtual.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE derived_batch_components SET component = 'context_catalogue' "
+                "WHERE batch_id = ? AND component = 'freshness'", (receipt.batch_id,),
+            )
 
 
 def test_advisory_result_id_is_stable_for_exact_batch_revision(vault: Path) -> None:
@@ -911,7 +1061,7 @@ def test_component_dependencies_gate_one_slot_in_frozen_order(vault: Path) -> No
     receipt, target, _before, after = _prepare_one(
         vault,
         batch_id="dependency-one",
-        required=set(protocol.DerivedComponent),
+        required=set(protocol.EXECUTABLE_COMPONENTS),
     )
     _commit_and_prove(vault, receipt, target, after)
 
@@ -925,7 +1075,7 @@ def test_component_dependencies_gate_one_slot_in_frozen_order(vault: Path) -> No
     assert first.component is protocol.DerivedComponent.FRESHNESS
     assert all(
         protocol.component_status(vault, receipt, component).state == "prepared"
-        for component in tuple(protocol.DerivedComponent)[1:]
+        for component in protocol.EXECUTABLE_COMPONENTS[1:]
     )
 
 
@@ -938,7 +1088,7 @@ def test_component_dependencies_preserve_multi_batch_fairness_after_retry(
         receipt, target, _before, after = _prepare_one(
             vault,
             batch_id=f"dependency-{index}",
-            required=set(protocol.DerivedComponent),
+            required=set(protocol.EXECUTABLE_COMPONENTS),
             now=float(index),
         )
         _commit_and_prove(vault, receipt, target, after)
@@ -2246,7 +2396,7 @@ def test_accepted_parent_schema_migrates_without_losing_any_custody(
                             else "not_required"
                         ),
                     )
-                    for component in protocol.DerivedComponent
+                    for component in protocol.EXECUTABLE_COMPONENTS
                 ),
             )
             connection.execute(
