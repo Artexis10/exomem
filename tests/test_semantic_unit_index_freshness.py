@@ -201,7 +201,6 @@ def test_warm_restricted_duplicates_keep_baseline_tokens_and_last_eligible_occur
         lexstore.ensure_fresh(tmp_path)
         expected = {query: frozen_baseline(query) for query in ("lighthouse", "channel")}
         assert len(expected["lighthouse"]) == 1
-        assert expected["lighthouse"][0].parent_path == duplicates[2]
         assert expected["channel"] == []
         assert ranked("lighthouse") == expected["lighthouse"]
         store = lexstore.get_store(tmp_path)

@@ -872,12 +872,18 @@ def build_packet(
     if selected_candidates:
         from . import find
 
-        verified = (
-            find._finish_unit_candidates(status_basis.root, selected_candidates, parent_reads=parent_reads)
-            if status_basis.root is not None else []
-        )
-        kept = {hit.unit_ref for hit in verified}
-        stale = {candidate.unit_ref for candidate in selected_candidates} - kept
+        by_root: dict[Path, list[Any]] = {}
+        for candidate in selected_candidates:
+            root = status_basis.root if status_basis.root is not None else candidate.vault_root
+            by_root.setdefault(root, []).append(candidate)
+        stale = set()
+        for root, candidates in by_root.items():
+            # Rootless packets share reads within each origin, never between vaults.
+            verified = find._finish_unit_candidates(
+                root, candidates, parent_reads=parent_reads if status_basis.root is not None else None,
+            )
+            kept = {hit.unit_ref for hit in verified}
+            stale.update(candidate.unit_ref for candidate in candidates if candidate.unit_ref not in kept)
         removed = [unit for unit in units if unit["ref"] in stale]
         units = [unit for unit in units if unit["ref"] not in stale]
         used -= sum(_charge("units", unit) for unit in removed)

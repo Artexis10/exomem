@@ -2487,7 +2487,6 @@ _PRE_ADMISSION_SIGNALS = (
 )
 
 
-@governance_policy_module.request_policy_snapshot()
 def op_find(
     vault_root: Path,
     query: str = "",
@@ -6328,7 +6327,6 @@ def op_get_video_frames(
 # ----- product command wrappers: public surface over canonical leaves -----
 
 
-@governance_policy_module.request_policy_snapshot()
 def op_ask_memory(
     vault_root: Path,
     query: str = "",
@@ -6529,7 +6527,6 @@ def _abstention_reason(packet: dict) -> str:
     return str(abstention.get("reason") or "")
 
 
-@governance_policy_module.request_policy_snapshot()
 def op_activate_context(
     vault_root: Path,
     turn: str = "",

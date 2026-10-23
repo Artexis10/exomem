@@ -2223,6 +2223,7 @@ def find(
             outside_selection = select_outside(defer_finish=True)
 
     annotation_candidates = None
+    annotation_fallback_paths: set[str] = set()
     if filter_plan.has_unit_predicate:
         with _span(timings, "matched_units"):
             try:
@@ -2236,9 +2237,21 @@ def find(
                     scope=annotation_scope, freshness_key=snapshot.for_scope(annotation_scope),
                     plan=filter_plan, pending=pending,
                 )
-            except RetrievalIndexWarming:
+            except (RetrievalIndexWarming, structured_filters.FilterError):
                 if managed_runtime:
                     raise
+                # Keep held pending views on their frozen descriptors; only
+                # sidecar rows take the offline canonical fallback.
+                held_paths = {
+                    path for path in annotation_paths
+                    if pending is not None and pending.covers(path) and pending.page(path) is not None
+                }
+                if held_paths:
+                    annotation_candidates = _unit_metadata_records(
+                        vault_root, held_paths, scope=annotation_scope,
+                        freshness_key=snapshot.for_scope(annotation_scope), plan=filter_plan, pending=pending,
+                    )
+                    annotation_fallback_paths = annotation_paths - held_paths
 
     selected = hits
 
@@ -2389,11 +2402,20 @@ def find(
 
         if filter_plan.has_unit_predicate:
             with _span(timings, "matched_units"):
+                page_hits = [hit for hit in hits if isinstance(hit, Hit)]
                 _annotate_matched_units(
-                    vault_root, [hit for hit in hits if isinstance(hit, Hit)], filter_plan,
+                    vault_root, [hit for hit in page_hits if hit.path not in annotation_fallback_paths],
+                    filter_plan,
                     catalog_view=catalog_view, parent_reads=unit_reads, pending=pending,
                     candidates=annotation_candidates, pages=page_memo,
                 )
+                if annotation_fallback_paths:
+                    _annotate_matched_units(
+                        vault_root, [hit for hit in page_hits if hit.path in annotation_fallback_paths],
+                        filter_plan,
+                        catalog_view=catalog_view, parent_reads=unit_reads, pending=pending,
+                        pages=page_memo,
+                    )
         _note_projection_lag()
         if mixed:
             return hits
@@ -2579,6 +2601,7 @@ class _UnitCandidate:
     selected_unit: Any
     unit_view: dict[str, Any]
     source_order: int
+    vault_root: Path = field(repr=False)
     pending_page: ParsedPage | None = None
     bm25_rank: int | None = None
     bm25_score: float | None = None
@@ -2648,6 +2671,12 @@ def _unit_metadata_records(
         vault_root, paths, scope=scope, freshness_key=freshness_key, pending=pending,
         include_ranking=True, include_occurrences=True,
     )
+    unsupported_fields = _unsupported_filter_fields(plan)
+    if unsupported_fields and any(
+        metadata.view is not None and "frontmatter" not in metadata.view
+        for path, metadata in metadata_by_path.items() if path in paths
+    ):
+        raise _unsupported_filter_field_error(unsupported_fields)
     projected = _origin_view(vault_root)
     records: dict[str, list[_UnitCandidate]] = {}
     catalog_view = lexstore._admitted_catalog_view(vault_root)
@@ -2687,6 +2716,7 @@ def _unit_metadata_records(
                 if structured_filters.evaluate_filter(plan, page=metadata.view, unit=unit_view):
                     records.setdefault(path, []).append(_UnitCandidate(
                         row, metadata, parent, selected, unit_view, source_order,
+                        vault_root=vault_root,
                         pending_page=pending.page(path) if pending is not None and pending.covers(path) else None,
                     ))
     except (ValueError, TypeError, KeyError, StopIteration) as error:
@@ -2708,7 +2738,7 @@ def _select_indexed_unit_records(
             vault_root, {hit.parent_path for hit in indexed}, scope=scope,
             freshness_key=freshness_key, plan=plan,
         )
-    except RetrievalIndexWarming:
+    except (RetrievalIndexWarming, structured_filters.FilterError):
         if readiness.runtime_managed():
             raise
         return _hydrate_indexed_unit_records(
@@ -4059,8 +4089,10 @@ RETRIEVAL_WARMING_SITES = (
     "pending_visibility_incomplete",
     "semantic_unit_index",
     "semantic_unit_seed",
+    "semantic_unit_metadata_incomplete",
     "filter_eligibility_unnarrowed",
     "filter_metadata_incomplete",
+    "pending_metadata_incomplete",
     "browse_ordering_unavailable",
     "browse_ordering_incomplete",
     "browse_ordering_stale",
@@ -4507,19 +4539,22 @@ def _managed_page_metadata(
         for row in pending.current_pages():
             if row.rel_path in paths and row.page.parent_media:
                 requested.add(row.page.parent_media + ".md")
-    result = lexstore.eligibility_metadata_result(
-        vault_root,
-        requested,
-        scope=scope,
-        freshness=freshness_key,
-        include_units=include_units,
-        parents_only=parents_only,
-        include_ranking=include_ranking,
-        include_occurrences=include_occurrences,
-    )
-    if not result.readiness.complete:
-        _raise_catalog_outcome(result.readiness)
-    metadata = dict(result.value or {})
+    catalogue_paths = set(pending.shadow(requested)) if pending is not None else requested
+    metadata = {}
+    if catalogue_paths:
+        result = lexstore.eligibility_metadata_result(
+            vault_root,
+            catalogue_paths,
+            scope=scope,
+            freshness=freshness_key,
+            include_units=include_units,
+            parents_only=parents_only,
+            include_ranking=include_ranking,
+            include_occurrences=include_occurrences,
+        )
+        if not result.readiness.complete:
+            _raise_catalog_outcome(result.readiness)
+        metadata = dict(result.value or {})
     if pending is not None and not pending.empty:
         # A stable orphan can acquire a newly committed parent that has no
         # catalogue row yet, including a parent outside this request's scope.

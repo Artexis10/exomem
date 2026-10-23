@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from exomem import context_roles, lexstore, working_set
+from exomem import context_roles, lexstore, lifecycle_statuses, working_set
 
 
 def _write_unit(root: Path, rel: str, text: str) -> None:
@@ -64,20 +64,42 @@ def test_rejected_units_cannot_expand_past_the_activation_cap(tmp_path, monkeypa
     lexstore.ensure_fresh(tmp_path)
     original = lexstore.search_semantic_units_result
     reads = []
+    parent_reads = []
+    original_get = find_module._CACHE.get
 
     def query(*args, **kwargs):
         reads.append(kwargs["k"])
         return original(*args, **kwargs)
 
+    def get(parent, root):
+        parent_reads.append(parent.relative_to(root).as_posix())
+        return original_get(parent, root)
+
     monkeypatch.setattr(lexstore, "search_semantic_units_result", query)
-    monkeypatch.setattr(find_module, "_hydrate_indexed_unit_records", lambda *a, **k: {})
+    monkeypatch.setattr(find_module._CACHE, "get", get)
+    role = context_roles.load_roles().roles["constraints"]
     lane = working_set._units_lane(
-        tmp_path, context_roles.load_roles().roles["constraints"],
+        tmp_path, role,
         neighbourhood=frozenset({local}),
     )
     assert reads == [working_set.UNIT_LANE_LIMIT + 1]
-    assert lane.items == ()
+    assert len(lane.items) == working_set.UNIT_LANE_LIMIT
+    assert parent_reads == []
     assert lane.truncated is True
+    path.unlink()
+
+    packet = working_set.build_packet(
+        items=lane.items, anchors=(), roles=({"id": role.id},), current_state=(), ambiguity=(),
+        missing=({"role": role.id, "reason": "lane_truncated"},),
+        max_chars=working_set.MAX_BUDGET_CHARS, generation={}, status="resolved",
+        status_basis=lifecycle_statuses.Basis(tmp_path),
+    )
+
+    assert packet["units"] == []
+    assert {"role": role.id, "reason": "lane_failed"} in packet["missing"]
+    assert {"role": role.id, "reason": "lane_truncated"} in packet["missing"]
+    assert reads == [working_set.UNIT_LANE_LIMIT + 1]
+    assert parent_reads == [local]
 
 
 def test_bounded_hydration_preserves_supersession_and_parent_metadata(tmp_path):
