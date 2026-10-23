@@ -277,7 +277,7 @@ def test_every_continuation_outcome_follows_the_contract(vault: Path, monkeypatc
     other_view = _ask(vault, cv.UNFILED_REF)["continuation"]
     assert token and other_view
     mac_flipped = token[:-2] + ("A" if token[-2] != "A" else "B") + token[-1]
-    plain_miss = _outcome(vault, "exomem://profile/topic/harbour")
+    plain_miss = _outcome(vault, "exomem://profile/topic/no-such-domain")
 
     def read(ref: str, **options: Any) -> Any:
         """The response, or the refusal's code."""

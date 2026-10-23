@@ -3812,7 +3812,7 @@ def guard_working_set(
 #: under every existing reading, and withholding its item if none exists.
 #: `_is_page_shaped` plays no part here; that classifier is for `ref` alone,
 #: and only on an item that ALSO carries one of these (T2).
-_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via")
+_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via", "corrects")
 #: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
 #: Harvested so a page mentioned only inside a sentence still gets a release
 #: decision: `release.withheld_paths` carries what hit projection happened to
@@ -4528,6 +4528,30 @@ def guard_view_response(
     guarded = copy.deepcopy(dict(response))
     # The caller's view the compile built: the same principal argument, so the same binding.
     caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
+    target = context_views.parse_view_ref(str(guarded.get("ref") or ""))
+    if target is not None and target.profile:
+        mapped = [item for item in guarded["items"] if isinstance(item, Mapping)]
+        guarded["items"] = context_views.pinned_items(vault_root, guarded.get("ref"), guarded.get("generation"), mapped, caller)
+        packet = {
+            section: [item for item in guarded["items"] if item.get("kind") == section]
+            for section in context_views.PROFILE_SECTIONS
+        }
+        packet["missing"] = [
+            entry for entry in guarded.get("missing", ())
+            if isinstance(entry, Mapping) and entry.get("reason") in context_views.PROFILE_MISSING_REASONS
+        ]
+        kept = guard_working_set(vault_root, packet, AnnotatedHits(hits=[]), principal=who, purpose=purpose)
+        guarded["items"] = [
+            item for section in context_views.PROFILE_SECTIONS for item in (kept or {}).get(section, ())
+        ]
+        if "missing" in guarded or (kept or {}).get("missing"):
+            guarded["missing"] = [
+                entry for entry in (kept or {}).get("missing", ())
+                if entry.get("reason") in context_views.PROFILE_MISSING_REASONS
+            ]
+        if kept is None:
+            guarded["continuation"] = None
+        return guarded
     guarded["items"] = _guard_view_items(
         vault_root, guarded, caller=caller, policy=policy, release_gate_active=release_gate_active,
         who=who, purpose=purpose,
@@ -7351,11 +7375,14 @@ class ReaderView:
         *,
         principal: RequestPrincipal | None,
         purpose: str | None,
+        unit_identity_only: bool = False,
     ) -> None:
         self._root = Path(vault_root)
         self._pages = pages
         self._principal = principal
         self._purpose = purpose
+        # Profiles admit a unit by its own source and ref; mentions cannot change their view.
+        self._unit_identity_only = unit_identity_only
         self._verdicts: dict[str, str] = {}
 
     def __call__(self, rel_path: str) -> bool:
@@ -7373,6 +7400,11 @@ class ReaderView:
 
     def verdicts(self, units: Sequence[Mapping[str, Any]]) -> list[str]:
         """`classify_units` for each unit, by everything but its `role`."""
+        if self._unit_identity_only:
+            units = [
+                {"ref": unit.get("ref"), "provenance": {"path": (unit.get("provenance") or {}).get("path")}}
+                for unit in units
+            ]
         keys = [
             json.dumps({k: v for k, v in unit.items() if k != "role"}, sort_keys=True, default=str)
             for unit in units
@@ -7408,13 +7440,14 @@ def reader_view(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    unit_identity_only: bool = False,
 ) -> ReaderView | None:
     """The caller's `ReaderView`, or `None` when nothing is withheld from it
     (`visible_page_filter`: the owner, or no bound caller)."""
     pages = visible_page_filter(vault_root, principal=principal, purpose=purpose)
     if pages is None:
         return None
-    return ReaderView(vault_root, pages, principal=principal, purpose=purpose)
+    return ReaderView(vault_root, pages, principal=principal, purpose=purpose, unit_identity_only=unit_identity_only)
 
 
 def release_allows_download(
