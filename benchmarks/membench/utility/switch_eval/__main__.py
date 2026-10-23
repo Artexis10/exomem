@@ -759,9 +759,15 @@ def cmd_power(args: argparse.Namespace) -> int:
     for number, rule in sorted(result["rules"].items()):
         delta = f", delta {rule['delta']}" if rule["delta"] else ""
         state = "short" if rule["short"] else "reaches the target"
+        parts = (
+            f", of which non-inferiority alone {rule['non_inferiority_pass_rate']:.3f} "
+            f"and calls alone {rule['calls_pass_rate']:.3f}"
+            if "calls_pass_rate" in rule
+            else ""
+        )
         print(
             f"rule {number}: {rule['cases']} cases in {rule['groups']} groups{delta}, "
-            f"pass rate {rule['pass_rate']:.3f}, {state}"
+            f"pass rate {rule['pass_rate']:.3f}{parts}, {state}"
         )
     print(f"written to {target}")
     return 0

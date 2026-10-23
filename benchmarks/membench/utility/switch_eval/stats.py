@@ -307,8 +307,10 @@ def _simulate(
     repeats, so the arms are equal and each case keeps its own spread. The
     slot's effect for its kind is added to the difference, and the differences
     sum within the frozen groups. With ``calls``, the same development case
-    also gives each compared arm its measured calls, and the calls test runs on
-    the second arm's calls minus the first's.
+    also gives each compared arm its measured calls, and a simulation passes
+    as rule 3 does: superiority, or non-inferiority within δ together with the
+    calls test on the second arm's calls minus the first's. The
+    non-inferiority and calls pass rates are recorded on their own as well.
     """
 
     rng = np.random.default_rng(seed)
@@ -339,18 +341,24 @@ def _simulate(
                 first, sources, rng
             )
     sizes = membership.sum(axis=0)
-    passed = _passes(quality @ membership + delta * sizes, rng=rng, alpha=alpha)
-    result = {
+    sums = quality @ membership
+    within = _passes(sums + delta * sizes, rng=rng, alpha=alpha)
+    diagnostics = {}
+    passed = within
+    if calls:
+        cheaper = _passes(saved @ membership, rng=rng, alpha=alpha)
+        passed = _passes(sums, rng=rng, alpha=alpha) | (within & cheaper)
+        diagnostics = {
+            "non_inferiority_pass_rate": float(within.mean()),
+            "calls_pass_rate": float(cheaper.mean()),
+        }
+    return {
         "cases": len(slots),
         "groups": len(labels),
         "delta": delta or None,
         "pass_rate": float(passed.mean()),
+        **diagnostics,
     }
-    if calls:
-        cheaper = _passes(saved @ membership, rng=rng, alpha=alpha)
-        result["calls_pass_rate"] = float(cheaper.mean())
-        result["joint_pass_rate"] = float((passed & cheaper).mean())
-    return result
 
 
 def power_step(
@@ -367,7 +375,8 @@ def power_step(
     ``design`` is the held-out key's structure; ``dev`` the development cases'
     measured repeats. Rule 1 simulates M beating A, each stratum at its own
     development M - A capped at +0.5; rules 2 and 3 simulate equal arms within
-    δ. Reserve turns are ordinary turns, each its own group (their groups are
+    δ, and rule 3 passes as the rule does, on superiority or on non-inferiority
+    with fewer calls, so a calls test that cannot pass leaves it short. Reserve turns are ordinary turns, each its own group (their groups are
     unknown until they are keyed), and they enter every rule, so the size the
     rules reach is the largest any rule needs. A share of them expects memory,
     the held-out ordinary turns' share. At that size rules 2 and 3 raise δ from
@@ -449,7 +458,11 @@ def power_step(
         rules[rule] = {
             **row,
             "compares": "M - P" if rule == "3" else "M - A",
-            "test": "superiority" if rule == "1" else "non-inferiority",
+            "test": {
+                "1": "superiority",
+                "2": "non-inferiority",
+                "3": "superiority, or non-inferiority with fewer calls",
+            }[rule],
             "short": row["pass_rate"] < protocol.POWER_TARGET,
             "table": tables[rule],
         }

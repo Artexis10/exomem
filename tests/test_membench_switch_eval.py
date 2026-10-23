@@ -236,6 +236,17 @@ def test_the_power_step_simulates_rule_3s_calls_test_from_the_development_call_c
     assert rule["calls_pass_rate"] == 1.0
 
 
+def test_rule_3s_power_is_short_when_ms_activation_call_makes_the_composite_rule_unreachable() -> None:
+    design = [stats.DesignCase("ordinary", f"turn-{n}", True) for n in range(12)]
+    scores = {arm: (1.0, 1.0, 1.0) for arm in "AMP"}
+    # Equal quality, so only non-inferiority with fewer calls could pass, and M makes one call more than P.
+    dev = [_dev("ordinary", scores, calls={"A": (3.0,) * 3, "M": (3.0,) * 3, "P": (2.0,) * 3})] * 4
+
+    rule = stats.power_step(design, dev, reserve=0, seed=0, simulations=200)["rules"]["3"]
+
+    assert rule["short"]
+
+
 def test_a_run_whose_rules_are_not_evaluable_decides_nothing() -> None:
     # Arms A and P only: every rule needs M, so no rule is evaluable.
     decided = rules(cases=[], table={}, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "P"])
