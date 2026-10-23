@@ -6471,6 +6471,7 @@ def shared_resolver(vault_root: Path):
     return _get_query_resolver(vault_root)
 
 
+@call_spans.timed("resolver.acquire")
 def recall_resolver_snapshot(
     vault_root: Path,
     freshness: tuple | None = None,
@@ -6538,7 +6539,11 @@ def recall_resolver_snapshot(
         generation = _RECALL_RESOLVER_GENERATIONS.setdefault(root, 0)
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached and cached[0] == identity:
-            return cached[1].fork()
+            # Fixed route counters describe copy attempts; paths sum across copies.
+            with call_spans.span(
+                "resolver.fork", {"cache_hits": 1, "paths": len(cached[1].full_paths)}
+            ):
+                return cached[1].fork()
 
     # Single-flight. The build below is a full vault walk plus a parse per
     # admitted page, so N callers arriving on a cold cache used to run N of
@@ -6580,7 +6585,10 @@ def recall_resolver_snapshot(
         with _RESOLVER_LOCK:
             cached = _RECALL_RESOLVER_CACHE.get(root)
             if cached and cached[0] == identity:
-                return cached[1].fork()
+                with call_spans.span(
+                    "resolver.fork", {"follower_returns": 1, "paths": len(cached[1].full_paths)}
+                ):
+                    return cached[1].fork()
         # The leader finished with a different identity, or its result was
         # evicted before this thread looked. Try to become the leader.
 
@@ -6623,7 +6631,10 @@ def recall_resolver_snapshot(
                 done = _RECALL_RESOLVER_BUILDS.pop(root, None)
             if done is not None:
                 done.set()
-    return resolver.fork()
+    with call_spans.span(
+        "resolver.fork", {"build_returns": 1, "paths": len(resolver.full_paths)}
+    ):
+        return resolver.fork()
 
 
 def recall_resolver_snapshot_at_checkpoint(
