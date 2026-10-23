@@ -36,8 +36,8 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > you want to run the steps yourself.
 
 > **For Claude Code, exomem is two parts and you want both.** The **MCP server**
-> (steps 1-5) is the *hands* — product commands such as `ask_memory`,
-> `remember`, `capture_source`, `preserve_evidence`, and `review_memory`. The
+> (steps 1-5) is the *hands* — product commands such as `search_memory`,
+> `create_note`, `capture_source`, `preserve_evidence`, and `review_memory`. The
 > **skill** (step 6) is the *brain* — it tells Claude *when* to save, how to keep
 > raw sources and evidence separate from compiled conclusions, when to suggest
 > links, and how to update knowledge safely. Generic MCP clients that cannot load
@@ -82,7 +82,7 @@ path unless I explicitly ask for embeddings. Run the setup wizard, explain each
 prompt in plain language before I answer it, and do not move or rewrite my
 existing vault files. After setup, verify with doctor, call
 bootstrap(profile="compact") if you are not using the Exomem skill, ask one
-known vault question with `ask_memory`, and
+known vault question with `search_memory`, and
 save one harmless test conclusion so I can see where it lands.
 ```
 
@@ -91,7 +91,7 @@ The expected first-run verification is concrete:
 1. `exomem doctor` passes for the selected vault.
 2. The connected assistant can call `bootstrap(profile="compact")`, unless it has
    already loaded the Exomem skill.
-3. A known question about your vault triggers `ask_memory` before the answer.
+3. A known question about your vault triggers `search_memory` before the answer.
 4. A safe test such as "remember that setup succeeded today" writes a compiled
    note and reports `Saved -> <path>`.
 
@@ -105,7 +105,7 @@ canonical operation first:
 ```bash
 exomem ask "what do I know about this project?"
 exomem ask "what supports this decision?" --deep --graph-enrich --json
-exomem remember "# Setup succeeded\n\n## Claim\n\nExomem setup completed today." --title "Setup succeeded today" --json
+exomem create_note "# Setup succeeded\n\n## Claim\n\nExomem setup completed today." --title "Setup succeeded today" --json
 exomem capture "raw source text" --title "Source title" --source-type other --json
 exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
 exomem review --json
@@ -113,8 +113,8 @@ exomem connect --path "Notes/Insights/example" --json
 exomem maintain --json
 ```
 
-These aliases are thin routes over product commands: `ask` -> `ask_memory`,
-`remember` -> `remember`, `capture` -> `capture_source`/`preserve_evidence`,
+These aliases are thin routes over product commands: `ask` -> `search_memory`,
+`create_note` -> `create_note`, `capture` -> `capture_source`/`preserve_evidence`,
 `review` -> `review_memory`, `connect` -> `connect_memory`, and `maintain` ->
 `maintain_memory` unless a fix flag is explicit. The canonical implementation
 leaves remain underneath for governance and validation, but new users do not need
@@ -147,7 +147,7 @@ That's the normal case, and it's safe:
   clobber anything. *(The governed folder is named `Knowledge Base/` by default;
   set `EXOMEM_KB_DIRNAME` to govern a differently-named folder — e.g. to adopt one
   your vault already uses.)*
-- **Your notes stay searchable.** `ask_memory` reaches sibling folders when you
+- **Your notes stay searchable.** `search_memory` reaches sibling folders when you
   use `scope="vault"`; `browse_memory` gives Claude a bounded structural report
   of the whole vault, and `adopt_vault` turns that scan into a safe adoption
   report with likely knowledge packs and manifest/copy/compile-planning next
@@ -395,7 +395,7 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 ```
 
 Restart Claude Code; you should see the product `exomem` tools (`bootstrap`,
-`ask_memory`, `read_memory`, `remember`, `capture_source`, `review_memory`,
+`search_memory`, `read_memory`, `create_note`, `capture_source`, `review_memory`,
 `maintain_memory`, …). Quick test before wiring: `uv run python -m exomem
 --transport stdio` should start and wait on stdin without error.
 
@@ -482,7 +482,7 @@ variant too, for example `--settings ~/.claude/settings.json##os.Msys`.
 
 - **Write** — a `Stop` hook that re-checks "is this worth saving?" at the end of
   each turn, so conclusions get captured on their own.
-- **Read** — a `UserPromptSubmit` hook that reminds Claude to run `ask_memory`
+- **Read** — a `UserPromptSubmit` hook that reminds Claude to run `search_memory`
   first when your message touches something the KB might hold, so it actually
   behaves as your source of truth.
 - **Continue** — one shared, stdlib-only checkpoint core with thin Claude and
@@ -587,21 +587,21 @@ the defaults (tuned for English) can under-fire. (These tunables were renamed fr
 `KB_*` to `EXOMEM_*`; the old `KB_*` names are still accepted for back-compat.)
 
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
-the `UserPromptSubmit` hook only reminds Claude to run `ask_memory` — set
+the `UserPromptSubmit` hook only reminds Claude to run `search_memory` — set
 `EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
 (hybrid mode, so a pasted ticket or a sentence with punctuation still finds its
 pages; keyword mode is an all-tokens gate that real prompts never pass) for the
 same gated prompt and appends them to the reminder, so relevant prior KB pages
 are already in context before Claude decides whether to search. It tries a short
 transport ladder and never blocks on a slow path: REST first (one
-`POST /api/ask_memory`, 4s timeout) — attempted when `EXOMEM_REST_API_KEY` is set
+`POST /api/search_memory`, 4s timeout) — attempted when `EXOMEM_REST_API_KEY` is set
 in the client's environment **or** persisted in the managed install's
 `service.env` (`~/.config/exomem/service.env` on Linux,
 `~/Library/Application Support/Exomem/service.env` on macOS; override the location
 with `EXOMEM_SERVICE_ENV`). A key read from that file is only ever sent to a
 loopback host: point `EXOMEM_HOST` elsewhere and the REST rung is skipped for it.
 Then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an
-`exomem ask_memory --json` subprocess call (~5s timeout, slower — cold Python
+`exomem search_memory --json` subprocess call (~5s timeout, slower — cold Python
 start). The two rungs share one 8s budget under the hook's 10s timeout, measured
 on elapsed time: a REST call that dribbles bytes past the budget is abandoned and
 the CLI rung gets what is left. If
@@ -616,7 +616,7 @@ to the plain reminder is visible. (The legacy `KB_RETRIEVE_INJECT` /
 
 **Opt-in: a compiled working set instead of routing stubs.** Set
 `EXOMEM_RETRIEVE_INJECT=working_set` and the same gated prompt goes to
-`activate_context` instead of `ask_memory`: one `POST /api/activate_context` over
+`recall_context` instead of `search_memory`: one `POST /api/recall_context` over
 the same ladder and the same 8s budget, and the returned working-memory packet
 *replaces* the reminder under a fixed header that names it as retrieved memory
 rather than instructions. It carries current state first, then units, then

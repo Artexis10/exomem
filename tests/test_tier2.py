@@ -1093,11 +1093,11 @@ def test_tier2_registered_by_default(
     names = _registered_tool_names(monkeypatch)
     # Tier 1 read/write ops are always present...
     assert {
-        "ask_memory",
+        "search_memory",
         "read_memory",
-        "remember",
+        "create_note",
         "capture_source",
-        "edit_memory",
+        "edit_note",
         "review_memory",
     } <= names
     # ...and so are the Tier 2 escape hatches when the flag is unset.
@@ -1111,11 +1111,11 @@ def test_tier2_dropped_when_disabled(
     names = _registered_tool_names(monkeypatch)
     # Tier 1 stays fully registered — only the escape hatches drop.
     assert {
-        "ask_memory",
+        "search_memory",
         "read_memory",
-        "remember",
+        "create_note",
         "capture_source",
-        "edit_memory",
+        "edit_note",
         "review_memory",
         "connect_memory",
     } <= names

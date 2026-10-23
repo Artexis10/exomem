@@ -127,8 +127,10 @@ def main() -> None:
         f"{TOOL_SURFACE_CONTRACT_PATH.relative_to(REPO_ROOT)}"
     )
     print(
-        "connector attestation is intentionally NOT updated: refresh/recreate and "
-        "verify external connectors before updating deploy/chatgpt/personal-plugin-contract.json"
+        "connector rollout metadata is not updated here. Before release, record this "
+        "digest as pending in deploy/chatgpt/personal-plugin-contract.json. After "
+        "deployment and a verified connector refresh/recreation, promote only that "
+        "verified digest to registered acceptance."
     )
 
 

@@ -89,8 +89,8 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
         "authoring_contract",
     } <= set(out)
     assert set(out["common_actions"]) == set(commands.simple_action_names())
-    assert out["simple_actions"]["ask"]["route"]["tool"] == "ask_memory"
-    assert out["simple_actions"]["remember"]["route"]["tool"] == "remember"
+    assert out["simple_actions"]["ask"]["route"]["tool"] == "search_memory"
+    assert out["simple_actions"]["remember"]["route"]["tool"] == "create_note"
     assert out["simple_actions"]["capture"]["evidence_route"]["tool"] == "preserve_evidence"
     assert "durable governed knowledge" in out["memory_model"]["exomem"]
     # The product comparison must not prescribe another system's memory policy.
@@ -143,20 +143,20 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["tool_defaults"]["adopt_existing_vault"]["tool"] == "adopt_vault"
     authoring = out["authoring_contract"]
     assert "connect_memory" in " ".join(authoring["canonical_loop"])
-    assert authoring["route_by_intent"]["new_durable_conclusion"] == "remember"
-    assert authoring["route_by_intent"]["small_correction"] == "edit_memory"
+    assert authoring["route_by_intent"]["new_durable_conclusion"] == "create_note"
+    assert authoring["route_by_intent"]["small_correction"] == "edit_note"
     assert authoring["route_by_intent"]["semantic_unit_mutation"] == "observe_memory"
-    assert authoring["route_by_intent"]["substantial_rewrite"] == "replace_memory"
+    assert authoring["route_by_intent"]["substantial_rewrite"] == "supersede_note"
     assert "near_duplicate_warnings" in authoring["preflight"]
     assert "write_feedback" in authoring["post_write"]
     assert "insight" in authoring["note_type_recipes"]
     assert any("write_feedback" in step for step in out["workflow"]["loop"])
     assert "adopt_vault" in out["common_tools"]
-    assert "ask_memory" in out["common_tools"]
+    assert "search_memory" in out["common_tools"]
     assert "read_memory" in out["common_tools"]
-    assert "remember" in out["common_tools"]
+    assert "create_note" in out["common_tools"]
     assert "observe_memory" in out["common_tools"]
-    assert out["tool_defaults"]["normal_lookup"]["tool"] == "ask_memory"
+    assert out["tool_defaults"]["normal_lookup"]["tool"] == "search_memory"
     assert out["tool_defaults"]["normal_lookup"]["args"] == {
         "detail": "compact",
         "rerank": False,
@@ -178,7 +178,7 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "relation_disposition=\"reviewed_none\"" in reviewed_creation["reviewed_none"]
     assert "relation_review_hash" in reviewed_creation["reviewed_none"]
     assert "relation_review_reason" in reviewed_creation["reviewed_none"]
-    assert "remember()" in reviewed_creation["adoption_handoff"]
+    assert "create_note()" in reviewed_creation["adoption_handoff"]
     semantic_recall = out["search_guidance"]["semantic_recall"]
     assert semantic_recall["result_levels"] == ["page", "unit", "mixed"]
     assert "empty query" in semantic_recall["filter_only"]
@@ -288,7 +288,7 @@ def test_bootstrap_does_not_advertise_records_when_surface_omits_command(
         surface="test",
         profile="without-records",
         tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory"),
+        product_commands=("bootstrap", "search_memory"),
     )
 
     with active_surface(descriptor):
@@ -351,7 +351,7 @@ def test_bootstrap_keeps_active_governance_safety_teaching_without_tier_two(
         surface="test",
         profile="tier-one-only",
         tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory"),
+        product_commands=("bootstrap", "search_memory"),
     )
 
     with active_surface(descriptor):
@@ -445,8 +445,8 @@ def test_bootstrap_profiles_project_profile_aware_semantic_authoring_contract(
             "open",
             "missing_semantic_unit",
             "empty_rich_unit",
-            "remember",
-            "replace_memory",
+            "create_note",
+            "supersede_note",
             "manage_memory_file create, overwrite, and append",
             "- [decision] Relocate to a coastal city next spring #life ^relocation",
             "- [nutrition] Evening protein improves adherence #experiment ^evening-protein",
@@ -676,7 +676,7 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
 
     assert {"save", "adopt", "ask", "prove", "review", "update", "connect"} <= set(front_door)
     assert "adopt_vault" in catalog["primary"]
-    assert "ask_memory" in catalog["primary"]
+    assert "search_memory" in catalog["primary"]
     assert "preserve_evidence" in front_door["prove"]["primary_tools"]
     assert "review_memory" in front_door["review"]["primary_tools"]
     assert "manage_memory_file" in catalog["advanced"]
@@ -691,7 +691,7 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
                 "name": "Technical",
                 "actions": ["save", "ask"],
                 "agent_instructions": "Route technical work through governed notes.",
-                "suggested_workflows": [{"title": "Save", "intent": "x", "route": "remember", "example": "x"}],
+                "suggested_workflows": [{"title": "Save", "intent": "x", "route": "create_note", "example": "x"}],
             }
         ]
     }
@@ -730,7 +730,7 @@ def test_simple_action_catalog_reaches_every_product_command() -> None:
         )
         reachable.update(entry["advanced"])
 
-    unreachable = {command.name for command in commands.PRODUCT_COMMANDS} - reachable
+    unreachable = {command.public_name for command in commands.PRODUCT_COMMANDS} - reachable
     assert unreachable == {"bootstrap"}, (
         "every product command must be reachable from some action; unreachable: "
         f"{sorted(unreachable - {'bootstrap'})}"
@@ -752,11 +752,11 @@ def test_simple_action_catalog_is_registry_routed() -> None:
         "plan",
     }
     assert catalog["ask"]["route"] == {
-        "tool": "ask_memory",
+        "tool": "search_memory",
         "args": {"detail": "compact", "rerank": False},
     }
     assert catalog["ask"]["deep_route"]["args"]["deep"] is True
-    assert catalog["remember"]["route"]["tool"] == "remember"
+    assert catalog["remember"]["route"]["tool"] == "create_note"
     assert catalog["capture"]["route"]["tool"] == "capture_source"
     assert catalog["capture"]["evidence_route"]["tool"] == "preserve_evidence"
     assert catalog["review"]["route"]["tool"] == "review_memory"
@@ -772,7 +772,7 @@ def test_simple_action_catalog_is_registry_routed() -> None:
         "args": {"action": "inspect"},
     }
 
-    known = {command.name for command in commands.PRODUCT_COMMANDS} | {"doctor"}
+    known = {command.public_name for command in commands.PRODUCT_COMMANDS} | {"doctor"}
     for action, item in catalog.items():
         routes = [item["route"]]
         routes.extend(

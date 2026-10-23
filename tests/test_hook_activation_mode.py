@@ -42,7 +42,7 @@ def test_mcp_turn_requests_native_activation_without_transport(monkeypatch, caps
     assert retrieve.main() == 0
     assert calls == []
     context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "bootstrap" in context and "activate_context" in context
+    assert "bootstrap" in context and "recall_context" in context
     assert "raw user turn" in context and "once" in context
     assert "already" in context and "duplicate" in context
     assert continuation.MEMORY_CITATION_GUIDANCE in context
@@ -77,7 +77,7 @@ def test_working_set_transport_failure_requests_native_activation(monkeypatch, c
     )
     assert retrieve.main() == 0
     context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "activate_context" in context and "native MCP" in context
+    assert "recall_context" in context and "native MCP" in context
     assert "already activated" not in context
     assert continuation.MEMORY_CITATION_GUIDANCE in context
 
@@ -94,7 +94,7 @@ def test_native_activation_survives_a_missing_checkpoint_script(monkeypatch, cap
     )
     assert retrieve.main() == 0
     context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "activate_context" in context and "raw user turn" in context
+    assert "recall_context" in context and "raw user turn" in context
 
 
 @pytest.mark.parametrize("branch", ["due", "coverage", "door"])
@@ -618,7 +618,7 @@ def test_mcp_activates_short_substantive_followups(monkeypatch, capsys, turn):
         retrieve.sys, "stdin", io.StringIO(json.dumps({"prompt": turn, "session_id": "s"}))
     )
     assert retrieve.main() == 0
-    assert "activate_context" in capsys.readouterr().out
+    assert "recall_context" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("turn", ["why?", "continue"])

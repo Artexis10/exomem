@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..issued_cursor import is_issued_cursor
 from . import authorization_sessions
 
 #: What replaces a blocked value. Deliberately fixed text: a per-credential
@@ -700,8 +701,12 @@ def _scrub_value(
                 scanner = classify if type(key) is str and len(key) <= 1024 else _scrub_string
                 cleaned_key, key_hit = scanner(key, False)
                 blocked = blocked or key_hit
-            cleaned, hit = _scrub_value(item, field_name=str(key), classify=classify,
-                                        structural=result and key in _RESULT_STRUCTURAL_FIELDS)
+            if result and key in _RESULT_STRUCTURAL_FIELDS and is_issued_cursor(item):
+                # Only codec-issued root continuations bypass scanning; user strings retain every check.
+                cleaned, hit = item, False
+            else:
+                cleaned, hit = _scrub_value(item, field_name=str(key), classify=classify,
+                                            structural=result and key in _RESULT_STRUCTURAL_FIELDS)
             entries.append((key, cleaned_key, key_hit, cleaned, hit))
             blocked = blocked or hit
         if type(value) is dict and all(

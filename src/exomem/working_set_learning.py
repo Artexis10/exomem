@@ -414,7 +414,7 @@ def build_advisory(
         options.append(
             {
                 "family": "name",
-                "tool": "edit_memory",
+                "tool": "edit_note",
                 "path": path,
                 "field": "learned_aliases",
                 "current": [str(item) for item in current] if isinstance(current, list) else [],

@@ -136,7 +136,7 @@ def test_rest_facade_round_trip(vault: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     finished = _post(client, "adoption_studio", {"action": "finish", "run_id": run_id})
     assert finished["phase"] == "done"
-    assert finished["finish"]["route"]["tool"] == "ask_memory"
+    assert finished["finish"]["route"]["tool"] == "search_memory"
 
     # Read-only status round-trips without a run_id (list) and with one (full doc).
     listed = _post(client, "adoption_studio", {"action": "status"})

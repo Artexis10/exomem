@@ -17,12 +17,12 @@ Users and agents should think in verbs first. Exomem's internal page types still
 
 | User action | What it means | Backed by |
 | --- | --- | --- |
-| Save | Keep raw material or a durable conclusion | `capture_source` for raw material; `remember` for compiled conclusions; `preserve_evidence` for proof |
+| Save | Keep raw material or a durable conclusion | `capture_source` for raw material; `create_note` for compiled conclusions; `preserve_evidence` for proof |
 | Adopt/import | Understand an existing vault safely before changing anything | `adopt_vault(mode="scan-only")`, then explicit copy/manifest/compile modes |
-| Ask | Retrieve what the vault already knows with citations | `ask_memory`, then `read_memory`; `ask_memory(deep=true)` for bounded context |
+| Ask | Retrieve what the vault already knows with citations | `search_memory`, then `read_memory`; `search_memory(deep=true)` for bounded context |
 | Prove | Show or preserve proof for a claim, case, warranty, dispute, record, or receipt | `preserve_evidence`, `transfer_artifact`, `review_memory(mode="provenance")` |
 | Review | Surface stale, unprocessed, disconnected, or contradictory areas; explicitly snooze/dismiss reviewed signals | `review_memory`; `triage_memory` for state changes |
-| Update | Correct, edit, or supersede knowledge while preserving history | `edit_memory`, `replace_memory`, `maintain_memory` |
+| Update | Correct, edit, or supersede knowledge while preserving history | `edit_note`, `supersede_note`, `maintain_memory` |
 | Connect | Link related notes, entities, decisions, and sources | `connect_memory` |
 | Record | Log or correct an observed event, measurement, transaction, session, or current state | `record_memory(action="inspect"|"create"|"query"|"append"|"update")` |
 
@@ -98,7 +98,7 @@ The adoption modes are explicit:
 | `scan-only` | No | Report structure, likely packs, governed vs read-only areas, bounded semantic-language census, and next actions |
 | `save-manifest` | Yes, under `Knowledge Base/_Adoption/` only | Save the scan as a durable onboarding artifact |
 | `copy-as-sources` | Yes, under `Knowledge Base/Sources/Imported/` only | Copy selected legacy text files with original path and SHA-256 provenance |
-| `compile-selected` | Yes, under `Knowledge Base/Sources/Imported/` when legacy files need source copies | Copy selected legacy text files when needed, then return a reviewable compile plan; compiled notes are written later through `remember` / `note()` |
+| `compile-selected` | Yes, under `Knowledge Base/Sources/Imported/` when legacy files need source copies | Copy selected legacy text files when needed, then return a reviewable compile plan; compiled notes are written later through `create_note` / `note()` |
 
 There is no rewrite-in-place onboarding path in the normal product flow.
 `scan-only` does not require initialization and never changes page bytes. Its
@@ -106,7 +106,7 @@ semantic census reports compact/rich coverage, category resolution/collisions,
 malformed candidates, contract/schema debt, and relation dispositions within
 explicit file/byte/example bounds. `compile-selected` is a planning step, not
 auto-migration: it prepares governed sources and a note scaffold so the user or
-agent can deliberately compile with `remember` through the normal `note()`
+agent can deliberately compile with `create_note` through the normal `note()`
 precommit path.
 
 Initialization and registry/index upgrades do not manufacture semantic units,

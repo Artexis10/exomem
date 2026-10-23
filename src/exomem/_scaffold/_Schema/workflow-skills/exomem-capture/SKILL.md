@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 1496455827106c6207692ebd02e7b121402a2f56a64e44698ef8409ea3150b65
+  skill_contract: f9fcf1d6d18ac082cf8e3b7861a24bef6ff82c1f3f7234eb5140a13ea8b3354a
   version: "0.1.0"
 ---
 
@@ -16,7 +16,7 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 
 ## Portable operating rules
 
-Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
@@ -71,11 +71,11 @@ carry transient progress; capture reusable decisions and verified milestones.
 4. Draft distilled conclusions as: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
 5. Reuse known meaningful connections; use `connect_memory(operation="suggest-links")`
    when candidates are still missing. Then write with
-   `remember`, carrying the sources and accepted links in the first write; prefer
-   `edit_memory` or `replace_memory` for near-duplicates.
+   `create_note`, carrying the sources and accepted links in the first write; prefer
+   `edit_note` or `supersede_note` for near-duplicates.
 6. For an entity, consult the active entity registry and selected knowledge packs,
    then call `connect_memory(operation="resolve-entity", name=...)` before writing.
-7. When one active entity matches, use `edit_memory` for a small stable-fact
+7. When one active entity matches, use `edit_note` for a small stable-fact
    correction or the canonical relation workflow for a new connection.
    A stable, uniquely attributable fact about a resolved person, including the
    vault owner's own entity (role, affiliation, relationship), is an entity-level
@@ -90,7 +90,7 @@ carry transient progress; capture reusable decisions and verified milestones.
    recurring, and useful beyond this source, use `connect_memory(operation="create-entity")`.
    When the name you write is in another script than the user's own spelling
    of it, add a native-script alias (`aliases=[...]` at create, or the
-   `aliases` field through `edit_memory` on an existing page); see
+   `aliases` field through `edit_note` on an existing page); see
    `references/writing.md` § Names in another script.
 
 ## Lifecycle
@@ -155,7 +155,7 @@ transient participant stays in source/note context. Do not create a parallel
 page when an existing active note or entity should be edited, linked, or
 superseded.
 
-<!-- exomem-semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d -->
+<!-- exomem-semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2 -->
 ## Semantic authoring contract
 
 Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
@@ -180,7 +180,7 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Exact applicability: obtain `bootstrap(profile="compact", section="authoring")` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(profile="full")` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `schema_memory(subject="note-types", operation="inspect")` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
-- Routes: use `remember` for a new compiled note, `replace_memory` for a replacement, `observe_memory` for one unit, and `edit_memory` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits.
+- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `observe_memory` for one unit, and `edit_note` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
 - Findings: `missing_semantic_unit` means an applicable live-class compiled result has no valid non-empty unit; `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.
 - Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`.
 - Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body.

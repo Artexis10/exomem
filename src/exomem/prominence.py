@@ -170,18 +170,18 @@ _CONFIG_KEY = "prominence"
 #: runs within a few hundred bytes of a hard ceiling, so it stays ASCII (a
 #: non-ASCII dash costs six JSON bytes) and inside 220.
 ACTIVATION_CARRIER_LINE = (
-    "Before a substantive turn with no prior context, call `activate_context` "
+    "Before a substantive turn with no prior context, call `recall_context` "
     "with the turn verbatim; on `ambiguous`, call again with `anchor`."
 )
 
 
-#: The same carrier for a surface that does not export `activate_context` (hosted).
+#: The same carrier for a surface that does not export `recall_context` (hosted).
 #: The surface filter drops any string naming an unavailable command, so on such a
 #: surface the whole recall contract, which opens with the line above, used to vanish
-#: from the bootstrap: the one carrier a hookless client has. `ask_memory` is exported
-#: everywhere `activate_context` is not.
+#: from the bootstrap: the one carrier a hookless client has. `search_memory` is exported
+#: everywhere `recall_context` is not.
 ASK_MEMORY_CARRIER_LINE = (
-    "Before a substantive turn with no prior context, call `ask_memory` on the "
+    "Before a substantive turn with no prior context, call `search_memory` on the "
     "turn's topic."
 )
 

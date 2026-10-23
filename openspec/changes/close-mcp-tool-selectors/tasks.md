@@ -12,5 +12,10 @@
 
 ## 3. Deliver
 
-- [ ] 3.1 Get an independent review, merge, and cut the ordinary release.
+- [x] 3.1 Get an independent review, merge, and cut the ordinary release.
 - [ ] 3.2 After the operator deploys Cloud and rescans, record the scan result.
+
+Task 3.1 shipped in [PR #1981](https://github.com/Artexis10/exomem/pull/1981), merged as `8c0a8d52`.
+That commit is an ancestor of [v0.134.2](https://github.com/Artexis10/exomem/releases/tag/v0.134.2), published on 2026-10-22.
+The [exact review record](https://github.com/Artexis10/exomem/pull/1981#issuecomment-6349831532) records approval and passing CI.
+Cloud deployment and the operator's rescan remain unverified; task 3.2 stays open.

@@ -145,7 +145,7 @@ def test_conformance_extractor_distinguishes_tool_keys_from_action_vocabulary() 
     payload = {
         "nested_contract": {"read_media": {"description": "structured tool entry"}},
         "simple_actions": {
-            "ask": {"route": {"tool": "ask_memory"}},
+            "ask": {"route": {"tool": "search_memory"}},
         },
         "front_door_actions": {"review": {"intent": "action label"}},
         "knowledge_packs": {"available": [{"actions": ["ask", "review"]}]},
@@ -160,7 +160,7 @@ def test_conformance_extractor_distinguishes_tool_keys_from_action_vocabulary() 
     )
 
     assert "read_media" in refs
-    assert "ask_memory" in refs
+    assert "search_memory" in refs
     assert {"ask", "capture", "review"}.isdisjoint(refs)
 
 
@@ -237,7 +237,7 @@ def test_all_mcp_bootstrap_profiles_match_live_tools(
     mcp = server_module.build_server(require_auth=False)
     live_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
     product_tuple = tuple(
-        command.name
+        command.public_name
         for command in commands.product_commands_for(
             "mcp", expose_tier2=tier2_enabled
         )
@@ -289,7 +289,7 @@ def test_all_rest_bootstrap_profiles_match_openapi_operations(
         for operation in openapi["paths"].values()
     }
     product_tuple = tuple(
-        command.name
+        command.public_name
         for command in commands.product_commands_for(
             "rest", expose_tier2=tier2_enabled
         )
@@ -325,14 +325,15 @@ def test_all_cli_bootstrap_profiles_match_parser_registry(
 ) -> None:
     _configure_server(monkeypatch, vault, tier2_enabled=tier2_enabled)
     product_tuple = tuple(
-        command.name
+        command.public_name
         for command in commands.product_commands_for(
             "cli", expose_tier2=tier2_enabled
         )
     )
     aliases = set(_simple_cli_action_names())
     assert aliases == set(commands.simple_action_names())
-    assert "remember" in aliases & set(product_tuple)
+    assert "remember" in aliases
+    assert "create_note" in product_tuple
     exported = set(product_tuple) | aliases
 
     for profile in PROFILES:
@@ -365,7 +366,7 @@ def test_narrow_surface_filters_every_profile_without_deleting_useful_routes(
         surface="test",
         profile="narrow",
         tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory", "remember"),
+        product_commands=("bootstrap", "search_memory", "create_note"),
     )
 
     with active_surface(descriptor):
@@ -385,14 +386,14 @@ def test_narrow_surface_filters_every_profile_without_deleting_useful_routes(
         assert refs <= descriptor.callable_commands
         assert {"review_memory", "read_media"}.isdisjoint(refs)
         if payload["profile"] != "session":
-            assert payload["simple_actions"]["ask"]["route"]["tool"] == "ask_memory"
-            assert payload["simple_actions"]["remember"]["route"]["tool"] == "remember"
+            assert payload["simple_actions"]["ask"]["route"]["tool"] == "search_memory"
+            assert payload["simple_actions"]["remember"]["route"]["tool"] == "create_note"
 
 
 def test_direct_python_bootstrap_defaults_to_canonical_full_mcp(vault: Path) -> None:
     payload = commands.op_bootstrap(vault, section="all")
     expected = tuple(
-        command.name for command in commands.product_commands_for("mcp", expose_tier2=True)
+        command.public_name for command in commands.product_commands_for("mcp", expose_tier2=True)
     )
     _assert_conforms(
         payload,
@@ -411,19 +412,19 @@ def test_bootstrap_guidance_uses_product_writer_not_legacy_note(vault: Path) -> 
                 vault, profile=profile, **({"section": "all"} if profile == "compact" else {})
             )
         )
-        assert "note()" not in serialized
-        assert "remember()" in serialized
+        assert not re.search(r"(?<![\w])note\(", serialized)
+        assert "create_note()" in serialized
 
 
 def test_active_surface_context_is_nested_and_concurrent_safe(vault: Path) -> None:
     outer = ActiveSurfaceDescriptor(
         surface="test", profile="outer", tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory"),
+        product_commands=("bootstrap", "search_memory"),
         exported_aliases=("ask",),
     )
     inner = ActiveSurfaceDescriptor(
         surface="test", profile="inner", tier2_enabled=False,
-        product_commands=("bootstrap", "remember"),
+        product_commands=("bootstrap", "create_note"),
         exported_aliases=("capture",),
     )
 
@@ -451,6 +452,6 @@ def test_active_surface_context_is_nested_and_concurrent_safe(vault: Path) -> No
         results = list(pool.map(render, (outer, inner)))
 
     assert results == [
-        ("outer", ["ask_memory", "bootstrap"], ["ask"]),
-        ("inner", ["bootstrap", "remember"], ["capture"]),
+        ("outer", ["bootstrap", "search_memory"], ["ask"]),
+        ("inner", ["bootstrap", "create_note"], ["capture"]),
     ]

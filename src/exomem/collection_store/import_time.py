@@ -17,6 +17,18 @@ from typing import Any
 
 _MAX_NAME_BYTES = 64
 
+# nosemgrep: ep-word-set -- The time-basis grammar fixes these source-path keys.
+BASIS_PATHS = ("date", "instant", "offset", "offset_minutes", "seconds", "index")
+
+
+def basis_paths(basis: Mapping[str, Any]) -> list[Any]:
+    """The source paths a declared time basis reads, including interval paths."""
+    every = basis.get("every")
+    intervals = every.values() if isinstance(every, Mapping) else ()
+    return [basis[key] for key in BASIS_PATHS if key in basis] + [
+        value for value in intervals if type(value) is str
+    ]
+
 
 def version() -> str:
     """The IANA release of the pinned zone rules; loaded on use, so other routes never need them."""

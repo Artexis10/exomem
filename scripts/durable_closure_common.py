@@ -1311,6 +1311,14 @@ async def run_product(
             raise AdapterFault("Basic Memory runtime provenance does not match the pinned packet")
         async with client:
             tools = {tool.name for tool in await client.list_tools()}
+            if product == "exomem":
+                from exomem.command_surface import resolve_command
+                from exomem.commands import PRODUCT_COMMANDS
+
+                tools = {
+                    command.name if (command := resolve_command(name, PRODUCT_COMMANDS)) else name
+                    for name in tools
+                }
             _permit_refusal_envelopes(client)
             required = (
                 {"write_note", "edit_note", "read_note", "search_notes"}

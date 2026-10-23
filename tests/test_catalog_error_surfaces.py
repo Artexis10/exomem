@@ -245,7 +245,7 @@ def test_rest_openapi_error_schema_accepts_warming_fields(
     assert site_schema["type"] == "string"
     assert tuple(site_schema["enum"]) == find_module.RETRIEVAL_WARMING_SITES
 
-    ask_memory_responses = doc["paths"]["/api/ask_memory"]["post"]["responses"]
+    ask_memory_responses = doc["paths"]["/api/search_memory"]["post"]["responses"]
     assert "503" in ask_memory_responses
 
     warming_response = client.post(

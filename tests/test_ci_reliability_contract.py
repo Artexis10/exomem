@@ -114,7 +114,9 @@ def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
         step for step in job["steps"] if step.get("name") == "Upload test timing evidence"
     )
     assert junit_step["uses"] == "actions/upload-artifact@v4"
-    assert junit_step["if"] == "always()"
+    assert junit_step["if"] == (
+        "${{ always() && (steps.scope.outputs.docs_only != 'true' || matrix.shard == 1) }}"
+    )
     assert junit_step["with"]["name"] == (
         f"{tier}-py${{{{ matrix.python-version }}}}-shard-${{{{ matrix.shard }}}}-junit"
     )
@@ -785,7 +787,11 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
     decision, summary = _change_scope(repository, "pull_request")
 
     if docs_only:
-        assert decision == {"docs_only": "true", "pytest_args": "-m reads_repository_docs"}
+        assert decision == {
+            "docs_only": "true",
+            "pytest_args": "-m reads_repository_docs --splits=1 --group=1",
+        }
+        assert "shard 1 each run all their marked tests" in summary
         assert "Docs-only change: the example check did not run" in summary
     else:
         assert decision == {"docs_only": "false", "pytest_args": ""}
@@ -912,15 +918,44 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> No
     }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])
     assert "test" not in gate["needs"]
-    assert gate["steps"][0]["env"]["RESULTS"] == "${{ join(needs.*.result, ' ') }}"
+    assert gate["steps"][0]["env"]["RESULTS"] == "${{ toJSON(needs) }}"
     full_ci = " ".join(str(gate["steps"][0]["env"]["FULL_CI"]).split())
     assert "github.event_name == 'schedule'" in full_ci
     assert "github.event_name == 'workflow_dispatch'" in full_ci
     assert "release-please" not in full_ci
-    command = gate["steps"][0]["run"]
-    assert 'test "$result" = success' in command
-    assert 'test "$result" = skipped' in command
-    assert 'test "$FULL_CI" != true' in command
+
+
+
+@pytest.mark.parametrize(
+    "full_ci,results,failures",
+    [
+        (False, {"core-tests": "success", "retrieval-quality": "skipped"}, []),
+        (True, {"core-tests": "success", "retrieval-quality": "success"}, []),
+        (True, {"core-tests": "success", "retrieval-quality": "skipped"}, ["retrieval-quality"]),
+        (False, {"build": "failure", "core-tests": "cancelled"}, ["build", "core-tests"]),
+    ],
+)
+def test_required_gate_reports_every_dependency_that_blocks_the_selected_tier(
+    full_ci: bool, results: dict[str, str], failures: list[str]
+) -> None:
+    """The stable required check must identify every failed job, preserving its verdict."""
+    step = _workflow()["jobs"]["gate"]["steps"][0]
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step["run"]],
+        env={
+            **os.environ,
+            "RESULTS": json.dumps({job: {"result": state} for job, state in results.items()}),
+            "FULL_CI": json.dumps(full_ci),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == (1 if failures else 0), result.stderr
+    for job in failures:
+        assert f"CI dependency {job} returned {results[job]}" in result.stderr
+    for job in results.keys() - set(failures):
+        assert job not in result.stderr
 
 
 def test_native_held_filesystem_has_a_required_ntfs_gate() -> None:

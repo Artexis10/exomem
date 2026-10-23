@@ -191,6 +191,8 @@ def test_failure_closes_connection_and_releases_reader_slot(store, monkeypatch, 
 @pytest.mark.query_deadline
 def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(store, monkeypatch, tmp_path):
     """Authorization setup expiry must identify its input without altering a query or its cleanup."""
+    import gc
+
     from exomem.query_engine import route
 
     observe_query_timeouts = runpy.run_path(str(
@@ -210,10 +212,12 @@ def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(
     real_reader = connection.open_query_reader
     real_check = runtime.ReadSession.check
     offset, readers, errors = [0.0], [], []
+    callbacks_before = tuple(gc.callbacks)
 
     def load(*args, **kwargs):
         result = real_load(*args, **kwargs)
         if runtime._CURRENT_SESSION.get() is not None:
+            gc.collect()
             offset[0] += 0.201  # Expire the unchanged interactive deadline without sleeping.
         return result
 
@@ -241,10 +245,14 @@ def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(
         assert governance.policy.load is load
         assert connection.open_query_reader is reader
         assert runtime.ReadSession.check is check
+    assert tuple(gc.callbacks) == callbacks_before
     records = [json.loads(line) for line in log.read_text().splitlines()]
     assert len(records) == 1
     record = records[0]
     assert record["timeout_ms"] == 200
+    assert record["gc"]["collections"] >= 1
+    assert record["gc"]["elapsed_ms"] >= 0
+    assert record["gc"]["thread_cpu_ms"] >= 0
     assert record["phases"]["authorization.input.policy_load@read_session.setup"]["calls"] == 1
     assert record["phases"]["authorization.policy.v4_active"]["calls"] == 2
     assert record["phases"]["authorization.policy.activation_store_probe"]["calls"] == 2
@@ -257,6 +265,33 @@ def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(
         with runtime.read_session(store.root, store.handle.path):
             pass  # Both reader slots remain available after the observed refusal.
     assert route.run(store, CID, query, facade_profile="records") == before
+
+
+def test_query_observer_retains_invalid_cursor_cause_without_its_value(store, tmp_path):
+    """A copied-service cursor failure needs its native cause without logging the cursor or rows."""
+    import gc
+
+    from exomem.query_engine import route
+
+    observe_query_timeouts = runpy.run_path(str(
+        Path(__file__).parents[1] / "scripts" / "_recipient_query_observer.py"
+    ))["observe_query_timeouts"]
+    create(store)
+    store.append_record(CID, item={"title": "Private fixture title"}, item_key=KEY, why="fixture")
+    private_cursor = "private-fixture-cursor"
+    query = {"version": 1, "select": ["title"], "page": {"after": private_cursor}}
+    log = tmp_path / "query-invalid.jsonl"
+    callbacks_before = tuple(gc.callbacks)
+    with observe_query_timeouts(log):
+        with pytest.raises(runtime.QueryError, match="QUERY_CURSOR_INVALID") as failure:
+            route.run(store, CID, query, facade_profile="records")
+    assert tuple(gc.callbacks) == callbacks_before
+    record = json.loads(log.read_text())
+    assert record["error"]["code"] == failure.value.code
+    assert any(cause["type"] == "InvalidToken" for cause in record["exception_causes"])
+    assert any(frame["function"] == "open" for cause in record["exception_causes"] for frame in cause["frames"])
+    assert private_cursor not in log.read_text()
+    assert "Private fixture title" not in log.read_text()
 
 
 def test_cost_rejection_precedes_value_evaluation(store):

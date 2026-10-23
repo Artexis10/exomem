@@ -357,6 +357,15 @@ def reconcile_operation_inventory(
 ) -> dict[str, Any]:
     declared = manifest["operation_inventory"][contender][surface]
     discovered_set = set(map(str, discovered))
+    if contender == "exomem":
+        from exomem.command_surface import resolve_command
+        from exomem.commands import PRODUCT_COMMANDS
+
+        # The frozen inventory classifies execution identities, independent of discovery spelling.
+        discovered_set = {
+            command.name if (command := resolve_command(name, PRODUCT_COMMANDS)) else name
+            for name in discovered_set
+        }
     declared_set = set(map(str, declared))
     unclassified = sorted(discovered_set - declared_set)
     missing = sorted(declared_set - discovered_set)
