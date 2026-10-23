@@ -125,7 +125,9 @@ def declaration(scope: str, **changes) -> dict:
 def test_installed_exhaustion_stops_refresh_dispatch_but_end_restores_inspection(tmp_path, client):
     report = install(tmp_path / client, client, refresh_max_operations=1)
     prompt = envelope(client, "UserPromptSubmit", prompt="Check the current adapter evidence.")
-    scope = metadata(invoke(report, prompt))["scope_id"]
+    initial = invoke(report, prompt)
+    scope = metadata(initial)["scope_id"]
+    assert continuation.MEMORY_CITATION_GUIDANCE in initial["hookSpecificOutput"]["additionalContext"]
     declaration = {
         "schema_version": 1,
         "kind": "checkpoint",
