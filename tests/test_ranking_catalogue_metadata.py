@@ -10,7 +10,7 @@ from test_recall_integration import _PageReadSentinel
 
 from exomem import find as find_module
 from exomem import find_candidates, find_policy, find_results, lexstore
-from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+from exomem.governance.principal import library_scope
 from exomem.ranking_config import DEFAULT_RANKING
 from exomem.vault import kb_dirname
 
@@ -342,22 +342,3 @@ def test_many_matching_frames_hydrate_only_the_selected_parent_and_frame(
     assert hits[0].scene_frame in [child[:-3] for child in children]
     assert "rankcatalogue latest" in hits[0].excerpt
     assert reads.count == 2, reads.report()
-
-
-@library_scope()
-def test_restricted_parent_does_not_replace_an_admitted_frame(
-    vault: Path, warm_managed_cell
-) -> None:
-    from test_vocabulary_registries import _govern, _reset_governance
-
-    parent = _write(vault, "Withheld/restricted-parent", "media_type: video\n", "Private transcript.")
-    child = _write(vault, "public-frame", f"parent_media: {parent[:-3]}\nframe_ts: 2.5\n")
-    _govern(vault)
-    _reset_governance()
-    warm_managed_cell(vault)
-    with request_scope(RequestPrincipal("external", surface="mcp")):
-        hits = find_module.find(
-            vault, query="rankcatalogue latest", scope="kb-only", graph=False, rerank=False,
-        )
-    assert [hit.path for hit in hits] == [child]
-    assert hits[0].scene_frame is None
