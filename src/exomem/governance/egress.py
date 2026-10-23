@@ -3550,18 +3550,22 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
-    map_block = guarded.get("map")
-    if isinstance(map_block, dict) and isinstance(map_block.get("items"), list):
+    if "map" in guarded:
         from .. import context_views
 
         caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
-        map_block = guarded["map"] = context_views.pinned_map_block(vault_root, map_block, caller)
-        map_block["items"] = _guard_view_items(
-            vault_root, map_block, caller=caller, policy=policy, release_gate_active=release_gate_active,
-            who=who, purpose=purpose,
-        )
-        # Pins preserve compiled display; release filtering only removes fields, text or items, so the cap holds.
-        guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
+        map_block = context_views.pinned_map_block(vault_root, guarded, caller)
+        if map_block is None:
+            # No map that this request compiled for this packet: no block field reaches the wire.
+            guarded = context_views.unavailable_map_packet(guarded)
+        else:
+            guarded["map"] = map_block
+            map_block["items"] = _guard_view_items(
+                vault_root, map_block, caller=caller, policy=policy, release_gate_active=release_gate_active,
+                who=who, purpose=purpose,
+            )
+            # The record holds the compiled display; release filtering only removes fields, text or items, so the cap holds.
+            guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
 
     ctx = _packet_release(
         vault_root,
@@ -4484,8 +4488,7 @@ def _guard_view_items(
     """Restore the compiled items, then apply the current release decisions for every view consumer."""
     from .. import context_views
 
-    mapped = [item for item in response["items"] if isinstance(item, Mapping)]
-    items = context_views.pinned_items(vault_root, response.get("ref"), response.get("generation"), mapped, caller)
+    items = context_views.pinned_items(vault_root, response, caller)
     ctx = _packet_release(
         vault_root, {"anchors": items}, AnnotatedHits(hits=[]), policy=policy,
         release_gate_active=release_gate_active, who=who, purpose=purpose, record="all",
@@ -4505,11 +4508,11 @@ def guard_view_response(
     """Apply release decisions to a derived-view response (`context_views.read_view`).
 
     The view is computed over the caller's own view, so this is the second line. No item is taken
-    from the response: each is served as the view's compile served it to this caller under the
-    response's generation (`context_views.pinned_items`), and an item that no compile served is
-    dropped. So both passes serve the text the generation was computed from. Then every path the
-    items name is decided under the authorization that stands now, and an item that names a
-    withheld or invalid one is dropped. The same three states as every other consumer: no
+    from the response: the items are the ones this request's compile served this caller for the
+    response's ref, generation and page (`context_views.pinned_items`), and a response that no
+    compile in this request served gets none. So both passes serve the text the generation was
+    computed from. Then every path the items name is decided under the authorization that stands
+    now, and an item that names a withheld or invalid one is dropped. The same three states as every other consumer: no
     governance and nothing withheld -> no decision; `blocked` or an unresolved-but-expected
     principal -> no items and no continuation; otherwise each item is decided. `purpose` is the
     one the request declared.
@@ -4530,16 +4533,12 @@ def guard_view_response(
     caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
     target = context_views.parse_view_ref(str(guarded.get("ref") or ""))
     if target is not None and target.profile:
-        mapped = [item for item in guarded["items"] if isinstance(item, Mapping)]
-        guarded["items"] = context_views.pinned_items(vault_root, guarded.get("ref"), guarded.get("generation"), mapped, caller)
+        guarded["items"] = context_views.pinned_items(vault_root, guarded, caller)
         packet = {
             section: [item for item in guarded["items"] if item.get("kind") == section]
             for section in context_views.PROFILE_SECTIONS
         }
-        packet["missing"] = [
-            entry for entry in guarded.get("missing", ())
-            if isinstance(entry, Mapping) and entry.get("reason") in context_views.PROFILE_MISSING_REASONS
-        ]
+        packet["missing"] = context_views.pinned_missing(vault_root, guarded, caller)
         kept = guard_working_set(vault_root, packet, AnnotatedHits(hits=[]), principal=who, purpose=purpose)
         guarded["items"] = [
             item for section in context_views.PROFILE_SECTIONS for item in (kept or {}).get(section, ())

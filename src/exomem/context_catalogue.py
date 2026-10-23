@@ -375,11 +375,12 @@ class ContextCatalogue:
 
     # -- owner-only reads --------------------------------------------------- #
 
-    def memberships(self, among: Iterable[Entry] | None = None) -> Memberships:
+    def memberships(self, among: Iterable[Entry] | None = None, *, projects: bool = True) -> Memberships:
         """Resolve each entry's declarations through the registries as they stand now.
 
         `among` limits the join to the entries a reader may see (default: every entry),
-        so a relation to an entry outside it adds nothing.
+        so a relation to an entry outside it adds nothing. `projects=False` is for a
+        reader who may not read the project registry: no project key files an entry.
 
         An entry belongs to the topics its own `topics` values resolve to, the
         domains of its project keys, and the topics its membership-relation
@@ -390,7 +391,9 @@ class ContextCatalogue:
         from . import project_keys, vocabulary_resolution
 
         taxonomy = source_taxonomy.load_taxonomy(self.vault_root)
-        project_registry = project_keys.load_project_registry(self.vault_root)
+        project_registry = (
+            project_keys.load_project_registry(self.vault_root) if projects else project_keys.ProjectRegistry({}, {})
+        )
         entries = tuple(self.entries() if among is None else among)
         edges = self.membership_edges()
         project_topics: dict[str, vocabulary_resolution.TopicResolution] = {}
@@ -885,7 +888,7 @@ class _Fold:
                 thread_order="",
                 source_signature="",
                 # Activation names a project anchor `project:<key>`; the key is its membership declaration.
-                projects=(row.anchor_id.partition(":")[2],) if row.kind == "project" else (),
+                projects=(row.anchor_id.partition(":")[2],) if row.kind == working_set_index.PROJECT_ANCHOR_KIND else (),
             )
         self.removed.update(
             entry_id for entry_id, row in self.stored.items() if entry_id != row.path and entry_id not in wanted

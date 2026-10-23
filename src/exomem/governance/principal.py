@@ -79,6 +79,14 @@ _REQUEST_PRINCIPAL: ContextVar[RequestPrincipal | None] = ContextVar(
     "exomem_request_principal", default=None
 )
 
+# What the request's own compiles served, for the terminal guard's passes over
+# the same request (`context_views`). The outermost `request_scope` owns it and
+# a nested one joins it, so a compile and both guard passes share it. A thread
+# that runs part of the request in a copied context mutates the same mapping.
+_REQUEST_SERVED: ContextVar[dict[Any, Any] | None] = ContextVar(
+    "exomem_request_served", default=None
+)
+
 # The host's explicit binding of one remote OAuth identity as the owner. It is
 # read only from the process environment the host's service configuration
 # supplies -- never from the vault, a policy document, a request or a claim --
@@ -539,13 +547,25 @@ def effective_principal() -> RequestPrincipal:
     return most_restrictive_principal(surface="unbound")
 
 
+def request_served() -> dict[Any, Any] | None:
+    """What this request's compiles served, or None outside any `request_scope`."""
+    return _REQUEST_SERVED.get()
+
+
 @contextmanager
 def request_scope(principal: RequestPrincipal) -> Iterator[None]:
-    """Bind one principal for a nested, task-local surface invocation."""
+    """Bind one principal for a nested, task-local surface invocation.
+
+    The outermost scope also owns the request's record of what it served, and
+    discards it on exit; a nested scope joins it.
+    """
     token = _REQUEST_PRINCIPAL.set(principal)
+    served = _REQUEST_SERVED.set({}) if _REQUEST_SERVED.get() is None else None
     try:
         yield
     finally:
+        if served is not None:
+            _REQUEST_SERVED.reset(served)
         _REQUEST_PRINCIPAL.reset(token)
 
 

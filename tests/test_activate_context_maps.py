@@ -84,7 +84,7 @@ def test_an_empty_vault_returns_an_empty_map(vault: Path, monkeypatch: pytest.Mo
     if restricted:
         _world(vault, with_w=True)
         _built(vault).close()
-        caller = context_views.CallerView(lambda _path: False, None, "empty-view", False)
+        caller = context_views.CallerView(lambda _path: False, None, "empty-view", False, False)
         monkeypatch.setattr(context_views.CallerView, "current", lambda *_a, **_kw: caller)
     else:
         shutil.rmtree(vault / "Knowledge Base")
@@ -175,28 +175,28 @@ def test_the_guard_drops_a_forged_map_item(vault: Path, monkeypatch: pytest.Monk
     _write(vault, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# Restricted fixture\n\nHidden.\n")
     _withhold(vault, SECRET, ceiling=0)
     _built(vault).close()
-    packet = _activate(vault, _external())
-    original = copy.deepcopy(packet["map"])
-    if forgery == "path":
-        forged = {"kind": "note", "path": SECRET, "ref": SECRET, "title": "Restricted fixture", "description": "Hidden."}
-        packet["map"]["items"].append(forged)
-    else:
-        forged = next(item for item in packet["map"]["items"] if item.get("path"))
-        if forgery == "description":
-            forged["description"] = "Forged [[secret-cluster]] prose."
-        elif forgery == "state":
-            forged["state"] = {"statement": "Forged", "path": SECRET, "as_of": "2026-10-01"}
-        elif forgery == "state.source":
-            forged["state"] = {**(forged.get("state") or {}), "source": SECRET}
-        elif forgery == "extra.path":
-            forged["extra"] = {"path": SECRET}
-        elif forgery == "links[].path":
-            forged["links"] = [{"path": SECRET}]
-        elif forgery in ("topics", "evidence"):
-            forged[forgery] = [SECRET]
-        else:
-            forged[forgery] = SECRET
     with principal.request_scope(_external()):
+        packet = _activate(vault, _external())
+        original = copy.deepcopy(packet["map"])
+        if forgery == "path":
+            forged = {"kind": "note", "path": SECRET, "ref": SECRET, "title": "Restricted fixture", "description": "Hidden."}
+            packet["map"]["items"].append(forged)
+        else:
+            forged = next(item for item in packet["map"]["items"] if item.get("path"))
+            if forgery == "description":
+                forged["description"] = "Forged [[secret-cluster]] prose."
+            elif forgery == "state":
+                forged["state"] = {"statement": "Forged", "path": SECRET, "as_of": "2026-10-01"}
+            elif forgery == "state.source":
+                forged["state"] = {**(forged.get("state") or {}), "source": SECRET}
+            elif forgery == "extra.path":
+                forged["extra"] = {"path": SECRET}
+            elif forgery == "links[].path":
+                forged["links"] = [{"path": SECRET}]
+            elif forgery in ("topics", "evidence"):
+                forged[forgery] = [SECRET]
+            else:
+                forged[forgery] = SECRET
         guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
     assert guarded is not None
     assert SECRET not in json.dumps(guarded)
@@ -211,13 +211,51 @@ def test_the_guard_restores_the_compiled_map_block(vault: Path, monkeypatch: pyt
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _world(vault, with_w=True)
     _built(vault).close()
-    packet = _activate(vault, _external())
-    original = copy.deepcopy(packet["map"])
-    packet["map"][field] = "Forged block text."
     with principal.request_scope(_external()):
+        packet = _activate(vault, _external())
+        original = copy.deepcopy(packet["map"])
+        packet["map"][field] = "Forged block text."
         guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
     assert guarded is not None
     assert guarded["map"] == original
+
+
+@pytest.mark.parametrize("pointed_at", ["the block", "the block and the packet"])
+def test_a_map_compiled_for_a_larger_packet_is_never_served(vault: Path, monkeypatch: pytest.MonkeyPatch, pointed_at: str) -> None:
+    """A 500-character packet carries the map that the same request compiled for 8000 characters.
+
+    The guard takes the block that the packet's own `map_generation` names, for the packet's own limit,
+    so the larger map never reaches the wire: the packet abstains, as a map that cannot be read does.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=True)
+    _built(vault).close()
+    with principal.request_scope(_external()):
+        small = _activate(vault, _external(), max_chars=500)
+        large = _activate(vault, _external(), max_chars=8000)
+        assert len(large["map"]["items"]) > len(small["map"]["items"])  # the control: two different maps
+        forged = copy.deepcopy(small)
+        forged["map"] = copy.deepcopy(large["map"])
+        if pointed_at == "the block and the packet":
+            forged["generation"]["map_generation"] = large["map"]["generation"]
+        guarded = egress.guard_working_set(vault, forged, egress.AnnotatedHits(hits=[]))
+    assert guarded is not None
+    assert (guarded["abstained"], guarded["abstention"], guarded["generation"]["map_generation"]) == (True, {"reason": "unavailable"}, None)
+    assert "map" not in guarded
+
+
+def test_a_map_that_another_request_compiled_is_never_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A packet replayed into a request that compiled no map abstains instead of serving an empty, ready map."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=True)
+    _built(vault).close()
+    packet = _activate(vault, _external())
+    assert packet["map"]["items"]
+    with principal.request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
+    assert guarded is not None
+    assert (guarded["abstained"], guarded["abstention"], guarded["generation"]["map_generation"]) == (True, {"reason": "unavailable"}, None)
+    assert "map" not in guarded
 
 
 def test_notes_without_map_rows_still_point_to_the_unfiled_map(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -271,10 +309,10 @@ def test_a_topic_with_only_a_withheld_member_cannot_be_injected(vault: Path, mon
     owner = _activate(vault)
     topic = next(item for item in owner["map"]["items"] if item["ref"] == context_views.topic_ref("fleet"))
     caller = _external("marketing")
-    packet = _activate(vault, caller, purpose="marketing")
-    original = copy.deepcopy(packet["map"])
-    packet["map"]["items"].append(topic)
     with principal.request_scope(caller):
+        packet = _activate(vault, caller, purpose="marketing")
+        original = copy.deepcopy(packet["map"])
+        packet["map"]["items"].append(topic)
         guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]), purpose="marketing")
     assert guarded is not None
     assert guarded["map"] == original

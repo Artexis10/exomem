@@ -143,6 +143,8 @@ ANCHOR_KINDS: tuple[str, ...] = (
     "plan",
     "project",
 )
+#: The kind of an anchor that the project registry declares. It has no page of its own.
+PROJECT_ANCHOR_KIND = "project"
 
 #: Caps. The index is a catalogue of *anchors*, not of notes: a vault with more
 #: hubs than this has a structure problem the index should not paper over, and
@@ -1794,7 +1796,7 @@ def _project_candidates(
                 path="",
                 ref=anchor_id,
                 title=str(folder).strip(),
-                kind="project",
+                kind=PROJECT_ANCHOR_KIND,
                 lifecycle="active",
                 signature=_signature(str(folder), "", extra=(key, category)),
                 aliases=(normalize(key),),

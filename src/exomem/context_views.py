@@ -8,13 +8,15 @@ The caller's view comes first. Every row is filtered by what the caller may
 see BEFORE it is ordered, counted, paged, hashed or compared with a pending
 change, so no entry the caller cannot see moves a byte the caller receives.
 `read_memory` serves a view through `read_view`; activation serves a budgeted
-map through `activation_packet` and `map_within`. Every item a view serves
-is pinned under its generation (`served_items`), and the terminal guard serves
-the pinned item (`pinned_items`), so both of its passes serve the text that the
-generation was computed from.
+map through `activation_packet` and `map_within`. A compile records what it
+served in its own request (`served_items`), and each pass of the terminal guard
+serves that record again (`pinned_items`), never the items it is handed. So both
+passes serve the text that the generation was computed from.
 
 A caller that may not read the domain registry gets nothing from it: no topic,
 no topic key and no domain map. Every topic ref then reads as an unknown one.
+A caller that may not read the project registry gets no project anchor and no
+domain filed through a project key.
 
 Map and profile refs share the view namespace. `read_view` pages a view
 with a signed continuation token that binds the view, the caller and the
@@ -213,6 +215,8 @@ class CallerView:
     binding: str
     #: Whether the caller may read the domain registry. Without it no view reads the registry.
     domains_admitted: bool
+    #: Whether the caller may read the project registry. Without it no view reads that registry.
+    projects_admitted: bool
 
     @property
     def restricted(self) -> bool:
@@ -240,7 +244,11 @@ class CallerView:
         declared = egress._declared_purpose(root, who, purpose)  # noqa: SLF001
         visible = egress.restricted_release_filter(root, principal=principal, purpose=declared)
         binding = _digest(json.dumps([who.audience_id, who.authorization_session_id, declared]))
-        return cls(visible, declared, binding, _domains_admitted(root, principal, purpose))
+        # The project registry is a vault file like any other: a restricted caller reads it only at full release.
+        projects_admitted = visible is None or egress.release_level_for_path_only(
+            root, project_keys.registry_relpath(), principal=principal, purpose=declared
+        ) >= egress.LEVEL_FULL
+        return cls(visible, declared, binding, _domains_admitted(root, principal, purpose), projects_admitted)
 
 
 def _domains_admitted(
@@ -267,11 +275,11 @@ def _digest(text: str) -> str:
 
 
 class _Registries:
-    """The two registries a view reads, loaded once per request."""
+    """The domain registry a view reads, loaded once per request."""
 
     def __init__(self, vault_root: Path) -> None:
+        self.vault_root = vault_root
         self.taxonomy = source_taxonomy.load_taxonomy(vault_root)
-        self.projects = project_keys.load_project_registry(vault_root)
         self._digest: str | None = None
 
     def topic(self, raw: str) -> str | None:
@@ -281,11 +289,15 @@ class _Registries:
 
     @property
     def digest(self) -> str:
-        """Identity of what the memberships and the topic rows read: the domains, their aliases, the project keys."""
+        """Identity of what the memberships and the topic rows read: the domains, their aliases, the project keys.
+
+        Only the owner's map cache keys on it. A generation never does: it covers the served rows alone.
+        """
         if self._digest is None:
             domains = [self.taxonomy.domains[key].as_dict() for key in sorted(self.taxonomy.domains)]
             aliases = sorted(self.taxonomy.domain_aliases.items())
-            payload = json.dumps([domains, aliases, self.projects.content_hash], sort_keys=True)
+            projects = project_keys.load_project_registry(self.vault_root).content_hash
+            payload = json.dumps([domains, aliases, projects], sort_keys=True)
             self._digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return self._digest
 
@@ -464,10 +476,17 @@ class _World:
 
 
 def _world(catalogue: context_catalogue.ContextCatalogue, caller: CallerView) -> _World:
-    entries = [entry for entry in catalogue.entries() if _admits(entry, caller.visible)]
+    entries = [
+        entry for entry in catalogue.entries()
+        if _admits(entry, caller.visible)
+        # A project anchor is the project registry's entry: its title is the registry's folder.
+        and (caller.projects_admitted or entry.anchor_kind != working_set_index.PROJECT_ANCHOR_KIND)
+    ]
     # The join runs over the visible entries only: a relation to an entry the caller cannot see adds nothing.
     # It resolves through the domain registry, so a caller who may not read the registry joins no topic.
-    joined = catalogue.memberships(entries).topics if caller.domains_admitted else {}
+    joined = (
+        catalogue.memberships(entries, projects=caller.projects_admitted).topics if caller.domains_admitted else {}
+    )
     # An entry with no activity of its own (a project anchor) takes its project's newest visible page.
     project_activity: dict[str, str] = {}
     for entry in entries:
@@ -596,10 +615,9 @@ def _compile(prepared: _Prepared, *, timings: find_types.FindTimings | None = No
         except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
             states, state_available = {}, False
     # The generation covers every field an item is served, its state included, so a continuation
-    # minted before any of them changed is stale.
-    registries = prepared.registries.digest if prepared.registries is not None else ""
-    digest = hashlib.sha256(registries.encode("ascii"))
-    digest.update(json.dumps(state_available).encode("ascii"))
+    # minted before any of them changed is stale. It reads nothing else: a registry edit that
+    # changes no served row moves no byte this caller receives.
+    digest = hashlib.sha256(json.dumps(state_available).encode("ascii"))
     for row in rows:
         digest.update(row.digest().encode("ascii"))
         if states is not None:
@@ -949,8 +967,7 @@ def _activation_packet(
         if view.state != READY:
             return packet
         rows = [view.rows[index] for index in compiled.selected]
-        items = served_items(root, view, rows, prepared.caller)
-        block = _response(view, items, None)
+        block = _response(view, [], None)
         block["description"] = description
         if compiled.overflow:
             block["overflow"] = compiled.overflow
@@ -958,7 +975,9 @@ def _activation_packet(
             block["reason"] = "empty"
         if not view.state_available:
             block["state_available"] = False
-        _PINS.add(_pin_key(root, view.ref, prepared.caller, view.generation), (), block=block)
+        block["items"] = served_items(
+            root, view, rows, prepared.caller, block=block, limit=packet["budget"]["limit_chars"]
+        )
         packet["map"] = block
         packet["budget"]["used_chars"] = map_packet_chars(block)
         packet["abstained"] = False
@@ -1103,7 +1122,7 @@ def _read_view(root: Path, path: str, continuation: str | None, purpose: str | N
     extra: dict[str, Any] = {}
     if view.states is not None and not view.state_available:
         extra["state_available"] = False
-    return _response(view, served_items(root, view, page, caller), token, extra)
+    return _response(view, served_items(root, view, page, caller, continuation=token), token, extra)
 
 
 # --------------------------------------------------------------------------- #
@@ -1111,112 +1130,126 @@ def _read_view(root: Path, path: str, continuation: str | None, purpose: str | N
 # --------------------------------------------------------------------------- #
 
 
-def _identity(item: Mapping[str, Any]) -> tuple[object, ...]:
-    """The fields that name an entry on the wire. A value that is not a string matches no entry."""
-    values = (item.get("kind"), item.get("anchor_kind") or "", item.get("ref"), item.get("path") or "")
-    return tuple(value if isinstance(value, str) else None for value in values)
-
-
 #: The fields of an item that are display text: the catalogue's own, served without links.
 DISPLAY_FIELDS = ("title", "description", "description_origin")  # nosemgrep: ep-word-set -- `Row`'s own field names.
 
-#: Most items pinned at once, over every pinned page. A memory bound: the terminal guard reads a pin
-#: in the request that made it, moments later, so only an in-flight request needs its pin kept.
-PINNED_ITEMS_MAX = 4096
+
+@dataclass(frozen=True, slots=True)
+class _Served:
+    """What one compile served for one response: its rows, with their entry ids, and their states.
+
+    `missing` is a profile's own markers. `block` and `limit` are set for the activation map only:
+    the block's own fields and the packet's character limit that the block was budgeted for.
+    """
+
+    rows: tuple[Row | ProfileLine, ...]
+    states: dict[str, Any] | None
+    missing: tuple[dict[str, Any], ...] = ()
+    block: dict[str, Any] | None = None
+    limit: int | None = None
 
 
-class _Pins:
-    """The items lately served, by (vault, view ref, caller binding, generation), least recent first."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        #: For each key, the items served under it, by `_identity`, then by entry id.
-        self._pages: OrderedDict[tuple[str, ...], dict[tuple[object, ...], dict[str, dict[str, Any]]]] = OrderedDict()
-        self._count = 0
-        self._blocks: dict[tuple[str, ...], dict[str, Any]] = {}
-
-    def add(
-        self, key: tuple[str, ...], served: Iterable[tuple[str, dict[str, Any]]], *, block: Mapping[str, Any] | None = None,
-    ) -> None:
-        with self.lock:
-            page = self._pages.pop(key, {})
-            for entry_id, item in served:
-                alike = page.setdefault(_identity(item), {})
-                self._count += entry_id not in alike
-                alike[entry_id] = copy.deepcopy(item)
-            self._pages[key] = page
-            if block is not None:
-                self._blocks[key] = copy.deepcopy(dict(block))
-            while (self._count > PINNED_ITEMS_MAX or len(self._pages) > PINNED_ITEMS_MAX) and len(self._pages) > 1:
-                dropped_key, dropped = self._pages.popitem(last=False)
-                self._blocks.pop(dropped_key, None)
-                self._count -= sum(len(alike) for alike in dropped.values())
-
-    def page(self, key: tuple[str, ...]) -> dict[tuple[object, ...], dict[str, dict[str, Any]]]:
-        """The items pinned under `key`. The caller holds `lock` while it reads them."""
-        page = self._pages.get(key)
-        if page is None:
-            return {}
-        self._pages.move_to_end(key)
-        return page
+def _served_key(
+    vault_root: Path, ref: str, caller: CallerView, generation: str, continuation: str | None
+) -> tuple[object, ...]:
+    # The admissions are part of the key: a guard that decides under other admissions finds no record.
+    return (
+        str(Path(vault_root)), ref, caller.binding, caller.domains_admitted, caller.projects_admitted,
+        generation, continuation,
+    )
 
 
-_PINS = _Pins()
-
-
-def _pin_key(vault_root: Path, ref: str, caller: CallerView, generation: str) -> tuple[str, ...]:
-    return (str(Path(vault_root)), ref, caller.binding, generation)
-
-
-def served_items(vault_root: Path, view: View, rows: Sequence[Row | ProfileLine], caller: CallerView) -> list[dict[str, Any]]:
-    """The items `rows` are served as, each pinned under the view's generation for the terminal guard."""
-    items = [row.item() for row in rows]
-    if view.states is not None:
-        for row, item in zip(rows, items, strict=True):
-            item["state"] = view.states.get(row.entry_id)
-    if view.generation is not None:
-        _PINS.add(_pin_key(vault_root, view.ref, caller, view.generation), zip([row.entry_id for row in rows], items, strict=True))
+def _items(served: _Served) -> list[dict[str, Any]]:
+    items = [row.item() for row in served.rows]
+    if served.states is not None:
+        for row, item in zip(served.rows, items, strict=True):
+            item["state"] = copy.deepcopy(served.states.get(row.entry_id))
     return items
 
 
-def pinned_items(
-    vault_root: Path, ref: object, generation: object, items: Sequence[Mapping[str, Any]], caller: CallerView
+def served_items(
+    vault_root: Path, view: View, rows: Sequence[Row | ProfileLine], caller: CallerView, *,
+    continuation: str | None = None, block: Mapping[str, Any] | None = None, limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Each item as the view `ref` served it to `caller` under `generation`. An item it never served is dropped.
+    """The items `rows` are served as. The request that compiled them keeps them for the terminal guard.
 
-    The terminal guard serves these in place of the items it is given. So both of its passes serve the
-    text the generation was computed from, and a field that no compile served this caller never reaches
-    the wire. An item is matched by the fields that name an entry: its kind, anchor kind, ref and path.
-    Of served items alike in all four, the one equal to the given item is kept, else the lowest entry
-    id's. Registry admission is decided again, as it stands now: without it, no topic and no topic key.
+    The record is kept under the view's ref, its generation, the caller and the page's position (the
+    continuation the response carries) in the request's own store (`principal.request_served`), so
+    nothing another request does can change or evict it, and it ends with the request. Outside any
+    request scope nothing is kept, and the guard then serves no item.
     """
-    if not isinstance(ref, str) or not isinstance(generation, str):
-        return []
-    out: list[dict[str, Any]] = []
-    with _PINS.lock:
-        page = _PINS.page(_pin_key(vault_root, ref, caller, generation))
-        for item in items:
-            alike = page.get(_identity(item))
-            if not alike:
-                continue
-            own = [served for served in alike.values() if served == item]
-            out.append(copy.deepcopy(own[0] if own else alike[min(alike)]))
-    if not caller.domains_admitted:
-        out = [{**item, "topics": []} if "topics" in item else item for item in out if item.get("kind") != KIND_TOPIC]
-    return out
+    served = _Served(
+        tuple(rows),
+        None if view.states is None else {row.entry_id: copy.deepcopy(view.states.get(row.entry_id)) for row in rows},
+        copy.deepcopy(view.missing or ()),
+        # The block keeps its `items` key, empty, so a restored block keeps its key order.
+        None if block is None else copy.deepcopy({**block, "items": []}),
+        limit,
+    )
+    store = principal_module.request_served()
+    if store is not None and view.generation is not None:
+        key = _served_key(vault_root, view.ref, caller, view.generation, continuation)
+        # One request that served two different pages under one key cannot say which one a
+        # response is, so the key then holds no record and the guard serves no item.
+        store[key] = served if store.get(key, served) == served else None
+    return _items(served)
 
 
-def pinned_map_block(vault_root: Path, block: Mapping[str, Any], caller: CallerView) -> dict[str, Any]:
-    """The entire budgeted activation map as compiled, so untrusted block fields cannot reach the wire."""
-    generation = block.get("generation")
-    if isinstance(generation, str):
-        with _PINS.lock:
-            key = _pin_key(vault_root, MAP_REF, caller, generation)
-            _PINS.page(key)
-            pinned = _PINS._blocks.get(key)
-            if pinned is not None:
-                return copy.deepcopy(pinned)
-    return {"ref": MAP_REF, "items": [], "continuation": None}
+def _record(
+    vault_root: Path, ref: object, generation: object, continuation: object, caller: CallerView
+) -> _Served | None:
+    if not isinstance(ref, str) or not isinstance(generation, str) or not isinstance(continuation, str | None):
+        return None
+    store = principal_module.request_served()
+    return None if store is None else store.get(_served_key(vault_root, ref, caller, generation, continuation))
+
+
+def pinned_items(vault_root: Path, response: Mapping[str, Any], caller: CallerView) -> list[dict[str, Any]]:
+    """The items this request's compile served for `response`, read again from its record.
+
+    The terminal guard serves these in place of the items it is given, and reads none of those. A
+    response is named by its ref, its generation and its continuation (the page's position), for
+    this caller. So both guard passes serve the text the generation was computed from, and a release
+    strip in the first pass cannot change what the second pass serves. A response that this request
+    never compiled for this caller, under the admissions that stand now, gets no item.
+    """
+    served = _record(vault_root, response.get("ref"), response.get("generation"), response.get("continuation"), caller)
+    return [] if served is None else _items(served)
+
+
+def pinned_missing(vault_root: Path, response: Mapping[str, Any], caller: CallerView) -> list[dict[str, Any]]:
+    """The profile markers this request's compile served for `response`, as `pinned_items` reads its items."""
+    served = _record(vault_root, response.get("ref"), response.get("generation"), response.get("continuation"), caller)
+    return [] if served is None else copy.deepcopy(list(served.missing))
+
+
+def pinned_map_block(vault_root: Path, packet: Mapping[str, Any], caller: CallerView) -> dict[str, Any] | None:
+    """The activation map that this request compiled for `packet`, or None when it compiled none.
+
+    The block is chosen by the packet's own `map_generation` and must be the one compiled for the
+    packet's character limit; the block's own `generation` must agree with it. So an untrusted
+    block field, or a block budgeted for a larger packet, never reaches the wire.
+    """
+    block = packet.get("map")
+    generation = packet.get("generation")
+    budget = packet.get("budget")
+    if not isinstance(block, Mapping) or not isinstance(generation, Mapping) or not isinstance(budget, Mapping):
+        return None
+    map_generation = generation.get("map_generation")
+    if block.get("generation") != map_generation:
+        return None
+    served = _record(vault_root, MAP_REF, map_generation, None, caller)
+    if served is None or served.block is None or served.limit != budget.get("limit_chars"):
+        return None
+    return {**copy.deepcopy(served.block), "items": _items(served)}
+
+
+def unavailable_map_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    """The `unavailable` abstention that a map packet is served as when its block has no record."""
+    generation = {**dict(packet.get("generation") or {}), "map_generation": None}
+    # `abstained_packet` clamps the limit it is given into the declared range.
+    limit = (packet.get("budget") or {}).get("limit_chars")
+    return working_set.abstained_packet(reason=UNAVAILABLE, max_chars=limit, generation=generation)
 
 
 def _response(

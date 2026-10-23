@@ -10,6 +10,7 @@ names a page the caller may not read.
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import json
 import shutil
@@ -490,8 +491,9 @@ def test_a_caller_who_may_not_read_the_domain_registry_learns_nothing_from_it(
     assert "Quays and moorings." not in json.dumps(pages)
 
     # A topic item forged into a real page leaves the guard with nothing of the registry.
-    forged = {**pages[0], "items": [*pages[0]["items"], {"kind": "topic", "ref": registered, "title": "F", "description": "F"}]}
     with principal.request_scope(_external()):
+        page = commands.op_read_memory(vault, path=cv.MAP_REF)
+        forged = {**page, "items": [*page["items"], {"kind": "topic", "ref": registered, "title": "F", "description": "F"}]}
         guarded = egress.postfilter("read_memory", forged, vault, request_kwargs={"path": cv.MAP_REF})
     assert guarded["items"] == pages[0]["items"]
 
@@ -519,6 +521,86 @@ def test_both_guard_passes_serve_the_text_their_generation_was_compiled_from(vau
     assert mooring(first)["description"] == mooring(second)["description"] == "How the quay lines are rated."
     assert compiled["generation"] == first["generation"] == second["generation"]
     assert mooring(_ask(vault, harbour))["description"] == "Changed before the second pass."  # the edits did publish
+
+
+def test_a_request_keeps_its_items_while_other_requests_record_thousands_between_its_passes(vault: Path) -> None:
+    """Between this request's compile and each of its guard passes, a thousand other requests record their pages."""
+    _world(vault, with_w=True)
+    _built(vault)
+    with principal.request_scope(OWNER):
+        view = cv.compile_view(vault, cv.MAP_REF)
+        owner = cv.CallerView.current(vault)
+
+    def one_request(n: int) -> None:
+        with principal.request_scope(OWNER):
+            cv.served_items(vault, view, view.rows, dataclasses.replace(owner, binding=f"other-request-{n}"))
+
+    def other_requests() -> None:
+        for n in range(1000):
+            contextvars.Context().run(one_request, n)  # each in a context of its own, as a server runs a request
+
+    with principal.request_scope(_external()):
+        compiled = commands.op_read_memory(vault, path=cv.MAP_REF)
+        other_requests()
+        first = egress.postfilter("read_memory", compiled, vault, request_kwargs={"path": cv.MAP_REF})
+        other_requests()
+        second = egress.postfilter("read_memory", first, vault, request_kwargs={"path": cv.MAP_REF})
+
+    assert len(view.rows) * 1000 > 4096  # more items than any bounded shared store kept
+    assert compiled["items"] and first["items"] == second["items"] == compiled["items"]
+
+
+def test_a_release_strip_in_the_first_pass_does_not_change_what_the_second_serves(vault: Path) -> None:
+    """A released bridge loses provenance fields in the first pass. The second pass still serves it."""
+    from test_governance_bridges import _write_bridge_fixture
+
+    bridge = f"{KB}/Products/workload-constraint.md"
+    _write_bridge_fixture(vault, approval=True, source_title="resource", bridge_path=bridge)
+    _built(vault)
+    with principal.request_scope(_external()):
+        compiled = commands.op_read_memory(vault, path=cv.MAP_REF)
+        first = egress.postfilter("read_memory", compiled, vault, request_kwargs={"path": cv.MAP_REF})
+        second = egress.postfilter("read_memory", first, vault, request_kwargs={"path": cv.MAP_REF})
+
+    served = [item for item in compiled["items"] if item.get("path") == bridge]
+    stripped = [item for item in first["items"] if item.get("path") == bridge]
+    assert served and stripped and stripped != served  # the control: the first pass strips the bridge
+    assert second["items"] == first["items"]
+
+
+def test_a_withheld_project_registry_edit_moves_no_byte_a_restricted_caller_receives(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller may not read the project registry. Its project's domain is edited between two pages."""
+    _frozen(monkeypatch, page_size=1)
+    _world(vault, with_w=False)
+    registry = f"{KB}/_Schema/project-keys.yaml"
+    _withhold(vault, registry, ceiling=0)
+    _cold()
+    _built(vault)
+    harbour = cv.topic_ref("harbour")
+
+    def read_all(caller: Any) -> dict[str, list[dict[str, Any]]]:
+        return {ref: _pages(vault, ref, caller) for ref in REFS}
+
+    owner_before, guest_before = read_all(OWNER), read_all(_external())
+    first_page = guest_before[harbour][0]
+    assert first_page["continuation"]
+    (vault / registry).write_text(
+        (vault / registry).read_text(encoding="utf-8").replace("domain: harbour", "domain: fleet"), encoding="utf-8"
+    )
+    _cold()
+    owner_after, guest_after = read_all(OWNER), read_all(_external())
+    following = _ask(vault, harbour, _external(), continuation=first_page["continuation"])
+
+    # The control: the owner files tide-work through the project's domain, and sees the project anchor.
+    assert TIDE in _refs(owner_before[harbour]) and TIDE not in _refs(owner_after[harbour])
+    assert "Harbour Ops" in json.dumps(owner_before)
+    # The guest gets nothing from the registry, so the edit moves nothing it receives.
+    assert TIDE not in _refs(guest_before[harbour]) and TIDE in _refs(guest_before[cv.UNFILED_REF])
+    assert "Harbour Ops" not in json.dumps(guest_before)
+    assert json.dumps(guest_before) == json.dumps(guest_after)
+    assert following == guest_before[harbour][1]
 
 
 def test_a_state_change_moves_the_generation_and_stales_an_old_continuation(
