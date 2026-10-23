@@ -2,9 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from exomem import entity_types, indexes
+
+
+def test_omitting_sources_index_still_rejects_invalid_utf8(vault: Path) -> None:
+    sources_index = vault / "Knowledge Base" / "Sources" / "index.md"
+    sources_index.write_bytes(b"# Sources\n\xff")
+
+    with pytest.raises(UnicodeDecodeError):
+        indexes.compute_subindex_writes(vault, include_sources_index=False)
+
+    assert sources_index.read_bytes() == b"# Sources\n\xff"
 
 
 def _proposal(type_id: str, folder: str, label: str) -> dict:

@@ -557,11 +557,8 @@ def add(
             vault_root,
             top_index_text=update.top_index_content,
             pending_paths=[rel_source_no_ext],
+            include_sources_index=False,
         )
-        sub_writes = [
-            write for write in sub_writes
-            if write.path != kb / "Sources" / "index.md"
-        ]
         top_index_final = (
             top_with_counts if top_with_counts is not None
             else update.top_index_content
