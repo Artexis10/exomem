@@ -169,7 +169,7 @@ def test_a_matrix_served_by_catch_up_counts_as_used(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(
         idx,
         "_catch_up_cache",
-        lambda c: embedding_index._EmbCache(
+        lambda c, _fields: embedding_index._EmbCache(
             c.epoch,
             c.generation + 1,
             c.instance,

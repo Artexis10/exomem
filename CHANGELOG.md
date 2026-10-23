@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.135.0](https://github.com/Artexis10/exomem/compare/v0.134.5...v0.135.0) (2026-10-23)
+
+
+### Features
+
+* **context:** build the context catalogue, derived views and the maps activation packet ([#1995](https://github.com/Artexis10/exomem/issues/1995)) ([f179a89](https://github.com/Artexis10/exomem/commit/f179a8913f50e62f1d2a9c182c957986fd89af6b))
+
+
+### Bug Fixes
+
+* **collection-store:** retry unstarted replica publication ([#2006](https://github.com/Artexis10/exomem/issues/2006)) ([1e3977b](https://github.com/Artexis10/exomem/commit/1e3977b3243676b25ecbba3d38648c7be8e8acad))
+* **hooks:** handle concurrent checkpoint directory creation ([#2014](https://github.com/Artexis10/exomem/issues/2014)) ([54020b3](https://github.com/Artexis10/exomem/commit/54020b38ac4bdfa187df514e82cc8a89a42646c3))
+
+### Rollback compatibility
+
+After this release writes a derived receipt, rollback to 0.134.x needs a compatible receipt reader.
+An empty queue alone is insufficient: an older release can reject a replay of a retained catalogue receipt.
+A compatible rollback artifact is not yet qualified.
+
 ## [0.134.5](https://github.com/Artexis10/exomem/compare/v0.134.4...v0.134.5) (2026-10-23)
 
 

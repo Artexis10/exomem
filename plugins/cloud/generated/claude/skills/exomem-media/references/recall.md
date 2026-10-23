@@ -24,8 +24,15 @@ Empty queries degrade to filtered-most-recent regardless of mode.
 - `scope="kb"` (default) searches `Knowledge Base/` first and **auto-widens to
   the whole vault** when the KB doesn't fill `limit`. Content in sibling folders
   is reachable, not silently invisible. Widened hits carry `outside_kb: true`.
-- `scope="vault"` always walks the whole vault. `scope="kb-only"` is the strict
-  opt-out (KB only, never widens).
+- `scope="vault"` searches eligible candidates across the whole vault.
+  `scope="kb-only"` is the strict opt-out (KB only, never widens).
+  Scope does not override recall admission or governance.
+- **Records and Planning use structured recall.** Ordinary recall admits their
+  valid collection manifests, but excludes raw items, logs and derived summaries.
+  Neither `scope="vault"` nor `prefer_compiled=false` changes that boundary.
+  For an observed event, state or planned item, follow the collection
+  inspect/query route in [Planning and Records](planning-records.md#simple-front-door).
+  A missing ordinary hit does not establish that the collection lacks an item.
 - **Never report a search-miss as absence.** An empty result means *"not found in
   what I searched,"* not *"it doesn't exist."* If you're sure something exists,
   try `scope="vault"`, vary the query terms, or `read_memory` a path you suspect.

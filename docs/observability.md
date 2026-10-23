@@ -391,6 +391,14 @@ their fields absent. Encoding includes tokenization, inference and normalization
 entry time does not identify a gate holder or prove contention.
 These fields survive truncation when the enclosing encode span is retained.
 
+An `embeddings.matrix_catch_up` span reports `prepare_us` for connection setup,
+identity coordination, the decision snapshot, vector decoding and connection release.
+It reports `splice_us` for constructing fresh metadata and matrix containers.
+Both fields sum attempted intervals, including failures. Unattempted phases remain absent.
+Prepared eligible attempts also report changed `paths` and expected matrix `rows`.
+These counts describe the replacement workload; field presence does not prove successful publication.
+The span can cover a refused or failed attempt before a full reload.
+
 During MCP calls, spans opened with `call_spans.span` and recall stage spans
 also carry `thread_cpu_us` and `process_cpu_us`, including spans that raise.
 Spans recorded directly, such as `egress.artifact_gate` and
