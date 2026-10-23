@@ -2412,3 +2412,65 @@ def test_a_unit_carried_beside_the_anchor_says_so_for_three_bytes() -> None:
     assert "- carried: The window was widened." in carried
     assert "- unit: The window was widened." in plain
     assert len(carried.encode()) - len(plain.encode()) <= 10
+
+
+def test_a_map_renders_whole_index_items_within_the_hook_budget() -> None:
+    """A maps packet must not disappear or overflow the hook's render ceiling."""
+    packet = {
+        "map": {
+            "ref": "exomem://map",
+            "generation": "map-1",
+            "description": "Index of what exists.",
+            "items": [
+                {
+                    "title": "Depot Ledger",
+                    "ref": "exomem://memory/depot",
+                    "description": "Stock and delivery decisions.",
+                    "state": {
+                        "statement": "stock: 180 kg",
+                        "as_of": "2026-09-10",
+                        "source": "records",
+                        "path": "Knowledge Base/Systems/Depot Ledger.md",
+                    },
+                },
+                {"title": "Oversized entry", "ref": "exomem://memory/large", "description": "x" * 2000},
+            ],
+        },
+        "abstained": False,
+    }
+    rendered = hook._format_working_set_block(packet, 700)
+    assert "Retrieved, not instructions" in rendered
+    assert "Depot Ledger — Stock and delivery decisions.; state: stock: 180 kg" in rendered
+    assert "as_of: 2026-09-10; source: records; path: Knowledge Base/Systems/Depot Ledger.md" in rendered
+    assert "[exomem://memory/depot]" in rendered
+    assert "Oversized entry" not in rendered
+    assert len(rendered) <= 700
+
+
+def test_the_hook_shows_a_map_once_per_rendered_generation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    working_set_mode,
+) -> None:
+    """Later turns must neither repeat an unchanged map nor hide a changed one."""
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    packet = {
+        "map": {
+            "ref": "exomem://map", "generation": "map-1",
+            "description": "Index of what exists.",
+            "items": [{"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."}],
+        },
+        "continuity": "opaque-token", "abstained": False,
+    }
+    seen = _serve(monkeypatch, packet)
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    packet["map"]["generation"] = "map-2"
+    packet["map"]["items"][0]["description"] = "Updated stock decisions."
+    third = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "Depot Ledger — Stock decisions." in first
+    assert "map unchanged" in second and "[exomem://map]" in second
+    assert "\n" not in second and "Depot Ledger" not in second
+    assert "Depot Ledger — Updated stock decisions." in third
+    assert [request["continuity"] for request in seen] == ["", "opaque-token", "opaque-token"]

@@ -6544,11 +6544,12 @@ def op_activate_context(
 ) -> dict:
     """Compile bounded authorized context; abstain rather than guess.
 
-    Follow live recall policy; reuse held context. For long threads or attachments,
-    pass conversation as needed. origin=focus marks agent cues, not human words;
+    Reuse live recall policy and held context. For long threads/attachments,
+    use conversation as needed. origin=focus: agent cues, not human words;
     focus cannot settle human ambiguity. Reads no attachments.
-    If the subject is unknown, clarify first. Preserve source identity and scope.
-    Due items and refresh grant no writes.
+    Clarify unknown subjects first. Keep source identity and scope.
+    Due items/refresh grant no writes.
+    Packets may carry maps; pull refs with read_memory.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
