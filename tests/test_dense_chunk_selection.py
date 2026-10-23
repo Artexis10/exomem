@@ -268,7 +268,7 @@ def test_find_hydrates_only_the_selected_prefix_with_identical_passages(
         expected = find_module.find(vault, **kwargs)
     expected_passages = list(passages)
     passages.clear()
-    find_module.clear_cache()
+    find_module.reset_page_and_result_caches()
     original_texts = index._texts_for
     read_pairs = []
 
@@ -308,7 +308,7 @@ def test_find_does_not_refill_or_cache_after_selected_chunk_proof_loss(
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS")
     monkeypatch.setattr(embeddings, "embed_texts", lambda *_args, **_kwargs: np.stack([_vector(1)]))
     index.all_vectors()
-    find_module.clear_cache()
+    find_module.reset_page_and_result_caches()
     original_texts = index._texts_for
     reads = []
 
@@ -363,7 +363,7 @@ def test_selected_transcript_and_frame_keep_passages_and_source_cache_guards(
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS")
     monkeypatch.setattr(embeddings, "embed_texts", lambda *_args, **_kwargs: np.stack([_vector(1)]))
     index.all_vectors()
-    find_module.clear_cache()
+    find_module.reset_page_and_result_caches()
     kwargs = dict(
         query="dense semantic",
         mode="vector",
@@ -376,7 +376,7 @@ def test_selected_transcript_and_frame_keep_passages_and_source_cache_guards(
     with monkeypatch.context() as oracle:
         oracle.setattr(index, "select_chunks", index.search)
         expected = find_module.find(vault, **kwargs)
-    find_module.clear_cache()
+    find_module.reset_page_and_result_caches()
 
     actual = find_module.find(vault, **kwargs)
 
