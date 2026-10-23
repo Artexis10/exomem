@@ -13,7 +13,8 @@ Source evidence: the unchanged 0.134.5 replay test raises `ValueError` for `cont
 The corrected source passes 163 scoped cases, including both existing state-guard negative cases.
 Independent exact-content review approves the five product files and three test files with zero findings.
 The source remains unmerged, so the task boxes stay open.
-Installed compatibility and official artifact qualification remain open below.
+The installed candidate journey passes replay, retained custody, restart recall and forward recovery.
+Graph adoption remains simulated; official artifact equivalence and operational qualification remain open below.
 
 ## 2. Installed journey and delivery
 
