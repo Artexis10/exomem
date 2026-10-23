@@ -6,6 +6,8 @@ The key lists:
 - forbidden claims: statements the answer must not assert as current;
 - whether the case expects memory at all.
 
+The key is current at the snapshot it was written on. An answer that corrects the user's framing with facts that are current at that snapshot is not penalised.
+
 Judge only the scored answer, against the key's statements. Tokens such as [ctx:1] stand for references that were removed, and [tool] stands for a tool name that was removed; treat them as citations, nothing more.
 
 For each required item, answer:
@@ -20,6 +22,6 @@ For each forbidden claim, answer:
 - "mentioned_as_past" when the answer mentions it only as past, superseded or rejected;
 - "absent" otherwise.
 
-When the case expects no memory, also say whether the answer asserts facts specific to this user that the turns do not supply, and quote the shortest span that does so. Otherwise give null.
+When the case expects no memory, also say whether the answer asserts facts specific to this user that the turns do not supply. When it does, quote the shortest span that does so; a verdict of true needs its span. Otherwise give null.
 
 Reply with the JSON object the schema asks for, and nothing else. Copy the item id exactly.

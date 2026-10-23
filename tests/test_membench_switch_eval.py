@@ -27,6 +27,7 @@ from membench.utility.switch_eval.judge import (
     item_payload,
     tie_break,
     unblind,
+    validate_verdict,
     write_items,
 )
 from membench.utility.switch_eval.score import ChainError, decide, rules, score_run
@@ -315,6 +316,14 @@ def test_the_judge_view_masks_every_arms_tool_names_in_an_answer_from_any_arm(tm
     item = item_payload(_case("case-1"), p_answer, "item-1", tool_names=names)
 
     assert item["answer"] == "I had no [tool], so [tool] and [tool] did it. The release is frozen."
+
+
+def test_a_contamination_verdict_without_its_span_is_refused() -> None:
+    item = item_payload(_case("case-1", expects_memory=False), "You said the release ships Friday.", "item-1", tool_names=())
+    verdict = {"item_id": "item-1", "required": [], "forbidden": [], "no_memory": {"asserts_unsupplied_user_facts": True, "span": None}}
+
+    with pytest.raises(JudgeError):
+        validate_verdict(item, verdict)
 
 
 # -- the pull budget ----------------------------------------------------------

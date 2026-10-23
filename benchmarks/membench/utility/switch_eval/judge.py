@@ -425,6 +425,13 @@ def validate_verdict(item: Mapping, verdict: object) -> dict:
         no_memory.get("asserts_unsupplied_user_facts"), bool
     ):
         raise JudgeError("a no-memory item needs the contamination verdict")
+    span = no_memory.get("span")
+    if (
+        not item["expects_memory"]
+        and no_memory["asserts_unsupplied_user_facts"]
+        and not (isinstance(span, str) and span.strip())
+    ):
+        raise JudgeError("a contamination verdict needs the span that shows it")
     return {
         "item_id": verdict["item_id"],
         "required": {e["label"]: e["verdict"] for e in verdict["required"]},
