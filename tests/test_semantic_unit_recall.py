@@ -84,6 +84,136 @@ def _prepare_semantic_catalog(root: Path, paths: list[Path]) -> None:
     lexstore.ensure_fresh(root)
 
 
+@pytest.mark.parametrize("result_level", ["unit", "mixed"])
+def test_public_cold_and_warm_recall_keeps_unit_identity_and_bounds_unit_only_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_level: str,
+) -> None:
+    """Warm unit and mixed calls preserve identity; unit-only calls bound canonical parent reads."""
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    from exomem import bm25, memory_refs, semantic_units
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    paths = [
+        _write_page(tmp_path, f"harbor-{index:02d}", body=_rich(
+            kind="decision", category="config", anchor="gauges",
+            content=f"Harbor gauges follow the tide {index}.", tags="harbor", context="winter",
+        )) for index in range(24)
+    ]
+    hidden = _write_page(tmp_path, "hidden-gauges", body="- [config] Harbor gauges stay sealed. ^sealed")
+    paths.append(hidden)
+    write_scope(tmp_path, paths="Notes/hidden-gauges.md", name="Restricted gauges")
+    write_rule(tmp_path, ceiling=0)
+    _reset_caches()
+    _prepare_semantic_catalog(tmp_path, paths)
+    canonical = {
+        unit.unit_ref: unit for path in paths
+        for unit in semantic_index.build_parent_index_state(tmp_path, path).document.units
+    }
+    raw_get = find_module._CACHE.get
+    statistics_of = bm25.CorpusStatistics.of.__func__
+    reads: list[str] = []
+    unit_builds = 0
+
+    def counted_get(path, root):
+        reads.append(path.relative_to(root).as_posix())
+        return raw_get(path, root)
+
+    def counted_statistics(cls, corpus):
+        nonlocal unit_builds
+        if corpus and all(ref.startswith(memory_refs.REF_PREFIX) for ref in corpus):
+            unit_builds += 1
+        return statistics_of(cls, corpus)
+
+    def unexpected_parse(*_args, **_kwargs):
+        raise AssertionError("unit selection reparsed canonical Markdown")
+
+    monkeypatch.setattr(find_module._CACHE, "get", counted_get)
+    monkeypatch.setattr(bm25.CorpusStatistics, "of", classmethod(counted_statistics))
+    monkeypatch.setattr(semantic_units, "parse_semantic_units", unexpected_parse)
+    for who in (owner_principal(), RequestPrincipal(audience_id="external", surface="mcp")):
+        responses = []
+        builds = []
+        for _ in range(2):
+            find_module.reset_page_and_result_caches()
+            reads.clear()
+            unit_builds = 0
+            with request_scope(who):
+                response = commands.op_find(
+                    tmp_path, query="harbor gauges", mode="hybrid", scope="kb-only",
+                    graph=False, result_level=result_level, limit=3,
+                )
+            hits = response["hits"] if isinstance(response, dict) else response
+            assert hits
+            parents = {hit.get("parent_path", hit.get("path")) for hit in hits}
+            # The unit-only response owns this proof. Whole mixed hydration
+            # remains unmet under task 6.14's page-lane work and task 6.6 acceptance.
+            if result_level == "unit":
+                overfetch = egress.pool_limit(3) - len(hits)
+                assert len(set(reads) - parents) <= overfetch
+                assert len(reads) <= len(parents) + overfetch
+            for hit in hits:
+                if hit.get("result_type") == "semantic_unit":
+                    expected = canonical[hit["unit_ref"]]
+                    assert hit["content"] == expected.content
+                    assert hit["source_span"] == find_module._unit_span(expected)
+                    assert hit["source_hash"] == expected.source_hash
+            responses.append(response)
+            builds.append(unit_builds)
+        assert responses[0] == responses[1]
+        assert builds[1] == 0
+        if who.audience_id == "external":
+            assert builds[0] == 1
+            assert hidden.relative_to(tmp_path).as_posix() not in parents
+
+
+@pytest.mark.parametrize("coverage", [
+    None,
+    {"format": 99, "body_length": 1, "owned": [], "withheld": []},
+    {"format": 1, "body_length": 1, "owned": [[0, 1000]], "withheld": [[0, 1000]]},
+])
+def test_managed_unit_selection_declines_unknown_carrier_coverage_without_reading_bodies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, coverage,
+) -> None:
+    """Missing coverage cannot authorize a carrier as prose or trigger a candidate scan."""
+    import json
+
+    from exomem import ranking_config, readiness, structured_filters
+
+    path = _write_page(tmp_path, "carrier-coverage", body="- [config] Harbor gauges stay bounded. ^gauges")
+    _prepare_semantic_catalog(tmp_path, [path])
+    rel = path.relative_to(tmp_path).as_posix()
+    connection = lexstore.get_store(tmp_path)._connect()
+    try:
+        metadata = json.loads(connection.execute("SELECT structure_json FROM pages WHERE path = ?", (rel,)).fetchone()[0])
+        if coverage is None:
+            metadata.pop("prose_carriers")
+        else:
+            metadata["prose_carriers"] = coverage
+        with connection:
+            connection.execute("UPDATE pages SET structure_json = ? WHERE path = ?", (json.dumps(metadata), rel))
+    finally:
+        connection.close()
+
+    def unexpected_read(*_args, **_kwargs):
+        raise AssertionError("managed unit selection read a canonical candidate body")
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    monkeypatch.setattr(find_module._CACHE, "get", unexpected_read)
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module._find_semantic_units(
+            tmp_path, query="", limit=3, scope="kb", mode="keyword",
+            plan=structured_filters.compile_filter({"unit.category": {"$eq": "config"}}),
+            snapshot=find_module.FreshnessSnapshot(tmp_path), prefer_active=False,
+            config=ranking_config.DEFAULT_RANKING, degraded_out=[], failed_out=[],
+            allowed_parent_paths={rel},
+        )
+
+
 def test_default_auto_page_recall_is_byte_compatible_with_explicit_page(
     tmp_path: Path,
 ) -> None:

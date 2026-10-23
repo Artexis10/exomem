@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from exomem import bm25, freshness, lexstore, readiness, semantic_index
+from exomem import bm25, embedding_index, freshness, lexstore, readiness, semantic_index
 from exomem import find as find_module
 
 pytestmark = pytest.mark.skipif(
@@ -69,30 +68,31 @@ def test_warm_keyword_unit_recall_hydrates_only_indexed_parent_candidates(
         )
     _seed_live_freshness(tmp_path, pages)
     snapshot = find_module.FreshnessSnapshot(tmp_path)
-    assert lexstore.search_semantic_units(
+    indexed = lexstore.search_semantic_units(
         tmp_path,
         "bounded recall needle",
         k=10,
         scope="kb",
         freshness=snapshot.kb(),
     )
+    assert indexed
 
     walked = 0
-    reparsed: list[str] = []
+    parent_reads: list[str] = []
     original_walk = find_module._walk_md
-    original_state = semantic_index.current_parent_index_state
+    original_get = find_module._CACHE.get
 
     def observed_walk(*args: Any, **kwargs: Any) -> Any:
         nonlocal walked
         walked += 1
         return original_walk(*args, **kwargs)
 
-    def observed_state(root: Path, path: Path | str, **kwargs: Any) -> Any:
-        reparsed.append(Path(path).as_posix())
-        return original_state(root, path, **kwargs)
+    def observed_get(path: Path, root: Path) -> Any:
+        parent_reads.append(path.relative_to(root).as_posix())
+        return original_get(path, root)
 
     monkeypatch.setattr(find_module, "_walk_md", observed_walk)
-    monkeypatch.setattr(semantic_index, "current_parent_index_state", observed_state)
+    monkeypatch.setattr(find_module._CACHE, "get", observed_get)
 
     hits = find_module.find(
         tmp_path,
@@ -105,8 +105,11 @@ def test_warm_keyword_unit_recall_hydrates_only_indexed_parent_candidates(
     )
 
     assert [hit.parent_path for hit in hits] == ["Knowledge Base/Notes/target.md"]
+    assert hits[0].unit_ref == indexed[0].unit_ref
+    assert hits[0].source_hash == indexed[0].source_hash
+    assert hits[0].snapshot_hash == indexed[0].parent_source_hash
     assert walked == 0
-    assert reparsed == [target.relative_to(tmp_path).as_posix()]
+    assert parent_reads == [target.relative_to(tmp_path).as_posix()]
 
 
 def test_warm_keyword_page_recall_never_walks_markdown(
@@ -204,10 +207,12 @@ def test_vector_unit_recall_hydrates_only_the_bounded_winner_window(
     lexstore.ensure_fresh(tmp_path)
     states = [semantic_index.build_parent_index_state(tmp_path, page) for page in pages]
     vector_hits = [
-        SimpleNamespace(
+        embedding_index.SemanticUnitVectorHit(
             unit_ref=state.document.units[0].unit_ref,
             parent_path=page.relative_to(tmp_path).as_posix(),
             parent_generation=state.parent_generation,
+            parent_source_hash=state.parent_source_hash,
+            parser_version=state.parser_version,
             cosine=1.0 - index / 100.0,
         )
         for index, (page, state) in enumerate(zip(pages[:21], states[:21], strict=True))
@@ -221,14 +226,18 @@ def test_vector_unit_recall_hydrates_only_the_bounded_winner_window(
             "kb",
         ),
     )
-    reparsed: list[str] = []
-    original_state = semantic_index.current_parent_index_state
+    parent_reads: list[str] = []
+    original_get = find_module._CACHE.get
 
-    def observed_state(root: Path, path: Path | str, **kwargs: Any) -> Any:
-        reparsed.append(Path(path).as_posix())
-        return original_state(root, path, **kwargs)
+    def observed_get(path: Path, root: Path) -> Any:
+        parent_reads.append(path.relative_to(root).as_posix())
+        return original_get(path, root)
 
-    monkeypatch.setattr(semantic_index, "current_parent_index_state", observed_state)
+    def forbidden_walk(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("vector unit recall must not walk the Markdown corpus")
+
+    monkeypatch.setattr(find_module._CACHE, "get", observed_get)
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
 
     hits = find_module.find(
         tmp_path,
@@ -241,7 +250,11 @@ def test_vector_unit_recall_hydrates_only_the_bounded_winner_window(
     )
 
     assert len(hits) == 1
-    assert len(reparsed) == 20
+    assert hits[0].unit_ref == vector_hits[0].unit_ref
+    assert hits[0].parent_path == vector_hits[0].parent_path
+    assert hits[0].snapshot_hash == vector_hits[0].parent_source_hash
+    assert hits[0].source_hash == states[0].document.units[0].source_hash
+    assert parent_reads == [hits[0].parent_path]
 
 
 def test_warm_outside_kb_widening_queries_lexstore_without_python_bm25(

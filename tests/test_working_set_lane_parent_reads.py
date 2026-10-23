@@ -162,3 +162,44 @@ def test_a_definition_change_between_lanes_refreshes_meaning_without_rereading_t
     assert len(second) == 1 and second[0].category == "harbor_choice"
     assert second[0].unit_ref == first[0].unit_ref
     assert reads.parents[rel].state.parent_generation == generation
+
+
+def test_role_units_read_only_parents_that_survive_the_packet_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A categorical role pool must not read bodies for units the packet discards."""
+    from exomem import lifecycle_statuses
+
+    paths = [f"Knowledge Base/Notes/Harbor/budget-{index}.md" for index in range(PAGES)]
+    for index, rel in enumerate(paths):
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text(_page(index), encoding="utf-8")
+    lexstore.ensure_fresh(vault)
+    roles = [{"id": "preferences", "lane": "units"}]
+    registry = context_roles.load_roles(vault)
+    basis = lifecycle_statuses.Basis(vault)
+    original = find_module._CACHE.get
+    read_paths = []
+
+    def counted(path, root):
+        rel = path.relative_to(root).as_posix()
+        if rel in paths:
+            read_paths.append(rel)
+        return original(path, root)
+
+    monkeypatch.setattr(find_module._CACHE, "get", counted)
+    items, missing = working_set.run_lanes(
+        vault, anchors=(), roles=roles, registry=registry, neighbourhood=frozenset(paths),
+        freshness_snapshot=find_module.FreshnessSnapshot(vault), status_basis=basis,
+    )
+    assert items and read_paths == []
+
+    packet = working_set.build_packet(
+        items=items, anchors=(), roles=roles, current_state=(), ambiguity=(), missing=missing,
+        max_chars=500, generation={}, status="resolved", status_basis=basis,
+    )
+
+    selected = {unit["provenance"]["path"] for unit in packet["units"]}
+    assert selected and len(selected) < len(paths)
+    assert set(read_paths) == selected
+    assert len(read_paths) == len(selected)

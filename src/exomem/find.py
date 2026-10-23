@@ -19,7 +19,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from functools import wraps
 from inspect import signature as inspect_signature
@@ -51,6 +51,7 @@ from .find_types import (
     ParsedPage,
     SemanticUnitHit,
 )
+from .governance import policy as governance_policy
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -933,7 +934,7 @@ def _cached_selection_hits(vault_root: Path, hits: list[Any], pending: Any) -> l
     selected = []
     pages: dict[str, ParsedPage | None] = {}
     for hit in hits:
-        sources = getattr(hit, "keyword_sources", {})
+        sources = getattr(hit, "evidence_sources", {})
         if sources:
             for path in sources:
                 if path not in pages:
@@ -1135,8 +1136,8 @@ def _freshness_key(
 
 @dataclass
 class _SelectedHits:
-    hits: list[Hit]
-    finish: Callable[[], list[Hit]]
+    hits: list[Any]
+    finish: Callable[[], list[Any]]
 
 
 @dataclass(frozen=True)
@@ -1149,6 +1150,7 @@ class _QueryPreparation:
 class _OutsideSelection:
     finish: Callable[[set[str] | None], list[Hit]]
     source: str
+    paths: tuple[str, ...] = ()
 
 
 def _validated_find_limit(
@@ -1314,6 +1316,7 @@ def caller_admission(vault_root: Path) -> Callable[[str], bool] | None:
     return lambda path: egress.content_permits(vault_root, path, who)
 
 
+@governance_policy.request_policy_snapshot()
 @_with_catalog_scope
 def find(
     vault_root: Path,
@@ -1718,6 +1721,7 @@ def find(
         pending=pending,
     )
     page_memo: dict[str, ParsedPage | None] = {}
+    unit_reads = UnitParentReads()
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
@@ -1853,6 +1857,8 @@ def find(
             retrieval_trace=retrieval_trace,
             timings=timings,
             prepared_queries=_prepared_queries,
+            parent_reads=unit_reads,
+            _defer_hydration=True,
         )
         if relation_paths is not None:
             # A unit qualifies through its parent page (per-unit edge anchoring is
@@ -1863,14 +1869,21 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
-        _note_projection_lag()
-        if unit_cache_key is not None and not degraded and not failed:
-            with _FIND_CACHE_LOCK:
-                _FIND_CACHE[unit_cache_key] = (copy.deepcopy(unit_hits), _dependency())
-                _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
-                _FIND_CACHE.move_to_end(unit_cache_key)
-                _trim_find_cache(cache_size)
-        return unit_hits
+        def finish_units():
+            verified = _finish_unit_candidates(
+                vault_root, unit_hits, parent_reads=unit_reads, pages=page_memo, failed_out=failed,
+                catalog_view=catalog_view,
+            )
+            _note_projection_lag()
+            if unit_cache_key is not None and not degraded and not failed:
+                with _FIND_CACHE_LOCK:
+                    _FIND_CACHE[unit_cache_key] = (copy.deepcopy(verified), _dependency())
+                    _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
+                    _FIND_CACHE.move_to_end(unit_cache_key)
+                    _trim_find_cache(cache_size)
+            return verified
+
+        return _SelectedHits(unit_hits, finish_units) if _defer_finish else finish_units()
     mixed = effective_result_level == "mixed"
     query_vector: Any = None
     query_vector_ready = False
@@ -2082,6 +2095,8 @@ def find(
                 retrieval_trace=retrieval_trace,
                 query_vector_provider=_query_vector,
                 prepared_queries=_prepared_queries,
+                parent_reads=unit_reads,
+                _defer_hydration=True,
             )
         if retrieval_trace is not None:
             retrieval_trace.snapshot_result_plan("unit")
@@ -2156,6 +2171,7 @@ def find(
                 pending=pending,
                 pending_paths=keyword_pending_paths,
                 timings=timings,
+                page_memo=page_memo,
             )
     else:
         with _span(timings, "semantic.search", elapsed_ms_field="entry_ms"):
@@ -2221,24 +2237,44 @@ def find(
             retrieval_trace=retrieval_trace,
             timings=timings,
             defer_finish=defer_finish,
+            page_memo=page_memo,
         )
 
     outside_selection = None
-    if _defer_finish and scope == "kb" and query_norm and widen_outside_kb:
+    if (_defer_finish or filter_plan.has_unit_predicate) and scope == "kb" and query_norm and widen_outside_kb:
         with _span(timings, "outside_kb"):
             outside_selection = select_outside(defer_finish=True)
 
-    annotation_reads = (
-        UnitParentReads() if catalog_view is not None and filter_plan.has_unit_predicate else None
-    )
-    prepared_annotations = _defer_finish and filter_plan.has_unit_predicate
-    if prepared_annotations:
+    annotation_candidates = None
+    annotation_fallback_paths: set[str] = set()
+    if filter_plan.has_unit_predicate:
         with _span(timings, "matched_units"):
-            _annotate_matched_units(
-                vault_root, hits.hits if isinstance(hits, _SelectedHits) else hits,
-                filter_plan, catalog_view=catalog_view, parent_reads=annotation_reads,
-                pending=pending,
-            )
+            try:
+                annotation_paths = {hit.path for hit in (hits.hits if isinstance(hits, _SelectedHits) else hits)}
+                annotation_scope = walk_scope
+                if isinstance(outside_selection, _OutsideSelection):
+                    annotation_paths.update(outside_selection.paths)
+                    annotation_scope = "vault"
+                annotation_candidates = _unit_metadata_records(
+                    vault_root, annotation_paths,
+                    scope=annotation_scope, freshness_key=snapshot.for_scope(annotation_scope),
+                    plan=filter_plan, pending=pending,
+                )
+            except (RetrievalIndexWarming, structured_filters.FilterError):
+                if managed_runtime:
+                    raise
+                # Keep held pending views on their frozen descriptors; only
+                # sidecar rows take the offline canonical fallback.
+                held_paths = {
+                    path for path in annotation_paths
+                    if pending is not None and pending.covers(path) and pending.page(path) is not None
+                }
+                if held_paths:
+                    annotation_candidates = _unit_metadata_records(
+                        vault_root, held_paths, scope=annotation_scope,
+                        freshness_key=snapshot.for_scope(annotation_scope), plan=filter_plan, pending=pending,
+                    )
+                    annotation_fallback_paths = annotation_paths - held_paths
 
     selected = hits
 
@@ -2368,32 +2404,44 @@ def find(
             if mixed:
                 retrieval_trace.snapshot_result_plan("page")
 
-        if filter_plan.has_unit_predicate:
-            with _span(timings, "matched_units"):
-                _annotate_matched_units(
-                    vault_root,
-                    hits,
-                    filter_plan,
-                    catalog_view=catalog_view,
-                    parent_reads=annotation_reads,
-                    pending=pending,
-                )
-
         if relation_paths is not None:
             for hit in hits:
                 match = relation_provenance.get(hit.path)
                 if match is not None:
                     hit.relation_match = _relation_match_dict(match, matched="self")
 
-        _note_projection_lag()
         if mixed:
-            return _merge_mixed_hits(
+            hits = _merge_mixed_hits(
                 hits,
                 mixed_unit_hits,
                 limit=limit,
                 config=resolved_config,
                 retrieval_trace=retrieval_trace,
             )
+            hits = _finish_unit_candidates(
+                vault_root, hits, parent_reads=unit_reads, pages=page_memo, failed_out=failed,
+                catalog_view=catalog_view,
+            )
+
+        if filter_plan.has_unit_predicate:
+            with _span(timings, "matched_units"):
+                page_hits = [hit for hit in hits if isinstance(hit, Hit)]
+                _annotate_matched_units(
+                    vault_root, [hit for hit in page_hits if hit.path not in annotation_fallback_paths],
+                    filter_plan,
+                    catalog_view=catalog_view, parent_reads=unit_reads, pending=pending,
+                    candidates=annotation_candidates, pages=page_memo,
+                )
+                if annotation_fallback_paths:
+                    _annotate_matched_units(
+                        vault_root, [hit for hit in page_hits if hit.path in annotation_fallback_paths],
+                        filter_plan,
+                        catalog_view=catalog_view, parent_reads=unit_reads, pending=pending,
+                        pages=page_memo,
+                    )
+        _note_projection_lag()
+        if mixed:
+            return hits
 
         # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
         # A result produced with warm-deferred lanes is lexical-only — caching it
@@ -2564,6 +2612,298 @@ class _UnitParent:
 
     def current_for(self, generation: str) -> bool:
         return self.state is not None and self.state.parent_generation == generation
+
+
+@dataclass
+class _UnitCandidate:
+    """Private sidecar evidence for selection; canonical coordinates do not exist yet."""
+
+    row: Any
+    parent_metadata: Any
+    selected_parent: Any
+    selected_unit: Any
+    unit_view: dict[str, Any]
+    source_order: int
+    vault_root: Path = field(repr=False)
+    pending_page: ParsedPage | None = None
+    bm25_rank: int | None = None
+    bm25_score: float | None = None
+    vector_rank: int | None = None
+    vector_score: float | None = None
+    relation_match: Any = None
+    mixed_units_truncated: int = 0
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate only stored occurrence facts, never a canonical page or span.
+        return getattr(object.__getattribute__(self, "row"), name)
+
+    @property
+    def rel_path(self) -> str:
+        return self.row.parent_path
+
+    @property
+    def frontmatter(self) -> dict[str, Any]:
+        return self.parent_metadata.ranking.frontmatter
+
+    @property
+    def updated(self) -> str:
+        return self.parent_metadata.ranking.updated
+
+    @property
+    def parent_title(self) -> str:
+        return self.parent_metadata.ranking.title
+
+    @property
+    def parent_type(self) -> str | None:
+        return self.parent_metadata.ranking.page_type
+
+    @property
+    def parent_status(self) -> str | None:
+        status = self.frontmatter.get("status")
+        return status if isinstance(status, str) and status else None
+
+    @property
+    def parent_updated(self) -> str:
+        return self.updated
+
+    @property
+    def parent_superseded_by(self) -> list[str]:
+        return list(self.parent_metadata.ranking.superseded_by)
+
+    @property
+    def relations(self) -> list[dict[str, Any]]:
+        return [relation.to_dict() for relation in self.selected_unit.relations]
+
+    @property
+    def verdict(self) -> str | None:
+        return self.unit_view.get("verdict")
+
+    @property
+    def check_by(self) -> str | None:
+        value = self.unit_view.get("check_by")
+        return value.isoformat() if value is not None else None
+
+
+def _unit_metadata_records(
+    vault_root: Path, paths: set[str], *, scope: str, freshness_key: tuple | None,
+    plan: structured_filters.FilterPlan, pending: Any | None = None,
+) -> dict[str, list[_UnitCandidate]]:
+    from . import access, lexstore, semantic_index
+
+    metadata_by_path = _managed_page_metadata(
+        vault_root, paths, scope=scope, freshness_key=freshness_key, pending=pending,
+        include_ranking=True, include_occurrences=True,
+    )
+    unsupported_fields = _unsupported_filter_fields(plan)
+    if unsupported_fields and any(
+        metadata.view is not None and "frontmatter" not in metadata.view
+        for path, metadata in metadata_by_path.items() if path in paths
+    ):
+        raise _unsupported_filter_field_error(unsupported_fields)
+    projected = _origin_view(vault_root)
+    records: dict[str, list[_UnitCandidate]] = {}
+    catalog_view = lexstore._admitted_catalog_view(vault_root)
+    if catalog_view is not None:
+        catalog_view.capture_page_hashes(paths)
+    try:
+        for path in paths:
+            metadata = metadata_by_path.get(path)
+            if metadata is None and pending is not None and pending.covers(path):
+                continue
+            if metadata is None or metadata.view is None or metadata.ranking is None:
+                raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+            if (path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES
+                    or not recall_policy.is_recall_candidate(vault_root, vault_root / path)
+                    or not access.is_indexable(vault_root, path)):
+                continue
+            if not metadata.occurrences:
+                continue
+            parent = metadata.occurrences[0][1]
+            if parent.metadata.get("parent_source_hash") != metadata.content_hash:
+                raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+            spans = semantic_index.prose_carrier_spans(parent.metadata, projected=projected)
+            selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
+            order_by_key = {unit.occurrence_key: order for order, unit in enumerate(parent.structure.units)}
+            # Structural format fixes these candidate families and offset fields.
+            occurrences = {item["key"]: item for family in ("rich", "compact")  # nosemgrep: ep-word-set -- parser summary families
+                           for item in parent.metadata["structure"][family]}
+            for row, parent, unit_view, key in metadata.occurrences:
+                selected = selected_by_key.get(key)
+                if selected is None or selected.source_hash != row.source_hash:
+                    raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+                source_order = order_by_key[key]
+                occurrence = occurrences[key]
+                if any(start < occurrence["end_offset"] and occurrence["start_offset"] < end
+                       for start, end in spans):
+                    continue
+                if structured_filters.evaluate_filter(plan, page=metadata.view, unit=unit_view):
+                    records.setdefault(path, []).append(_UnitCandidate(
+                        row, metadata, parent, selected, unit_view, source_order,
+                        vault_root=vault_root,
+                        pending_page=pending.page(path) if pending is not None and pending.covers(path) else None,
+                    ))
+    except (ValueError, TypeError, KeyError, StopIteration) as error:
+        raise RetrievalIndexWarming(site="semantic_unit_metadata_incomplete") from error
+    return records
+
+
+def _select_indexed_unit_records(
+    vault_root: Path, indexed: list[Any], *, plan: structured_filters.FilterPlan,
+    scope: str, freshness_key: tuple | None, stale_out: list[str] | None = None,
+    parent_reads: UnitParentReads | None = None,
+) -> dict[str, tuple[Any, Any, int]]:
+    from . import readiness
+
+    if not indexed:
+        return {}
+    try:
+        metadata = _unit_metadata_records(
+            vault_root, {hit.parent_path for hit in indexed}, scope=scope,
+            freshness_key=freshness_key, plan=plan,
+        )
+    except (RetrievalIndexWarming, structured_filters.FilterError):
+        if readiness.runtime_managed():
+            raise
+        return _hydrate_indexed_unit_records(
+            vault_root, indexed, plan=plan, stale_out=stale_out, parent_reads=parent_reads,
+        )
+    records = {}
+    by_parent = {}
+    for path, candidates in metadata.items():
+        by_ref = {}
+        for candidate in candidates:
+            by_ref.setdefault(candidate.unit_ref, candidate)
+        by_parent[path] = by_ref
+    for hit in indexed:
+        candidate = by_parent.get(hit.parent_path, {}).get(hit.unit_ref)
+        if candidate is None:
+            continue
+        if (hit.parent_generation, hit.parent_source_hash, hit.parser_version) != (
+            candidate.parent_generation, candidate.parent_source_hash, candidate.parser_version,
+        ):
+            if stale_out is not None:
+                stale_out.append(hit.unit_ref)
+            continue
+        records[hit.unit_ref] = (candidate, candidate.row, candidate.source_order)
+    return records
+
+
+def _finish_unit_candidates(
+    vault_root: Path, hits: list[Any], *, parent_reads: UnitParentReads | None = None,
+    pages: dict[str, ParsedPage | None] | None = None, failed_out: list[str] | None = None,
+    catalog_view: Any | None = None,
+) -> list[Any]:
+    """Verify only selected evidence, preserving its order and leaving stale slots empty."""
+    from . import lexstore, memory_refs, semantic_index, semantic_units
+    from .governance import egress
+
+    reads = parent_reads or UnitParentReads()
+    pages = {} if pages is None else pages
+    catalog = catalog_view if catalog_view is not None else lexstore._admitted_catalog_view(vault_root)
+    checked: dict[tuple, tuple[_UnitParent, dict[str, Any]] | None] = {}
+
+    @call_spans.measure_ms(call_spans.HYDRATION_MS)
+    def parent_read(candidate):
+        path = candidate.parent_path
+        if (not recall_policy.is_recall_candidate(vault_root, vault_root / path)
+                or not egress.quick_page_visible(vault_root, path)):
+            raise ValueError("SEMANTIC_PARENT_UNAVAILABLE")
+        read = reads.parents.get(path)
+        if read is None or not read.current_for(candidate.parent_generation):
+            if candidate.pending_page is not None:
+                pages[path] = candidate.pending_page
+            elif path not in pages:
+                call_spans.measure(call_spans.PAGES_PARSED)
+                pages[path] = _CACHE.get(vault_root / path, vault_root)
+            page = pages[path]
+            if page is None:
+                raise ValueError("SEMANTIC_PARENT_UNAVAILABLE")
+            read = _UnitParent(page=page)
+            reads.parents[path] = read
+        page = read.page
+        if page is None or page.snapshot_hash is None:
+            raise ValueError("SEMANTIC_PARENT_UNAVAILABLE")
+        page_id = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
+        freshness = semantic_index.validate_parent_snapshot(
+            parent_path=path, parent_generation_value=candidate.parent_generation,
+            parent_source_hash=candidate.parent_source_hash, parser_version=candidate.parser_version,
+            current_source_hash=page.snapshot_hash,
+            current_ref=memory_refs.memory_ref(page_id) if page_id else None,
+        )
+        if (not freshness.current or candidate.parent_metadata.content_hash != page.snapshot_hash
+                or candidate.pending_page is None and catalog is not None
+                and catalog.page_hashes.get(path) != page.snapshot_hash):
+            raise ValueError("SEMANTIC_PARENT_UNAVAILABLE")
+        parent = candidate.selected_parent
+        if parent.definitions is None or not parent.definitions.current(vault_root):
+            parent = semantic_index.Interpretations(vault_root).parent(path, parent.metadata)
+        if not parent.structure.complete or parent.definitions is None:
+            raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+        if read.state is None or read.prose is None or read.state.definitions != parent.definitions:
+            raw = {key: row for row, _selected, _view, key in candidate.parent_metadata.occurrences}
+            summary = parent.metadata["structure"]
+            occurrences = {item["key"]: item for family in ("rich", "compact")  # nosemgrep: ep-word-set -- parser summary families
+                           for item in summary[family]}
+            spans = semantic_index.prose_carrier_spans(parent.metadata, projected=_origin_view(vault_root))
+            if parent.metadata["prose_carriers"]["body_length"] != len(page.body):
+                raise ValueError("SEMANTIC_CARRIER_COVERAGE_UNAVAILABLE")
+            units = tuple(semantic_units.materialize_structural_unit(
+                page.body, unit, occurrences[unit.occurrence_key], content=raw[unit.occurrence_key].content,
+                category_raw=raw[unit.occurrence_key].category_raw, category_key=raw[unit.occurrence_key].category_key,
+                tags=raw[unit.occurrence_key].tags, context=raw[unit.occurrence_key].context,
+                parent_ref=parent.structure.parent_ref, path=path,
+            ) for unit in parent.structure.units if unit.occurrence_key in raw and not any(
+                start < occurrences[unit.occurrence_key]["end_offset"]
+                and occurrences[unit.occurrence_key]["start_offset"] < end for start, end in spans
+            ))
+            parser, language_hash, relation_hash = semantic_index.current_registry_identity(vault_root)
+            state = semantic_index.SemanticParentIndexState(
+                path, candidate.parent_ref, page.snapshot_hash, language_hash, relation_hash,
+                candidate.parent_generation, parser,
+                semantic_units.SemanticUnitDocument(units, parent_ref=parent.structure.parent_ref),
+                body=page.body, frontmatter=page.frontmatter, definitions=parent.definitions,
+                prose_carriers=parent.metadata.get("prose_carriers"),
+            )
+            read.state = state
+            read.neutral = replace(state, definitions=None)
+            read.prose = units
+        by_ref = {}
+        for unit in read.prose:
+            by_ref.setdefault(unit.unit_ref, unit)
+        return read, by_ref
+
+    out = []
+    for candidate in hits:
+        if not isinstance(candidate, _UnitCandidate):
+            out.append(candidate)
+            continue
+        stamp = (candidate.parent_path, candidate.parent_generation,
+                 candidate.parent_source_hash, candidate.parser_version)
+        try:
+            if stamp not in checked:
+                checked[stamp] = None
+                checked[stamp] = parent_read(candidate)
+            current = checked[stamp]
+            if current is None:
+                raise ValueError("SEMANTIC_PARENT_UNAVAILABLE")
+            read, by_ref = current
+            unit = by_ref.get(candidate.unit_ref)
+            if (unit is None or unit.fingerprint != candidate.fingerprint
+                    or (unit.category, unit.kind) != (candidate.category, candidate.kind)):
+                raise ValueError("SEMANTIC_UNIT_CHANGED")
+            verified = _semantic_unit_hit(
+                read.page, unit, bm25_rank=candidate.bm25_rank, bm25_score=candidate.bm25_score,
+                vector_rank=candidate.vector_rank, vector_score=candidate.vector_score,
+            )
+            verified.relation_match = candidate.relation_match
+            verified.mixed_units_truncated = candidate.mixed_units_truncated
+            out.append(verified)
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+            if catalog is not None:
+                catalog.incomplete = True
+            if failed_out is not None and "semantic_units_current" not in failed_out:
+                failed_out.append("semantic_units_current")
+    return out
 
 
 @dataclass
@@ -2752,7 +3092,7 @@ def _hydrate_indexed_unit_records(
 
 
 def _python_unit_scores(
-    records: dict[str, tuple[ParsedPage, Any, int]],
+    records: dict[str, tuple[ParsedPage | _UnitCandidate, Any, int]],
     query: str,
 ) -> dict[str, float]:
     """Deterministic in-process lexical rung when the FTS sidecar is absent."""
@@ -2777,7 +3117,7 @@ def _python_unit_scores(
 
 
 def _unit_text_match_refs(
-    records: dict[str, tuple[ParsedPage, Any, int]],
+    records: dict[str, tuple[ParsedPage | _UnitCandidate, Any, int]],
     query: str,
 ) -> set[str]:
     """Exact OR/stemming membership shared with both lexical rungs."""
@@ -2796,7 +3136,7 @@ def _unit_text_match_refs(
 def _unit_rank_score(
     raw_score: float,
     *,
-    page: ParsedPage,
+    page: ParsedPage | _UnitCandidate,
     prefer_active: bool,
     config: RankingConfig,
     status_basis: lifecycle_statuses.Basis,
@@ -2808,14 +3148,19 @@ def _unit_rank_score(
 
 
 def _semantic_unit_hit(
-    page: ParsedPage,
+    page: ParsedPage | _UnitCandidate,
     unit: Any,
     *,
     bm25_rank: int | None,
     bm25_score: float | None,
     vector_rank: int | None = None,
     vector_score: float | None = None,
-) -> SemanticUnitHit:
+) -> SemanticUnitHit | _UnitCandidate:
+    if isinstance(page, _UnitCandidate):
+        return replace(
+            page, bm25_rank=bm25_rank, bm25_score=bm25_score,
+            vector_rank=vector_rank, vector_score=vector_score,
+        )
     return SemanticUnitHit(
         unit_ref=unit.unit_ref,
         form=unit.form,
@@ -3003,9 +3348,21 @@ def _find_semantic_units(
     truncated_out: list[bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
+    _defer_hydration: bool = False,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
+
+    def finish(hits):
+        return hits if _defer_hydration else _finish_unit_candidates(
+            vault_root, hits, parent_reads=parent_reads, failed_out=failed_out,
+        )
+
+    def select(indexed, *, stale_out=None):
+        return _select_indexed_unit_records(
+            vault_root, indexed, plan=plan, scope=scope, freshness_key=snapshot.for_scope(scope),
+            stale_out=stale_out, parent_reads=parent_reads,
+        )
 
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     # Empty queries carry no vector signal. Match the page lane's contract and
@@ -3078,14 +3435,13 @@ def _find_semantic_units(
                             repair=exact_repair,
                             allow_delta=exact_allow_delta,
                             validated=parent_reads.validated if parent_reads else None,
+                            _validate_current=False,
                         )
                         _set_catalog_timing_profile(timings, catalog_result.readiness)
                         if not catalog_result.readiness.complete:
                             _raise_catalog_outcome(catalog_result.readiness)
                         indexed = list(catalog_result.value or [])
-                        records = _hydrate_indexed_unit_records(
-                            vault_root, indexed, plan=plan, parent_reads=parent_reads
-                        )
+                        records = select(indexed)
                         if len(records) >= requested_limit or len(indexed) < prefix_size:
                             break
                         if (
@@ -3121,6 +3477,7 @@ def _find_semantic_units(
                         repair=exact_repair,
                         allow_delta=exact_allow_delta,
                         validated=parent_reads.validated if parent_reads else None,
+                        _validate_current=False,
                     )
                     _set_catalog_timing_profile(timings, catalog_result.readiness)
                     if not catalog_result.readiness.complete:
@@ -3129,9 +3486,7 @@ def _find_semantic_units(
                     records = (
                         {}
                         if mode == "vector"
-                        else _hydrate_indexed_unit_records(
-                            vault_root, indexed, plan=plan, parent_reads=parent_reads
-                        )
+                        else select(indexed)
                     )
         else:
             indexed = lexstore.search_semantic_units(
@@ -3145,6 +3500,7 @@ def _find_semantic_units(
                 literal_all=mode == "keyword" and bool(query.strip()),
                 _repair_stale=True,
                 repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
+                _validate_current=False,
             )
         if indexed is None:
             if lexstore.backend() != "python":
@@ -3176,9 +3532,7 @@ def _find_semantic_units(
             records = (
                 {}
                 if mode == "vector"
-                else _hydrate_indexed_unit_records(
-                    vault_root, indexed, plan=plan, parent_reads=parent_reads
-                )
+                else select(indexed)
             )
     else:
         records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
@@ -3202,7 +3556,7 @@ def _find_semantic_units(
         ]
         if retrieval_trace is not None:
             retrieval_trace.record_unit_filter_only(selected)
-        return ordered_hits
+        return finish(ordered_hits)
 
     if mode == "keyword":
         if not records:
@@ -3241,7 +3595,7 @@ def _find_semantic_units(
             retrieval_trace.record_unit_keyword(
                 selected, status_basis=status_basis, prefer_active=prefer_active
             )
-        return hits
+        return finish(hits)
 
     vector_hits: list[Any] = []
     vector_profile: dict[str, Any] = {
@@ -3299,12 +3653,7 @@ def _find_semantic_units(
     if vector_hits:
         stale_vector_refs: list[str] = []
         records.update(
-            _hydrate_indexed_unit_records(
-                vault_root,
-                vector_hits,
-                plan=plan,
-                stale_out=stale_vector_refs,
-            )
+            select(vector_hits, stale_out=stale_vector_refs)
         )
         if stale_vector_refs:
             vector_hits = []
@@ -3322,9 +3671,7 @@ def _find_semantic_units(
     # parents twice while preserving the deterministic lexical fallback.
     if mode == "vector" and not vector_hits and indexed:
         records.update(
-            _hydrate_indexed_unit_records(
-                vault_root, indexed, plan=plan, parent_reads=parent_reads
-            )
+            select(indexed)
         )
 
     if not records:
@@ -3344,6 +3691,7 @@ def _find_semantic_units(
             admitted_parent_paths=allowed_parent_paths,
             _repair_stale=True,
             repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
+            _validate_current=False,
         )
     if indexed is None:
         scores = _python_unit_scores(records, query)
@@ -3479,7 +3827,7 @@ def _find_semantic_units(
             lexical_used=(mode != "vector" or not vector_succeeded),
             vector_used=vector_succeeded,
         )
-    return [
+    return finish([
         _semantic_unit_hit(
             records[unit_ref][0],
             records[unit_ref][1],
@@ -3491,7 +3839,7 @@ def _find_semantic_units(
             vector_score=vector_scores.get(unit_ref),
         )
         for unit_ref in final_ranking
-    ]
+    ])
 
 
 def _merge_mixed_hits(
@@ -3571,10 +3919,26 @@ def _annotate_matched_units(
     catalog_view: Any | None = None,
     parent_reads: UnitParentReads | None = None,
     pending: Any | None = None,
+    candidates: dict[str, list[_UnitCandidate]] | None = None,
+    pages: dict[str, ParsedPage | None] | None = None,
 ) -> None:
     """Attach bounded same-unit matches without changing default page bytes."""
     from . import semantic_index
 
+    if candidates is not None:
+        for hit in hits:
+            verified = _finish_unit_candidates(
+                vault_root, candidates.get(hit.path, []), parent_reads=parent_reads, pages=pages,
+                catalog_view=catalog_view,
+            )
+            matched = [unit for unit in verified if unit.snapshot_hash == hit.snapshot_hash]
+            hit.matched_units = [{
+                "unit_ref": unit.unit_ref, "form": unit.form, "category": unit.category,
+                "category_key": unit.category_key, "kind": unit.kind, "anchor": unit.source_anchor,
+                "span": unit.source_span, "excerpt": unit.excerpt,
+            } for unit in matched[:_MATCHED_UNITS_CAP]]
+            hit.matched_units_truncated = max(0, len(matched) - _MATCHED_UNITS_CAP)
+        return
     if catalog_view is not None and parent_reads is None:
         parent_reads = UnitParentReads()
     for hit in hits:
@@ -3586,7 +3950,7 @@ def _annotate_matched_units(
                 held = pending.page(hit.path)
                 expected_hash = held.snapshot_hash if held is not None else None
             else:
-                expected_hash = catalog_view.page_hashes.get(hit.path)
+                expected_hash = catalog_view.page_hashes.get(hit.path) if catalog_view is not None else hit.snapshot_hash
             if (
                 read is None or read.page is None or read.state is None
                 or read.neutral is None
@@ -3595,7 +3959,8 @@ def _annotate_matched_units(
                 or read.state.parent_source_hash != read.page.snapshot_hash
                 or expected_hash != hit.snapshot_hash
             ):
-                catalog_view.incomplete = True
+                if catalog_view is not None:
+                    catalog_view.incomplete = True
                 hit.matched_units = []
                 continue
             refresh = (
@@ -3747,8 +4112,10 @@ RETRIEVAL_WARMING_SITES = (
     "pending_visibility_incomplete",
     "semantic_unit_index",
     "semantic_unit_seed",
+    "semantic_unit_metadata_incomplete",
     "filter_eligibility_unnarrowed",
     "filter_metadata_incomplete",
+    "pending_metadata_incomplete",
     "browse_ordering_unavailable",
     "browse_ordering_incomplete",
     "browse_ordering_stale",
@@ -4180,6 +4547,7 @@ def _managed_page_metadata(
     include_units: bool = False,
     parents_only: bool = False,
     include_ranking: bool = False,
+    include_occurrences: bool = False,
 ) -> dict[str, Any]:
     """Resolve current page metadata without opening canonical page files.
 
@@ -4187,25 +4555,29 @@ def _managed_page_metadata(
     snapshots replace only the identities whose committed bytes they own.
     `parents_only` skips the catalogue's filter views (see lexstore).
     """
-    from . import lexstore, semantic_index, vault
+    from . import lexstore, semantic_index, semantic_units, vault
 
     requested = set(paths)
     if pending is not None:
         for row in pending.current_pages():
             if row.rel_path in paths and row.page.parent_media:
                 requested.add(row.page.parent_media + ".md")
-    result = lexstore.eligibility_metadata_result(
-        vault_root,
-        requested,
-        scope=scope,
-        freshness=freshness_key,
-        include_units=include_units,
-        parents_only=parents_only,
-        include_ranking=include_ranking,
-    )
-    if not result.readiness.complete:
-        _raise_catalog_outcome(result.readiness)
-    metadata = dict(result.value or {})
+    catalogue_paths = set(pending.shadow(requested)) if pending is not None else requested
+    metadata = {}
+    if catalogue_paths:
+        result = lexstore.eligibility_metadata_result(
+            vault_root,
+            catalogue_paths,
+            scope=scope,
+            freshness=freshness_key,
+            include_units=include_units,
+            parents_only=parents_only,
+            include_ranking=include_ranking,
+            include_occurrences=include_occurrences,
+        )
+        if not result.readiness.complete:
+            _raise_catalog_outcome(result.readiness)
+        metadata = dict(result.value or {})
     if pending is not None and not pending.empty:
         # A stable orphan can acquire a newly committed parent that has no
         # catalogue row yet, including a parent outside this request's scope.
@@ -4218,17 +4590,57 @@ def _managed_page_metadata(
                 metadata.pop(rel, None)
                 continue
             units: tuple[dict[str, Any], ...] = ()
-            if include_units:
+            occurrences: tuple = ()
+            if include_units or include_occurrences:
                 # Parsing bounded, already-proven pending bytes is permitted;
                 # reopening the file here could observe a later commit instead.
+                # The frontmatter parser consumes one separator LF before the held body.
                 source = (
-                    "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n" + page.body
+                    "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n\n" + page.body
                 )
                 state = semantic_index.selected_parent_index_state(vault_root, rel, source=source)
                 units = tuple(
                     structured_filters.unit_view(unit, instance=state.instance_id)
                     for unit in state.document.units
                 )
+                if include_occurrences:
+                    receipt = pending.rows[rel]
+                    if page.snapshot_hash is None or receipt.after_hash != page.snapshot_hash:
+                        raise RetrievalIndexWarming(site="pending_metadata_incomplete")
+                    # Reconstruction parses held bytes; only the receipt's original
+                    # hash and current core inputs identify their canonical generation.
+                    parser, language_hash, relation_hash = semantic_index.current_registry_identity(vault_root)
+                    state = replace(
+                        state, parent_source_hash=page.snapshot_hash, parser_version=parser,
+                        language_registry_hash=language_hash, relation_registry_hash=relation_hash,
+                        parent_generation=semantic_index.parent_generation(
+                            parent_path=rel, parent_ref=state.parent_ref, parent_source_hash=page.snapshot_hash,
+                            language_registry_hash=language_hash, relation_registry_hash=relation_hash,
+                            parser_version=parser,
+                        ),
+                    )
+                    parent = semantic_index.Interpretations(vault_root).parent(
+                        rel, semantic_index.structural_metadata(state),
+                    )
+                    if not parent.structure.complete:
+                        raise RetrievalIndexWarming(site="pending_metadata_incomplete")
+                    selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
+                    values = []
+                    for order, raw in enumerate(semantic_units.candidate_units(state.candidates)):
+                        key = semantic_units.occurrence_key(raw.form, raw.span, raw.source_hash)
+                        selected_unit = selected_by_key.get(key)
+                        if selected_unit is None or selected_unit.unit_ref is None:
+                            continue
+                        row = (
+                            key, rel, state.parent_ref, state.parent_generation, state.parent_source_hash,
+                            state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
+                            json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
+                            raw.line, raw.end_line, order,
+                        )
+                        unit_view = structured_filters.unit_view(raw, instance=state.instance_id)
+                        unit_view.update(category=selected_unit.category, kind=selected_unit.kind)
+                        values.append((lexstore._unit_hit(row, selected_unit, None), parent, unit_view, key))
+                    occurrences = tuple(values)
             metadata[rel] = lexstore.EligibilityMetadata(
                 structured_filters.page_view(page),
                 page.parent_media + ".md" if page.parent_media else None,
@@ -4237,6 +4649,8 @@ def _managed_page_metadata(
                 page.frame_ts,
                 units,
                 find_types.RankingPage.from_page(page) if include_ranking else None,
+                occurrences,
+                page.snapshot_hash,
             )
     if any(
         rel not in metadata and not (pending is not None and pending.covers(rel)) for rel in paths
@@ -4548,6 +4962,7 @@ def _find_managed_browse(
     speakers: list[str] | None,
     file_types: list[str] | None,
     exclude_file_types: list[str] | None,
+    page_memo: dict[str, ParsedPage | None] | None = None,
 ) -> list[Hit]:
     """Order emitted identities before hydrating a bounded answer.
 
@@ -4637,6 +5052,9 @@ def _find_managed_browse(
         page = (
             candidate if first[emitted] == emitted else _resolve_page(vault_root, emitted, pending)
         )
+        if page_memo is not None:
+            page_memo[first[emitted]] = candidate
+            page_memo[emitted] = page
         if candidate is None or page is None:
             from . import lexstore
 
@@ -4722,6 +5140,7 @@ def _find_managed_keyword(
     pending_paths: frozenset[str] | None, types: list[str] | None, projects: list[str] | None,
     tags: list[str] | None, speakers: list[str] | None, file_types: list[str] | None,
     exclude_file_types: list[str] | None,
+    page_memo: dict[str, ParsedPage | None] | None = None,
 ) -> list[Hit]:
     """Fix emitted groups in SQL, then verify only the selected canonical evidence."""
     from . import lexstore
@@ -4758,7 +5177,7 @@ def _find_managed_keyword(
     if not result.readiness.complete:
         _raise_catalog_outcome(result.readiness)
     view = lexstore._admitted_catalog_view(vault_root)
-    pages: dict[str, ParsedPage | None] = {}
+    pages: dict[str, ParsedPage | None] = page_memo if page_memo is not None else {}
 
     def resolve(path: str, expected: str) -> ParsedPage | None:
         if path not in pages:
@@ -4801,7 +5220,7 @@ def _find_managed_keyword(
                 continue
             hit.scene_frame, hit.scene_frame_ts = frame.media_file, frame.frame_ts
             sources[frame.rel_path] = group.hashes[frame.rel_path]
-        hit.keyword_sources = sources
+        hit.evidence_sources = sources
         hits.append(hit)
     return hits
 
@@ -4825,6 +5244,7 @@ def _find_keyword(
     pending: Any | None = None,
     pending_paths: frozenset[str] | None = None,
     timings: FindTimings | None = None,
+    page_memo: dict[str, ParsedPage | None] | None = None,
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches.
 
@@ -4846,6 +5266,7 @@ def _find_keyword(
                 freshness_key=freshness_key, pending=pending, pending_paths=pending_paths,
                 types=types, projects=projects, tags=tags, speakers=speakers,
                 file_types=file_types, exclude_file_types=exclude_file_types,
+                page_memo=page_memo,
             )
     if not query_norm and _managed_browse_reader():
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
@@ -4862,6 +5283,7 @@ def _find_keyword(
             speakers=speakers,
             file_types=file_types,
             exclude_file_types=exclude_file_types,
+            page_memo=page_memo,
         )
     lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
     if query_norm:
@@ -4926,6 +5348,8 @@ def _find_keyword(
         if admitted_paths is not None and rel_path not in admitted_paths:
             continue
         page = _resolve_page(vault_root, rel_path, pending)
+        if page_memo is not None:
+            page_memo[rel_path] = page
         if page is None:
             continue
         if eligible_paths is not None and page.rel_path not in eligible_paths:
@@ -4942,6 +5366,8 @@ def _find_keyword(
             parent_page = _resolve_page(
                 vault_root, page.parent_media + ".md", pending
             )
+            if page_memo is not None:
+                page_memo[page.parent_media + ".md"] = parent_page
             if parent_page is not None:
                 existing = by_path.get(parent_page.rel_path)
                 if existing is not None:
@@ -5268,6 +5694,21 @@ def _find_semantic(
     )
     hits: list[Hit] = []
     seen: set[str] = set()
+    selected: list[tuple[str, ParsedPage, str | None]] = []
+
+    def incomplete() -> None:
+        view = lexstore._admitted_catalog_view(vault_root)
+        if view is not None:
+            view.incomplete = True
+        if degraded_out is not None and _RECALL_PROJECTION_STALE_COMPONENT not in degraded_out:
+            degraded_out.append(_RECALL_PROJECTION_STALE_COMPONENT)
+
+    # Legacy indexes and injected providers still supply strings. Modern
+    # references travel through the same collapse map without reading text.
+    from .embedding_index import ChunkRef
+
+    chunk_refs = {path: ref for path, ref in chunk_text_by_path.items() if isinstance(ref, ChunkRef)}
+    chunk_text_by_path = {path: text for path, text in chunk_text_by_path.items() if isinstance(text, str)}
 
     def _supported_stems(page: ParsedPage | find_types.RankingPage) -> bool:
         if semantic_lanes_absent:
@@ -5377,6 +5818,46 @@ def _find_semantic(
                 if keyword_excerpt is None:
                     body = page.body.strip()
                     keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
+            selected.append((rel_path, page, keyword_excerpt))
+            if len(selected) >= target_n:
+                break
+
+        # Freeze the eligible prefix before proof checks. Missing selected text
+        # reduces coverage; it must not pull lower fused rows into the answer.
+        selected_refs = {}
+        for rel_path, _page, _excerpt in selected:
+            ref = chunk_refs.get(rel_path)
+            if ref is not None:
+                selected_refs.setdefault(ref.proof, []).append((rel_path, ref))
+        for proof, entries in selected_refs.items():
+            try:
+                texts = proof.index._texts_for([(ref.path, ref.chunk) for _rel, ref in entries], proof=proof)
+            except Exception:  # noqa: BLE001 — lost selected evidence reduces coverage
+                texts = {}
+            for rel_path, ref in entries:
+                pair = (ref.path, ref.chunk)
+                if pair in texts:
+                    chunk_text_by_path[rel_path] = texts[pair]
+
+        for rel_path, page, keyword_excerpt in selected:
+            sources = {page.rel_path: page.snapshot_hash}
+            ref = chunk_refs.get(rel_path)
+            if ref is not None:
+                if rel_path not in chunk_text_by_path:
+                    incomplete()
+                    continue
+                chunk_page = _page_of(ref.path)
+                if chunk_page is None:
+                    incomplete()
+                    continue
+                sources[chunk_page.rel_path] = chunk_page.snapshot_hash
+            frame_path = bundle.frame_sources.get(rel_path)
+            if frame_path is not None:
+                frame_page = _page_of(frame_path)
+                if frame_page is None:
+                    incomplete()
+                    continue
+                sources[frame_page.rel_path] = frame_page.snapshot_hash
             chunk = chunk_text_by_path.get(rel_path)
             excerpt = _semantic_excerpt(page, query_norm, chunk, keyword_excerpt)
             is_graph_only = (
@@ -5432,9 +5913,13 @@ def _find_semantic(
                     nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
                     if nf is not None:
                         hit.scene_frame, hit.scene_frame_ts = nf
+                        frame_page = _page_of(hit.scene_frame + ".md")
+                        if frame_page is None:
+                            incomplete()
+                            continue
+                        sources[frame_page.rel_path] = frame_page.snapshot_hash
+            hit.evidence_sources = sources
             hits.append(hit)
-            if len(hits) >= target_n:
-                break
 
     def finish() -> list[Hit]:
         nonlocal hits
@@ -5734,6 +6219,7 @@ def _find_outside_kb(
     retrieval_trace: Any | None = None,
     timings: FindTimings | None = None,
     defer_finish: bool = False,
+    page_memo: dict[str, ParsedPage | None] | None = None,
 ) -> list[Hit] | _OutsideSelection:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers the requested `scope="kb"` widening.
@@ -5937,6 +6423,8 @@ def _find_outside_kb(
             if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
                 continue
             page = _resolve_page(vault_root, rel_path, catalog_view=catalog_view)
+            if page_memo is not None:
+                page_memo[rel_path] = page
             if page is None:
                 continue
             if post_eligibility is not None and rel_path not in post_eligibility:
@@ -5985,7 +6473,8 @@ def _find_outside_kb(
 
     if defer_finish:
         return _OutsideSelection(
-            finish, find_types.SOURCE_INDEX if catalog_served else find_types.SOURCE_COMPUTED
+            finish, find_types.SOURCE_INDEX if catalog_served else find_types.SOURCE_COMPUTED,
+            tuple(candidates),
         )
     return finish(exclude_paths)
 
