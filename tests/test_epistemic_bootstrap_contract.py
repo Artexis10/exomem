@@ -604,7 +604,12 @@ def test_destination_rule_reaches_the_pre_write_loop(vault: Path, profile: str) 
     clause = AUTHORING_CONTRACT.routes["destination_fitness"]
     loop = authoring["canonical_loop"]
 
-    assert authoring["post_write"]["destination_choice"].startswith(clause)
+    destination = authoring["post_write"]["destination_choice"]
+    if profile == "compact":
+        assert "before writing" in destination
+        assert "safety net" in destination
+    else:
+        assert destination.startswith(clause)
     assert loop.index(clause) < loop.index("draft the smallest durable compiled conclusion")
 
 

@@ -1739,8 +1739,7 @@ def op_bootstrap(
                     "bind its supported canonical write through vocabulary_workflow.application"
                 ),
                 (
-                    "Address post-write link/duplicate warnings. write_feedback needs "
-                    "response_detail='full'; suggestions need remember(suggestions=true)."
+                    "Address write_feedback."
                     if profile == "compact" else
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
@@ -1901,6 +1900,8 @@ def op_bootstrap(
                     else "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due"
                 ),
                 "destination_choice": (
+                    "Link homes before writing; structural advisories are only a safety net."
+                    if profile == "compact" else
                     f"{authoring_contract.routes['destination_fitness']} "
                     "Choose and link the home before writing; post-write structural advisories are the "
                     "safety net for missed routing, never the primary mechanism."
