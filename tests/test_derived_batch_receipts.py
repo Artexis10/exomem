@@ -2302,13 +2302,12 @@ def test_accepted_parent_schema_migrates_without_losing_any_custody(
             "FROM derived_batch_components WHERE batch_id='accepted-parent' "
             "AND component='write_advisory'"
         ).fetchone() == (1, 7, 4)
-        # The component this release added is backfilled, and the rows the older
-        # release wrote are exactly as it left them.
+        # The rows the older release wrote are exactly as it left them, and the
+        # migration adds no row for the component this release introduced.
         assert connection.execute(
-            "SELECT state, revision, lease_revision, attempt_count "
-            "FROM derived_batch_components WHERE batch_id='accepted-parent' "
+            "SELECT count(*) FROM derived_batch_components WHERE batch_id='accepted-parent' "
             "AND component='context_catalogue'"
-        ).fetchone() == ("not_required", 1, 0, 0)
+        ).fetchone() == (0,)
         assert connection.execute(
             "SELECT count(*) FROM derived_batch_components WHERE batch_id='accepted-parent' "
             "AND state='not_required' AND revision=1 AND lease_revision=7 AND attempt_count=4"
@@ -2330,15 +2329,20 @@ def test_accepted_parent_schema_migrates_without_losing_any_custody(
         ).fetchone() == (1,)
 
 
-def _rewrite_as_prior_release(vault: Path) -> None:
+def _rewrite_as_prior_release(vault: Path, *, after_rollback: bool) -> None:
     """Leave the store as the release before the catalogue component wrote it.
 
-    That release's component table carried a CHECK that names nine components,
-    held no row for the catalogue, and kept no marker for the component set.
+    That release wrote no row for the catalogue. Before any upgrade, its component
+    table also carried a CHECK that names nine components and kept no marker for
+    the component set. After a rollback it writes into the table this release
+    already widened, so the marker stays current.
     """
     with sqlite3.connect(deferred_index.store_path(vault)) as connection:
         connection.execute("DELETE FROM derived_batch_components WHERE component = 'context_catalogue'")
-        connection.execute("DELETE FROM maintenance_state WHERE key = ?", (deferred_index._COMPONENT_ROWS_KEY,))
+        if after_rollback:
+            connection.commit()
+            return
+        connection.execute("DELETE FROM maintenance_state WHERE key = ?", (deferred_index._COMPONENT_CHECK_KEY,))
         ddl = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'derived_batch_components'"
         ).fetchone()[0]
@@ -2349,16 +2353,19 @@ def _rewrite_as_prior_release(vault: Path) -> None:
         connection.commit()
 
 
-def test_a_batch_prepared_before_the_catalogue_component_reads_drains_and_replays(vault: Path) -> None:
+@pytest.mark.parametrize("after_rollback", [False, True], ids=["before-upgrade", "after-rollback"])
+def test_a_batch_prepared_before_the_catalogue_component_reads_drains_and_replays(
+    vault: Path, after_rollback: bool
+) -> None:
     protocol = _protocol()
     drain = _drain()
     receipt, target, _before, after = _prepare_one(vault, batch_id="prior-release")
     _write(target, after)
-    _rewrite_as_prior_release(vault)
+    _rewrite_as_prior_release(vault, after_rollback=after_rollback)
     with sqlite3.connect(deferred_index.store_path(vault)) as connection:
         assert connection.execute("SELECT count(*) FROM derived_batch_components").fetchone() == (9,)
 
-    # The upgrade opens the store; before the migration this raised KeyError on every old batch.
+    # This release opens the store; a batch with no catalogue row once raised KeyError here.
     opened = protocol._load_receipt(vault, "prior-release")
     assert protocol.component_status(
         vault, opened, protocol.DerivedComponent.CONTEXT_CATALOGUE
@@ -2376,11 +2383,11 @@ def test_a_batch_prepared_before_the_catalogue_component_reads_drains_and_replay
     )
 
     assert completed == 1
-    assert dispatched == [protocol.DerivedComponent.LEXSTORE]  # the backfilled row asks for no work
+    assert dispatched == [protocol.DerivedComponent.LEXSTORE]  # the absent row asks for no work
     replayed, target_again, *_ = _prepare_one(vault, batch_id="prior-release")
     assert replayed.batch_id == receipt.batch_id and target_again == target
     with sqlite3.connect(deferred_index.store_path(vault)) as connection:
-        assert connection.execute("SELECT count(*) FROM derived_batch_components").fetchone() == (10,)
+        assert connection.execute("SELECT count(*) FROM derived_batch_components").fetchone() == (9,)
         assert connection.execute(
             "SELECT state FROM derived_batches WHERE batch_id = 'prior-release'"
         ).fetchone() == ("completed",)

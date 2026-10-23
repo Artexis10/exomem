@@ -151,8 +151,12 @@ _COMPONENT_DEPENDENCIES: Final[dict[DerivedComponent, tuple[DerivedComponent, ..
         DerivedComponent.GRAPH,
     ),
 }
-#: Components that a store made by an older release backfills as `not_required`.
-_BACKFILLED_COMPONENTS: Final = frozenset({DerivedComponent.CONTEXT_CATALOGUE})
+#: Components that an older release's batch has no row for. The reader takes the
+#: absent row as `not_required`: the release that prepared the batch never owed it.
+_ADDED_COMPONENTS: Final = frozenset({DerivedComponent.CONTEXT_CATALOGUE})
+_ADDED_COMPONENTS_SQL: Final = ", ".join(
+    f"'{component.value}'" for component in DerivedComponent if component in _ADDED_COMPONENTS
+)
 #: Components a write's acknowledgement neither reports nor waits for: the
 #: catalogue is a disposable sidecar, so a slow fold never delays a write.
 UNACKNOWLEDGED_COMPONENTS: Final = frozenset({DerivedComponent.CONTEXT_CATALOGUE})
@@ -557,6 +561,26 @@ def _component_status_from_connection(
         "WHERE c.batch_id = ? AND c.component = ?",
         (batch_id, component.value),
     ).fetchone()
+    if row is None and component in _ADDED_COMPONENTS:
+        batch = connection.execute(
+            "SELECT canonical_generation, created_at FROM derived_batches WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchone()
+        if batch is not None:
+            return DerivedComponentStatus(
+                batch_id=batch_id,
+                component=component,
+                revision=1,
+                lease_revision=0,
+                state="not_required",
+                canonical_generation=str(batch[0]),
+                attempt_count=0,
+                next_attempt_at=float(batch[1]),
+                claim_owner=None,
+                claim_expires_at=None,
+                failure_code=None,
+                advisory_result_ref=None,
+            )
     if row is None:
         raise KeyError(f"unknown derived component: {batch_id}/{component.value}")
     return DerivedComponentStatus(
@@ -656,7 +680,7 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
             "INDEXED BY derived_paths_missing_sequence "
             "WHERE batch_seq IS NULL LIMIT 1"
         ).fetchone() is None
-        and deferred_index.derived_component_rows_current(connection)
+        and deferred_index.derived_component_check_current(connection)
     )
 
 
@@ -714,9 +738,9 @@ def _exact_existing(
         for status in existing.components
         if status.state != "not_required"
     )
-    # The store backfills this component as `not_required` for a batch prepared
-    # before it existed; a replay of that batch must still match what it owed.
-    if actual_required - _BACKFILLED_COMPONENTS != required_components - _BACKFILLED_COMPONENTS:
+    # A batch an older release prepared has no row for this component, which reads
+    # as `not_required`; a replay of that batch must still match what it owed.
+    if actual_required - _ADDED_COMPONENTS != required_components - _ADDED_COMPONENTS:
         return False
     advisory = connection.execute(
         "SELECT target_rel_path, target_fingerprint "
@@ -1810,7 +1834,8 @@ def snapshot_pending_visibility(
             "EXISTS (SELECT 1 FROM derived_batch_components AS c "
             "WHERE c.batch_id = r.batch_id AND c.revision = r.component_revision), "
             "b.schema_version, b.mutation_attempt_digest, b.checkpoint_id, b.state, b.created_at, "
-            "(SELECT count(*) FROM derived_batch_components AS c WHERE c.batch_id = r.batch_id) "
+            "(SELECT count(*) FROM derived_batch_components AS c WHERE c.batch_id = r.batch_id "
+            f"AND c.component NOT IN ({_ADDED_COMPONENTS_SQL})) "
             "FROM pending_recall_rows AS r "
             "LEFT JOIN derived_batches AS b ON b.batch_id = r.batch_id "
             "LEFT JOIN derived_batch_paths AS p "
@@ -1837,7 +1862,7 @@ def snapshot_pending_visibility(
                 maximum=_MAX_BATCH_ID,
             )
             if batch_id not in grouped:
-                if schema_version != SCHEMA_VERSION or batch_state not in _BATCH_STATES or components != len(DerivedComponent):
+                if schema_version != SCHEMA_VERSION or batch_state not in _BATCH_STATES or components != len(DerivedComponent) - len(_ADDED_COMPONENTS):
                     raise ValueError("pending visibility receipt is invalid")
                 _digest(attempt_digest, label="mutation_attempt_digest")
                 _bounded(checkpoint, label="checkpoint_id", maximum=_MAX_IDENTITY)

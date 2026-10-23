@@ -3925,10 +3925,12 @@ def _matches_explicit_non_page_shape(text: str) -> bool:
     (`working_set.py`, `working_set_index.py`) can legitimately produce
     that is NOT a page reference at all — exhaustively enumerated, never
     guessed at by how the string looks: a memory-id reference, the
-    synthetic project-anchor id, the synthetic plan-anchor id, a derived-view
-    ref (`exomem://map...`, the refs `context_views` serves). R1's default
-    is that every OTHER non-empty path-bearing-field string is a candidate
-    that must be decided or withheld — nothing else is exempted.
+    synthetic project-anchor id, the synthetic plan-anchor id, a map or
+    topic-profile ref (`exomem://map...`, `exomem://profile/topic/...`). An
+    anchor-profile ref is not exempt: it names its anchor, which
+    `_working_set_paths` decides instead (`_anchor_profile_subject`). R1's
+    default is that every OTHER non-empty path-bearing-field string is a
+    candidate that must be decided or withheld — nothing else is exempted.
     """
     fragment_stripped = text.split("#", 1)[0]
     if memory_refs.parse_memory_ref(fragment_stripped) is not None:
@@ -3937,7 +3939,20 @@ def _matches_explicit_non_page_shape(text: str) -> bool:
         return True
     from .. import context_views
 
-    return _matches_plan_anchor_shape(text) or context_views.parse_view_ref(fragment_stripped) is not None
+    target = context_views.parse_view_ref(fragment_stripped)
+    return _matches_plan_anchor_shape(text) or (
+        target is not None and target.kind != context_views.PROFILE_ANCHOR
+    )
+
+
+def _anchor_profile_subject(text: str) -> str | None:
+    """The anchor ref an anchor-profile ref names, or None for any other string."""
+    from .. import context_views
+
+    target = context_views.parse_view_ref(text.split("#", 1)[0])
+    if target is None or target.kind != context_views.PROFILE_ANCHOR:
+        return None
+    return target.key
 
 
 def _is_page_shaped(text: str) -> bool:
@@ -4147,6 +4162,11 @@ def _working_set_paths(
 
     def _add(candidate: str, *, strict: bool) -> None:
         text = candidate.strip()
+        # An anchor-profile ref is decided as the anchor it names, under the
+        # original string, so a withheld anchor withholds the item that carries it.
+        subject = _anchor_profile_subject(text)
+        decided = candidate if subject is None else subject
+        text = decided.strip()
         if not text or _matches_explicit_non_page_shape(text):
             return
         if not strict and not _is_page_shaped(text):
@@ -4158,7 +4178,7 @@ def _working_set_paths(
             # branch: EVERY non-empty, non-exempt value in one is a
             # candidate, page-shaped or not.
             return
-        readings = _interpretations_for(candidate)
+        readings = _interpretations_for(decided)
         if not readings:
             unresolvable.add(candidate)
             return
