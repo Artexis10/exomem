@@ -1154,7 +1154,11 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
     container["command"] = command
     container["env"] = [*_init_env(spec), {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"}]
     container["volumeMounts"].append({"name": "staging", "mountPath": "/staging"})
-    pod["volumes"].append({"name": "staging", "emptyDir": {"sizeLimit": str(size.parts * size.part_bytes)}})
+    # Reserve the disk-backed archive so concurrent exports cannot overcommit node storage.
+    staging_bytes = str(size.parts * size.part_bytes)
+    container["resources"]["requests"]["ephemeral-storage"] = staging_bytes
+    container["resources"]["limits"]["ephemeral-storage"] = staging_bytes
+    pod["volumes"].append({"name": "staging", "emptyDir": {"sizeLimit": staging_bytes}})
     labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}
     return {
         "apiVersion": "batch/v1", "kind": "Job",
