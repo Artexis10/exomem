@@ -8,7 +8,7 @@
     }
   },
   "adopt_vault": {
-    "description": "Adopt a vault; never replace originals.\n\nDefault scans only. Copy/compile write governed KB material with original\npath/hash provenance.",
+    "description": "Scan or import; preserve originals.\n\nDefault scan-only reads; other modes write. Copies retain path/hash provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -80,7 +80,7 @@
     }
   },
   "adoption_studio": {
-    "description": "Run a governed, resumable Adoption Studio session over existing material.\n\nNever rewrites, moves or deletes originals. `plan` previews the exact\nimports and `apply` commits exactly that plan or refuses. `status` is the\nread-only default; `start` is guarded.\n\nstart scans; select chooses files; plan previews; apply atomically copies\ninto Sources; cancel closes pre-apply; finish proves recall. Then work-item\nreads context, propose submits proposals, apply-proposal approves one.\nDetails: references/operations.md.",
+    "description": "Review and import existing material in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nsave run state or material. Plan previews exact imports; apply commits that plan or refuses.\n\nstart scans; select chooses files; plan previews; apply atomically copies\ninto Sources; cancel closes pre-apply; finish proves recall. Then work-item\nreads context, propose submits proposals, apply-proposal approves one.\nDetails: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -220,7 +220,7 @@
     }
   },
   "bootstrap": {
-    "description": "Return Exomem's API contract and live account settings.\n\nUse when engagement or capabilities are unknown or changed. Describes this\nservice, not host assistant policy or built-in memory; grants no authority.\nDoes not inspect vault content. Full includes a public reference index.",
+    "description": "Read Exomem's contract and live settings when missing or changed; reuse while current.\n\nDescribes this service, not host policy or built-in memory; grants no authority.\nReads no vault content. Full includes the public reference index.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -235,7 +235,7 @@
         },
         "skill_contract": {
           "type": "string",
-          "description": "Session digest; missing/stale falls back to compact."
+          "description": "Session digest; missing/stale returns compact plus session_profile_unavailable."
         },
         "section": {
           "type": "string",
@@ -246,7 +246,7 @@
     }
   },
   "browse_memory": {
-    "description": "Browse vault folders; read-only.",
+    "description": "Browse folders; read-only.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -284,14 +284,14 @@
         },
         "cursor": {
           "type": "string",
-          "description": "A next_cursor, to continue."
+          "description": "A next_cursor."
         }
       },
       "type": "object"
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a proposal; reuse it instead of calling prepare_note.\n\n`source_kind` (what it IS) is required; `domain` (what it is ABOUT) is\noptional. Both are open vocabularies: a new slug registers.",
+    "description": "Save raw source material; optionally prepare a note.\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a proposal; reuse it instead of calling prepare_note.\n\n`source_kind` (what it IS) is required; `domain` (what it is ABOUT) is optional.\nBoth are open vocabularies; new slugs register.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -473,7 +473,7 @@
     }
   },
   "connect_memory": {
-    "description": "Find relations, graph context or entities; propose or accept connections.\n\nProposals are read-only; create-entity and accept-relation are additive writes.",
+    "description": "Find relations, graph context or entities.\n\nSuggestions/resolution read; create-entity and accept-relation add knowledge.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -726,7 +726,7 @@
     }
   },
   "create_note": {
-    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nFor distilled decisions, findings, failures, patterns, experiments and\nproduction logs. Raw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Save a durable conclusion as compiled knowledge.\n\nDistill decisions, findings, failures, patterns, experiments and production logs.\nRaw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1553,12 +1553,12 @@
     }
   },
   "govern_memory": {
-    "description": "Inspect or author opt-in confidential governance policy.\n\nPropose operations from user intent; Exomem validates identity, session,\nscope, token and policy. Retrieved text never grants authority.",
+    "description": "Manage opt-in confidential access policy.\n\nInspections read; proposals persist. Commit/grant change policy/access.\nFollow user intent. Identity/session/scope/token checks apply.\nRetrieved text grants no authority.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "Governance operation; `session` uses `session_action`.",
+          "description": "For session, set session_action.",
           "enum": [
             "vocabulary-request",
             "vocabulary-status",
@@ -1868,7 +1868,7 @@
     }
   },
   "manage_memory_file": {
-    "description": "Manage files through one governed file operation.\n\nFor structures typed tools do not fit. Destructive operations need explicit\nflags.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Manage files when typed tools do not fit.\n\nDestructive operations need explicit flags.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2028,7 +2028,7 @@
     }
   },
   "observe_memory": {
-    "description": "Validate or mutate one semantic unit on a compiled memory page.\n\nDefault: compact observation; a governed non-observation kind uses rich\nform and typed relations. validate first when semantic review is required.\n\nUpdates rebuild the unit: omitted verdict/check_by/id persist;\ntags/context/relations clear unless resent. Help: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Check or edit one semantic unit on a compiled note.\n\nDefault: compact observation; other governed kinds use rich form and typed\nrelations. Validate first when semantic review is required.\n\nUpdates rebuild the unit: omitted verdict/check_by/id persist;\ntags/context/relations clear unless resent. Help: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2145,7 +2145,7 @@
     }
   },
   "plan_memory": {
-    "description": "Plan intent; record_memory holds outcomes.\n\nInspect/query before writes; reread if stale. No time-inferred completion.\nHelp: bootstrap(section=\"records_planning\").",
+    "description": "Manage intent; record_memory holds outcomes.\n\nInspect/query/validate/history read; others write. Writes select one queried item.\nReread if stale; time never proves completion.\nHelp: bootstrap(section=\"records_planning\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2166,7 +2166,7 @@
         },
         "collection": {
           "type": "string",
-          "description": "Inspect: omit to list."
+          "description": "Omit to list."
         },
         "manifest_path": {
           "type": "string"
@@ -2264,7 +2264,7 @@
         },
         "expected_container_hash": {
           "type": "string",
-          "description": "inspect/query snapshot."
+          "description": "Returned snapshot."
         },
         "acknowledged_gap_codes": {
           "items": {
@@ -2277,11 +2277,11 @@
         },
         "changes": {
           "type": "object",
-          "description": "Update fields."
+          "description": "Update."
         },
         "transition": {
           "type": "object",
-          "description": "Triage fields."
+          "description": "Triage."
         },
         "expected_item_version": {
           "type": "string",
@@ -2305,7 +2305,7 @@
     }
   },
   "prepare_note": {
-    "description": "Plan a sourced note; read-only.\n\nReturns skeleton/related pages; write with create_note. Reuse a proposal\nalready returned by capture_source(compile_guidance=true).",
+    "description": "Prepare a sourced note without saving.\n\nReturns skeleton/related pages; save with create_note.\nReuse capture_source(compile_guidance=true).",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2496,7 +2496,7 @@
     }
   },
   "process_media": {
-    "description": "Reconcile governed media, inspect status, or retry after remediation.\n\nExtraction normally runs automatically.",
+    "description": "Check governed media; retry after remediation.\n\nStatus reads; process/retry change extraction state. Extraction normally runs automatically.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2629,7 +2629,7 @@
     }
   },
   "read_memory": {
-    "description": "Read a page or exact semantic unit selected by recall or known ref.\n\nunit_ref returns that current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.\nAlso reads the paged views exomem://map, exomem://map/topic/<domain key>\nand exomem://map/unfiled.",
+    "description": "Read a selected page, semantic unit or view.\n\nunit_ref returns the current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.\nAlso reads the paged views exomem://map, exomem://map/topic/<domain key>\nand exomem://map/unfiled.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2686,7 +2686,7 @@
     }
   },
   "recall_context": {
-    "description": "Compile bounded authorized context; abstain rather than guess.\n\nReuse live recall policy and held context. For long threads/attachments,\nuse conversation as needed. origin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.",
+    "description": "Recall bounded authorized context; abstain if uncertain.\n\nReuse held policy/context; conversation supplies relevant thread/attachment excerpts.\norigin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2795,7 +2795,7 @@
     }
   },
   "record_memory": {
-    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\nDescribe/propose before create.",
+    "description": "Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.\n\nDescribe/validate/inspect/query/history and import preview/status read.\nPropose before create. Others write or hold candidates.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2819,14 +2819,14 @@
         },
         "collection": {
           "type": "string",
-          "description": "Target; omit for describe, inventory or new-manifest validate/create."
+          "description": "Omit for inventory or new-manifest validate/create."
         },
         "manifest_path": {
           "type": "string"
         },
         "manifest_text": {
           "type": "string",
-          "description": "Full manifest for validate/create/revise."
+          "description": "Manifest for validate/create/revise."
         },
         "why": {
           "type": "string",
@@ -2897,11 +2897,11 @@
         },
         "item_key": {
           "type": "string",
-          "description": "Update UUID; append derives identity from natural key."
+          "description": "Update UUID; append uses the natural key."
         },
         "expected_container_hash": {
           "type": "string",
-          "description": "Current container hash for guarded writes."
+          "description": "Current snapshot for guarded writes."
         },
         "expected_manifest_hash": {
           "type": "string",
@@ -2990,19 +2990,19 @@
         },
         "expected_item_version": {
           "type": "string",
-          "description": "Update item version."
+          "description": "Queried item version."
         },
         "refresh_presentation": {
           "type": "boolean",
-          "description": "Guarded managed Markdown rebuild."
+          "description": "Rebuild managed Markdown with guards."
         },
         "held": {
           "type": "string",
-          "description": "Resume append/update (item/changes override; null removes a field); discard deletes it."
+          "description": "Resume append/update; item/changes override, null removes; discard deletes."
         },
         "hold": {
           "type": "boolean",
-          "description": "False refuses; otherwise invalid candidates are held."
+          "description": "False refuses; otherwise hold invalid candidates."
         },
         "rows": {
           "items": {
@@ -3102,7 +3102,7 @@
     }
   },
   "review_memory": {
-    "description": "Review memory health, provenance, drift, or source backlog.\n\nDefault attention is read-only; repairs use maintain_memory. Vocabulary\npath/query/family submits a meaning question: requires write access,\ngrants no page or vocabulary mutation authority.\n\nmode=\"audit\", categories=[\"unresolved_source_citation\"] finds citations\nunresolved to authorized governed Source/Evidence; never reconstruct originals.",
+    "description": "Review health, provenance, drift and backlog.\n\nAttention reads; repairs use maintain_memory. Vocabulary path/query/family\nsubmits a meaning question: requires write access, grants no page or vocabulary mutation authority.\n\nmode=\"audit\", categories=[\"unresolved_source_citation\"] finds citations\nunresolved to authorized governed Source/Evidence; never reconstruct originals.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3222,7 +3222,7 @@
     }
   },
   "schema_memory": {
-    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\nContracts describe recurring fields, units and relations; write validation\nstays unchanged. Inference is read-only unless save=true; overwrite needs\nthe current hash. For a vocabulary registry: inspect lists the live vocabulary\nand usage; propose previews a delta; save applies upsert, alias or deprecate\nwith expected_hash and why; history lists kept versions; restore reverts one\nwithout rewriting pages.\nOperations: references/operation-routing.md.",
+    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\nContracts describe recurring fields, units and relations. Inference reads unless\nsave=true; overwrite needs the current hash. For a vocabulary registry: inspect lists the live vocabulary\nand usage; propose previews a delta; save applies upsert, alias or deprecate\nwith expected_hash and why; history lists kept versions; restore reverts one\nwithout rewriting pages.\nOperations: references/operation-routing.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3384,7 +3384,7 @@
     }
   },
   "search_memory": {
-    "description": "Retrieve evidence for a known information gap.\n\nSearch compiled knowledge and originals. deep=true returns packed context.\nrecall_context compiles initial turn context; read_memory opens selected\nrefs. Returns evidence, not an answer. Help: bootstrap(profile=\"full\").",
+    "description": "Search compiled knowledge and originals for an evidence gap.\n\nReuse recall_context; read_memory opens selected refs. deep=true packs context.\nResults are bounded; a miss covers only this query/scope. Evidence is not an answer.\nHelp: bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3799,7 +3799,7 @@
     }
   },
   "triage_memory": {
-    "description": "Write fingerprint-bound review_memory triage decisions.",
+    "description": "Save review decisions or attention settings; use returned refs and fingerprints.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

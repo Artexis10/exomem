@@ -42,6 +42,10 @@ Titles describe the whole tool, including mixed effects; they never pretend to d
 The following table covers every current product tool and gives the proposed title and review focus.
 Descriptions retain any necessary distinctions that cannot fit in a short title.
 
+The integrated registry still contains all 33 families and the six compatible name pairs.
+Reconciliation found no operation, parameter, selector, or effect-coverage change.
+Existing provenance, semantic-authoring, continuity, and refusal guidance remains part of the reviewed surface.
+
 | Tool | Proposed public title | Review focus |
 |---|---|---|
 | bootstrap | Read memory instructions and settings | Reuse held policy; request detail only when needed. |

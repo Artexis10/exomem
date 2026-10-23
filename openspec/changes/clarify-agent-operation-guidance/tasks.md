@@ -1,13 +1,13 @@
 ## 1. Product metadata and operation guidance
 
-- [ ] 1.1 Reconcile all 33 tool decisions against the integrated registry; record any changed coverage in design.md.
-- [ ] 1.2 Add registry-owned public titles and remove the adoption exception; verify actual MCP discovery and existing annotation checks.
-- [ ] 1.3 Clarify each tool's job, inputs, effects, results, and recovery; verify supported selectors and guards against existing classifiers and family tests.
+- [x] 1.1 Reconcile all 33 tool decisions against the integrated registry; record any changed coverage in design.md.
+- [x] 1.2 Add registry-owned public titles and remove the adoption exception; verify actual MCP discovery and existing annotation checks.
+- [x] 1.3 Clarify each tool's job, inputs, effects, results, and recovery; verify supported selectors and guards against existing classifiers and family tests.
 
 ## 2. Instruction sources and generated clients
 
-- [ ] 2.1 Align server instructions and bootstrap teaching; verify context reuse, activation fields, maps, continuation, and existing byte ceilings.
-- [ ] 2.2 Align scaffold, workflow skills, and hook sources; verify structured recall, capture routes, source preservation, and mutation recovery.
+- [x] 2.1 Align server instructions and bootstrap teaching; verify context reuse, activation fields, maps, continuation, and existing byte ceilings.
+- [x] 2.2 Align scaffold, workflow skills, and hook sources; verify structured recall, capture routes, source preservation, and mutation recovery.
 - [ ] 2.3 Regenerate current clients from the exact installed candidate; verify owning generator checks, privacy, schemas, and wheel/source agreement.
 
 ## 3. Integrated acceptance and delivery
@@ -20,5 +20,5 @@
 - [ ] 3.6 Synchronize and archive completed changes through OpenSpec; pass strict validation before and after archive with release evidence recorded.
 
 The implementation uses the paired shape: one author for this coupled surface and one independent reviewer of the integrated batch.
-The existing naming implementation retains its approval and release authority; the new metadata and guidance plan requires its own implementation selection.
+The naming, metadata, and guidance changes form one approved implementation and delivery batch.
 Cloud deployment, external submission, publication, and metered evaluation retain their existing explicit authority requirements.

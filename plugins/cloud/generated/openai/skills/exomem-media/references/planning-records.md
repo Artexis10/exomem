@@ -84,7 +84,7 @@ when Exomem cannot capture; move durable results to Exomem when it can.
 
 | Simple action | User phrasing | Product route |
 |---|---|---|
-| `ask` | "what do I know," "find what I concluded," "show the context" | `search_memory(detail="compact", rerank=false)` first; `read_memory` or `search_memory(deep=true)` when synthesis needs context |
+| `ask` | "what do I know," "find what I concluded," "show the context" | Reuse turn context; `search_memory(detail="compact", rerank=false)` for gaps, then `read_memory` or `search_memory(deep=true)` as needed |
 | `create_note` | "remember this," "save this conclusion," "write this decision" | `create_note`; use `supersede_note` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | Pick the lane first, then the transport. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
 | `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `plan_memory` for intended future state in a configured Planning collection |
@@ -174,7 +174,7 @@ Examples:
 
 - "Remember this decision" -> write a concise compiled note and report
   `Saved -> <path>`.
-- "What did I conclude about onboarding?" -> `search_memory` first, cite hits, and
+- "What did I conclude about onboarding?" -> reuse current context, search remaining gaps with `search_memory`, cite hits, and
   retry with adjacent terms before treating a miss as meaningful.
 - "Save this article" -> `capture_source` with provenance; ask about compiling
   only if a conclusion is present.

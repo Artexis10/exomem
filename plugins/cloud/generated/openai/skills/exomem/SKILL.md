@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: dd0f88bac3a81fc1decfc1c4c17f5b74476bcc76e139226241f2e1165de8e6a3
+  skill_contract: 3fb0f9a1a06bae6df24f58c1919aa2ebfcbca71348a275d740b72ecc2ec30d1e
   version: "0.32.0"
 ---
 
@@ -36,7 +36,8 @@ when this session lacks the current `engagement` (including `envelope`) or activ
 capability information. Reuse it until policy, connection, adapter, or returned
 vault configuration/registry state changes. Inspect the exposed bootstrap schema: if it lacks
 `skill_contract`, request `bootstrap(profile="compact")` directly. Otherwise request session;
-if the server rejects the session profile or argument, request compact once. The static skill
+if the server rejects the session profile or argument, request compact once.
+`session_profile_unavailable` marks compact fallback, not loaded session rules. The static skill
 cannot tell you a user's current overrides. Generic MCP clients without this skill
 obtain their portable operating contract from compact bootstrap. Use
 `profile="diagnostics"` only when investigating compute, timing, reranking, or
@@ -81,7 +82,7 @@ The table above also works when the current package is the only installed skill.
 
 ## Portable operating rules
 
-Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
