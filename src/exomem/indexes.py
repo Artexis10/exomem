@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+from . import call_spans
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import kb_prefix
 from .vault import (
@@ -757,7 +758,8 @@ def compute_subindex_writes(
     entities_dir = kb / "Entities"
     entity_registry = load_entity_types(vault_root)
 
-    sources_counts = _count_sources(sources_dir)
+    with call_spans.span("indexes.source_census"):
+        sources_counts = _count_sources(sources_dir)
     notes_counts = _count_notes(notes_dir)
     entities_counts = _count_entities(entities_dir, registry=entity_registry)
     notes_by_subfolder = _count_notes_by_subfolder(notes_dir)
@@ -823,17 +825,20 @@ def compute_subindex_writes(
         if current is not None:
             base_write = planned_bases.get(sources_index.resolve())
             base = base_write.content if base_write is not None else current
-            new = _rewritten_in_place(
-                base,
-                lambda logical: _replace_by_type_section(
-                    logical,
-                    folder_title="Articles",
-                    folder_description=_LEGACY_FOLDER_DESCRIPTIONS["Articles"],
-                    counts=sources_counts,
-                    vault_root=vault_root,
-                ),
-            )
-            new = render_wikilinks_for_vault(new, vault_root)
+            # Keep guarded reading outside the rendering cost: callers may
+            # discard this text while still depending on its validation.
+            with call_spans.span("indexes.sources_render"):
+                new = _rewritten_in_place(
+                    base,
+                    lambda logical: _replace_by_type_section(
+                        logical,
+                        folder_title="Articles",
+                        folder_description=_LEGACY_FOLDER_DESCRIPTIONS["Articles"],
+                        counts=sources_counts,
+                        vault_root=vault_root,
+                    ),
+                )
+                new = render_wikilinks_for_vault(new, vault_root)
             if include_unchanged or new != base:
                 writes.append(PlannedWrite(
                     path=sources_index,
