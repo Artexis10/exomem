@@ -85,13 +85,13 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
     assert "search" not in tools
     assert "fetch" not in tools
 
-    for name in ("ask_memory", "read_memory"):
+    for name in ("search_memory", "read_memory"):
         annotations = tools[name]["annotations"]
         assert annotations["readOnlyHint"] is True
         assert annotations["destructiveHint"] is False
         assert annotations["openWorldHint"] is False
 
-    ask_schema = tools["ask_memory"]["outputSchema"]
+    ask_schema = tools["search_memory"]["outputSchema"]
     assert ask_schema["type"] == "object"
     assert ask_schema["required"] == ["result"]
     assert ask_schema["properties"]["result"]["anyOf"][0]["type"] == "array"
@@ -101,7 +101,7 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
     assert read_schema["type"] == "object"
     assert read_schema["additionalProperties"] is True
 
-    ask_inputs = tools["ask_memory"]["inputSchema"]["properties"]
+    ask_inputs = tools["search_memory"]["inputSchema"]["properties"]
     read_inputs = tools["read_memory"]["inputSchema"]["properties"]
     assert {"query", "detail", "deep", "include_timings", "explain"} <= set(
         ask_inputs

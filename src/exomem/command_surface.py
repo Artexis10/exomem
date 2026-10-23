@@ -11,7 +11,7 @@ import time
 import types
 import typing
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -278,15 +278,12 @@ OPEN_WORLD_OPS: frozenset[str] = frozenset({"capture_source", "preserve_artifact
 
 
 def mcp_tool_annotations(
-    name: str, *, read_only: bool, open_world: bool = False, idempotent: bool = False
+    name: str, *, read_only: bool, open_world: bool = False, idempotent: bool = False,
+    public_title: str | None = None,
 ) -> ToolAnnotations:
-    """MCP behaviour hints for one tool — what cautious clients render as badges."""
+    """Discovery hints for the whole tool; invocation authorization stays separate."""
     return ToolAnnotations(
-        title=(
-            "Adopt Existing Memory"
-            if name == "adoption_studio"
-            else name.replace("_", " ").title()
-        ),
+        title=public_title or name.replace("_", " ").title(),
         readOnlyHint=read_only,
         destructiveHint=False if read_only else (name in DESTRUCTIVE_OPS),
         idempotentHint=idempotent,
@@ -336,6 +333,17 @@ class Command:
     mcp_annotation_pin: Mapping[str, object] | None = field(
         default=None, compare=False, hash=False
     )
+    preferred_name: str | None = None
+    public_title: str | None = None
+
+    @property
+    def public_name(self) -> str:
+        """Preferred discovery spelling; ``name`` remains the execution identity."""
+        return self.preferred_name or self.name
+
+    @property
+    def callable_names(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((self.public_name, self.name)))
 
     @property
     def doc(self) -> str:
@@ -358,8 +366,14 @@ class Command:
         if self.mcp_annotation_pin is not None:
             return ToolAnnotations(**dict(self.mcp_annotation_pin))
         return mcp_tool_annotations(
-            self.name, read_only=self.read_only, open_world=self.name in OPEN_WORLD_OPS
+            self.name, read_only=self.read_only, open_world=self.name in OPEN_WORLD_OPS,
+            public_title=self.public_title or self.public_name.replace("_", " ").title(),
         )
+
+
+def resolve_command(name: str, commands: Iterable[Command]) -> Command | None:
+    """Resolve either spelling only within the adapter's already-filtered registry."""
+    return next((command for command in commands if name in command.callable_names), None)
 
 
 def bind_vault(

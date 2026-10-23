@@ -117,7 +117,7 @@ def test_write_feedback_says_suggestions_were_not_computed(
     # a caller replaying it drops back to the compact projection, pays the
     # retrieval pass, and is handed neither the suggestions nor `computed`.
     assert block["route"] == {
-        "tool": "remember",
+        "tool": "create_note",
         "args": {"suggestions": True, "response_detail": "full"},
     }
 
@@ -199,7 +199,7 @@ def test_remember_declares_the_new_default_on_its_tool_surface() -> None:
     prose — the prose is free to be reworded, the schema contract is not.
     """
     schema = json.loads(_TOOL_SCHEMAS.read_text(encoding="utf-8"))
-    suggestions = schema["remember"]["inputSchema"]["properties"]["suggestions"]
+    suggestions = schema["create_note"]["inputSchema"]["properties"]["suggestions"]
     assert suggestions["default"] is False
 
     # Loose prose check: the description must still name the way back on.

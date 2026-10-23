@@ -224,9 +224,13 @@ class NativeCell:
             raise
 
     async def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        from exomem.command_surface import resolve_command
+        from exomem.commands import PRODUCT_COMMANDS
+
         if self._client is None:
             raise RuntimeError("native cell is not running")
-        if name not in _CALLABLE_TOOLS:
+        command = resolve_command(name, (command for command in PRODUCT_COMMANDS if command.name in _CALLABLE_TOOLS))
+        if command is None:
             raise PermissionError(f"native cell tool is not allowed: {name}")
         if not isinstance(arguments, dict):
             raise TypeError("native cell tool arguments must be an object")
@@ -241,7 +245,7 @@ class NativeCell:
             "structuredContent": _json_value(result.structured_content),
             "isError": bool(result.is_error),
         }
-        if name == "ask_memory" and not envelope["isError"]:
+        if command.name == "ask_memory" and not envelope["isError"]:
             observed = _fallback_observation(envelope)
             if observed is True or (observed is False and self._fallback_detected is not True):
                 self._fallback_detected = observed

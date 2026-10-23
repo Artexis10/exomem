@@ -112,7 +112,7 @@ rewind one line · `s` skip an optional step.
 ## Governed write-back
 
 Saving an insight (`w` on Ask, or Capture's insight kind) writes through
-`remember`. Two governed rules are handled for you, visibly:
+`create_note`. Two governed rules are handled for you, visibly:
 
 - every compiled note needs at least one semantic unit — the editor pre-fills
   an editable `## Observations` line, and if a draft has none, one is appended

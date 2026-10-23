@@ -339,6 +339,19 @@ back under the held boundary. Missed external edits remain subject to the
 existing watcher/reconcile contract; arbitrary-editor linearizability is not
 introduced.
 
+The final seal checks the existing process-local boundary waiter count between
+source guards and produced membership paths. A waiting writer ends the
+uncommitted attempt and releases authority; availability remains withdrawn.
+Successful publication still requires every byte, membership and freshness check.
+An individual file read, directory listing or policy read remains indivisible.
+This does not establish a constant hold or cross-process scheduling guarantee.
+
+The internal republication result distinguishes restored (`True`), declined
+(`False`) and deferred (`None`) attempts. Deferral leaves existing availability
+debt scheduled by the drain's normal backoff; it creates no full-rebuild debt.
+Only a declined proof keeps the existing full-rebuild fallback. Continuous
+writer contention can delay graph availability, while canonical writes proceed.
+
 ## Post-terminal graph receipts retain their dispatch checkpoint
 
 After canonical authority is released, another writer may advance the graph

@@ -1445,6 +1445,13 @@ async def _stdio_session(
     async with asyncio.timeout(timeout * 12):
         async with client:
             tools = {tool.name for tool in await asyncio.wait_for(client.list_tools(), timeout)}
+            from exomem.command_surface import resolve_command
+            from exomem.commands import PRODUCT_COMMANDS
+
+            tools = {
+                command.name if (command := resolve_command(name, PRODUCT_COMMANDS)) else name
+                for name in tools
+            }
             required = {
                 "capture_source",
                 "remember",

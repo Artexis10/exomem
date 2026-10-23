@@ -120,6 +120,38 @@ def _remote_arguments(value: Any) -> bool:
     return isinstance(value, list) and any(_remote_arguments(item) for item in value)
 
 
+def _memory_catalogue(schemas: dict, allowed: frozenset[str]) -> dict:
+    from exomem import commands
+
+    # Arm policy fixes API identities; discovery supplies their actual schema keys.
+    catalogue = {}
+    for command in commands.PRODUCT_COMMANDS:
+        if command.name not in allowed:
+            continue
+        name = command.public_name if command.public_name in schemas else next(
+            (name for name in command.callable_names if name in schemas), None,
+        )
+        if name is not None:
+            catalogue[name] = schemas[name]
+    return catalogue
+
+
+def _available_tool_name(name: str, available: dict) -> str | None:
+    if name in available:
+        return name
+    from exomem import commands
+
+    # Fixed API spellings grant no access beyond identities in the filtered catalogue.
+    admitted = (
+        command for command in commands.PRODUCT_COMMANDS
+        if any(spelling in available for spelling in command.callable_names)
+    )
+    command = commands.resolve_command(name, admitted)
+    if command is None:
+        return None
+    return next(spelling for spelling in command.callable_names if spelling in available)
+
+
 class NativeBroker:
     def __init__(self, *, cell, backend, envelope: RunEnvelope, guidance: dict[str, str],
                  custom_instructions: str = ""):
@@ -133,19 +165,23 @@ class NativeBroker:
         if phase not in {"writer", "answer"}:
             raise ValueError("unknown native phase")
         allowed = WRITER_TOOLS if phase == "writer" else ANSWER_TOOLS
-        return {**{name: schema for name, schema in self.cell.schemas.items() if name in allowed}, **HARNESS_TOOLS}
+        return {**_memory_catalogue(self.cell.schemas, allowed), **HARNESS_TOOLS}
 
     async def tool(self, name: str, arguments: dict, *, phase: str) -> tuple[dict, list[str]]:
         self.envelope.take("tool")
         available = self.available(phase)
-        if name not in available or not isinstance(arguments, dict):
+        if _available_tool_name(name, available) is None or not isinstance(arguments, dict):
             return _denied("Tool unavailable in this phase."), []
         if _remote_arguments(arguments):
             return _denied("Remote files and credentials are unavailable in the text-only diagnostic."), []
         if name == "discover_tools":
             names = arguments.get("names")
-            if set(arguments) != {"names"} or not isinstance(names, list) or len(names) > 20 or any(not isinstance(n, str) or n not in available for n in names):
+            if set(arguments) != {"names"} or not isinstance(names, list) or len(names) > 20 or any(not isinstance(n, str) for n in names):
                 return _denied("Unknown tool requested."), []
+            names = [_available_tool_name(n, available) for n in names]
+            if None in names:
+                return _denied("Unknown tool requested."), []
+            names = list(dict.fromkeys(names))
             return {"loaded": names}, names
         if name == "read_file":
             path = arguments.get("path")
@@ -218,12 +254,17 @@ async def run_agent_phase(
     worker_cwd = out / "worker"
     worker_cwd.mkdir(mode=0o700)
     available = broker.available(phase)
-    if initial_tools is not None:
-        if not isinstance(initial_tools, list) or any(not isinstance(n, str) for n in initial_tools) or not set(initial_tools) <= available.keys():
-            raise ValueError("initial_tools must name only tools available in this phase")
-        active = sorted(set(initial_tools))
-    else:
-        active = sorted({"discover_tools", "read_file", "bootstrap", "ask_memory", "read_memory"} & available.keys())
+    if initial_tools is not None and (
+        not isinstance(initial_tools, list) or any(not isinstance(n, str) for n in initial_tools)
+    ):
+        raise ValueError("initial_tools must name only tools available in this phase")
+    requested = initial_tools if initial_tools is not None else [
+        "discover_tools", "read_file", "bootstrap", "ask_memory", "read_memory",
+    ]
+    resolved = [_available_tool_name(name, available) for name in requested]
+    if initial_tools is not None and None in resolved:
+        raise ValueError("initial_tools must name only tools available in this phase")
+    active = sorted({name for name in resolved if name is not None})
     if messages is not None:
         if turn is not None:
             raise ValueError("messages and turn are mutually exclusive")

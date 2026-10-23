@@ -2008,9 +2008,18 @@ def test_direct_preparation_failure_releases_waiting_contender() -> None:
     assert isinstance(failing, ValueError)
 
 
-def test_exomem_generated_registry_is_fully_classified() -> None:
+@pytest.mark.parametrize("preferred", (False, True))
+def test_exomem_generated_registry_is_fully_classified(preferred: bool) -> None:
     manifest = bench.load_manifest()
     discovered = bench.exomem_registry_inventory()
+    if preferred:
+        from exomem.command_surface import resolve_command
+        from exomem.commands import PRODUCT_COMMANDS
+
+        discovered = {
+            surface: [resolve_command(name, PRODUCT_COMMANDS).public_name for name in names]
+            for surface, names in discovered.items()
+        }
 
     mcp = bench.reconcile_operation_inventory(
         manifest,

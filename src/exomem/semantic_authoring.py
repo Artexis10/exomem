@@ -412,14 +412,14 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "Choose homes by future use and accumulated content, not mentions or broad scope. "
             "Keep coherent long notes; reuse or create a home for independent material."
         ),
-        "new_compiled_note": "remember",
-        "replacement": "replace_memory",
+        "new_compiled_note": "create_note",
+        "replacement": "supersede_note",
         "single_semantic_unit": "observe_memory",
-        "small_edit_or_activation": "edit_memory",
+        "small_edit_or_activation": "edit_note",
         "tier_2": (
             "manage_memory_file create, overwrite, and append receive the same semantic "
-            "precommit contract on the complete resulting compiled Markdown; prefer remember "
-            "or replace_memory when their typed route fits."
+            "precommit contract on the complete resulting compiled Markdown; prefer create_note "
+            "or supersede_note when their typed route fits."
         ),
     }
     findings = {

@@ -50,13 +50,18 @@ def broker(backend, *, limits=None):
     )
 
 
-def test_fresh_answer_worker_obtains_evidence_through_public_tool(tmp_path):
-    backend = Backend([tool("ask_memory", {"query": "current choice"}), {"role": "assistant", "content": "Cedar."}])
+@pytest.mark.parametrize("catalogue_name", ["ask_memory", "search_memory"])
+def test_fresh_answer_worker_obtains_evidence_through_public_tool(tmp_path, catalogue_name):
+    backend = Backend([tool(catalogue_name, {"query": "current choice"}), {"role": "assistant", "content": "Cedar."}])
     b = broker(backend)
+    b.cell.schemas = {catalogue_name: Cell.schemas["ask_memory"]}
     result = asyncio.run(run_agent_phase(b, phase="answer", turn="What is the current choice?", out=tmp_path / "answer"))
     assert result["status"] == "completed"
     assert result["answer"] == "Cedar."
-    assert b.cell.calls == [("ask_memory", {"query": "current choice"})]
+    assert b.cell.calls == [(catalogue_name, {"query": "current choice"})]
+    assert {row["function"]["name"] for row in backend.requests[0]["tools"]} == {
+        "discover_tools", "read_file", catalogue_name,
+    }
     for definition in backend.requests[0]["tools"]:
         assert definition["function"]["strict"] is False
         name = definition["function"]["name"]
@@ -77,10 +82,48 @@ def test_denied_routes_never_dispatch(name, args):
     assert b.cell.calls == []
 
 
-def test_answer_phase_cannot_mutate_memory():
+@pytest.mark.parametrize("name", ["remember", "create_note"])
+def test_answer_phase_cannot_mutate_memory(name):
     b = broker(Backend([]))
-    result, _ = asyncio.run(b.tool("remember", {"title": "Injected"}, phase="answer"))
+    b.cell.schemas = {"create_note": Cell.schemas["remember"]}
+    result, _ = asyncio.run(b.tool(name, {"title": "Injected"}, phase="answer"))
     assert result["isError"] is True
+    assert b.cell.calls == []
+
+
+def test_writer_aliases_preserve_dispatch_without_admitting_other_identities():
+    b = broker(Backend([]))
+    b.cell.schemas = {
+        "remember": Cell.schemas["remember"],
+        "create_note": Cell.schemas["remember"],
+        "recall_context": Cell.schemas["ask_memory"],
+        "unknown_memory": Cell.schemas["ask_memory"],
+    }
+    assert set(b.available("writer")) == {"create_note", "discover_tools", "read_file"}
+    arguments = {"title": "Durable conclusion"}
+    for name in ("remember", "create_note"):
+        result, _ = asyncio.run(b.tool(name, arguments, phase="writer"))
+        assert not result.get("isError")
+    assert b.cell.calls == [("remember", arguments), ("create_note", arguments)]
+    for name in ("activate_context", "recall_context", "unknown_memory"):
+        result, _ = asyncio.run(b.tool(name, {}, phase="writer"))
+        assert result["isError"] is True
+    assert len(b.cell.calls) == 2
+
+
+@pytest.mark.parametrize("catalogue_name", ["remember", "create_note"])
+def test_discovery_projects_aliases_only_within_the_available_catalogue(catalogue_name):
+    b = broker(Backend([]))
+    b.cell.schemas = {catalogue_name: Cell.schemas["remember"]}
+    arguments = {"names": ["remember", "create_note"]}
+    result, loaded = asyncio.run(b.tool("discover_tools", arguments, phase="writer"))
+    assert result == {"loaded": [catalogue_name]}
+    assert loaded == [catalogue_name]
+    assert arguments == {"names": ["remember", "create_note"]}
+    for name in ("activate_context", "recall_context", "unknown_memory"):
+        result, loaded = asyncio.run(b.tool("discover_tools", {"names": [name]}, phase="writer"))
+        assert result["isError"] is True
+        assert loaded == []
     assert b.cell.calls == []
 
 
@@ -169,9 +212,11 @@ def test_oversized_tool_result_stops_without_silent_truncation(tmp_path):
     assert "tool-result byte budget" in result["reason"]
 
 
-def test_explicit_messages_and_initial_tools_bypass_lme_role_prompt(tmp_path):
+@pytest.mark.parametrize("catalogue_name", ["ask_memory", "search_memory"])
+def test_explicit_messages_and_initial_tools_bypass_lme_role_prompt(tmp_path, catalogue_name):
     backend = Backend([{"role": "assistant", "content": "Done."}])
     b = broker(backend)
+    b.cell.schemas = {catalogue_name: Cell.schemas["ask_memory"]}
     explicit = [
         {"role": "system", "content": "TASK-ONLY-SENTINEL"},
         {"role": "user", "content": "Do the task."},
@@ -180,6 +225,7 @@ def test_explicit_messages_and_initial_tools_bypass_lme_role_prompt(tmp_path):
         b, phase="writer", out=tmp_path / "run", messages=explicit, initial_tools=["ask_memory"],
     ))
     assert result["status"] == "completed"
+    assert [row["function"]["name"] for row in backend.requests[0]["tools"]] == [catalogue_name]
     assert backend.requests[0]["messages"] == explicit
     assert "session-end memory maintenance" not in str(backend.requests[0])
     assert "Follow the installed memory skill" not in str(backend.requests[0])

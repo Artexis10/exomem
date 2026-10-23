@@ -27,7 +27,7 @@ directory independently.
 | `exomem.log`             | Server-process structured JSONL log (one line per record).     |
 | `exomem-cli.log`         | One-shot CLI invocations (`doctor`, `status`, product ops, …).  |
 | `exomem-media.log`       | The media worker child process.                                |
-| `queries.jsonl`          | One record per `find()`/`ask_memory` call.                      |
+| `queries.jsonl`          | One record per `find()`/`search_memory` call.                      |
 | `writes.jsonl`           | One record per note/add/replace write.                          |
 | `reads.jsonl`            | One record per `get()` read.                                     |
 | `mutations.jsonl`        | One record per mutation attempt (the mutation journal).          |
@@ -278,7 +278,7 @@ it with `exomem logs verify`.
 
 A row carries `spans`: named phases of that one call, slowest first, each with
 a `count` and a total `ms`. They exist because two boundary clocks can prove a
-call was slow and locate nothing between them — a live `edit_memory` once
+call was slow and locate nothing between them — a live `edit_note` once
 recorded `total_ms=24,394` with `boundary_hold_ms=3,348` and no account of the
 other 21 seconds.
 
@@ -342,7 +342,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `recall.due_state.emit` | Deciding whether that block is new to the session and recording its delivery. |
 | `recall.working_set.carry.phrase`, `recall.working_set.carry.title` | An activation's retrieval carry, one span per rung inside `recall.working_set.carry`: the phrase rung, which names pages by a phrase of distinctive words, and the title rung, which lists pages whose title the turn says. Fields: `admitted` (the request's admitted pages), `stem_rows` (admitted catalogue rows its per-word rarity counts examined, summed over the words), `candidates` (rows its corroboration test examined) and `stats_rebuilt` (1 when the rung rebuilt ranking statistics over the admitted pages instead of reusing them; summed over calls). An owner whose configuration can withhold no page (no governance policy, collection-store marker or lifecycle marker) ranks on the catalogue's own statistics, so its `stats_rebuilt` stays 0. A restricted reader, and the owner under a governance policy, ranks on its admitted pages and rebuilds once per catalogue revision, whether or not any page is withheld. |
 | `recall.working_set.lanes.<position>` | One activation role lane, named by its position, never by its role. Fields: `rows_read` (rows the lane's maintained-catalogue reads returned), `pages_parsed` (unit-parent pages it read from Markdown and parsed), `catalogue_ms` and `hydration_ms` (whole milliseconds inside those two reads, rounded down). The rest of the lane's duration is its own selection work. |
-| `runtime.gc` | Garbage-collection pauses inside one `activate_context` call: the duration is the pause time and `collections` the number of collections. A collection stops every thread, so the pauses counted are those inside the call's interval, whichever thread triggered them. Absent when no collection ran. |
+| `runtime.gc` | Garbage-collection pauses inside one `recall_context` call: the duration is the pause time and `collections` the number of collections. A collection stops every thread, so the pauses counted are those inside the call's interval, whichever thread triggered them. Absent when no collection ran. |
 | `command.leaf`, `command.postfilter` | The dispatcher envelope, then the MCP-layer filter and scrub. The dispatcher envelope includes its command body, first terminal filter and disclosure receipt. |
 | `command.body`, `command.terminal_filter`, `command.disclosure_receipt` | Dispatcher stages on the read-only and the mutation path: invoke the command, filter its result or error, then, on a read, emit the disclosure receipt. Failed stages retain their duration. |
 | `mutation.idempotency_claim` | Keyed claim attempts in the command body, including SQLite commit and close. Excludes capture queue waits, pending-replay polling, and the mutation operation. Wall and thread CPU totals aggregate repeated attempts. |
@@ -619,8 +619,8 @@ neither a ceiling nor a release.
 
 ## Recall availability
 
-The packaged MCP canary checks private cases through `ask_memory`,
-`activate_context` and `read_memory`.
+The packaged MCP canary checks private cases through `search_memory`,
+`recall_context` and `read_memory`.
 On a schema mismatch, the attempt can retain `schema_failure` with the validator
 keyword and `schema_path_sha256`. The hash covers the first rejected schema
 path encoded with compact JSON separators. It comes from the same validation

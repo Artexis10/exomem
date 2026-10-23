@@ -157,7 +157,9 @@ def test_generated_bridge_covers_only_registry_static_reads_and_preserves_select
     report = install(profile, "codex")
     generated = json.loads((profile / "hooks" / retrieve.REFRESH_METADATA_NAME).read_text())
     assert generated["operations"] == {
-        command.name: command.read_only for command in commands.product_commands_for("mcp")
+        name: command.read_only
+        for command in commands.product_commands_for("mcp")
+        for name in command.callable_names
     }
     assert generated["activation"] == {
         "operation": "activate_context",

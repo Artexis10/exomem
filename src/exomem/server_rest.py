@@ -264,7 +264,8 @@ def register_rest_facade(
         surface="rest",
         profile="openapi",
         tier2_enabled=expose_tier2,
-        product_commands=tuple(command.name for command in rest_commands),
+        product_commands=tuple(command.public_name for command in rest_commands),
+        compatibility_commands=tuple(command.name for command in rest_commands if command.preferred_name),
     )
 
     def _rest_principal(request: Request) -> tuple[bool, str | None]:
@@ -350,8 +351,8 @@ def register_rest_facade(
 
             latency_watch.current().record_failure()
 
-    def _register_rest(cmd: commands_module.Command) -> None:
-        @mcp_app.custom_route(f"/api/{cmd.name}", methods=["POST"])
+    def _register_rest(cmd: commands_module.Command, exposed_name: str) -> None:
+        @mcp_app.custom_route(f"/api/{exposed_name}", methods=["POST"])
         async def _served(request: Request, _cmd: commands_module.Command = cmd) -> JSONResponse:
             # Everything the handler does with a restricted refusal happens inside its floor.
             async with projection_timing.surface_refusal_floor():
@@ -522,10 +523,11 @@ def register_rest_facade(
             finally:
                 _observe_rest(_cmd.name, outcome=outcome, started=t0, request_id=request_id)
 
-        _served.__name__ = f"_api_{cmd.name}"
+        _served.__name__ = f"_api_{exposed_name}"
 
     for cmd in rest_commands:
-        _register_rest(cmd)
+        for exposed_name in cmd.callable_names:
+            _register_rest(cmd, exposed_name)
 
     @mcp_app.custom_route("/api/openapi.json", methods=["GET"])
     async def _api_openapi(request: Request) -> JSONResponse:  # noqa: ARG001
@@ -571,9 +573,9 @@ def register_rest_facade(
             summary = (cmd.description or cmd.name).strip().splitlines()[0]
             success_schema, command_schemas = _openapi_success_schema(cmd)
             response_schemas.update(command_schemas)
-            paths[f"/api/{cmd.name}"] = {
+            paths[f"/api/{cmd.public_name}"] = {
                 "post": {
-                    "operationId": cmd.name,
+                    "operationId": cmd.public_name,
                     "summary": summary,
                     **(
                         {"description": semantic_authoring.CLI_REST_POINTER}

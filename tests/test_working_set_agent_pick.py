@@ -278,7 +278,7 @@ def test_a_captured_session_entry_is_labelled_for_read_memory() -> None:
     assert "- session:" in block, block
     assert "- recent:" not in block, block
     assert "read_memory" in hook._WORKING_SET_HEADER
-    assert "activate_context" in hook._WORKING_SET_HEADER
+    assert "recall_context" in hook._WORKING_SET_HEADER
 
 
 def test_the_named_pages_menu_now_offers_the_anchor_remedy() -> None:
@@ -326,7 +326,7 @@ def test_the_named_pages_menu_now_offers_the_anchor_remedy() -> None:
     closing = block.splitlines()[-1]
 
     assert "anchor" in closing, closing
-    assert "activate_context" in closing, closing
+    assert "recall_context" in closing, closing
     assert "read_memory" not in closing, closing
 
 
@@ -527,7 +527,7 @@ def test_the_header_routes_by_kind() -> None:
     for kind in ("unit", "pointer", "state", "session"):
         assert f"`{kind}`" in hook._WORKING_SET_HEADER, hook._WORKING_SET_HEADER
     assert "read_memory" in hook._WORKING_SET_HEADER
-    assert "activate_context(anchor=...)" in hook._WORKING_SET_HEADER
+    assert "recall_context(anchor=...)" in hook._WORKING_SET_HEADER
 
 
 def test_a_resolved_packet_still_shows_its_answer_at_a_small_hook_ceiling() -> None:

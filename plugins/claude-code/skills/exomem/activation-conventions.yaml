@@ -1,6 +1,6 @@
 # Activation conventions — how THIS vault is shaped and spelled.
 #
-# `activate_context` resolves a raw turn to durable anchors and fills a small
+# `recall_context` resolves a raw turn to durable anchors and fills a small
 # working-memory packet. Some of what it needs to know is not a universal
 # rule — it is a fact about how ONE vault happens to be organised: which
 # folders hold resources and hubs, which folders are noise the index should

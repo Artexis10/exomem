@@ -660,11 +660,12 @@ def test_unknown_param_rejected(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.json()["error"]["code"] == "UNKNOWN_PARAM"
 
 
-def test_blob_guard_preserved(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("name", ("remember", "create_note"))
+def test_blob_guard_preserved(vault, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     blob = "data:image/png;base64," + "A" * 40000
     r = client.post(
-        "/api/remember",
+        f"/api/{name}",
         json={"note_type": "insight", "title": "x", "content": blob},
         headers=_auth(),
     )
@@ -672,11 +673,12 @@ def test_blob_guard_preserved(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.json()["error"]["code"] == "BINARY_BLOB_REJECTED"
 
 
-def test_blob_guard_nested_edits_preserved(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("name", ("edit_memory", "edit_note"))
+def test_blob_guard_nested_edits_preserved(vault, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     blob = "data:image/png;base64," + "A" * 40000
     r = client.post(
-        "/api/edit_memory",
+        f"/api/{name}",
         json={
             "path": "Knowledge Base/Notes/Insights/x.md",
             "why": "nested blob",
@@ -695,7 +697,7 @@ def test_edit_memory_rest_and_openapi_use_discriminated_primary_shape(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
-    schema = client.get("/api/openapi.json").json()["paths"]["/api/edit_memory"]["post"][
+    schema = client.get("/api/openapi.json").json()["paths"]["/api/edit_note"]["post"][
         "requestBody"
     ]["content"]["application/json"]["schema"]
 
@@ -866,10 +868,10 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     doc = client.get("/api/openapi.json").json()
     assert doc["openapi"].startswith("3.1")
-    assert "/api/replace_memory" in doc["paths"]
-    assert "/api/ask_memory" in doc["paths"]
+    assert "/api/supersede_note" in doc["paths"]
+    assert "/api/search_memory" in doc["paths"]
     assert "/api/observe_memory" in doc["paths"]
-    ask_schema = doc["paths"]["/api/ask_memory"]["post"]["requestBody"]["content"][
+    ask_schema = doc["paths"]["/api/search_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
     props = ask_schema["properties"]
@@ -900,7 +902,7 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert "enum" not in entity_type_schema
     assert "active entity registry" in entity_type_schema["description"]
     assert "_Schema/entity-types.yaml" in entity_type_schema["description"]
-    success = doc["paths"]["/api/ask_memory"]["post"]["responses"]["200"]
+    success = doc["paths"]["/api/search_memory"]["post"]["responses"]["200"]
     response_schema = success["content"]["application/json"]["schema"]
     encoded_response = json.dumps(
         {
@@ -956,7 +958,7 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
         "relation_review_hash",
         "relation_review_reason",
     } <= set(observe_schema["properties"])
-    remember_schema = doc["paths"]["/api/remember"]["post"]["requestBody"]["content"][
+    remember_schema = doc["paths"]["/api/create_note"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
     assert {"slug", "vocabulary_decision", *REVIEW_FIELDS} <= set(remember_schema["properties"])
@@ -997,7 +999,7 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
         "targets",
         "omitted_target_count",
     }
-    conflict = doc["paths"]["/api/remember"]["post"]["responses"]["409"]
+    conflict = doc["paths"]["/api/create_note"]["post"]["responses"]["409"]
     assert conflict["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ErrorEnvelope"
     }

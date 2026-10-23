@@ -130,13 +130,15 @@ _KB_WRITE = re.compile(
     r")",
     re.I,
 )
+# Preparation only returns a proposal; standalone deployers copy bytes and cannot import the registry.
+_PREPARATION_TOOL_SUFFIXES = ("compile_source", "prepare_note")
 
 #: The capture check, one short line on every fire. It names the rules that prevent known
 #: incidents and points at the installed skill or portable operating contract.
 #: A connected vault need not contain a readable copy of the shipped references.
 #: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
-    "[Exomem capture check] Per live policy: no transcripts; replace_memory supersedes a "
+    "[Exomem capture check] Per live policy: no transcripts; supersede_note supersedes a "
     "contradicted conclusion; intent->Planning/plan_memory, outcome->Records/record_memory; "
     "no transient code/test/CI; nothing durable: stop. "
     'Rules: Exomem skill or bootstrap(profile="compact").'
@@ -503,6 +505,8 @@ def _successful_kb_write(tool: dict) -> bool:
     if tool.get("failed"):
         return False
     name = str(tool.get("name") or "")
+    if name.lower().rsplit("__", 1)[-1] in _PREPARATION_TOOL_SUFFIXES:
+        return False
     tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
     # `operation` for the mixed tools that use it; `action` for the two
     # structured-collection commands, whose selector is spelled `action`. Without
@@ -512,7 +516,8 @@ def _successful_kb_write(tool: dict) -> bool:
     selector = f"{name}:{operation}" if operation else name
     if not _KB_WRITE.search(selector):
         return False
-    if "edit_memory" in name.lower() and tool_input.get("validate_only") is True:
+    # Hook deployers copy standalone bytes; these closed API spellings need no package or runtime name resource.
+    if name.lower().endswith(("edit_memory", "edit_note")) and tool_input.get("validate_only") is True:
         return False
     return True
 
@@ -707,7 +712,7 @@ def _successful_landing(tool: dict) -> bool:
 #: Written by `install-hook`, cleared once an exomem MCP tool is observed. The
 #: hooks take effect for the CURRENT session, but the MCP server they reference
 #: is not loaded until the client restarts — so on a fresh install the very
-#: first thing the product does is ask for `remember` / `edit_memory` /
+#: first thing the product does is ask for `create_note` / `edit_note` /
 #: `connect_memory`, none of which exist yet, and there is no CLI fallback for
 #: the write side. The nudge's own escape hatch ("no Knowledge Base configured,
 #: do nothing") cannot detect this case.

@@ -70,14 +70,14 @@ performs no action.
 Conclusion-changing work has a proposal step and a separate confirmation:
 
 - Relation suggestions come from read-only `connect_memory`; single-candidate
-  acceptance is an audited `edit_memory` call, and queue acceptance is the
+  acceptance is an audited `edit_note` call, and queue acceptance is the
   governed `connect_memory(operation="accept-relation")`, which revalidates the
   candidate's fingerprint, the target page hash, and live eligibility before
   authoring exactly one canonical `## Relations` bullet.
-- Source compilation starts with read-only `compile_source`; the editable draft
-  becomes knowledge only through confirmed `remember`.
+- Source compilation starts with read-only `prepare_note`; the editable draft
+  becomes knowledge only through confirmed `create_note`.
 - Supersession previews the exact target, successor draft, reason, and
-  consequence before confirmed `replace_memory` preserves the old version.
+  consequence before confirmed `supersede_note` preserves the old version.
 
 Validation failures leave the dialog and draft intact. Proposal generation and
 cancellation never mutate the vault. Existing server validation, expected-hash

@@ -393,8 +393,8 @@ def test_full_bootstrap_and_edit_description_teach_both_recovery_paths(
         assert "supports:: [[" in text
         assert "not" in text.lower() or "unsupported" in text.lower()
     reviewed = bootstrap["authoring_contract"]["reviewed_existing_edit"]
-    assert reviewed["validate_call"]["tool"] == "edit_memory"
-    assert reviewed["commit_call"]["tool"] == "edit_memory"
+    assert reviewed["validate_call"]["tool"] == "edit_note"
+    assert reviewed["commit_call"]["tool"] == "edit_note"
     assert reviewed["validate_call"]["arguments"]["operation"]["validate_only"] is True
     assert (
         reviewed["commit_call"]["arguments"]["operation"]["relation_disposition"]

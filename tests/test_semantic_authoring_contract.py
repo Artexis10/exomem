@@ -24,7 +24,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     9,
-    "sha256:80611c297969dd7a1e73dcf4a43d0ee3f6559e62bb00afffe74f971dba01a56c",
+    "sha256:5c51c091751dfca2645a71fa607dd16eb23a6a68b16fb55b37df18c9503f6949",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -235,14 +235,14 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     routes = dict(contract["routes"])
     assert routes.pop("destination_fitness")
     assert routes == {
-        "new_compiled_note": "remember",
-        "replacement": "replace_memory",
+        "new_compiled_note": "create_note",
+        "replacement": "supersede_note",
         "single_semantic_unit": "observe_memory",
-        "small_edit_or_activation": "edit_memory",
+        "small_edit_or_activation": "edit_note",
         "tier_2": (
             "manage_memory_file create, overwrite, and append receive the same semantic "
-            "precommit contract on the complete resulting compiled Markdown; prefer remember "
-            "or replace_memory when their typed route fits."
+            "precommit contract on the complete resulting compiled Markdown; prefer create_note "
+            "or supersede_note when their typed route fits."
         ),
     }
     findings = contract["findings"]
@@ -409,8 +409,8 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         "next non-fenced heading at level N or shallower",
         "`missing_semantic_unit`",
         "`empty_rich_unit`",
-        "`remember`",
-        "`replace_memory`",
+        "`create_note`",
+        "`supersede_note`",
         "`observe_memory`",
         "Tier 2",
         "independent obligations",

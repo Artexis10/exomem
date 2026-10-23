@@ -41,7 +41,7 @@
     {
       "title": "Find everyday documents",
       "intent": "Retrieve records by topic, person, trip, purchase, or household context.",
-      "route": "record_memory(action=query) for bounded Record history; use ask_memory for compiled conclusions or original documents",
+      "route": "record_memory(action=query) for bounded Record history; use search_memory for compiled conclusions or original documents",
       "example": "Find the documents for the trip."
     }
   ],

@@ -2,7 +2,7 @@
 
 ## Search
 
-`ask_memory` is the normal product command for recall. Underneath, `find` runs in
+`search_memory` is the normal product command for recall. Underneath, `find` runs in
 **hybrid mode** by default: BM25 + local vector embeddings
 (a multilingual model on a personal server, `BAAI/bge-m3`, 1024-dim) fused via
 reciprocal rank fusion.
@@ -21,11 +21,19 @@ Modes:
 Empty queries degrade to filtered-most-recent regardless of mode.
 
 **Scope — the vault is bigger than the KB:**
-- `scope="kb"` (default) searches `Knowledge Base/` first and **auto-widens to
-  the whole vault** when the KB doesn't fill `limit`. Content in sibling folders
-  is reachable, not silently invisible. Widened hits carry `outside_kb: true`.
-- `scope="vault"` always walks the whole vault. `scope="kb-only"` is the strict
-  opt-out (KB only, never widens).
+- `scope="kb"` (default) searches only `Knowledge Base/`.
+  For a non-empty query, `widen_outside_kb=true` reserves up to `limit - 1`
+  result slots for eligible sibling pages, even when KB matches fill `limit`.
+  Widened hits carry `outside_kb: true`.
+- `scope="vault"` searches eligible candidates across the whole vault.
+  `scope="kb-only"` stays inside the KB and ignores widening.
+  Scope does not override recall admission or governance.
+- **Records and Planning use structured recall.** Ordinary recall admits their
+  valid collection manifests, but excludes raw items, logs and derived summaries.
+  Neither `scope="vault"` nor `prefer_compiled=false` changes that boundary.
+  For an observed event, state or planned item, follow the collection
+  inspect/query route in [Planning and Records](planning-records.md#simple-front-door).
+  A missing ordinary hit does not establish that the collection lacks an item.
 - **Never report a search-miss as absence.** An empty result means *"not found in
   what I searched,"* not *"it doesn't exist."* If you're sure something exists,
   try `scope="vault"`, vary the query terms, or `read_memory` a path you suspect.
@@ -39,9 +47,9 @@ When recall returns a `referents` block, name only its `resolved` entities.
 For `partial`, say how many people remain unresolved; for `ambiguous`, ask the
 user to disambiguate; for `unresolved`, never guess. When the user supplies a
 missing identity, run `connect_memory(operation="resolve-entity")` first, then
-create the durable entity or use `edit_memory` to add a reviewed alias.
+create the durable entity or use `edit_note` to add a reviewed alias.
 
-Additional knobs exposed through `ask_memory`/`find`: `graph=true` (default; expands
+Additional knobs exposed through `search_memory`/`find`: `graph=true` (default; expands
 1-hop neighbours of strong matches through the typed graph sidecar when it is
 available — typed and provenance relations rank ahead of plain wikilinks, and a
 hit surfaced this way carries a `graph` annotation naming the relation type,
@@ -74,11 +82,11 @@ need what was left out.
 A `latency` block on a `bootstrap` response means this client's own recent recalls have been slower than the service's ceiling; its `dominant_spans` name the stage responsible, and it is absent when nothing is slow.
 
 Performance presets:
-- Normal lookup: `ask_memory(detail="compact", rerank=false)`.
-- Reasoning context: `ask_memory(deep=true)` when you need a compressed evidence bundle;
+- Normal lookup: `search_memory(detail="compact", rerank=false)`.
+- Reasoning context: `search_memory(deep=true)` when you need a compressed evidence bundle;
   add `graph_enrich=true` only when you need typed graph neighborhoods alongside
   the normal pack contract.
-- Diagnostics: `ask_memory(include_timings=true)`; add `rerank=true` only when you are
+- Diagnostics: `search_memory(include_timings=true)`; add `rerank=true` only when you are
   intentionally measuring reranking or spending latency for precision. Interpret
   timing output with the returned compute mode, embedding backend, cache state,
   rerank flag, and search profile.
@@ -90,7 +98,7 @@ Use relevant held context first. Activation selects bounded working context;
 task lookup does not show that the vault lacks the answer. Restricted readers
 retain categorical baseline selection without supplemental task matching.
 
-Use focused `ask_memory` for a remaining question. Use `deep=true` when a bounded
+Use focused `search_memory` for a remaining question. Use `deep=true` when a bounded
 evidence pack helps compare sources. Read a selected source when its qualifications
 or complete contents matter. A directory requires `read_memory(path=<parent page>)`
 without `unit_ref`. A unit read is not the whole page or directory.
@@ -131,17 +139,17 @@ context, pass that reference or category/kind filters to
 `connect_memory(operation="graph-context")`. Compact categories do not imply
 typed edges: traversal follows authored relations only.
 
-## Context activation packets (`activate_context`)
+## Context activation packets (`recall_context`)
 
 Use for initial context when the live engagement policy from `bootstrap` warrants
 recall. Pass the current user's words verbatim, not a search query; skip if a hook
 already injected this turn's working set. For a known information gap, use
-`ask_memory`, then `read_memory` on selected refs. Activation is read-only and
+`search_memory`, then `read_memory` on selected refs. Activation is read-only and
 abstains rather than guessing.
 
 A packet may instead carry a map: an index of what exists, with titles, refs,
 descriptions and current state when available. Read the map and pull by ref
-with `read_memory`, or query `ask_memory`, before answering; cite the refs you use.
+with `read_memory`, or query `search_memory`, before answering; cite the refs you use.
 Read `exomem://map` for the paginated index and follow its domain-map refs for
 material beyond the packet. A map is not a claim that its items fit the turn.
 Read an anchor's profile through its `profile` ref.
@@ -307,7 +315,7 @@ its own rules, or dispose of it.
 
 **`learning`** may ride on an `anchor` call whose turn never named the chosen
 page: an advisory naming the writer that would teach the vault the user's words
-(`edit_memory` adding to `learned_aliases`, or `schema_memory save-conventions`
+(`edit_note` adding to `learned_aliases`, or `schema_memory save-conventions`
 adding a referential cue) with the `expected_hash` it needs, plus `turn_terms`.
 It writes nothing; act only if those words should reach that page, else dismiss
 its `review` ref with `triage_memory`.

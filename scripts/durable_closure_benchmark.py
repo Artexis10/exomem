@@ -388,7 +388,13 @@ def workflow_plan(variant: str) -> list[dict[str, Any]]:
 
 def required_tools_missing(discovered: Iterable[str]) -> list[str]:
     """Return required product calls missing from the registered MCP surface."""
-    available = set(discovered)
+    from exomem.command_surface import resolve_command
+    from exomem.commands import PRODUCT_COMMANDS
+
+    available = {
+        command.name if (command := resolve_command(name, PRODUCT_COMMANDS)) else name
+        for name in discovered
+    }
     return sorted(name for name in REQUIRED_PUBLIC_TOOLS if name not in available)
 
 
