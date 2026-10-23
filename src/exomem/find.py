@@ -2125,12 +2125,10 @@ def find(
         mixed_plan = _mixed_plan(paths, mixed_unit_hits, limit=limit, config=resolved_config)
         return {identity for _score, priority, identity, _rank, _lane in mixed_plan.items if priority == 0}
 
-    # Widening and post-selection dates can change page-lane membership. Keep
-    # their existing path until their complete metadata selection is available.
+    # Typed eligibility already includes shortcut and date filters. Widening
+    # still changes page membership after this boundary and retains its path.
     select_pages = (
-        select_mixed_pages if mixed and query_norm and catalog_view is not None
-        and not widen_outside_kb and updated_after is None and updated_before is None
-        and recency_days is None else None
+        select_mixed_pages if mixed and catalog_view is not None and not widen_outside_kb else None
     )
 
     # Primary page semantic recall spans the vault even before widening.
@@ -5018,6 +5016,7 @@ def _find_managed_browse(
     file_types: list[str] | None,
     exclude_file_types: list[str] | None,
     page_memo: dict[str, ParsedPage | None] | None = None,
+    select_pages: Callable[[list[str]], set[str]] | None = None,
 ) -> list[Hit]:
     """Order emitted identities before hydrating a bounded answer.
 
@@ -5099,17 +5098,27 @@ def _find_managed_browse(
         if emitted != rel and row.media_file and emitted not in frames:
             frames[emitted] = row
 
-    hits: list[Hit] = []
-    for emitted in sorted(
+    emitted_paths = sorted(
         first, key=lambda rel: _browse_order_key(rel, metadata[rel].updated), reverse=True
-    ):
-        candidate = _resolve_page(vault_root, first[emitted], pending)
+    )
+    if select_pages is not None:
+        # Preserve the original lane limit and freeze mixed identities before
+        # any canonical proof can fail. Missing selected groups do not refill.
+        selected_paths = select_pages(emitted_paths[:limit])
+        emitted_paths = [path for path in emitted_paths[:limit] if path in selected_paths]
+    pages = page_memo if page_memo is not None else {}
+
+    def resolve(path: str) -> ParsedPage | None:
+        if path not in pages:
+            pages[path] = _resolve_page(vault_root, path, pending)
+        return pages[path]
+
+    hits: list[Hit] = []
+    for emitted in emitted_paths:
+        candidate = resolve(first[emitted])
         page = (
-            candidate if first[emitted] == emitted else _resolve_page(vault_root, emitted, pending)
+            candidate if first[emitted] == emitted else resolve(emitted)
         )
-        if page_memo is not None:
-            page_memo[first[emitted]] = candidate
-            page_memo[emitted] = page
         if candidate is None or page is None:
             from . import lexstore
 
@@ -5346,6 +5355,7 @@ def _find_keyword(
             file_types=file_types,
             exclude_file_types=exclude_file_types,
             page_memo=page_memo,
+            select_pages=select_pages,
         )
     lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
     if query_norm:
@@ -5638,6 +5648,15 @@ def _find_semantic(
         # path where a walk is MOST likely: both rankers produced nothing, and
         # `_find_keyword` is about to enumerate whatever it can. Its own span
         # here is what makes those declarations land.
+        fallback_ranks: dict[str, int] = {}
+
+        def select_fallback_pages(paths: list[str]) -> set[str]:
+            assert select_pages is not None
+            selected = select_pages(paths)
+            fallback_ranks.update({path: rank for rank, path in enumerate(paths, start=1)
+                                   if path in selected})
+            return selected
+
         with _span(timings, "keyword"):
             fallback_hits = _find_keyword(
                 vault_root,
@@ -5658,11 +5677,13 @@ def _find_semantic(
                 pending_paths=pending_paths,
                 timings=timings,
                 page_memo=page_memo,
+                select_pages=select_fallback_pages if select_pages is not None else None,
             )
         if retrieval_trace is not None:
             retrieval_trace.record_keyword_fallback(
                 fallback_hits,
                 lane_profiles=bundle.lane_statuses,
+                ranks=fallback_ranks or None,
             )
         _set_rerank_timing_profile(
             timings,
