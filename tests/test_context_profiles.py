@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import logging
 import threading
 from pathlib import Path
 
@@ -25,7 +27,7 @@ from test_context_views import (
     _warm_catalogue,
     _world,
 )
-from test_governance_egress import _external
+from test_governance_egress import _external, write_rule
 from test_latency_gate import _seed_freshness_live
 from test_working_set_withheld_twins import _withhold
 
@@ -34,6 +36,7 @@ from exomem import context_catalogue as cc
 from exomem import context_views as cv
 from exomem.activation_result import INDEX_WARMING
 from exomem.governance import egress, principal
+from exomem.writer_lease import invoke_command
 
 HUB = f"{INSIGHTS}/harbour-hub.md"
 
@@ -60,8 +63,9 @@ def _items(pages: list[dict]) -> list[dict]:
     return [item for page in pages for item in page["items"]]
 
 
-def test_profiles_page_to_exhaustion_without_reading_the_owner_cache_or_leaking_a_withheld_member(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mention", ["plain", "unit", "state"] )
+def test_profiles_page_to_exhaustion_without_leaking_a_withheld_member_or_mention(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mention: str
 ) -> None:
     """The P3 twins stay identical through profiles, including their generations and signed continuations."""
     _frozen(monkeypatch, page_size=1)
@@ -69,16 +73,24 @@ def test_profiles_page_to_exhaustion_without_reading_the_owner_cache_or_leaking_
     refs = (cv.anchor_profile_ref(HUB), cv.topic_profile_ref("harbour"))
     for root, present in ((vault, True), (twin, False)):
         _seed_profile(root, with_w=present)
-        _withhold(root, THREAD_W, ceiling=0)
+        if present:
+            _write(root, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# secret-cluster\n\nHidden.\n")
+        if mention == "unit":
+            page = root / HUB
+            page.write_text(page.read_text().replace("Reserve the inner quay", "Reserve the inner quay beside [[secret-cluster]]"))
+            note = root / MOORING
+            note.write_text(note.read_text().replace("Use doubled lines", "Use doubled lines beside [[secret-cluster]]"))
+        if mention == "state":
+            crane = _page(root, "quay-crane", "topics: [harbour]\nupdated: 2026-10-12\nstate: 'Parked beside [[secret-cluster]]'\n",
+                          folder=f"{KB}/Products")
+            _write(root, f"{KB}/_Schema/context-roles.yaml", "roles:\n  current_state:\n    anchor_defaults: [resource, collection, hub]\n")
+            refs = (cv.anchor_profile_ref(crane), cv.topic_profile_ref("harbour"))
+        _withhold(root, THREAD_W, SECRET, ceiling=0)
+        _built(root)
+        lexstore.ensure_fresh(root)
         _cold()
         owner = {ref: _pages(root, ref) for ref in refs}
         assert all(len(pages) > 1 for pages in owner.values())
-    assert cv._PROFILE_CACHE  # An owner populated the cache before either restricted read.
-
-    def owner_cache_is_forbidden(*args):
-        raise AssertionError("a restricted profile inspected the owner cache")
-
-    monkeypatch.setattr(cv, "_cached_profile", owner_cache_is_forbidden)
     guests = []
     for root in (vault, twin):
         _cold()
@@ -86,13 +98,20 @@ def test_profiles_page_to_exhaustion_without_reading_the_owner_cache_or_leaking_
     assert json.dumps(guests[0], sort_keys=True) == json.dumps(guests[1], sort_keys=True)
     for ref, pages in guests[0].items():
         encoded = json.dumps(pages, sort_keys=True)
-        assert THREAD_W not in encoded
+        assert THREAD_W not in encoded and SECRET not in encoded
+        assert "[[" not in encoded
+        if mention == "unit":
+            linked_text = "Reserve the inner quay beside" if ref == cv.anchor_profile_ref(HUB) else "Use doubled lines beside"
+            assert linked_text in encoded
+        if mention == "state":
+            assert any(item["kind"] == "current_state" and item["statement"] == "state: Parked beside" for item in _items(pages))
+            assert any(item["kind"] == "pointers" and item["title"] == "state: Parked beside" for item in _items(pages))
         assert all(len(page["items"]) <= 1 for page in pages)
         assert len(pages) > 1 and pages[0]["continuation"]
-        assert len({(item["kind"], item["ref"]) for item in _items(pages)}) == len(_items(pages))
+        assert len({(item["kind"], item.get("ref") or item.get("anchor")) for item in _items(pages)}) == len(_items(pages))
         print(json.dumps({"workflow": "restricted profile read", "ref": ref,
                           "pages": len(pages), "items": len(_items(pages)),
-                          "withheld_path_present": THREAD_W in encoded, "twins_equal": True}))
+                          "withheld_path_present": THREAD_W in encoded or SECRET in encoded, "twins_equal": True, "mention": mention}))
 
 
 def test_profile_units_keep_their_own_dates_supersession_and_whole_claims(
@@ -165,7 +184,7 @@ def test_topic_profile_reads_declared_notes_and_does_not_import_lexical_mentions
     assert "passing-mention" not in json.dumps(notes_only)
 
 
-def test_profile_serves_its_last_published_build_stale_until_the_member_is_folded(
+def test_profile_marks_the_published_index_build_stale_until_the_member_is_folded(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A pending member cannot silently replace the published profile with partially refreshed lanes."""
@@ -174,6 +193,7 @@ def test_profile_serves_its_last_published_build_stale_until_the_member_is_folde
     baseline = _ask(vault, ref)
     _warm_catalogue(monkeypatch)
     _leave_pending(vault, MOORING, monkeypatch)
+    lexstore.ensure_fresh(vault)
     stale = _ask(vault, ref)
     assert stale == {**baseline, "stale": True}
     lexstore.ensure_fresh(vault)
@@ -218,15 +238,18 @@ def test_a_build_started_before_a_write_never_replaces_the_newer_profile(
 
     monkeypatch.setattr(working_set, "run_lanes", lanes_then_write)
     response = _ask(vault, ref)
-    assert newer and response == newer[0]
-    assert "Use braided lines" in json.dumps(response)
-    assert "Use doubled lines" not in json.dumps(response)
-    assert _ask(vault, ref) == newer[0]
+    assert newer and response["state"] == INDEX_WARMING and not response["items"]
+    with monkeypatch.context() as patch:
+        patch.setattr(working_set, "run_lanes", run)
+        current = _ask(vault, ref)
+    assert current == newer[0]
+    assert "Use braided lines" in json.dumps(current)
+    assert "Use doubled lines" not in json.dumps(current)
 
 
 @pytest.mark.parametrize("live", [True, False], ids=["event-maintained", "non-live-warming"])
 def test_a_captured_decision_reaches_the_anchor_profile_after_derived_sync(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live: bool
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A completed catalogue receipt must invalidate a warmed anchor profile and retain the decision's own date."""
     monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
@@ -255,6 +278,7 @@ def test_a_captured_decision_reaches_the_anchor_profile_after_derived_sync(
     assert batches
     _settle(vault, batches)
     if not live:
+        caplog.set_level(logging.DEBUG, logger=working_set.__name__)
         # Hold the existing background repair until both callers observe the same pending state.
         store = lexstore.get_store(vault)
         repair = store.rebuild_atomic
@@ -273,6 +297,11 @@ def test_a_captured_decision_reaches_the_anchor_profile_after_derived_sync(
                     "ref": ref, "state": INDEX_WARMING, "generation": None,
                     "stale": False, "items": [], "continuation": None,
                 }
+                failures = [record for record in caplog.records if record.name == cv.__name__ and "profile lane failed" in record.message]
+                assert failures and any(record.args[-1] == "RetrievalIndexWarming" for record in failures)
+                assert len(failures) == len({(record.args[0], record.args[1]) for record in failures})
+                assert not any(record.name == working_set.__name__ and "activation lane" in record.message
+                               for record in caplog.records)
             finally:
                 release.set()
                 _drain_background_threads()
@@ -283,18 +312,132 @@ def test_a_captured_decision_reaches_the_anchor_profile_after_derived_sync(
 
 
 @pytest.mark.parametrize("kind", ["units", "pointers", "current_state"])
-def test_the_profile_guard_drops_a_forged_item_naming_a_withheld_page(vault: Path, kind: str) -> None:
-    """Every profile line uses the packet's strict path fields and whole-prose release rule."""
+def test_the_profile_guard_drops_an_unpinned_item_naming_a_withheld_page(vault: Path, kind: str) -> None:
+    """An invented line cannot gain authority from a real response's generation."""
     _seed_profile(vault)
     _write(vault, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# secret-cluster\n\nHidden.\n")
     _withhold(vault, SECRET, ceiling=0)
     _built(vault)
-    honest = {"kind": "pointers", "ref": TIDE, "anchor": HUB, "title": "Tide work", "why": "Declared member"}
-    forged = {"kind": kind, "ref": MOORING, "anchor": HUB, "text": "Forged prose",
+    lexstore.ensure_fresh(vault)
+    _cold()
+    ref = cv.topic_profile_ref("harbour")
+    response = _ask(vault, ref, _external())
+    forged = {"kind": kind, "ref": "invented", "anchor": HUB, "text": "Forged prose",
               "provenance": {"path": SECRET, "level": "unit", "anchor": HUB}}
-    response = {"ref": cv.topic_profile_ref("harbour"), "state": "ready", "generation": "g",
-                "stale": False, "items": [honest, forged], "continuation": None}
+    with principal.request_scope(_external()):
+        guarded = egress.postfilter("read_memory", {**response, "items": [*response["items"], forged]}, vault,
+                                   request_kwargs={"path": ref})
+    assert guarded == response
+
+
+def test_profile_pins_replace_forged_literals_and_the_guard_strips_a_withheld_corrects(vault: Path) -> None:
+    """Pinned display text cannot be replaced with literal secrets; correction provenance still requires admission."""
+    _seed_profile(vault)
+    _write(vault, SECRET, "---\ntype: insight\nstatus: active\n---\n\n# secret-cluster\n\nHidden.\n")
+    _page(vault, "quay-crane", "topics: [harbour]\nstate: parked\nupdated: 2026-10-12\n", folder=f"{KB}/Products")
+    _built(vault)
+    _withhold(vault, SECRET, ceiling=0)
+    lexstore.ensure_fresh(vault)
+    _cold()
+    ref = cv.topic_profile_ref("harbour")
+    response = _ask(vault, ref, _external())
+    assert set(cv.PROFILE_SECTIONS) <= {item["kind"] for item in response["items"]}
+    forged = copy.deepcopy(response)
+    for item in forged["items"]:
+        item["text"] = SECRET
+        item["title"] = "Secret literal"
+        item["statement"] = SECRET
+        item["source"] = SECRET
+    with principal.request_scope(_external()):
+        assert egress.postfilter("read_memory", forged, vault, request_kwargs={"path": ref}) == response
+        unit = next(item for item in response["items"] if item["kind"] == "units")
+        corrected = {**unit, "provenance": {**unit["provenance"], "corrects": SECRET + "#private"}}
+        guarded = egress.guard_working_set(vault, {"units": [corrected]}, egress.AnnotatedHits(hits=[]))
+    assert guarded and guarded["units"]
+    assert "corrects" not in guarded["units"][0]["provenance"]
+    assert SECRET not in json.dumps(guarded)
+
+
+def test_profile_compile_and_guard_keep_the_declared_purpose(vault: Path) -> None:
+    """A unit withheld only for marketing cannot reach that purpose through either dispatch pass."""
+    _seed_profile(vault, with_w=False)
+    _withhold(vault, MOORING, ceiling=0)
+    write_rule(vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+    lexstore.ensure_fresh(vault)
+    _cold()
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
+    ref = cv.topic_profile_ref("harbour")
+    with principal.request_scope(_external()):
+        unrestricted = invoke_command(command, vault, path=ref)
+        marketing = invoke_command(command, vault, path=ref, purpose="marketing")
+    assert MOORING in json.dumps(unrestricted)
+    assert MOORING not in json.dumps(marketing)
+    assert marketing["state"] == "ready" and marketing["items"]
+
+
+def test_a_withheld_registry_never_resolves_a_profile_alias_or_moves_an_anchor_continuation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Private taxonomy content gives no topic-ref or generation oracle, even during catalogue warmup."""
+    _seed_profile(vault, with_w=False)
+    taxonomy = f"{KB}/_Schema/source-taxonomy.yaml"
+    path = vault / taxonomy
+    path.write_text(path.read_text() + "  old-harbour: {label: Old harbour, path_label: Old Harbour, status: deprecated, replaced_by: harbour}\n")
+    keys = f"{KB}/_Schema/project-keys.yaml"
+    _withhold(vault, keys, ceiling=0)
+    lexstore.ensure_fresh(vault)
+    _cold()
+    _frozen(monkeypatch, page_size=1)
+    refs = (cv.anchor_profile_ref(HUB), cv.topic_profile_ref("harbour"))
+    before = {ref: _ask(vault, ref, _external()) for ref in refs}
+    assert all(page["continuation"] for page in before.values())
+    key_file = vault / keys
+    key_file.write_text(key_file.read_text() + "  extra-ops: {folder: Extra operations, category: domain, domain: fleet}\n")
+    cc.ContextCatalogue(vault).update()
+    lexstore.ensure_fresh(vault)
+    _cold()
+    for ref in refs:
+        assert _ask(vault, ref, _external()) == before[ref]
+        assert _ask(vault, ref, _external(), continuation=before[ref]["continuation"])["items"]
+    _withhold(vault, taxonomy, ceiling=0)
+    _cold()
+    def forbidden_lookup(*args, **kwargs):
+        raise AssertionError("a refused topic read touched registry definitions or catalogue readiness")
+
+    for warming in (False, True):
+        with monkeypatch.context() as patch:
+            patch.setattr(cv, "_Registries", forbidden_lookup)
+            if warming:
+                patch.setattr(cc, "ensure_unlisted", forbidden_lookup)
+            for key in ("harbour", "old-harbour", "missing"):
+                assert _outcome(vault, cv.topic_profile_ref(key), _external()) == "NOT_FOUND: memory identifier is unavailable"
+    ref = cv.anchor_profile_ref(HUB)
+    first = _ask(vault, ref, _external())
+    assert first["continuation"]
+    second = _ask(vault, ref, _external(), continuation=first["continuation"])
+    path.write_text(path.read_text().replace("Quays and moorings.", "A private registry edit."))
+    _cold()
+    lexstore.ensure_fresh(vault)
+    assert _ask(vault, ref, _external()) == first
+    assert _ask(vault, ref, _external(), continuation=first["continuation"]) == second
+
+
+def test_profile_reports_lane_truncation_and_live_notice_removal(vault: Path) -> None:
+    """A bounded lane and a later notice-level revocation remain visible instead of looking complete."""
+    _seed_profile(vault, with_w=False)
+    _page(vault, "mooring-lines", "topics: [harbour]\nupdated: 2026-10-12\n",
+          body="\n".join(f"- [decision] Reserve berth {n} ^berth-{n}" for n in range(working_set.UNIT_LANE_LIMIT + 1)))
+    _built(vault)
+    lexstore.ensure_fresh(vault)
+    _cold()
+    ref = cv.topic_profile_ref("harbour")
+    response = _ask(vault, ref, _external())
+    assert response["missing"] and all(entry["reason"] == "lane_truncated" for entry in response["missing"])
+    _withhold(vault, MOORING, ceiling=1)
     _cold()
     with principal.request_scope(_external()):
-        guarded = egress.postfilter("read_memory", response, vault)
-    assert guarded["items"] == [honest]
+        revoked = egress.postfilter("read_memory", response, vault, request_kwargs={"path": ref})
+        assert egress.postfilter("read_memory", revoked, vault, request_kwargs={"path": ref}) == revoked
+    assert {"role": "units", "reason": "withheld"} in revoked["missing"]
+    assert all(entry["reason"] in ("lane_truncated", "withheld") for entry in revoked["missing"])
+    assert all(item.get("provenance", {}).get("path") != MOORING for item in revoked["items"])
