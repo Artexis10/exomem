@@ -338,6 +338,7 @@ def _start_k3s(stack: Stack) -> K3s:
     name = f"exo-rehearsal-k3s-{stack.run_id}"
     mount = containerd_mount(stack)
     args = ["server", *SERVER_ARGS, *node_args(stack)]
+    ensure_image(images.K3S)
     declared = json.loads(run(["docker", "image", "inspect", "--format", "{{json .Config.Volumes}}", images.K3S]).stdout)
     mounts = []
     for index, path in enumerate(sorted(declared or {})):
@@ -389,12 +390,17 @@ def wait_api_server(container: str, *, timeout: float = 180) -> None:
     )
 
 
+def ensure_image(reference: str) -> None:
+    """Retain docker run's missing-image pull before reading image metadata."""
+    if run(["docker", "image", "inspect", reference], check=False).returncode != 0:
+        run(["docker", "pull", "--quiet", reference], timeout=900)
+
+
 def import_images(k3s_container: str, references: list[str]) -> None:
     """Loads host Docker images into K3s's containerd (namespace k8s.io)."""
 
     for reference in references:
-        if run(["docker", "image", "inspect", reference], check=False).returncode != 0:
-            run(["docker", "pull", "--quiet", reference], timeout=900)
+        ensure_image(reference)
     save = run(["bash", "-c", "set -o pipefail; docker save \"$@\" | docker exec --interactive " + k3s_container + " ctr --namespace k8s.io images import -", "_", *references], timeout=1800)
     del save
 
