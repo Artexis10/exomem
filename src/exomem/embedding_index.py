@@ -1654,8 +1654,10 @@ class EmbeddingIndex:
         # paths' rows alone, instead of paying the O(vault) SELECT + stack.
         if c is not None and c.recall_policy_identity == policy_identity:
             try:
-                with call_spans.span("embeddings.matrix_catch_up"):
-                    patched = self._catch_up_cache(c)
+                # These four measurements are the span's closed numeric protocol.
+                fields: dict[str, int] = {}
+                with call_spans.span("embeddings.matrix_catch_up", fields):
+                    patched = self._catch_up_cache(c, fields)
             except Exception as e:  # noqa: BLE001 — always fall back, never raise
                 log.warning(
                     "embedding matrix catch-up failed (%s); taking the full load", e
@@ -1784,7 +1786,7 @@ class EmbeddingIndex:
             status["generation"] = c.generation
         return status
 
-    def _catch_up_cache(self, c: _EmbCache) -> _EmbCache | None:
+    def _catch_up_cache(self, c: _EmbCache, fields: dict[str, int]) -> _EmbCache | None:
         """Patch a slightly-stale warm cache forward from the changed paths only.
 
         Returns the patched cache, or None when this delta is not eligible (the
@@ -1805,51 +1807,61 @@ class EmbeddingIndex:
         which preserves the row count exactly. The count is a cheap secondary
         cross-check for insert/delete-shaped divergence only.
         """
-        conn = self._connect()
+        prepare_started = time.perf_counter_ns()
         try:
-            conn.execute("BEGIN")
+            conn = self._connect()
             try:
-                epoch, gen, instance = sidecar_store.read_meta_token(conn)
-                run = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
-                if not sidecar_store.catchup_is_eligible(
-                    c,
-                    epoch,
-                    gen,
-                    instance,
-                    run=run,
-                    max_generations=CATCHUP_MAX_GENERATIONS,
-                ):
-                    return None
-                changed = sidecar_store.changed_paths_since(
-                    conn, CHUNK_PATH_LOG, c.generation, limit=CATCHUP_MAX_PATHS
-                )
-                if len(changed) > CATCHUP_MAX_PATHS:
-                    return None  # wider than the bound — one clean reload is cheaper
-                replacements: dict[
-                    str, tuple[list[tuple[str, int]], np.ndarray | None]
-                ] = {}
-                for path in changed:
-                    rows = conn.execute(
-                        "SELECT chunk_idx, vector FROM chunks "
-                        "WHERE file_path = ? ORDER BY chunk_idx",
-                        (path,),
-                    ).fetchall()
-                    key = sys.intern(path)
-                    replacements[key] = (
-                        [(key, idx) for idx, _blob in rows],
-                        np.stack(
-                            [np.frombuffer(blob, dtype=np.float32) for _idx, blob in rows],
-                            axis=0,
-                        )
-                        if rows
-                        else None,
+                conn.execute("BEGIN")
+                try:
+                    epoch, gen, instance = sidecar_store.read_meta_token(conn)
+                    run = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
+                    if not sidecar_store.catchup_is_eligible(
+                        c,
+                        epoch,
+                        gen,
+                        instance,
+                        run=run,
+                        max_generations=CATCHUP_MAX_GENERATIONS,
+                    ):
+                        return None
+                    changed = sidecar_store.changed_paths_since(
+                        conn, CHUNK_PATH_LOG, c.generation, limit=CATCHUP_MAX_PATHS
                     )
-                total_rows = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+                    if len(changed) > CATCHUP_MAX_PATHS:
+                        return None  # wider than the bound — one clean reload is cheaper
+                    replacements: dict[
+                        str, tuple[list[tuple[str, int]], np.ndarray | None]
+                    ] = {}
+                    for path in changed:
+                        rows = conn.execute(
+                            "SELECT chunk_idx, vector FROM chunks "
+                            "WHERE file_path = ? ORDER BY chunk_idx",
+                            (path,),
+                        ).fetchall()
+                        key = sys.intern(path)
+                        replacements[key] = (
+                            [(key, idx) for idx, _blob in rows],
+                            np.stack(
+                                [np.frombuffer(blob, dtype=np.float32) for _idx, blob in rows],
+                                axis=0,
+                            )
+                            if rows
+                            else None,
+                        )
+                    total_rows = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+                finally:
+                    conn.rollback()  # read-only txn — release the snapshot
             finally:
-                conn.rollback()  # read-only txn — release the snapshot
+                conn.close()
         finally:
-            conn.close()
-        metadata, matrix = _splice_path_blocks(c.metadata, c.matrix, replacements)
+            fields["prepare_us"] = (time.perf_counter_ns() - prepare_started) // 1000
+        fields["paths"] = len(replacements)
+        fields["rows"] = total_rows
+        splice_started = time.perf_counter_ns()
+        try:
+            metadata, matrix = _splice_path_blocks(c.metadata, c.matrix, replacements)
+        finally:
+            fields["splice_us"] = (time.perf_counter_ns() - splice_started) // 1000
         if len(metadata) != total_rows:
             raise ValueError(
                 f"catch-up row count disagrees with the sidecar: {len(metadata)} "
