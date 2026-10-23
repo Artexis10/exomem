@@ -12,6 +12,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from ..collection_store import native_identity, query_freshness
 from ..collection_store.native_projections import NativeProjectionPlan
+from ..issued_cursor import issued_cursor
 from . import ir, typed_sql
 from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
@@ -40,7 +41,7 @@ class CursorCodec:
         token = self._cipher.encrypt(_json(payload).encode()).decode("ascii")
         if len(token) > _MAX_TOKEN_BYTES:
             raise QueryError("QUERY_RESULT_TOO_LARGE")
-        return token
+        return issued_cursor(token)
 
     def open(self, token):
         try:

@@ -1173,8 +1173,6 @@ _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _BASIS_KEYS = (
     "date", "instant", "zone", "offset", "offset_minutes", "seconds", "index", "every", "clock", "fold"
 )
-# nosemgrep: ep-word-set -- The time-basis keys whose value is a source path.
-_BASIS_PATHS = ("date", "instant", "offset", "offset_minutes", "seconds", "index")
 # nosemgrep: ep-word-set -- The grammar's interval units, keyed to their timedelta argument.
 _UNITS = {"s": "seconds", "ms": "milliseconds"}
 # nosemgrep: ep-word-set -- The grammar's clock and fold rules.
@@ -1430,16 +1428,6 @@ class Plan:
         return {}, ("TIME_BASIS_ABSENT", "mapping.time.from"), None
 
 
-def basis_paths(basis: Mapping[str, Any]) -> list[Any]:
-    """The source paths a declared time basis reads, an interval's included; field admission
-    classifies the time fields by them."""
-    every = basis.get("every")
-    intervals = every.values() if isinstance(every, Mapping) else ()
-    return [basis[key] for key in _BASIS_PATHS if key in basis] + [
-        value for value in intervals if type(value) is str
-    ]
-
-
 def _lookup(value: Any, path: tuple[str, ...]) -> Any:
     for part in path:
         if not isinstance(value, Mapping) or part not in value:
@@ -1663,7 +1651,7 @@ def _basis(index: int, raw: Any, fmt: str, rows: _Rows | None) -> tuple[_Basis, 
                              expected=None)
     canonical: dict[str, Any] = {}
     paths: dict[str, _Path] = {}
-    for key in _BASIS_PATHS:
+    for key in import_time.BASIS_PATHS:
         if key in raw:
             if key == "index" and (rows is None or raw[key] != _INDEX):
                 _mapping_invalid(f"{at}.index", "index counts a json-document row's place in its array", allowed=[_INDEX])
