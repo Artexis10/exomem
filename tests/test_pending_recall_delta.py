@@ -1174,6 +1174,93 @@ def test_managed_guest_scene_admission_uses_pending_parent_changes(
     assert [row["path"] for row in after] == ([] if change == "reparent" else [child])
 
 
+@library_scope()
+@pytest.mark.parametrize("change", ["edit", "create", "delete"])
+def test_keyword_groups_apply_a_pending_parent_to_all_children_before_the_cap(
+    tmp_path: Path, warm_managed_cell, change: str,
+) -> None:
+    """A nonmatching parent can reorder many matching children at once."""
+    vault = tmp_path
+    _seed_corpus(vault)
+    parent = "Knowledge Base/Notes/pending-group-parent.md"
+    marker = "pendinggroupmarker"
+    before = None if change == "create" else _page(
+        title="Parent", body="Parent transcript.",
+        updated="2026-12-01" if change == "delete" else "2026-10-01",
+    )
+    if before is not None:
+        _write(vault, parent, before)
+    for index in range(12):
+        child = _page(
+            title=f"Frame {index}", body=f"{marker} child evidence.", updated="2026-09-01",
+        ).replace("type: insight", f"type: insight\nparent_media: {parent[:-3]}")
+        _write(vault, f"Knowledge Base/Notes/group-frame-{index:02d}.md", child)
+    ordinary = "Knowledge Base/Notes/group-ordinary.md"
+    _write(vault, ordinary, _page(
+        title="Ordinary", body=f"{marker} ordinary evidence.", updated="2026-10-10",
+    ))
+    warm_managed_cell(vault)
+    kwargs = dict(query=marker, mode="keyword", scope="kb-only", graph=False, limit=1)
+    initial = find_module.find(vault, **kwargs)
+    assert [hit.path for hit in initial] == ([parent] if change == "delete" else [ordinary])
+
+    after = None if change == "delete" else _page(
+        title="Parent", body="Parent transcript.", updated="2026-12-01",
+    )
+    _publish_change(
+        vault, batch_id=f"group-parent-{change}", generation=f"group-generation-{change}",
+        changes=((parent, before, after, None),),
+    )
+    assert _overlay(vault).paths == frozenset({parent})
+
+    actual = find_module.find(vault, **kwargs)
+
+    assert [hit.path for hit in actual] == ([ordinary] if change == "delete" else [parent])
+    assert ("ordinary evidence" if change == "delete" else "child evidence") in actual[0].excerpt
+
+
+@library_scope()
+def test_keyword_pending_parent_membership_stays_fixed_after_admission(
+    tmp_path: Path, warm_managed_cell,
+) -> None:
+    vault = tmp_path
+    _seed_corpus(vault)
+    parent = "Knowledge Base/Notes/admitted-group-parent.md"
+    before = _write(vault, parent, _page(
+        title="Parent", body="Original transcript.", updated="2026-01-01",
+    ))
+    child = "Knowledge Base/Notes/admitted-group-frame.md"
+    _write(vault, child, _page(
+        title="Frame", body="admittedgroupmarker child evidence.", updated="2026-12-01",
+    ).replace("type: insight", f"type: insight\nparent_media: {parent[:-3]}"))
+    ordinary = "Knowledge Base/Notes/admitted-group-ordinary.md"
+    _write(vault, ordinary, _page(
+        title="Ordinary", body="admittedgroupmarker ordinary evidence.", updated="2026-10-01",
+    ))
+    warm_managed_cell(vault)
+    after = before.replace("Original transcript.", "Committed transcript.")
+    _publish_change(
+        vault, batch_id="admitted-parent", generation="admitted-parent-generation",
+        changes=((parent, before, after, None),),
+    )
+    deleted = False
+
+    def admit(path: str) -> bool:
+        nonlocal deleted
+        if path == child and not deleted:
+            deleted = True
+            (vault / parent).unlink()
+        return True
+
+    hits = find_module.find(
+        vault, query="admittedgroupmarker", mode="keyword", scope="kb-only", graph=False,
+        limit=1, admit_path=admit,
+    )
+
+    assert deleted
+    assert [hit.path for hit in hits] == [ordinary]
+
+
 def test_pending_operational_status_and_telemetry_are_content_free(
     tmp_path: Path,
 ) -> None:
