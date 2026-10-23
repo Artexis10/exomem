@@ -8,7 +8,7 @@ recomputes it and compares, which is the protocol's last chain check.
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 
 from . import protocol, stats
@@ -195,6 +195,15 @@ def _vault_pages(layout: Layout, arm: str, tree: str) -> list[str]:
     return sorted(p.relative_to(vault).as_posix() for p in vault.rglob("*.md") if p.is_file())
 
 
+def _attempts(layout: Layout, record: Mapping) -> list[dict]:
+    """Every attempt the session logged, retried harness faults included."""
+
+    path = layout.session_dir(record["case_id"], record["arm"], record["repeat"]) / "attempts.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
 def case_table(
     layout: Layout,
     *,
@@ -257,6 +266,12 @@ def case_table(
                 if case.no_memory
                 else None,
                 "failures": [o["failure"] for o in outcomes if o["failure"]],
+                "harness_faults": [
+                    attempt["kind"]
+                    for record in records
+                    for attempt in _attempts(layout, record)
+                    if attempt["outcome"] == HARNESS_FAULT
+                ],
                 "calls": sum(t["calls"] for t in turns) / len(records),
                 "input_tokens": sum(t["input_tokens"] for t in turns) / len(records),
                 "output_tokens": sum(t["output_tokens"] for t in turns) / len(records),
@@ -517,12 +532,22 @@ def secondary(*, cases: Sequence[Case], table: Mapping, arm_ids: Sequence[str]) 
                 "score": sum(r["score"] for r in subset) / len(subset),
                 **{m: _mean([r[m] for r in subset]) for m in _MEASURES},
             }
-        failures: dict[str, int] = {}
-        for _, row in rows:
-            for kind in row["failures"]:
-                failures[kind] = failures.get(kind, 0) + 1
-        out[arm] = {"by_turn_completeness": per_completeness, "failures_by_kind": failures}
+        out[arm] = {
+            "by_turn_completeness": per_completeness,
+            # Final outcomes that score 0, and every retried attempt's fault.
+            "failures_by_kind": _counts(kind for _, row in rows for kind in row["failures"]),
+            "harness_faults_by_kind": _counts(
+                kind for _, row in rows for kind in row["harness_faults"]
+            ),
+        }
     return out
+
+
+def _counts(kinds: Iterable[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for kind in kinds:
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
 
 
 def _mean(values: Sequence[float | None]) -> float | None:
@@ -530,17 +555,20 @@ def _mean(values: Sequence[float | None]) -> float | None:
     return sum(present) / len(present) if present else None
 
 
-def usage(sessions: Mapping[str, Mapping], *, project_sessions: int | None) -> dict:
-    """Measured usage per session, and the projection for a planned run size."""
+def usage(layout: Layout, sessions: Mapping[str, Mapping], *, project_sessions: int | None) -> dict:
+    """Measured usage per session over every attempt, and the projection for a
+    planned run size."""
 
     records = list(sessions.values())
     if not records:
         return {"sessions": 0}
+    attempts = [attempt for record in records for attempt in _attempts(layout, record)]
+    turns = [turn for attempt in attempts for turn in attempt["turns"]]
     totals = {
-        "input_tokens": sum(t["input_tokens"] for r in records for t in r["turns"]),
-        "output_tokens": sum(t["output_tokens"] for r in records for t in r["turns"]),
-        "wall_seconds": sum(t["wall_seconds"] for r in records for t in r["turns"]),
-        "attempts": sum(r["attempts"] for r in records),
+        "input_tokens": sum(t["input_tokens"] for t in turns),
+        "output_tokens": sum(t["output_tokens"] for t in turns),
+        "wall_seconds": sum(t["wall_seconds"] for t in turns),
+        "attempts": len(attempts),
     }
     per_session = {key: value / len(records) for key, value in totals.items()}
     out = {"sessions": len(records), "totals": totals, "per_session": per_session}
@@ -592,7 +620,7 @@ def score_run(
         "rules": decided,
         "decision": decide(decided, void=void, split=split),
         "secondary": secondary(cases=cases, table=built["cases"], arm_ids=arm_ids),
-        "usage": usage(sessions, project_sessions=project_sessions),
+        "usage": usage(layout, sessions, project_sessions=project_sessions),
         "cases": built["cases"],
         "actor_failures": sum(1 for r in sessions.values() if r["outcome"] == ACTOR_FAILURE),
         "deltas": {str(k): v for k, v in deltas.items()},
