@@ -452,12 +452,25 @@ def test_shipped_private_worker_runs_full_server_with_existing_auth(vault, tmp_p
             assert health.json()["version"] == version("exomem")
             denied = await client.post("/mcp", json={})
             assert denied.status_code == 401
-            deadline = asyncio.get_running_loop().time() + 15
-            while True:
-                ready = await client.get("/health/ready", timeout=2)
-                if ready.status_code == 200 or asyncio.get_running_loop().time() >= deadline:
-                    break
-                await asyncio.sleep(0.1)
+            ready, last_error = None, None
+            try:
+                async with asyncio.timeout(15):
+                    while True:
+                        if worker.poll() is not None:
+                            pytest.fail((tmp_path / "private-worker.log").read_text()[-5000:])
+                        try:
+                            ready = await client.get("/health/ready", timeout=2)
+                            if ready.status_code == 200:
+                                break
+                        except httpx.HTTPError as error:
+                            last_error = repr(error)
+                        await asyncio.sleep(0.1)
+            except TimeoutError:
+                pytest.fail(
+                    f"worker did not become ready within 15 seconds: "
+                    f"response={None if ready is None else ready.text}; error={last_error}\n"
+                    + (tmp_path / "private-worker.log").read_text()[-5000:]
+                )
             assert ready.json()["status"] == "ready", (
                 ready.json().get("reasons"),
                 ready.json().get("retrieval"),
