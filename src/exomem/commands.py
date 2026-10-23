@@ -126,6 +126,7 @@ from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
+from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import state_paths as state_paths_module
@@ -5385,53 +5386,67 @@ def op_note(
         validation failure, raises a structured error with code=INVALID_NOTE,
         the missing fields, and the reason.
     """
+    return _invoke_note(
+        vault_root,
+        content=content,
+        note_type=note_type,
+        title=title,
+        slug=slug,
+        project=project,
+        projects=projects,
+        sources=sources,
+        tags=tags,
+        status=status,
+        severity=severity,
+        pattern_type=pattern_type,
+        domain=domain,
+        started=started,
+        duration=duration,
+        hypothesis=hypothesis,
+        n=n,
+        concluded=concluded,
+        medium=medium,
+        recorded=recorded,
+        published=published,
+        host=host,
+        editor=editor,
+        bridge_of=bridge_of,
+        bridge_scope=bridge_scope,
+        bridge_review=bridge_review,
+        suggestions=suggestions,
+        project_category=project_category,
+        validate_only=validate_only,
+        draft_id=draft_id,
+        draft_hash=draft_hash,
+        draft_token=draft_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
+        vocabulary_decision=vocabulary_decision,
+        summary=summary,
+        topics=topics,
+    ).as_dict()
+
+
+def _invoke_note(
+    vault_root: Path, **kwargs: Any
+) -> (
+    note_module.NoteResult
+    | semantic_writes_module.CreationPreflight
+    | vocabulary_resolution.VocabularyPreparation
+):
+    """Keep the prepared result behind the same public note argument contract."""
+    arguments = inspect.signature(op_note).bind(vault_root, **kwargs)
+    arguments.apply_defaults()
     try:
-        result = note_module.note(
-            vault_root,
-            content=content,
-            note_type=note_type,
-            title=title,
-            slug=slug,
-            project=project,
-            projects=projects,
-            sources=sources,
-            tags=tags,
-            status=status,
-            severity=severity,
-            pattern_type=pattern_type,
-            domain=domain,
-            started=started,
-            duration=duration,
-            hypothesis=hypothesis,
-            n=n,
-            concluded=concluded,
-            medium=medium,
-            recorded=recorded,
-            published=published,
-            host=host,
-            editor=editor,
-            bridge_of=bridge_of,
-            bridge_scope=bridge_scope,
-            bridge_review=bridge_review,
-            suggestions=suggestions,
-            project_category=project_category,
-            validate_only=validate_only,
-            draft_id=draft_id,
-            draft_hash=draft_hash,
-            draft_token=draft_token,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
-            vocabulary_decision=vocabulary_decision,
-            summary=summary,
-            topics=topics,
-        )
+        result = note_module.note(**arguments.arguments)
     except note_module.NoteError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "path", None):
+        sources = arguments.arguments["sources"]
         query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
         working_set_heat_module.note_citations(vault_root, sources or ())
-    return result.as_dict()
+    return result
 
 
 def op_query_data(

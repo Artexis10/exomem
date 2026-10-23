@@ -152,13 +152,17 @@ def test_content_effect_and_content_free_witness_share_the_leaf_batch(vault: Pat
         vault,
         _create_step("atomic", "curation-atomic-witness", sentence=sentence),
     )
+    binding = curation.preview(vault, run_id=proposed["run_id"])["binding_manifest"][0]
     result = _apply(vault, proposed)
     store = curation.CurationStore(vault)
     operation = curation.operation_id(proposed["plan_id"], 0, "atomic")
     witness_path = store.evidence_dir(proposed["run_id"]) / f"{operation}.json"
     witness = json.loads(witness_path.read_text(encoding="utf-8"))
 
-    assert (vault / result["step"]["path"]).is_file()
+    source = (vault / result["step"]["path"]).read_text(encoding="utf-8")
+    assert binding["prepared"]["destination"] == result["step"]["path"]
+    assert binding["postcondition"]["content_hash"] == content_hash(source)
+    assert binding["effect_after"] == witness["after"]
     assert witness["operation_id"] == operation
     assert witness["leaf_identity"] == "remember"
     assert witness["before"] == [
