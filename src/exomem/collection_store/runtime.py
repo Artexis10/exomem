@@ -1146,11 +1146,15 @@ class StoreServer:
                     error = connection.busy(
                         "the collection store did not take this request within the mutation timeout")
                     try:
-                        error.details["store_thread"] = self._queue_refusal_state()
-                    except Exception:
-                        # Optional diagnostics must not replace the original queue refusal.
-                        pass
-                    raise error
+                        try:
+                            error.details["store_thread"] = self._queue_refusal_state()
+                        except Exception:
+                            # Optional diagnostics must not replace the original queue refusal.
+                            pass
+                        raise error
+                    finally:
+                        # Do not retain the request through an exception/traceback cycle.
+                        del error
                 self._condition.wait(remaining)
         if not request.done.wait(max(0.0, completion_deadline - time.monotonic())):
             # Accepted work survives the wait deadline so its outcome and replay remain owned.
