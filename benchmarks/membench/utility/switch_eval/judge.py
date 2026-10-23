@@ -25,7 +25,6 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import environment_floor
 
-from exomem.runtime_resources import CPU_THREADS_ENV
 from membench.judge.blinding import (
     SourceNumbering,
     deterministic_permutation,
@@ -36,7 +35,7 @@ from membench.judge.blinding import (
 from . import protocol
 from .cases import Case
 from .session import CLIENT_PINS, launched_argv
-from .state import Layout
+from .state import PRODUCT_ENV_PREFIXES, Layout
 
 TEXTS = Path(__file__).resolve().parent / "texts"
 
@@ -497,8 +496,9 @@ def run_structured(
     log_path = out_dir.with_name(f"{out_dir.name}-attempts.jsonl")
     # The launching agent session's variables would make the call a nested
     # child of that session; it starts as a plain headless run instead.
-    env = {**environment_floor(os.environ)[0], **CLIENT_PINS}
-    env.pop(CPU_THREADS_ENV, None)
+    floor = environment_floor(os.environ)[0]
+    env = {key: value for key, value in floor.items() if not key.startswith(PRODUCT_ENV_PREFIXES)}
+    env.update(CLIENT_PINS)
     answered = 0
     for item in items:
         target = out_dir / f"{item['item_id']}.json"

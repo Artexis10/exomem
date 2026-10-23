@@ -216,8 +216,13 @@ def python_executable() -> str:
     return sys.executable
 
 
+#: The product's settings, and the legacy ``KB_*`` names it promotes to them at
+#: import: an inherited one would change what a child runs with.
+PRODUCT_ENV_PREFIXES = ("EXOMEM_", "KB_")
+
+
 def _child_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[str, str]:
-    env = {key: value for key, value in parent.items() if not key.startswith("EXOMEM_")}
+    env = {key: value for key, value in parent.items() if not key.startswith(PRODUCT_ENV_PREFIXES)}
     env.update(product_env(slot, spec))
     env["PYTHONPATH"] = str(REPO_ROOT / "benchmarks")
     return env

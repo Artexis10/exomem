@@ -1361,6 +1361,8 @@ def test_state_cpu_threads_reach_only_the_builder(
     monkeypatch.setattr(cli, "_stage", lambda *args: None)
     monkeypatch.setattr(state, "effective_online_cpus", lambda: 2)
     monkeypatch.setenv(CPU_THREADS_ENV, "99")
+    # The product promotes this legacy name to the setting above at import.
+    monkeypatch.setenv("KB_MCP_CPU_THREADS", "7")
     real_run = subprocess.run
     observed = []
 
@@ -1381,10 +1383,12 @@ def test_state_cpu_threads_reach_only_the_builder(
 
     def surface(slot, spec, *, env, out):
         assert CPU_THREADS_ENV not in env
+        assert "KB_MCP_CPU_THREADS" not in env
         return {}
 
     def proof(slot, spec, *, env, out, before):
         assert CPU_THREADS_ENV not in env
+        assert "KB_MCP_CPU_THREADS" not in env
         return {"content_unchanged": True, "signatures_unchanged": True}
 
     monkeypatch.setattr(state.subprocess, "run", built)
