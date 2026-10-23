@@ -120,8 +120,9 @@ class RetrievalTrace:
         hits: list[Any],
         *,
         lane_profiles: dict[str, dict[str, Any]],
+        ranks: dict[str, int] | None = None,
     ) -> None:
-        self.record_keyword_hits(hits, filter_only=False)
+        self.record_keyword_hits(hits, filter_only=False, ranks=ranks)
         keyword_profile = self.lane_profiles["keyword"]
         self.lane_profiles.update(lane_profiles)
         self.lane_profiles["keyword"] = keyword_profile
