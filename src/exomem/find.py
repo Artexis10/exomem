@@ -4156,6 +4156,7 @@ def _managed_page_metadata(
     pending: Any | None,
     include_units: bool = False,
     parents_only: bool = False,
+    include_ranking: bool = False,
 ) -> dict[str, Any]:
     """Resolve current page metadata without opening canonical page files.
 
@@ -4177,6 +4178,7 @@ def _managed_page_metadata(
         freshness=freshness_key,
         include_units=include_units,
         parents_only=parents_only,
+        include_ranking=include_ranking,
     )
     if not result.readiness.complete:
         _raise_catalog_outcome(result.readiness)
@@ -4211,6 +4213,7 @@ def _managed_page_metadata(
                 page.media_file,
                 page.frame_ts,
                 units,
+                find_types.RankingPage.from_page(page) if include_ranking else None,
             )
     if any(
         rel not in metadata and not (pending is not None and pending.covers(rel)) for rel in paths
@@ -4923,6 +4926,18 @@ def _find_semantic(
     def _keyword_lane(vault_root_arg: Path, *args: Any, **kwargs: Any) -> list[str]:
         return _keyword_match_paths(vault_root_arg, *args, pending=pending, allowed_paths=eligible_paths, **kwargs)
 
+    def _ranking_metadata(paths: set[str]) -> dict[str, find_types.RankingPage | None]:
+        # The selection owns membership; the frozen overlay owns replacements.
+        # Final output still goes through `_resolve_page` and its exact hash.
+        admitted = snapshot.recall_paths(recall_scope or scope)
+        if admitted_paths is not None:
+            admitted = admitted & admitted_paths
+        rows = _managed_page_metadata(
+            vault_root, paths & admitted, scope=scope, freshness_key=lexical_freshness,
+            pending=pending, include_ranking=True,
+        )
+        return {rel: row.ranking for rel, row in rows.items() if rel in admitted}
+
     def _optional_graph_resolver(root: Path, freshness=None):
         try:
             return recall_resolver_snapshot(
@@ -4964,6 +4979,9 @@ def _find_semantic(
             timings=timings,
             snapshot=snapshot,
             page_of=_page_of,
+            ranking_metadata=(
+                _ranking_metadata if snapshot.requires_live_recall and lexstore._catalog_usable() else None
+            ),
             keyword_match_paths=_keyword_lane,
             outbound_wikilink_paths=_outbound_wikilink_paths,
             get_query_resolver=_optional_graph_resolver,
@@ -5118,6 +5136,15 @@ def _find_semantic(
     )
     hits: list[Hit] = []
     seen: set[str] = set()
+
+    def _supported_stems(page: ParsedPage | find_types.RankingPage) -> bool:
+        if semantic_lanes_absent:
+            present, total, content_present = find_policy.stem_word_coverage(
+                page.stem_set, degraded_query_words
+            )
+            return 2 * present > total and content_present > 0
+        return _stem_tokens_present(page, query_norm)
+
     with _span(timings, "filter_hits"):
         # Hit construction is one of the four stages the contract names, so it
         # says `index` rather than carrying the static `computed` default.
@@ -5149,9 +5176,33 @@ def _find_semantic(
             # but they must not cause a raw Record to be hydrated even transiently.
             if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
                 continue
+            needs_corroboration = (
+                rel_path not in vector_paths
+                and rel_path not in graph_set
+                and rel_path not in keyword_set
+                and rel_path not in clip_set
+                and rel_path not in frame_attribution
+            )
+            if rel_path in bundle.ranking_pages:
+                ranking_page = bundle.ranking_pages[rel_path]
+                if ranking_page is None:
+                    catalog_view = lexstore._admitted_catalog_view(vault_root)
+                    if catalog_view is not None:
+                        catalog_view.incomplete = True
+                    continue
+                if (
+                    needs_corroboration
+                    and not find_results.literal_tokens_present(ranking_page, query_norm)
+                    and not _supported_stems(ranking_page)
+                ):
+                    continue
             page = _page_of(rel_path)
             if page is None:
                 continue
+            attr = frame_attribution.get(rel_path)
+            if attr is not None and rel_path in bundle.frame_sources:
+                if _page_of(bundle.frame_sources[rel_path]) is None:
+                    continue
             if eligible_paths is not None and rel_path not in eligible_paths:
                 continue
             if not _passes_filters(
@@ -5166,14 +5217,7 @@ def _find_semantic(
             ):
                 continue
             keyword_excerpt = _make_excerpt(page, query_norm)
-            if (
-                rel_path not in vector_paths
-                and rel_path not in graph_set
-                and rel_path not in keyword_set
-                and rel_path not in clip_set
-                and rel_path not in frame_attribution
-                and keyword_excerpt is None
-            ):
+            if needs_corroboration and keyword_excerpt is None:
                 # No literal match, not a graph hop, not vector-ranked, not in
                 # the keyword scan. Try stem match before dropping — recovers
                 # morphology ("regulation" matching a "regulator" page). With the
@@ -5182,14 +5226,7 @@ def _find_semantic(
                 # at least one content word, so BM25's own top-ranked evidence
                 # survives interrogative phrasing without function-word overlap
                 # alone retaining junk.
-                if semantic_lanes_absent:
-                    present, total, content_present = _stem_word_coverage(
-                        page, degraded_query_words
-                    )
-                    stems_ok = 2 * present > total and content_present > 0
-                else:
-                    stems_ok = _stem_tokens_present(page, query_norm)
-                if not stems_ok:
+                if not _supported_stems(page):
                     continue
                 keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
             elif (
@@ -5202,7 +5239,7 @@ def _find_semantic(
                 # "why", else the sidecar's leading body.
                 attr = frame_attribution.get(rel_path)
                 if attr is not None:
-                    fpage = _CACHE.get(vault_root / (attr[0] + ".md"), vault_root)
+                    fpage = _page_of(attr[0] + ".md")
                     if fpage is not None:
                         keyword_excerpt = _make_excerpt(fpage, query_norm)
                 if keyword_excerpt is None:
@@ -6131,7 +6168,7 @@ def _keyword_match_paths(
 
 
 def _outbound_wikilink_paths(
-    page: ParsedPage,
+    page: ParsedPage | find_types.RankingPage,
     vault_root: Path,
     resolver=None,
     *,
@@ -6153,18 +6190,18 @@ def _outbound_wikilink_paths(
     ``visible`` is a reader's view (`None` for the owner): targets then
     resolve over the pages it admits, as in a vault without the others.
     """
-    from .vault import (
-        find_body_wikilinks,
-        normalize_wikilink,
-    )
+    from .vault import normalize_wikilink
 
     if resolver is None:
         resolver = _get_query_resolver(vault_root)
     out: list[str] = []
     seen: set[str] = set()
-    for m in find_body_wikilinks(page.body):
-        inner = m.group(0)[2:-2]
-        target = inner.split("|", 1)[0].strip()
+    targets = (
+        page.outbound_targets
+        if isinstance(page, find_types.RankingPage)
+        else find_results.wikilink_targets(page.body)
+    )
+    for target in targets:
         if not target or target.endswith("/"):
             continue
         try:

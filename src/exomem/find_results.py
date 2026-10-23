@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .find_types import ParsedPage
+from .find_types import ParsedPage, RankingPage
 from .semantic_units import SemanticUnit
 
 EXCERPT_RADIUS = 100  # chars on each side of the match
@@ -79,7 +79,7 @@ def transcript_ts_for_hit(
     return best
 
 
-def stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
+def stem_tokens_present(page: ParsedPage | RankingPage, query_norm: str) -> bool:
     """All-tokens-present check using Snowball stems on both sides.
 
     Recovers morphological matches that the literal substring gate misses.
@@ -181,21 +181,31 @@ def semantic_excerpt(
     return keyword_excerpt or ""
 
 
+def literal_tokens_present(page: ParsedPage | RankingPage, query_norm: str) -> bool:
+    """The exact substring predicate shared by excerpts and catalogue graph seeds."""
+    return all(tok in page.title_norm or tok in page.body_norm for tok in query_norm.split())
+
+
+def wikilink_targets(body: str) -> tuple[str, ...]:
+    """Parser-derived targets, in source order, before request-time resolution."""
+    from .vault import find_body_wikilinks
+
+    return tuple(match.group(0)[2:-2].split("|", 1)[0].strip() for match in find_body_wikilinks(body))
+
+
 def make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
     """Return a short snippet anchored to the query, or None when no token matches."""
     body = page.body_stripped
     if not query_norm:
         snippet = body[:EXCERPT_MAX_LEN]
         return collapse(snippet)
-    title_norm = page.title_norm
     body_norm = page.body_norm
     tokens = query_norm.split()
     if not tokens:
         snippet = body[:EXCERPT_MAX_LEN]
         return collapse(snippet)
-    for tok in tokens:
-        if tok not in title_norm and tok not in body_norm:
-            return None
+    if not literal_tokens_present(page, query_norm):
+        return None
     anchor_idx = -1
     anchor_len = 0
     for tok in tokens:

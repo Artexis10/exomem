@@ -217,6 +217,43 @@ class ParsedPage:
         return find_policy.dominant_script(self.title + " " + self.search_body)
 
 
+@dataclass(frozen=True)
+class RankingPage:
+    """Selection-free ranking inputs from one admitted page generation."""
+
+    frontmatter: dict[str, Any]
+    page_type: str | None
+    updated: str
+    media_type: str | None
+    parent_media: str | None
+    media_file: str | None
+    frame_ts: float | None
+    title_norm: str
+    body_norm: str
+    stem_set: frozenset[str]
+    letter_script: str | None
+    outbound_targets: tuple[str, ...]
+
+    @classmethod
+    def from_page(cls, page: ParsedPage) -> RankingPage:
+        from . import find_results, semantic_index
+
+        return cls(
+            frontmatter=semantic_index.structural_frontmatter(page.frontmatter),
+            page_type=page.page_type,
+            updated=page.updated,
+            media_type=page.media_type,
+            parent_media=page.parent_media,
+            media_file=page.media_file,
+            frame_ts=page.frame_ts,
+            title_norm=page.title_norm,
+            body_norm=page.body_norm,
+            stem_set=page.stem_set,
+            letter_script=page.letter_script,
+            outbound_targets=find_results.wikilink_targets(page.body),
+        )
+
+
 def _format_timestamp(seconds: float) -> str:
     """Seconds to mm:ss, or h:mm:ss past an hour."""
     total = int(round(seconds))

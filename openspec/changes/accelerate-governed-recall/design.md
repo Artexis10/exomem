@@ -501,6 +501,15 @@ it with the current path on the reference corpus.
     catalogue's stored text.
 
   Results stay identical, and Markdown is read only for returned hits.
+  Identity means the same admitted generation, including its frozen pending
+  overlay. A writer derives ranking fields, minimal interpretation frontmatter
+  and unresolved wikilink targets from the same parsed page snapshot. Targets
+  retain source order and resolve under the reader's existing resolver and view.
+  Ordinary publication or later bytes on an unread candidate do not rerank that
+  selection. Final hydration checks the selected page and frame evidence against
+  their admitted hashes. A mismatch omits that evidence, marks coverage incomplete
+  and prevents the partial selection from entering the shared result cache.
+  Policy and semantic identity changes keep their existing refusal behavior.
 - **Unit lanes.** `_hydrate_indexed_unit_records` (`find.py:2188`) rebuilds each
   candidate parent's unit state (`semantic_index.py:250`, `:189`), then resolves
   its prose carriers through a governance policy load per parent
