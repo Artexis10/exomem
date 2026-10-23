@@ -376,6 +376,9 @@ def power_step(
     """
 
     design = [c for c in design if c.kind in (KIND_MISS, KIND_ORDINARY)]
+    dev = [c for c in dev if c.kind in (KIND_MISS, KIND_ORDINARY)]
+    if any(set(c.repeats) != set(protocol.ARM_IDS) for c in dev):
+        raise ValueError(f"every development case needs the repeats of arms {protocol.ARM_IDS}")
     pools = {kind: [c for c in dev if c.kind == kind] for kind in (KIND_MISS, KIND_ORDINARY)}
     ordinary = [c for c in design if c.kind == KIND_ORDINARY]
     share = sum(c.expects_memory for c in ordinary) / len(ordinary) if ordinary else 0.0
