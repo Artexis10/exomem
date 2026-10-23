@@ -218,8 +218,22 @@ def test_offline_migrate_routes_every_records_and_planning_collection_without_ch
     descriptor, serves rows that differ from the files it read, or hides migrated Planning
     collections from global inventory."""
     root = legacy_vault(env)
+
+    def histories():
+        result = {}
+        for cid, path in MIGRATED.items():
+            tool = "plan_memory" if path == PLANNING else "record_memory"
+            history = call(root, tool, action="query", collection=path,
+                           include_agent_history=True)["agent_history"]
+            result[cid] = {
+                "assessment": {key: value for key, value in history.items() if key != "events"},
+                "transition_ids": [event["transition_id"] for event in history["events"]],
+            }
+        return result
+
     before = vault_bytes(root)
     expected = {cid: rows(root, path) for cid, path in MIGRATED.items()}
+    expected_history = histories()
     report = preflight.preflight(root)
     statuses = {row["collection_id"]: row["legacy_audit_status"] for row in report["collections"]
                 if row["status"] == "ready"}
@@ -247,6 +261,7 @@ def test_offline_migrate_routes_every_records_and_planning_collection_without_ch
     service = start_service(root)
     try:
         assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == expected
+        assert histories() == expected_history
         assert call(root, "record_memory", action="inspect", collection=CID)["audit"]["status"] == "gap"
         assert call(root, "record_memory", action="inspect")["unreadable_manifests"] == []
         plans = call(root, "plan_memory", action="inspect")

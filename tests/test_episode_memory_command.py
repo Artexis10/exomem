@@ -1134,10 +1134,11 @@ def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     # A Source retry must not count another plan or another heat event.
     for name in (
         "source.counts", "source.index_planning",
-        "indexes.source_census", "indexes.sources_render",
+        "indexes.source_census",
         "episode.heat_attribution", "episode.heat_record",
     ):
         assert phases[name]["count"] == 1
+    assert "indexes.sources_render" not in {span["name"] for span in spans}
     assert phases["episode.nudge"]["count"] == 2
     assert {
         name: value for name, value in phases["episode.revisions"]["fields"].items()

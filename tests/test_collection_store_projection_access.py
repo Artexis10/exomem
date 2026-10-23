@@ -90,7 +90,8 @@ def test_canonical_inspection_versions_do_not_depend_on_unaccepted_view_edits(st
             _through_dispatcher(store.root, "get", path=path, include_raw=True)
 
 
-def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store):
+@pytest.mark.parametrize("action", ["inspect", "query"])
+def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store, action):
     """The real adapter retains the carrier; wire JSON cannot recreate it."""
     import json
 
@@ -99,17 +100,49 @@ def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store):
     store.create_collection(manifest_path(), manifest_text(), why="create")
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     path = first["affected_paths"][0]
+    if action == "query":
+        store.update_record(CID, item_key=KEY, changes={"title": "Two"},
+                            expected_container_hash=first["after_container_hash"],
+                            expected_item_version=first["after_item_hash"], why="correct")
     store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     command = next(command for command in commands.COMMANDS if command.name == "record_memory")
     bound = command_surface.bind_vault(command.leaf, store.root, command=command)
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
-        result = bound(action="inspect", collection=CID)
-        assert path in {entry["path"] for entry in result["source_versions"]}
+        result = bound(action=action, collection=CID, **({"include_agent_history": True} if action == "query" else {}))
+        if action == "inspect":
+            assert path in {entry["path"] for entry in result["source_versions"]}
+        else:
+            assert path in {event["canonical_path"] for event in result["agent_history"]["events"]}
         clone = json.loads(json.dumps(result))
         filtered = egress.postfilter("record_memory", clone, store.root)
         assert path not in {entry["path"] for entry in filtered["source_versions"]}
+        if action == "query":
+            from copy import deepcopy
+
+            from exomem.collection_store import governance
+
+            assert path not in {event["canonical_path"] for event in filtered["agent_history"]["events"]}
+            evidence = governance._inspection_evidence(result)
+            result["ordinary_history"] = deepcopy(result["agent_history"])
+            result = governance._seal_metadata_projection(result, evidence)
+            cleaned = egress.postfilter("record_memory", result, store.root)
+            assert path in {event["canonical_path"] for event in cleaned["agent_history"]["events"]}
+            assert path not in {event["canonical_path"] for event in cleaned["ordinary_history"]["events"]}
+            # A trusted transform may shift an authentic event, but cannot give a forged identity its slot.
+            shifted = deepcopy(dict(result))
+            shifted["agent_history"]["events"] = shifted["agent_history"]["events"][1:2]
+            shifted = governance._seal_metadata_projection(shifted, evidence)
+            assert egress.postfilter("record_memory", shifted, store.root)["agent_history"]["events"]
+            forged = deepcopy(dict(shifted))
+            forged["agent_history"]["events"][0]["transition_id"] = "f" * 24
+            forged = governance._seal_metadata_projection(forged, evidence)
+            assert not egress.postfilter("record_memory", forged, store.root)["agent_history"]["events"]
+            duplicate = deepcopy(dict(shifted))
+            duplicate["agent_history"]["events"] *= 2
+            with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                governance._seal_metadata_projection(duplicate, evidence)
 
 
 def test_global_inventory_keeps_canonical_metadata_without_authorizing_stale_manifest_bytes(store):
@@ -317,11 +350,16 @@ def test_terminal_filter_rechecks_distinct_views_after_bytes_and_policy_change(s
     payload = {"items": [{"path": path} for path in paths]}
     with preview_store(store.root, store.handle), request_scope(_external()):
         assert egress.filter_withheld_entries(store.root, payload) == payload
+        history = _through_dispatcher(store.root, "record_memory", action="query", collection=CID,
+                                      include_agent_history=True)
+        assert history["agent_history"]["events"]
         page = store.root / paths[0]
         page.write_text(page.read_text() + "\nUncommitted view edit\n")
         write_scope(store.root, paths=paths[1].removeprefix("Knowledge Base/"))
         write_rule(store.root, ceiling=0)
         assert egress.filter_withheld_entries(store.root, payload) == {"items": []}
+        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+            egress.postfilter("record_memory", history, store.root)
 
 
 def test_terminal_filter_observes_a_new_deletion_tombstone(store):

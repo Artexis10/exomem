@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import embeddings, sidecar_store
+from exomem import call_spans, embeddings, sidecar_store
 
 
 @pytest.fixture(autouse=True)
@@ -287,7 +287,19 @@ def test_external_writer_is_served_without_a_full_reload(tmp_path, monkeypatch):
     external.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)
     _bump_mtime(idx.path)  # guarantee a distinct mtime for the gate
 
-    metadata, matrix = idx.all_vectors()
+    token = "matrix-catch-up-splice"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        metadata, matrix = idx.all_vectors()
+        spans = {row["name"]: row for row in call_spans.pop_call_spans(token)}
+    finally:
+        call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+    fields = spans["embeddings.matrix_catch_up"]["fields"]
+    assert fields["paths"] == 1
+    assert fields["rows"] == 2
+    assert fields["prepare_us"] >= 0
+    assert fields["splice_us"] >= 0
     assert count["n"] == 0
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
     assert matrix.shape[0] == 2
@@ -630,7 +642,19 @@ def test_epoch_bump_invalidates_without_gen_or_mtime(tmp_path, monkeypatch):
         conn.close()
     os.utime(idx.path, ns=(frozen.st_atime_ns, frozen.st_mtime_ns))
 
-    idx.all_vectors()
+    token = "matrix-catch-up-refused"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        idx.all_vectors()
+        spans = {row["name"]: row for row in call_spans.pop_call_spans(token)}
+    finally:
+        call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+    fields = spans["embeddings.matrix_catch_up"]["fields"]
+    assert fields["prepare_us"] >= 0
+    assert "splice_us" not in fields
+    assert "paths" not in fields
+    assert "rows" not in fields
     assert count["n"] == 1  # epoch moved -> reload despite unchanged gen and mtime
 
 

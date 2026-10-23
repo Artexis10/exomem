@@ -221,6 +221,16 @@ class _InspectionState:
 
 
 @dataclass(frozen=True, slots=True)
+class _QueryHistoryState:
+    collection_id: str
+    manifest_path: str
+    profile: str
+    snapshot: str
+    history_hash: str
+    owners: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _CanonicalInspectionEvidence:
     """Producer provenance with an opaque handle identity, never a resource."""
 
@@ -234,6 +244,7 @@ class _CanonicalInspectionEvidence:
     payload_hash: str
     _seal: object
     inventory: bool = False
+    history: _QueryHistoryState | None = None
 
     def __reduce__(self) -> object:
         raise TypeError("canonical inspection evidence is process-local")
@@ -336,11 +347,28 @@ def _coverage_references(value, contributors):
                  if (receipt["leaf_id"], receipt["operation_id"], receipt["path"]) in owners)
 
 
+def _history_references(value, state):
+    from .. import record_governance
+
+    history = value.get("agent_history")
+    if history is None or not record_governance._valid_agent_history(history, semantic_profile=state.profile):
+        OperationAuthorization.refuse()
+    identities = [event["transition_id"] for event in history["events"]]
+    if len(set(identities)) != len(identities):
+        OperationAuthorization.refuse()
+    return tuple((("agent_history", "events", index, "canonical_path"), event["canonical_path"])
+                 for index, event in enumerate(history["events"])
+                 if (event["transition_id"], event["canonical_path"]) in state.owners)
+
+
 def _seal_metadata_projection(value, evidence):
     """Only the producer and trusted terminal transformations call this."""
     if type(evidence) is _CanonicalCoverageEvidence:
         # File receipt removal can shift indexes; only the original sealed owners receive new slots.
         references = _coverage_references(value, evidence.contributors)
+    elif evidence.history is not None:
+        # History slots follow authenticated transitions when terminal filtering shifts indexes.
+        references = _history_references(value, evidence.history)
     elif evidence.inventory:
         # Filtering file entries can shift canonical rows; identity, not position, owns each slot.
         owners = {(state.manifest.collection_id, state.manifest.basis.subject.path)
@@ -1445,21 +1473,43 @@ class OperationAuthorization:
         evidence = self._inspection_proof(handle, tuple(selections), (), inventory=True)
         return _seal_metadata_projection(payload, evidence)
 
-    def _inspection_proof(self, handle, selections, references, *, inventory=False):
+    def query_history_evidence(self, payload, writer, manifest):
+        """Certify audit topology, never current file bytes or another query field."""
+        history = payload["agent_history"]
+        state = _QueryHistoryState(
+            manifest.collection_id, manifest.path, manifest.semantic_profile, payload["snapshot"],
+            hashlib.sha256(_json(history).encode()).hexdigest(),
+            tuple((event["transition_id"], event["canonical_path"]) for event in history["events"]),
+        )
+        evidence = self._inspection_proof(writer.handle, (), (), history=state)
+        return _seal_metadata_projection(payload, evidence)
+
+    def _inspection_proof(self, handle, selections, references, *, inventory=False, history=None):
         from . import views
 
         return _CanonicalInspectionEvidence(
             self.root.resolve(), handle._inspection_identity, tuple(sorted(views.store_identity(self.conn).items())),
-            self.who, self.purpose, selections, references, "", _METADATA_SEAL, inventory,
+            self.who, self.purpose, selections, references, "", _METADATA_SEAL, inventory, history,
         )
 
-    def validate_inspection_projection(self, payload, handle):
+    def validate_inspection_projection(self, payload, handle, *, writer=None):
         """Fresh canonical admission; physical views cannot change this metadata."""
         evidence = _inspection_evidence(payload)
         if evidence is None:
             return None
         try:
             self._validate_metadata_binding(payload, handle, evidence)
+            if evidence.history is not None:
+                from .history import agent_history
+
+                state = evidence.history
+                manifest = writer._collection(state.collection_id, facade_profile=state.profile)[1]
+                if (manifest.path != state.manifest_path or payload.get("collection_id") != state.collection_id
+                        or payload.get("snapshot") != state.snapshot
+                        or hashlib.sha256(_json(agent_history(writer, manifest)).encode()).hexdigest()
+                        != state.history_hash):
+                    self.refuse()
+                _history_references(payload, state)
             current = []
             for state in evidence.selections:
                 cid = state.manifest.collection_id
