@@ -18,7 +18,10 @@ captures from the server itself (see :mod:`.state`).
   line.
 
 The hook command is rendered by the product's own installer, from the build's
-own hook sources, so the push is the deployed shape and not a copy of it.
+own hook sources, so the push is the deployed shape and not a copy of it. In
+the deployed ``mcp`` hook mode the push is a reminder to activate: A and M
+fetch their packet with their own ``activate_context`` call, which the tap
+counts against the pull budget and in the turn's calls like any other.
 """
 
 from __future__ import annotations
