@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **bench:** add a build-only CPU budget and recover arm retries in the switch evaluation ([#2019](https://github.com/Artexis10/exomem/issues/2019)) ([eb0a771](https://github.com/Artexis10/exomem/commit/eb0a771e46c483a68fad9a756301e91322d88a7f))
+* **recall:** drive keyword groups from trigram matches ([#2029](https://github.com/Artexis10/exomem/issues/2029)) ([0df8017](https://github.com/Artexis10/exomem/commit/0df80179e588afb94ac2e11e5675d06945d04ae3))
 * reserve temporary storage for owner exports ([5c2b10a](https://github.com/Artexis10/exomem/commit/5c2b10ae061f7499c507850c53481fb8b4b73321))
 * stop two release-gate flakes (watcher self-write, re-seed lexical repair) ([#2016](https://github.com/Artexis10/exomem/issues/2016)) ([10bc16c](https://github.com/Artexis10/exomem/commit/10bc16cd84013e0fad7eb62ee362e03d3a76e59a))
 
