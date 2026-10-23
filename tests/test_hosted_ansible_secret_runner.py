@@ -35,17 +35,6 @@ def test_ansible_secret_runner_requires_tmpfs_before_decrypting(tmp_path: Path) 
     # not ship. Without it the refusal under test is unreachable -- the runner
     # stops one step earlier, on its own missing-tool refusal.
     require_mount_type_inspection()
-    # `tmp_path` is tmpfs wherever /tmp is (Ubuntu 26.04 runners), so the
-    # workspace is the checkout. The runner refuses before it writes there.
-    workspace = ROOT
-    filesystem_type = subprocess.run(
-        ["findmnt", "--noheadings", "--output", "FSTYPE", "--target", str(workspace)],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    if filesystem_type in ("tmpfs", "ramfs"):  # the runner's own accepted types
-        pytest.skip("the checkout is on tmpfs, so no disk-backed workspace exists here")
 
     encrypted = tmp_path / "secret.v1.sops.json"
     encrypted.write_text('{"sops":{}}', encoding="utf-8")
@@ -62,7 +51,7 @@ def test_ansible_secret_runner_requires_tmpfs_before_decrypting(tmp_path: Path) 
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "EXOMEM_SECRET_TMPFS_DIR": str(workspace)},
+        env={**os.environ, "EXOMEM_SECRET_TMPFS_DIR": str(tmp_path)},
     )
     assert result.returncode != 0
     assert "must be tmpfs or ramfs" in result.stderr
