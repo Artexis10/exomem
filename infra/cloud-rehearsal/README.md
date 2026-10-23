@@ -109,6 +109,27 @@ The report remains partial and cannot gate the node.
 The twelve P3 steps and their release criteria stay unchanged.
 Production storage, browser CORS, large uploads and multiple nodes need their own acceptance evidence.
 
+## Owner export
+
+The optional owner-export stage connects the real Substrate owner endpoints to C6,
+the running controller, the export Job and versioned storage. It creates one
+invented source in the disposable owner's cell, requests its export, downloads
+the issued version and runs the canonical archive verifier in the Cloud image.
+It then expires only that fixture's row and checks deletion and return to Ready.
+
+Select `owner-export` in the existing `Cloud rehearsal` workflow. This runs steps
+1 and 2 before the C6 stage. It does not qualify a production node or enable a
+production export flag. The default twelve-step rehearsal stays unchanged.
+
+The stage enables `EXOMEM_CLOUD_EXPORTS_ENABLED` only in its isolated app.
+It uses the existing sealed network, synthetic sessions, migrations and grants.
+The report retains source and image identities, archive digests, states and
+cleanup observations. It records failures without provider URLs or credentials.
+
+The pinned Versity store supplies TLS, multipart requests, versions and cleanup.
+It does not implement provider encryption at rest. Use the separate B2 task 4.2
+receipt for that proof; this stage makes no encryption or per-cell key claim.
+
 ## Interrupted operator restore
 
 `--operator-restore-abort` adds one stage after provisioning. It also works with only steps 1 and 2 selected.

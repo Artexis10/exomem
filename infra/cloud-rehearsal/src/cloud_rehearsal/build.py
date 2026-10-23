@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import images
+from .infra import docker_labels
 from .shell import run
 
 CELL_REPOSITORY = "rehearsal.local/exomem-cell"
@@ -68,10 +69,10 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
     if prebuilt:
         run(["docker", "tag", prebuilt, v1])
         # A prebuilt image still upgrades to a new digest built from it.
-        _derive(workdir / "cell-v2", v1, v2, "LABEL io.exomem.rehearsal.release=v2\n")
+        _derive(workdir / "cell-v2", v1, v2, "LABEL io.exomem.rehearsal.release=v2\n", labels=docker_labels(run_id, image=True))
     else:
         for tag in (v1, v2):
-            build_cell_image(tag)
+            build_cell_image(tag, labels=docker_labels(run_id, image=True))
     broken_dir = workdir / "cell-broken"
     broken_dir.mkdir(parents=True, exist_ok=True)
     (broken_dir / "exomem-shim").write_text(BROKEN_SHIM, encoding="utf-8")
@@ -84,16 +85,17 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
         'RUN real="$(command -v exomem)" && mv "$real" "$real-real" '
         '&& ln -s /usr/local/lib/exomem-rehearsal-shim "$real"\n'
         "USER 10001:10001\n",
+        labels=docker_labels(run_id, image=True),
     )
     return v1, v2, broken
 
 
-def build_cell_image(tag: str) -> None:
+def build_cell_image(tag: str, *, labels: list[str] | None = None) -> None:
     """This checkout's `Dockerfile --target cloud`, stamped with a build time."""
 
     run(
         [
-            "docker", "build", "--target", "cloud", "--tag", tag,
+            "docker", "build", *(labels or []), "--target", "cloud", "--tag", tag,
             "--build-arg", f"EXOMEM_RELEASE_BUILD_TIME={_now_iso()}",
             str(images.REPO_ROOT),
         ],
@@ -101,13 +103,13 @@ def build_cell_image(tag: str) -> None:
     )
 
 
-def _derive(context: Path, base: str, tag: str, body: str) -> None:
+def _derive(context: Path, base: str, tag: str, body: str, *, labels: list[str] | None = None) -> None:
     context.mkdir(parents=True, exist_ok=True)
     (context / "Dockerfile").write_text(f"FROM {base}\n{body}", encoding="utf-8")
-    run(["docker", "build", "--tag", tag, str(context)], timeout=900)
+    run(["docker", "build", *(labels or []), "--tag", tag, str(context)], timeout=900)
 
 
-def trust_rehearsal_ca(tag: str, ca_path: Path, workdir: Path) -> str:
+def trust_rehearsal_ca(tag: str, ca_path: Path, workdir: Path, *, run_id: str | None = None) -> str:
     """Add only the disposable trust root to a source-built Cloud image."""
     trusted = tag + "-trusted"
     context = workdir / trusted.rsplit(":", 1)[1]
@@ -116,7 +118,7 @@ def trust_rehearsal_ca(tag: str, ca_path: Path, workdir: Path) -> str:
     _derive(context, tag, trusted,
             "USER 0:0\nCOPY ca.crt /tmp/rehearsal-ca.crt\n"
             "RUN cat /tmp/rehearsal-ca.crt >> /etc/ssl/certs/ca-certificates.crt && rm /tmp/rehearsal-ca.crt\n"
-            "USER 10001:10001\n")
+            "USER 10001:10001\n", labels=docker_labels(run_id, image=True) if run_id else None)
     return trusted
 
 
@@ -124,7 +126,7 @@ def build_gateway_image(run_id: str, workdir: Path, substrate_source: Path, *, m
     tag = f"{GATEWAY_REPOSITORY}:{run_id}"
     if mode == "dockerfile":
         run(
-            ["docker", "build", "--file", "Dockerfile.exomem-gateway", "--tag", tag, "."],
+            ["docker", "build", *docker_labels(run_id, image=True), "--file", "Dockerfile.exomem-gateway", "--tag", tag, "."],
             cwd=substrate_source,
             timeout=3600,
         )
@@ -152,7 +154,7 @@ def build_gateway_image(run_id: str, workdir: Path, substrate_source: Path, *, m
         encoding="utf-8",
     )
     (context / ".dockerignore").write_text("package.json\npackage-lock.json\n", encoding="utf-8")
-    run(["docker", "build", "--tag", tag, str(context)], timeout=900)
+    run(["docker", "build", *docker_labels(run_id, image=True), "--tag", tag, str(context)], timeout=900)
     return tag
 
 
@@ -193,10 +195,10 @@ def build_cellctl_image(run_id: str, workdir: Path, *, mode: str) -> str:
     site = "/opt/cellctl/lib/python3.12/site-packages"
     if mode == "dockerfile":
         base = f"{CELLCTL_REPOSITORY}:{run_id}-base"
-        run(["docker", "build", "--tag", base, str(CELLCTL_ROOT)], timeout=1800)
+        run(["docker", "build", *docker_labels(run_id, image=True), "--tag", base, str(CELLCTL_ROOT)], timeout=1800)
         # Only packages the base venv lacks, so nothing cellctl locks is replaced.
         present = set(
-            run(["docker", "run", "--rm", "--entrypoint", "ls", base, site]).stdout.split()
+            run(["docker", "run", "--rm", *docker_labels(run_id), "--entrypoint", "ls", base, site]).stdout.split()
         )
         # Metadata goes by distribution name too, so a resolve that picks a
         # different version of something the base has leaves no second
@@ -214,7 +216,7 @@ def build_cellctl_image(run_id: str, workdir: Path, *, mode: str) -> str:
             "USER 1000:1000\n"
         )
     (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
-    run(["docker", "build", "--tag", tag, str(context)], timeout=900)
+    run(["docker", "build", *docker_labels(run_id, image=True), "--tag", tag, str(context)], timeout=900)
     return tag
 
 

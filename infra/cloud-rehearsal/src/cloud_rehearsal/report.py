@@ -122,6 +122,8 @@ class Report:
         """Everything besides steps and targets that keeps a run from gating the node."""
 
         blockers = []
+        if self.inputs.get("owner_export"):
+            blockers.append("owner export is a partial coupling proof, not node qualification")
         if self.inputs.get("operator_restore_abort"):
             blockers.append("operator restore abort is a partial recovery proof, not node qualification")
         if not self.valid:

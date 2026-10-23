@@ -35,7 +35,7 @@ from pathlib import Path
 import asyncpg
 
 from . import images, tls
-from .infra import PG_DATABASE, PG_ROLES, Stack
+from .infra import PG_DATABASE, PG_ROLES, Stack, docker_labels
 from .shell import run, wait_for
 
 # The full rehearsal and controller fixtures must use the same companion schema.
@@ -162,8 +162,9 @@ def migrate(stack: Stack, source: Path) -> str:
     return result.stdout[-4000:]
 
 
-def _app_environment(stack: Stack, substrate_secrets: SubstrateSecrets, cell_image_repository: str) -> dict[str, str]:
-    return {
+def _app_environment(stack: Stack, substrate_secrets: SubstrateSecrets, cell_image_repository: str,
+                     *, exports_enabled: bool = False) -> dict[str, str]:
+    env = {
         "NODE_ENV": "production",
         "NEXT_TELEMETRY_DISABLED": "1",
         "DATABASE_URL": stack.postgres.dsn("substrate_app", from_host=False),
@@ -179,35 +180,40 @@ def _app_environment(stack: Stack, substrate_secrets: SubstrateSecrets, cell_ima
         "PADDLE_ENVIRONMENT": "sandbox",
         "PADDLE_WEBHOOK_SECRET": substrate_secrets.paddle_webhook_secret,
     }
+    if exports_enabled:
+        env["EXOMEM_CLOUD_EXPORTS_ENABLED"] = "true"
+    return env
 
 
-def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_repository: str) -> Substrate:
+def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_repository: str,
+          *, exports_enabled: bool = False) -> Substrate:
     substrate_secrets = SubstrateSecrets()
     sealed = stack.sealed_network or f"{stack.network}-sealed"
     if not stack.sealed_network:
-        run(["docker", "network", "create", "--internal", sealed])
+        run(["docker", "network", "create", *docker_labels(stack.run_id), "--internal", sealed])
         stack.networks.append(sealed)
     run(["docker", "network", "connect", sealed, stack.postgres.container])
     pg_sealed_ip = json.loads(run(["docker", "inspect", stack.postgres.container]).stdout)[0][
         "NetworkSettings"]["Networks"][sealed]["IPAddress"]
 
-    env = _app_environment(stack, substrate_secrets, cell_image_repository)
+    env = _app_environment(stack, substrate_secrets, cell_image_repository, exports_enabled=exports_enabled)
     env["DATABASE_URL"] = env["DATABASE_URL"].replace(f"@{stack.postgres.ip}:", f"@{pg_sealed_ip}:")
     env_file = stack.workdir / "secrets" / "substrate.env"
     env_file.write_text("".join(f"{key}={value}\n" for key, value in env.items()), encoding="utf-8")
     env_file.chmod(0o600)
 
     app = f"exo-rehearsal-substrate-{stack.run_id}"
+    stack.containers.append(app)
     run(
         [
-            "docker", "run", "--detach", "--name", app, "--network", sealed,
+            "docker", "run", "--detach", *docker_labels(stack.run_id), "--name", app, "--network", sealed,
             "--env-file", str(env_file),
-            "--mount", f"type=bind,source={source},target=/app",
+            "--mount", f"type=bind,source={source},target=/app,readonly",
+            "--tmpfs", "/app/.next/cache",
             "--workdir", "/app",
             NODE_IMAGE, "node", "node_modules/next/dist/bin/next", "start", "--hostname", "0.0.0.0", "--port", "3000",
         ]
     )
-    stack.containers.append(app)
 
     edge_dir = stack.workdir / "edge"
     edge_dir.mkdir(parents=True, exist_ok=True)
@@ -240,9 +246,10 @@ def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_reposito
         encoding="utf-8",
     )
     edge = f"exo-rehearsal-edge-{stack.run_id}"
+    stack.containers.append(edge)
     run(
         [
-            "docker", "run", "--detach", "--name", edge, "--network", stack.network,
+            "docker", "run", "--detach", *docker_labels(stack.run_id), "--name", edge, "--network", stack.network,
             "--publish", "127.0.0.1::443",
             "--mount", f"type=bind,source={edge_dir},target=/edge,readonly",
             images.TRAEFIK,
@@ -254,7 +261,6 @@ def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_reposito
             "--global.sendAnonymousUsage=false",
         ]
     )
-    stack.containers.append(edge)
     run(["docker", "network", "connect", "--alias", tls.SUBSTRATE_HOST, "--alias", tls.MCP_HOST, sealed, edge])
     edge_port = int(run(["docker", "port", edge, "443/tcp"]).stdout.strip().splitlines()[0].rsplit(":", 1)[1])
     return Substrate(
