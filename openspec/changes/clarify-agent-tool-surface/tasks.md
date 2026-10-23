@@ -7,7 +7,7 @@
 ## 2. Verify
 
 - [x] 2.1 Prove discovery, both-spelling dispatch, guarded behavior, exclusions, and cross-spelling replay in isolated state.
-- [ ] 2.2 Measure complete wire bytes before and after; pass schema budgets, generators, privacy, and affected suites.
+- [x] 2.2 Measure complete wire bytes before and after; pass schema budgets, generators, privacy, and affected suites.
 - [x] 2.3 Exercise installed public workflows and preserve the context compiler contracts.
 - [ ] 2.4 Complete the independent integrated review and required full-corpus checks.
 
@@ -20,4 +20,7 @@ Local verification: 15 compatibility cases, 342 boundary cases, and 68 correctio
 
 Installed acceptance reaches all eight source-truth outcomes across an initial pass and a guided CLI syntax correction. The correction also validates on the exact base. Context compiler inputs, view references, continuation, and maps guidance remain covered.
 
-The first full CI run exposed stale public-name assertions, two existing text ceilings, and benchmark admission that dropped preferred names. Verification remains open until the grouped corrections and full CI pass.
+The earlier naming head passed its independent review and full CI after grouped corrections.
+The expanded batch retains all 33 tools and adds registry-owned public titles and clearer operation guidance.
+Its installed complete wire catalogue is 92,027 bytes, within the existing ceiling; schemas and effect hints remain unchanged.
+The expanded head still requires its exact integrated review, full CI, and ordinary release verification.
