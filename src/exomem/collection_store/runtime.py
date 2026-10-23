@@ -832,7 +832,11 @@ def route(command, vault_root, arguments):
 
             capability.require_records_summary(root)
             raise admission.enrollment_required()
-    elif command == "record_memory" and arguments.get("action") in {"describe", "inspect"} and selector is None:
+    elif selector is None and (
+        arguments.get("action") == "inspect"
+        or (command == "record_memory" and arguments.get("action") == "describe")
+    ):
+        # Both public store tools need the service writer for global inventory.
         server = None if proof.marker is None else _server(root)
         return server if server is not None and server.runtime is not None else None
     elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):

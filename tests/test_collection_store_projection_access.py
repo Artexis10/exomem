@@ -112,6 +112,29 @@ def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store):
         assert path not in {entry["path"] for entry in filtered["source_versions"]}
 
 
+def test_global_inventory_keeps_canonical_metadata_without_authorizing_stale_manifest_bytes(store):
+    """The MCP adapter must retain inventory metadata without granting a wire copy the same authority."""
+    import json
+
+    from exomem import command_surface, commands
+
+    store.create_collection(manifest_path(), manifest_text(), why="create")
+    store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / manifest_path()
+    path.write_text(path.read_text() + "\nUnaccepted local edit\n")
+    command = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    bound = command_surface.bind_vault(command.leaf, store.root, command=command)
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        result = bound(action="inspect")
+        assert [(row["collection_id"], row["committed"]) for row in result["collections"]] == [(CID, 1)]
+        clone = json.loads(json.dumps(result))
+        assert egress.postfilter("record_memory", clone, store.root)["collections"] == []
+        result["collections"][0]["committed"] = 2
+        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+            egress.postfilter("record_memory", result, store.root)
+
+
 def test_canonical_metadata_does_not_authorize_the_same_resource_reference(store):
     """Canonical row metadata cannot release an authored reference to edited view bytes."""
     path = f"Knowledge Base/Records/Work/Items/{KEY}.md"

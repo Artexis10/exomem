@@ -215,7 +215,8 @@ def test_offline_migrate_routes_every_records_and_planning_collection_without_ch
         env, capsys):
     """A migration that rewrites or loses a vault file, routes a collection that did not prove,
     blesses a gap, leaves the vault unfenced against old writers or without its compatibility
-    descriptor, or serves rows that differ from the files it read."""
+    descriptor, serves rows that differ from the files it read, or hides migrated Planning
+    collections from global inventory."""
     root = legacy_vault(env)
     before = vault_bytes(root)
     expected = {cid: rows(root, path) for cid, path in MIGRATED.items()}
@@ -247,6 +248,10 @@ def test_offline_migrate_routes_every_records_and_planning_collection_without_ch
     try:
         assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == expected
         assert call(root, "record_memory", action="inspect", collection=CID)["audit"]["status"] == "gap"
+        assert call(root, "record_memory", action="inspect")["unreadable_manifests"] == []
+        plans = call(root, "plan_memory", action="inspect")
+        assert {entry["collection_id"] for entry in plans["collections"]} == {OTHER}
+        assert plans["unreadable_manifests"] == []
     finally:
         service.stop()
 
