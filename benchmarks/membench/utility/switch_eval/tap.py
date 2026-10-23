@@ -1,18 +1,17 @@
 """A stdio MCP tap between the agent CLI and the Exomem server under test.
 
 The agent CLI starts this script as its MCP server; the script starts the real
-server and pumps newline-delimited JSON-RPC both ways. It is the one place that
-sees every Exomem call, so it does the three things the protocol asks of the
-client side and that no CLI flag does:
+server and pumps newline-delimited JSON-RPC both ways. It sees every Exomem call
+and handles the protocol's client duties that no CLI flag covers:
 
 - it applies the arm's tool filter to ``tools/list``, so the actor sees only
   the arm's read tools, with the shipped descriptions unchanged;
 - it enforces the pull budget per user turn: the harness writes the current
   turn's index to ``--turn-file`` before it sends the turn, and a call past the
   budget is answered here with a refusal and never reaches the server;
-- it records the server instructions, the filtered tool list, every call with
-  its result, and the server's exit, so a crash of the server under test is
-  told apart from a fault of the harness.
+- it waits for ranked recall before relaying discovery or tool calls;
+- it records the wait, server instructions, filtered tools, calls and results;
+- it records the server's exit, which separates a product crash from a harness fault.
 
 Stdlib only: the CLI runs it with the build's interpreter, before anything of
 the harness is importable, and a proxy that imports the product could change
@@ -24,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -43,6 +43,62 @@ FILTER_REFUSAL = "Refused: this tool is not available in this session."
 #: session-based ``initialize`` and the stateless ``server/discover`` that a
 #: client on the 2026-07-28 protocol sends instead. Protocol method names.
 HANDSHAKE_METHODS = frozenset({"initialize", "server/discover"})
+
+# Harness knob: a cold snapshot took about five minutes to admit recall.
+# Fifteen minutes leaves margin for contention; --ready-timeout can override it.
+READY_TIMEOUT_SECONDS = 900.0
+
+
+def tool_payloads(message: dict):
+    """Read only MCP and product envelopes, including JSON text content."""
+
+    pending = [message]
+    while pending:
+        value = pending.pop()
+        yield value
+        if not isinstance(value, dict):
+            continue
+        # These are transport/envelope fields, never hit text or vocabulary.
+        for key in ("structuredContent", "result", "data", "error"):
+            if key in value:
+                pending.append(value[key])
+        for block in value.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                try:
+                    pending.append(json.loads(block.get("text", "")))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+
+def warming_refusal(message: dict) -> bool:
+    """The product's structured refusal codes, never words in returned prose."""
+
+    for value in tool_payloads(message):
+        if not isinstance(value, dict):
+            continue
+        abstention = value.get("abstention")
+        if isinstance(abstention, dict) and abstention.get("reason") == "index_warming":
+            return True
+        if (
+            value.get("code") == "RETRIEVAL_INDEX_WARMING"
+            or value.get("error_code") == "RETRIEVAL_INDEX_WARMING"
+        ):
+            return True
+    return False
+
+
+def ready_wait(events: list[dict], start: float, end: float) -> float:
+    """Gate time overlapping one turn, also while the gate is still running."""
+
+    began = next((e["monotonic"] for e in events if e.get("event") == "ready_started"), None)
+    if began is None:
+        return 0.0
+    finished = next((e["monotonic"] for e in events if e.get("event") == "ready_finished"), end)
+    return max(0.0, min(end, finished) - max(start, began))
+
+
+class ReadyGateError(RuntimeError):
+    """The session's server did not prove recall ready within the setup bound."""
 
 
 def process_start_ticks(pid: int) -> str | None:
@@ -98,12 +154,22 @@ class Budget:
 
 class Tap:
     def __init__(
-        self, *, server: subprocess.Popen, log: TapLog, budget: Budget, allow: frozenset[str]
+        self,
+        *,
+        server: subprocess.Popen,
+        log: TapLog,
+        budget: Budget,
+        allow: frozenset[str],
+        ready_timeout: float = READY_TIMEOUT_SECONDS,
     ) -> None:
         self.server = server
         self.log = log
         self.budget = budget
         self.allow = allow
+        self.ready_timeout = ready_timeout
+        self._ready = False
+        self._probe_id: str | None = None
+        self._probe_replies: queue.Queue[dict] = queue.Queue()
         self._out_lock = threading.Lock()
         self._pending: dict[object, tuple[str, dict]] = {}
         self._pending_lock = threading.Lock()
@@ -139,6 +205,8 @@ class Tap:
             return
         method = message.get("method")
         request_id = message.get("id")
+        if method in ("tools/list", "tools/call") and not self._ready:
+            self._wait_ready(message.get("params") or {})
         if method == "tools/call" and request_id is not None:
             params = message.get("params") or {}
             name = str(params.get("name", ""))
@@ -164,6 +232,75 @@ class Tap:
                 self._pending[request_id] = (method, {})
         self._forward(raw)
 
+    def _wait_ready(self, params: dict) -> None:
+        """Hold discovery and calls; probe this connection outside the arm budget."""
+
+        started = time.monotonic()
+        deadline = started + self.ready_timeout
+        self.log.write("ready_started", monotonic=started, timeout_seconds=self.ready_timeout)
+        probes = 0
+        outcome = "timeout"
+        while time.monotonic() < deadline:
+            probes += 1
+            self._probe_id = f"switch-eval-ready-{probes}"
+            probe_params = {
+                "name": "ask_memory",
+                # A nonempty, case-independent query exercises ranked recall.
+                # No reranker or case ref is needed to prove its admission.
+                "arguments": {"query": "readiness probe", "limit": 1, "rerank": False},
+            }
+            if "_meta" in params:
+                probe_params["_meta"] = params["_meta"]
+            self._forward(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": self._probe_id,
+                        "method": "tools/call",
+                        "params": probe_params,
+                    }
+                )
+            )
+            try:
+                reply = self._probe_replies.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if not warming_refusal(reply):
+                result = reply.get("result") or {}
+                payloads = list(tool_payloads(reply))
+                failed = (
+                    reply.get("error")
+                    or result.get("isError")
+                    or any(
+                        isinstance(p, dict) and (p.get("success") is False or p.get("error"))
+                        for p in payloads
+                    )
+                )
+                # A ranked response proves request admission. The product serves
+                # bounded projection lag and optional lanes with warming metadata;
+                # those disclosures are not refusals and must not hold this gate.
+                if not failed and any(
+                    isinstance(p, list) or (isinstance(p, dict) and isinstance(p.get("hits"), list))
+                    for p in payloads
+                ):
+                    self._ready = True
+                    outcome = "ready"
+                else:
+                    outcome = "probe_error"
+                break
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        self._probe_id = None
+        finished = time.monotonic()
+        self.log.write(
+            "ready_finished",
+            monotonic=finished,
+            outcome=outcome,
+            wait_seconds=round(finished - started, 4),
+            probes=probes,
+        )
+        if not self._ready:
+            raise ReadyGateError(outcome)
+
     def _forward(self, raw: str) -> None:
         try:
             self.server.stdin.write(raw + "\n")
@@ -179,6 +316,9 @@ class Tap:
             self._write_raw(raw)
             return
         request_id = message.get("id") if isinstance(message, dict) else None
+        if self._probe_id is not None and request_id == self._probe_id and "method" not in message:
+            self._probe_replies.put(message)
+            return
         with self._pending_lock:
             pending = (
                 self._pending.pop(request_id, None)
@@ -230,12 +370,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", required=True, type=Path)
     parser.add_argument("--turn-file", required=True, type=Path)
     parser.add_argument("--budget", required=True, type=int)
+    parser.add_argument("--ready-timeout", type=float, default=READY_TIMEOUT_SECONDS)
     parser.add_argument(
         "--allow", required=True, help="comma-separated tool names the arm may see and call"
     )
     parser.add_argument("--server-stderr", required=True, type=Path)
     parser.add_argument("server", nargs=argparse.REMAINDER, help="-- then the server argv")
     args = parser.parse_args(argv)
+    if not 0 < args.ready_timeout < float("inf"):
+        parser.error("--ready-timeout must be finite and positive")
     server_argv = args.server[1:] if args.server[:1] == ["--"] else args.server
     if not server_argv:
         parser.error("the server argv is required after --")
@@ -262,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
         log=log,
         budget=Budget(args.turn_file, args.budget),
         allow=frozenset(args.allow.split(",")),
+        ready_timeout=args.ready_timeout,
     )
 
     closing = threading.Event()
@@ -298,9 +442,13 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, on_terminate)
     reader = threading.Thread(target=pump_server, daemon=True)
     reader.start()
-    for line in sys.stdin:
-        if line.strip():
-            tap.from_client(line.rstrip("\n"))
+    try:
+        for line in sys.stdin:
+            if line.strip():
+                tap.from_client(line.rstrip("\n"))
+    except ReadyGateError:
+        shut_down()
+        return 1
     # The client closed its end: an orderly shutdown of the server under test.
     shut_down()
     reader.join(timeout=5)

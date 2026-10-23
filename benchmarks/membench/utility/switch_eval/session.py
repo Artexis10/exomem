@@ -61,7 +61,7 @@ from .state import (
     prepare_session_slot,
     product_env,
 )
-from .tap import process_start_ticks
+from .tap import READY_TIMEOUT_SECONDS, process_start_ticks, ready_wait, warming_refusal
 
 # Outcomes of one attempt. ``ok`` and ``actor_failure`` are final; a
 # ``harness_fault`` is retried; ``quota`` pauses the run; ``abort`` stops it,
@@ -244,6 +244,9 @@ def session_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[st
     env.update(product_env(slot, spec))
     env["EXOMEM_RETRIEVE_INJECT_CLI"] = "1"
     env.update(CLIENT_PINS)
+    # Discovery waits at the tap's ready gate. Let that bounded setup finish
+    # before the client gives up connecting (MCP_TIMEOUT is in milliseconds).
+    env["MCP_TIMEOUT"] = str(int((READY_TIMEOUT_SECONDS + 60) * 1000))
     build_bin = str(Path(sys.executable).parent)
     rest = [
         entry for entry in floor.get("PATH", "").split(os.pathsep) if entry and entry != build_bin
@@ -273,7 +276,7 @@ class SessionInputs:
         product = {
             key: self.env[key]
             for key in sorted(self.env)
-            if key.startswith("EXOMEM_") or key == "PATH"
+            if key.startswith("EXOMEM_") or key in ("PATH", "MCP_TIMEOUT")
         }
         return sha256_text(
             canonical_json(
@@ -471,6 +474,28 @@ def classify(
             "quota",
             json.dumps(quota),
             resets_at=quota.get("resetsAt"),
+            turns=list(turn_records),
+        )
+
+    gate_started = any(e.get("event") == "ready_started" for e in tap_events)
+    gate = next((e for e in tap_events if e.get("event") == "ready_finished"), None)
+    if gate_started and (gate is None or gate.get("outcome") != "ready"):
+        return AttemptResult(
+            HARNESS_FAULT,
+            "recall_not_ready",
+            str(gate.get("outcome")) if gate else "server ended during the ready gate",
+            turns=list(turn_records),
+        )
+    if any(
+        e.get("event") == "call"
+        and e.get("outcome") == "served"
+        and warming_refusal({"result": e.get("result"), "error": e.get("error")})
+        for e in tap_events
+    ):
+        return AttemptResult(
+            HARNESS_FAULT,
+            "recall_warming",
+            "a served read refused after the ready gate",
             turns=list(turn_records),
         )
 
@@ -702,6 +727,7 @@ def _turn_record(
     times: Sequence[float],
     tap_events: Sequence[dict],
     wall: float,
+    setup_wait: float = 0.0,
 ) -> dict:
     """One turn's facts. ``times`` holds each event's arrival, in seconds after
     the turn was sent; a push's ``seconds`` is its response's arrival minus its
@@ -732,7 +758,8 @@ def _turn_record(
     usage = transcript.usage or {}
     return {
         "index": index,
-        "wall_seconds": round(wall, 3),
+        "wall_seconds": round(max(0.0, wall - setup_wait), 3),
+        "ready_wait_seconds": round(setup_wait, 3),
         "result_subtype": result.get("subtype") if result else None,
         "is_error": bool(result.get("is_error")) if result else None,
         "answer": transcript.result_text if result else None,
@@ -855,10 +882,11 @@ class ClaudeSessionExecutor:
         reader = threading.Thread(target=pump, daemon=True)
         reader.start()
         all_events: list[dict] = []
-        turn_slices: list[tuple[int, list[str], list[dict], list[float], float]] = []
+        turn_slices: list[tuple[int, list[str], list[dict], list[float], float, float]] = []
         timed_out = False
         quota: dict | None = None
         ended = False
+        gate_events: list[dict] = []
         try:
             for index, turn in enumerate(inputs.turns):
                 slot.turn_file.write_text(str(index), encoding="utf-8")
@@ -872,18 +900,23 @@ class ClaudeSessionExecutor:
                 turn_lines: list[str] = []
                 turn_events: list[dict] = []
                 turn_times: list[float] = []
-                deadline = sent + self.turn_timeout
                 got_result = False
                 while not got_result:
-                    remaining = deadline - time.monotonic()
+                    now = time.monotonic()
+                    if not any(e.get("event") == "ready_finished" for e in gate_events):
+                        gate_events = _read_jsonl(slot.runtime / "tap.jsonl")
+                    remaining = self.turn_timeout - (
+                        now - sent - ready_wait(gate_events, sent, now)
+                    )
                     if remaining <= 0:
                         timed_out = True
                         break
                     try:
-                        item = lines.get(timeout=remaining)
+                        # The tap logs the gate independently of CLI output.
+                        # Recheck its clock even while the client is silent.
+                        item = lines.get(timeout=min(remaining, 1.0))
                     except queue.Empty:
-                        timed_out = True
-                        break
+                        continue
                     if item is None:
                         ended = True
                         break
@@ -908,7 +941,7 @@ class ClaudeSessionExecutor:
                         break
                     got_result = event.get("type") == "result"
                 turn_slices.append(
-                    (index, turn_lines, turn_events, turn_times, time.monotonic() - sent)
+                    (index, turn_lines, turn_events, turn_times, sent, time.monotonic())
                 )
                 if timed_out or ended or quota is not None:
                     break
@@ -933,7 +966,8 @@ class ClaudeSessionExecutor:
         tap_events = _read_jsonl(runtime_copy / "tap.jsonl")
         orphan = _end_orphan_server(tap_events)
         records = [
-            _turn_record(i, tl, te, tt, tap_events, wall) for i, tl, te, tt, wall in turn_slices
+            _turn_record(i, tl, te, tt, tap_events, end - start, ready_wait(tap_events, start, end))
+            for i, tl, te, tt, start, end in turn_slices
         ]
         result = classify(
             spec=spec,

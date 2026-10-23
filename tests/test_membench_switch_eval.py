@@ -46,6 +46,7 @@ from membench.utility.switch_eval.session import (
     HARNESS_FAULT,
     OK,
     AttemptResult,
+    ClaudeSessionExecutor,
     PlannedSession,
     RunAborted,
     SessionInputs,
@@ -53,7 +54,7 @@ from membench.utility.switch_eval.session import (
     plan_sessions,
     run_session,
 )
-from membench.utility.switch_eval.state import Layout
+from membench.utility.switch_eval.state import Layout, Slot
 from membench.utility.switch_eval.tap import BUDGET_REFUSAL
 from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 
@@ -66,6 +67,7 @@ if "--exit-at-start" in sys.argv:
     sys.exit(2)
 crash = "--crash-on-call" in sys.argv
 served = 0
+probes = 0
 for line in sys.stdin:
     message = json.loads(line)
     if "id" not in message:
@@ -76,11 +78,23 @@ for line in sys.stdin:
                   "serverInfo": {"name": "stand-in", "version": "0"}, "instructions": "stand-in"}
     elif method == "tools/list":
         result = {"tools": [{"name": "read_memory", "description": "d", "inputSchema": {"type": "object"}}]}
+    elif method == "tools/call" and message["params"]["name"] == "ask_memory":
+        if "--check-meta" in sys.argv:
+            assert message["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+        probes += 1
+        if "--never-ready" in sys.argv or ("--warming-once" in sys.argv and probes == 1):
+            result = {"structuredContent": {"result": {"success": False,
+                      "error": {"code": "RETRIEVAL_INDEX_WARMING"}}}}
+        else:
+            result = {"structuredContent": {"result": {"hits": [],
+                      "warming": {"components": ["embeddings", "graph", "recall_projection"], "since_s": None}}}}
     else:
         if crash:
             sys.exit(3)
         served += 1
         result = {"content": [{"type": "text", "text": f"served {served}"}]}
+        if "--read-result" in sys.argv:
+            result = json.loads(sys.argv[sys.argv.index("--read-result") + 1])
     print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)
 """
 
@@ -415,6 +429,91 @@ def test_a_contamination_verdict_without_its_span_is_refused() -> None:
 
 
 # -- the pull budget ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("eventually_ready", [True, False], ids=["ready", "setup-timeout"])
+def test_the_ready_gate_holds_requests_without_spending_the_turn_budget_or_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, eventually_ready: bool) -> None:
+    from membench.utility.switch_eval import session
+
+    slot = Slot(tmp_path / "slot")
+    slot.runtime.mkdir(parents=True)
+    slot.cwd.mkdir()
+    server = tmp_path / "stand_in_server.py"
+    server.write_text(FAKE_SERVER, encoding="utf-8")
+    client = tmp_path / "stand_in_client.py"
+    client.write_text('''
+import json, subprocess, sys
+request = json.loads(sys.stdin.readline())
+tap = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def ask(rid, method, params):
+    tap.stdin.write(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}) + "\\n")
+    tap.stdin.flush()
+    reply = json.loads(tap.stdout.readline())
+    assert reply["id"] == rid
+    return reply
+meta = {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}
+ask(1, "server/discover", meta)
+ask(2, "tools/list", meta)
+print(json.dumps({"type": "system", "subtype": "init", "apiKeySource": "none",
+      "model": "m", "claude_code_version": "v", "tools": ["mcp__exomem__read_memory"],
+      "mcp_servers": [{"name": "exomem", "status": "connected"}]}), flush=True)
+reply = ask(3, "tools/call", {"name": "read_memory", "arguments": {}})
+print(json.dumps({"type": "result", "subtype": "success",
+      "result": reply["result"]["content"][0]["text"]}), flush=True)
+tap.stdin.close()
+tap.wait(timeout=10)
+''', encoding="utf-8")
+    monkeypatch.setattr(session, "prepare_session_slot", lambda *args: slot)
+    spec = replace(arm_specs()["P"], tools=("read_memory",))
+    inputs = replace(_inputs(arm="P"), cwd=slot.cwd, argv=(
+        sys.executable, str(client), sys.executable, TAP_SCRIPT,
+        "--log", str(slot.runtime / "tap.jsonl"), "--turn-file", str(slot.turn_file),
+        "--budget", "1", "--allow", "read_memory",
+        "--ready-timeout", "5" if eventually_ready else "0.05",
+        "--server-stderr", str(slot.runtime / "server.stderr"),
+        "--", sys.executable, str(server), "--check-meta",
+        "--warming-once" if eventually_ready else "--never-ready",
+    ))
+    # Warm-up lasts a second; an actor turn gets only half a second.
+    executor = ClaudeSessionExecutor(Layout(tmp_path), {"P": spec}, "m", "v", {}, turn_timeout=0.5)
+    result = executor(inputs, tmp_path / "attempt")
+
+    tap_events = _log(tmp_path / "attempt" / "runtime" / "tap.jsonl")
+    ready = next(e for e in tap_events if e["event"] == "ready_finished")
+    if not eventually_ready:
+        assert result.outcome == HARNESS_FAULT and result.kind == "recall_not_ready"
+        assert ready["outcome"] == "timeout"
+        assert not any(e["event"] == "call" for e in tap_events)
+        return
+
+    assert result.outcome == OK and result.answer == "served 1"
+    assert ready["outcome"] == "ready" and ready["probes"] == 2
+    assert next(e["t"] for e in tap_events if e["event"] == "tools_list") >= ready["t"]
+    turn = result.turns[0]
+    assert turn["calls"] == 1 and turn["calls_refused_budget"] == 0
+    assert turn["ready_wait_seconds"] >= 1.0 and turn["wall_seconds"] < 0.5
+
+
+@pytest.mark.parametrize("refusal", [
+    {"structuredContent": {"abstained": True, "abstention": {"reason": "index_warming"}}},
+    {"content": [{"type": "text", "text": json.dumps({"success": False, "error": {"code": "RETRIEVAL_INDEX_WARMING"}})}]},
+])
+def test_a_warming_read_after_the_gate_is_a_harness_fault(tmp_path: Path, refusal: dict) -> None:
+    tap, log, _turn_file = _start_tap(tmp_path, "--read-result", json.dumps(refusal))
+    _ask(tap, 1, "initialize", {})
+    _ask(tap, 2, "tools/call", {"name": "read_memory", "arguments": {}})
+    tap.stdin.close()
+    tap.wait(timeout=30)
+
+    def warming(inputs: SessionInputs, attempt_dir: Path) -> AttemptResult:
+        return classify(
+            spec=arm_specs()["P"], model="m", client_version="v", events=[], turn_records=[],
+            tap_events=_log(log), scored_turn=0, timed_out=True, quota=None, surface=None,
+        )
+
+    record = run_session(_inputs(), tmp_path / "warming", warming)
+    assert record["outcome"] == HARNESS_FAULT and record["kind"] == "recall_warming"
+    assert record["attempts"] == 1 + protocol.HARNESS_FAULT_RETRIES
 
 
 def test_an_over_budget_call_is_refused_and_counted(tmp_path: Path) -> None:
