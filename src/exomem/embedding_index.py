@@ -20,7 +20,7 @@ from collections.abc import Set as AbstractSet
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NamedTuple, NoReturn
+from typing import Any, NamedTuple, NoReturn, cast
 
 import numpy as np
 
@@ -144,13 +144,33 @@ class _EmbCache(NamedTuple):
     recall_policy_identity: tuple[str, str]
     metadata: list[tuple[str, int]]
     matrix: np.ndarray
+    space: recall_space.SpaceIdentity | None = None
+
+
+class ChunkProof(NamedTuple):
+    """The actual vector snapshot that supplied a selected chunk's score."""
+
+    index: EmbeddingIndex
+    token: tuple[int, int, int]
+    space: recall_space.SpaceIdentity | None
+
+
+class ChunkRef(NamedTuple):
+    """A request-local passage reference; it owns no connection or matrix."""
+
+    proof: ChunkProof
+    path: str
+    chunk: int
 
 
 def _cache_covers_publication(
-    cached: _EmbCache | None, token: tuple[int, ...] | None
+    cached: _EmbCache | None, token: tuple[int, ...] | None,
+    identity: recall_space.SpaceIdentity | None,
 ) -> bool:
-    """A failed token probe must not serve a snapshot known to precede publication."""
-    if cached is None:
+    """A failed token probe must not serve rows from an obsolete publication."""
+    # The first producer or a refined fingerprint can change space without a
+    # chunk generation bump. Retire that cache through the existing reload path.
+    if cached is None or cached.space != identity:
         return False
     if token is None:
         return True
@@ -1077,7 +1097,7 @@ class EmbeddingIndex:
         epoch, _generation, instance = token
         with self._lock:
             cached = self._cache
-            current = _cache_covers_publication(cached, token)
+            current = _cache_covers_publication(cached, token, self._identity)
             # Same-epoch rows can catch up; a changed space or instance must reload.
             if not current and (
                 cached is None or cached.instance != instance or cached.epoch != epoch
@@ -1184,22 +1204,11 @@ class EmbeddingIndex:
         conn = self._connect()
         try:
             conn.execute("BEGIN")
-            current = self._build_token(conn)
-            if current[0] != token[0] or current[2] != token[2] or current[1] < token[1]:
-                return False
             stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
             if stored != identity and (chunk_count or unit_count or stored is not None):
                 return False
-            if current[1] != token[1]:
-                start, upto = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
-                if start is None or start > token[1] or upto != current[1]:
-                    return False
-                changed = conn.execute(
-                    "SELECT generation FROM chunk_path_log WHERE file_path = ?",
-                    (rel_path,),
-                ).fetchone()
-                if changed is not None and int(changed[0]) > token[1]:
-                    return False
+            if rel_path not in self._unchanged_chunk_paths(conn, token[:3], {rel_path}):
+                return False
             width = identity.dim * 4
             chunks = conn.execute(
                 "SELECT COUNT(*), MIN(chunk_idx), MAX(chunk_idx), "
@@ -1224,6 +1233,27 @@ class EmbeddingIndex:
             )
         finally:
             conn.close()
+
+    def _unchanged_chunk_paths(
+        self, conn: sqlite3.Connection, token: tuple[int, int, int], paths: set[str],
+    ) -> set[str]:
+        """Reuse the owner's contiguous path log inside the caller's snapshot."""
+        current = self._build_token(conn)
+        if current[0] != token[0] or current[2] != token[2] or current[1] < token[1]:
+            return set()
+        if current[1] == token[1]:
+            return paths
+        start, upto = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
+        if start is None or start > token[1] or upto != current[1]:
+            return set()
+        changed = set()
+        for path in paths:
+            row = conn.execute(
+                "SELECT generation FROM chunk_path_log WHERE file_path = ?", (path,),
+            ).fetchone()
+            if row is not None and int(row[0]) > token[1]:
+                changed.add(path)
+        return paths - changed
 
     def parent_publication_from_source(
         self, chunks: list[str], state: semantic_index.SemanticParentIndexState,
@@ -1414,6 +1444,7 @@ class EmbeddingIndex:
                 cached.matrix[keep]
                 if keep
                 else np.zeros((0, cached.matrix.shape[1]), dtype=np.float32),
+                cached.space,
             )
 
     def upsert_semantic_units(
@@ -1548,6 +1579,7 @@ class EmbeddingIndex:
                     c.recall_policy_identity,
                     new_metadata,
                     new_matrix,
+                    c.space,
                 )
             except Exception as e:  # noqa: BLE001 — self-heal, never break a write
                 log.warning("embedding matrix splice failed (%s); dropping cache", e)
@@ -1561,20 +1593,27 @@ class EmbeddingIndex:
         is deliberately NOT here (numpy-lite — see class docstring); fetch the
         winners' texts via `_texts_for` when needed.
         """
-        if not self.path.exists():
+        served = self._all_vector_snapshot()
+        if served is None:
             return [], np.zeros((0, self.dim), dtype=np.float32)
+        return served.metadata, served.matrix
+
+    def _all_vector_snapshot(self) -> _EmbCache | None:
+        """Keep the scored cache's proof attached to its copy-on-write arrays."""
+        if not self.path.exists():
+            return None
         if cloud_cell.resource_policy() == "service-v1":
             # Explicit audit consumers may read all rows transiently, but they
             # cannot turn subsequent ordinary writes into matrix replacements.
             self.unload_cache()
             loaded = self._load_all_rows()
-            return loaded.metadata, loaded.matrix
+            return loaded
         from . import recall_policy
 
         policy_identity = recall_policy.recall_policy_identity(self.vault_root)
         served = self._serve_resident(policy_identity)
         if served is not None:
-            return served.metadata, served.matrix
+            return served
         while True:
             loading = self._matrix_loading()
             if loading is not None:
@@ -1583,11 +1622,11 @@ class EmbeddingIndex:
             with self._lock:
                 served = self._serve_or_catch_up_locked(policy_identity)
                 if served is not None:
-                    return served.metadata, served.matrix
+                    return served
                 if self._matrix_loading() is not None:
                     continue
                 loaded = self._full_load_locked()
-                return loaded.metadata, loaded.matrix
+                return loaded
 
     def _serve_resident(
         self, policy_identity: tuple[str, str], *, nonblocking: bool = False
@@ -1601,7 +1640,7 @@ class EmbeddingIndex:
             if c is not None and c.recall_policy_identity == policy_identity
             else None
         )
-        if served is not None and _cache_covers_publication(served, self._identity_token):
+        if served is not None and _cache_covers_publication(served, self._identity_token, self._identity):
             self._hits += 1
             return served
         return None
@@ -1658,7 +1697,7 @@ class EmbeddingIndex:
             if c is not None and c.recall_policy_identity == policy_identity
             else None
         )
-        if served is not None and _cache_covers_publication(served, self._identity_token):
+        if served is not None and _cache_covers_publication(served, self._identity_token, self._identity):
             self._hits += 1
             return served
         # Bounded catch-up BEFORE the full reload: a cache a couple of
@@ -1667,8 +1706,10 @@ class EmbeddingIndex:
         # paths' rows alone, instead of paying the O(vault) SELECT + stack.
         if c is not None and c.recall_policy_identity == policy_identity:
             try:
-                with call_spans.span("embeddings.matrix_catch_up"):
-                    patched = self._catch_up_cache(c)
+                # These four measurements are the span's closed numeric protocol.
+                fields: dict[str, int] = {}
+                with call_spans.span("embeddings.matrix_catch_up", fields):
+                    patched = self._catch_up_cache(c, fields)
             except Exception as e:  # noqa: BLE001 — always fall back, never raise
                 log.warning(
                     "embedding matrix catch-up failed (%s); taking the full load", e
@@ -1797,7 +1838,7 @@ class EmbeddingIndex:
             status["generation"] = c.generation
         return status
 
-    def _catch_up_cache(self, c: _EmbCache) -> _EmbCache | None:
+    def _catch_up_cache(self, c: _EmbCache, fields: dict[str, int]) -> _EmbCache | None:
         """Patch a slightly-stale warm cache forward from the changed paths only.
 
         Returns the patched cache, or None when this delta is not eligible (the
@@ -1818,51 +1859,63 @@ class EmbeddingIndex:
         which preserves the row count exactly. The count is a cheap secondary
         cross-check for insert/delete-shaped divergence only.
         """
-        conn = self._connect()
+        prepare_started = time.perf_counter_ns()
         try:
-            conn.execute("BEGIN")
+            conn = self._connect()
             try:
-                epoch, gen, instance = sidecar_store.read_meta_token(conn)
-                run = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
-                if not sidecar_store.catchup_is_eligible(
-                    c,
-                    epoch,
-                    gen,
-                    instance,
-                    run=run,
-                    max_generations=CATCHUP_MAX_GENERATIONS,
-                ):
-                    return None
-                changed = sidecar_store.changed_paths_since(
-                    conn, CHUNK_PATH_LOG, c.generation, limit=CATCHUP_MAX_PATHS
-                )
-                if len(changed) > CATCHUP_MAX_PATHS:
-                    return None  # wider than the bound — one clean reload is cheaper
-                replacements: dict[
-                    str, tuple[list[tuple[str, int]], np.ndarray | None]
-                ] = {}
-                for path in changed:
-                    rows = conn.execute(
-                        "SELECT chunk_idx, vector FROM chunks "
-                        "WHERE file_path = ? ORDER BY chunk_idx",
-                        (path,),
-                    ).fetchall()
-                    key = sys.intern(path)
-                    replacements[key] = (
-                        [(key, idx) for idx, _blob in rows],
-                        np.stack(
-                            [np.frombuffer(blob, dtype=np.float32) for _idx, blob in rows],
-                            axis=0,
-                        )
-                        if rows
-                        else None,
+                conn.execute("BEGIN")
+                try:
+                    epoch, gen, instance = sidecar_store.read_meta_token(conn)
+                    if recall_space.read_identity(conn, tables=_VECTOR_TABLES) != c.space:
+                        return None
+                    run = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
+                    if not sidecar_store.catchup_is_eligible(
+                        c,
+                        epoch,
+                        gen,
+                        instance,
+                        run=run,
+                        max_generations=CATCHUP_MAX_GENERATIONS,
+                    ):
+                        return None
+                    changed = sidecar_store.changed_paths_since(
+                        conn, CHUNK_PATH_LOG, c.generation, limit=CATCHUP_MAX_PATHS
                     )
-                total_rows = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+                    if len(changed) > CATCHUP_MAX_PATHS:
+                        return None  # wider than the bound — one clean reload is cheaper
+                    replacements: dict[
+                        str, tuple[list[tuple[str, int]], np.ndarray | None]
+                    ] = {}
+                    for path in changed:
+                        rows = conn.execute(
+                            "SELECT chunk_idx, vector FROM chunks "
+                            "WHERE file_path = ? ORDER BY chunk_idx",
+                            (path,),
+                        ).fetchall()
+                        key = sys.intern(path)
+                        replacements[key] = (
+                            [(key, idx) for idx, _blob in rows],
+                            np.stack(
+                                [np.frombuffer(blob, dtype=np.float32) for _idx, blob in rows],
+                                axis=0,
+                            )
+                            if rows
+                            else None,
+                        )
+                    total_rows = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+                finally:
+                    conn.rollback()  # read-only txn — release the snapshot
             finally:
-                conn.rollback()  # read-only txn — release the snapshot
+                conn.close()
         finally:
-            conn.close()
-        metadata, matrix = _splice_path_blocks(c.metadata, c.matrix, replacements)
+            fields["prepare_us"] = (time.perf_counter_ns() - prepare_started) // 1000
+        fields["paths"] = len(replacements)
+        fields["rows"] = total_rows
+        splice_started = time.perf_counter_ns()
+        try:
+            metadata, matrix = _splice_path_blocks(c.metadata, c.matrix, replacements)
+        finally:
+            fields["splice_us"] = (time.perf_counter_ns() - splice_started) // 1000
         if len(metadata) != total_rows:
             raise ValueError(
                 f"catch-up row count disagrees with the sidecar: {len(metadata)} "
@@ -1880,7 +1933,7 @@ class EmbeddingIndex:
             gen - c.generation,
         )
         return _EmbCache(
-            epoch, gen, instance, c.mtime, c.recall_policy_identity, metadata, matrix
+            epoch, gen, instance, c.mtime, c.recall_policy_identity, metadata, matrix, c.space
         )
 
     def _load_all_rows(self, policy_identity: tuple[str, str] | None = None) -> _EmbCache:
@@ -1935,7 +1988,7 @@ class EmbeddingIndex:
                 mtime = self.path.stat().st_mtime
             except OSError:
                 mtime = 0.0
-            return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix)
+            return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix, identity)
 
     def search(
         self,
@@ -1946,6 +1999,31 @@ class EmbeddingIndex:
         encoded_for: Any = _UNSPECIFIED_SPACE,
         defer_cold_load: bool = False,
     ) -> list[tuple[str, int, str, float]]:
+        """Top-k chunks with eager text, preserving the ordinary search API."""
+        return cast(list[tuple[str, int, str, float]], self._search(
+            query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
+            defer_cold_load=defer_cold_load,
+        ))
+
+    def select_chunks(
+        self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
+        encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
+    ) -> list[tuple[str, int, str | ChunkRef, float]]:
+        """Keep modern passages as references until final evidence selection.
+
+        Generation-zero snapshots retain eager text: a cached legacy matrix
+        has no durable token, and a different scorer can change tied winners.
+        """
+        return self._search(
+            query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
+            defer_cold_load=defer_cold_load, defer_text=True,
+        )
+
+    def _search(
+        self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
+        encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
+        defer_text: bool = False,
+    ) -> list[tuple[str, int, str | ChunkRef, float]]:
         """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
 
         Backend ladder: vec0 KNN in the sidecar when available (full-precision by
@@ -1970,18 +2048,31 @@ class EmbeddingIndex:
             with foreground_priority.foreground():
                 return self._disk_score(
                     [query_vec], k, admits=lambda path: allowed_paths is None or path in allowed_paths,
-                    encoded_for=encoded_for, hydrate=True,
+                    encoded_for=encoded_for, hydrate=True, defer_text=defer_text,
                 )[0]
         if allowed_paths is None:
-            vec_hits = self._vec_search(query_vec, k)
+            vec_hits = (
+                self._vec_search(query_vec, k, defer_text=True, encoded_for=encoded_for)
+                if defer_text else self._vec_search(query_vec, k)
+            )
             if vec_hits is not None:
                 return vec_hits
         resident = self.require_resident_matrix() if defer_cold_load else None
-        metadata, matrix = (
-            (resident.metadata, resident.matrix) if resident is not None else self.all_vectors()
-        )
+        if defer_text:
+            resident = resident if resident is not None else self._all_vector_snapshot()
+            if resident is None:
+                return []
+            metadata, matrix = resident.metadata, resident.matrix
+        else:
+            # Ordinary search retains the public matrix-provider seam. Only
+            # deferred passages need the immutable cache object as their proof.
+            metadata, matrix = (
+                (resident.metadata, resident.matrix) if resident is not None else self.all_vectors()
+            )
         if not metadata:
             return []
+        if defer_text and encoded_for is not _UNSPECIFIED_SPACE:
+            recall_space.require_same_space(SimpleNamespace(identity=resident.space), encoded_for, query_vec)
         mask: np.ndarray | None = None
         # The ceiling on how many rows may be returned. Under a filter it is the
         # ELIGIBLE count, never the row count: `argpartition` over the full score
@@ -2015,6 +2106,9 @@ class EmbeddingIndex:
             top_idx = eligible_idx[np.argpartition(-sub, k_eff - 1)[:k_eff]]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
         top = [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
+        if defer_text and resident.generation > 0:
+            proof = ChunkProof(self, (resident.epoch, resident.generation, resident.instance), resident.space)
+            return [(fp, ci, ChunkRef(proof, fp, ci), score) for fp, ci, score in top]
         # numpy-lite: hydrate only the winners' texts (PK point-lookups).
         try:
             texts = self._texts_for([(fp, ci) for fp, ci, _ in top])
@@ -2113,7 +2207,8 @@ class EmbeddingIndex:
     def _disk_score(
         self, query_vecs, k: int, *, admits: Callable[[str], bool],
         encoded_for: Any = _UNSPECIFIED_SPACE, hydrate: bool = False,
-    ) -> list[list[tuple[str, int, str, float]]]:
+        defer_text: bool = False,
+    ) -> list[list[tuple[str, int, str | ChunkRef, float]]]:
         """Exact eligible top-k with bounded vectors and one scoring snapshot."""
         if not self.path.exists():
             return [[] for _ in query_vecs]
@@ -2131,6 +2226,7 @@ class EmbeddingIndex:
                 if encoded_for is not _UNSPECIFIED_SPACE and len(queries):
                     recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
                 self._observe_identity(identity, token)
+                proof = ChunkProof(self, token[:3], identity) if defer_text and token[1] > 0 else None
             answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
             if k <= 0:
                 return [[] for _ in queries]
@@ -2178,8 +2274,10 @@ class EmbeddingIndex:
                 for hits in answers:
                     hydrated = []
                     for path, chunk, score in hits:
-                        text = ""
-                        if hydrate:
+                        text: str | ChunkRef = ""
+                        if proof is not None:
+                            text = ChunkRef(proof, path, chunk)
+                        elif hydrate:
                             text = conn.execute(
                                 "SELECT chunk_text FROM chunks WHERE file_path=? AND chunk_idx=?",
                                 (path, chunk),
@@ -2486,7 +2584,9 @@ class EmbeddingIndex:
         epoch, _chunk_generation, instance, generation = token
         return _UnitCache(epoch, generation, instance, width, block, coverage, unproved)
 
-    def _texts_for(self, pairs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
+    def _texts_for(
+        self, pairs: list[tuple[str, int]], *, proof: ChunkProof | None = None,
+    ) -> dict[tuple[str, int], str]:
         """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.
 
         The in-memory cache holds no chunk text (numpy-lite), so the numpy
@@ -2499,6 +2599,15 @@ class EmbeddingIndex:
             return out
         conn = self._connect()
         try:
+            if proof is not None:
+                conn.execute("BEGIN")
+                if (
+                    proof.index is not self or proof.token[1] <= 0
+                    or recall_space.read_identity(conn, tables=_VECTOR_TABLES) != proof.space
+                ):
+                    return {}
+                unchanged = self._unchanged_chunk_paths(conn, proof.token, {fp for fp, _ci in pairs})
+                pairs = [(fp, ci) for fp, ci in pairs if fp in unchanged]
             batch_size = 150  # 2 bound params per pair
             for s in range(0, len(pairs), batch_size):
                 batch = pairs[s : s + batch_size]
@@ -2614,8 +2723,9 @@ class EmbeddingIndex:
         return keyed(chunk_rows), keyed(unit_rows), space
 
     def _vec_search(
-        self, query_vec: np.ndarray, k: int
-    ) -> list[tuple[str, int, str, float]] | None:
+        self, query_vec: np.ndarray, k: int, *, defer_text: bool = False,
+        encoded_for: Any = _UNSPECIFIED_SPACE,
+    ) -> list[tuple[str, int, str | ChunkRef, float]] | None:
         """vec0 KNN, or None when the backend can't serve (the scan takes over).
 
         Never creates the sidecar file on a read path (a missing sidecar keeps the
@@ -2631,25 +2741,40 @@ class EmbeddingIndex:
             try:
                 if not vec_gate(self, conn):
                     return None
+                # The gate may commit while synchronizing the mirror. Score,
+                # rescore and map rowids only after it, in one read snapshot.
+                conn.execute("BEGIN")
+                proof = None
+                if defer_text:
+                    token = self._build_token(conn)
+                    identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                    if encoded_for is not _UNSPECIFIED_SPACE:
+                        recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, query_vec)
+                    if token[1] > 0:
+                        proof = ChunkProof(self, token[:3], identity)
                 quant = vecstore.quant_mode() == "binary"
                 pairs = self._vec.knn(conn, query_vec, k, quant=quant)
                 if not pairs:
                     return []
                 ids = [rid for rid, _ in pairs]
                 placeholders = ",".join("?" * len(ids))
+                text_column = "NULL" if proof is not None else "chunk_text"
                 rows = conn.execute(
-                    "SELECT rowid, file_path, chunk_idx, chunk_text FROM chunks "
+                    f"SELECT rowid, file_path, chunk_idx, {text_column} FROM chunks "
                     f"WHERE rowid IN ({placeholders})",
                     ids,
                 ).fetchall()
                 by_id = {r[0]: r for r in rows}
                 return [
-                    (by_id[rid][1], by_id[rid][2], by_id[rid][3], score)
+                    (by_id[rid][1], by_id[rid][2],
+                     ChunkRef(proof, by_id[rid][1], by_id[rid][2]) if proof is not None else by_id[rid][3], score)
                     for rid, score in pairs
                     if rid in by_id
                 ]
             finally:
                 conn.close()
+        except recall_space.VectorSpaceMismatch:
+            raise
         except Exception as e:  # noqa: BLE001 — vec failure must never break search
             log.warning(
                 "vec search failed for %s (%s); falling back to the in-memory scan",

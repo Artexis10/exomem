@@ -1132,6 +1132,16 @@ class CatalogQueryResult(Generic[_CatalogValue]):
     readiness: CatalogReadiness
 
 
+@dataclass(frozen=True, slots=True)
+class KeywordGroup:
+    """A selected emitted page and its possible excerpt and frame sources."""
+
+    path: str
+    source_path: str
+    frame_path: str | None
+    hashes: Mapping[str, str]
+
+
 class CatalogUnavailable(RuntimeError):
     """Internal signal that a maintained content query cannot answer completely."""
 
@@ -2983,6 +2993,23 @@ def search_substring_result(
         freshness,
         k,
         allowed_paths,
+    )
+
+
+def search_keyword_groups_result(
+    vault_root: Path, query_norm: str, *, scope: str, freshness: tuple | None,
+    limit: int, allowed_paths: set[str] | None, pending_rows: list[dict[str, Any]],
+) -> CatalogQueryResult[list[KeywordGroup]]:
+    """Select emitted keyword groups from the retained catalogue and frozen pending facts."""
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    store = get_store(vault_root)
+    return store._serve_from_ready_catalog_result(
+        scope, freshness,
+        lambda conn: store._keyword_groups_query(
+            conn, query_norm.split(), scope, limit, allowed_paths, pending_rows,
+        ),
+        "lexical keyword group query failed (%s)",
     )
 
 
@@ -9775,21 +9802,12 @@ class LexicalStore:
             "lexical sidecar substring query failed (%s)",
         )
 
-    def _substring_query(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None,
+    @staticmethod
+    def _substring_predicate(
+        tokens: list[str], scope: str,
         allowed_paths: set[str] | None = None,
-    ) -> list[str]:
-        """Exact keyword contract: trigram MATCH narrows (tokens >= 3 chars),
-        then instr() verifies EVERY token against the stored raw text — the
-        verification is what parity rests on; MATCH is only the accelerator.
-        Needles under the trigram floor rely on the verification alone.
-
-        `k` truncates a list that is already totally ordered, so a bounded
-        result is a prefix of the unbounded one and the contract is unchanged.
-        It exists because the ordering makes the *caller* unable to bound this
-        safely: a candidate lane cannot take the first `k` it happens to see
-        and still be reading recency order, so the bound has to be applied
-        where the order is."""
+    ) -> tuple[list[str], list[object]]:
+        """The shared trigram accelerator and exact all-token substring predicate."""
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses: list[str] = [f"p.{col} = 1", "p.is_nav = 0"]
         params: list[object] = []
@@ -9804,6 +9822,14 @@ class LexicalStore:
         if allowed_paths is not None:
             clauses.append("p.path IN (SELECT value FROM json_each(?))")
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
+        return clauses, params
+
+    def _substring_query(
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None,
+        allowed_paths: set[str] | None = None,
+    ) -> list[str]:
+        """Return the recency-ordered exact substring matches, capped after ordering."""
+        clauses, params = self._substring_predicate(tokens, scope, allowed_paths)
         limit = ""
         if k is not None:
             limit = " LIMIT ?"
@@ -9815,3 +9841,59 @@ class LexicalStore:
             params,
         ).fetchall()
         return [r[0] for r in rows]
+
+    def _keyword_groups_query(
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str, limit: int,
+        allowed_paths: set[str] | None, pending_rows: list[dict[str, Any]],
+    ) -> list[KeywordGroup]:
+        """Merge every frozen pending parent before grouping and capping matching sources."""
+        clauses, params = self._substring_predicate(tokens, scope, allowed_paths)
+        clauses.extend((
+            "p.eligibility_view_json IS NOT NULL", "p.content_hash IS NOT NULL",
+            "p.ranking_json IS NOT NULL", "NOT EXISTS (SELECT 1 FROM pending WHERE path = p.path)",
+        ))
+        # JSON keys are the private transport of frozen pending parser facts.
+        rows = conn.execute(
+            "WITH pending AS MATERIALIZED ("
+            "SELECT json_extract(value, '$.path') AS path, "
+            "json_extract(value, '$.parent') AS parent, json_extract(value, '$.updated') AS updated, "
+            "json_extract(value, '$.hash') AS hash, json_extract(value, '$.media_file') AS media_file, "
+            "json_extract(value, '$.ordinal') AS ordinal, json_extract(value, '$.matches') AS matches, "
+            "json_extract(value, '$.parseable') AS parseable FROM json_each(?)), "
+            "matched AS (SELECT p.path, p.emitted_parent_path AS parent, p.updated, p.content_hash AS hash, "
+            "json_extract(p.eligibility_view_json, '$.media_file') AS media_file, 1 AS priority, 0 AS ordinal "
+            "FROM tri JOIN pages p ON p.rowid = tri.rowid WHERE " + " AND ".join(clauses) + " "
+            "UNION ALL SELECT path, parent, updated, hash, media_file, 0, ordinal "
+            "FROM pending WHERE matches = 1 AND parseable = 1), "
+            "parents AS (SELECT m.*, CASE WHEN overlay.path IS NOT NULL THEN overlay.parseable "
+            "ELSE parent.eligibility_view_json IS NOT NULL "
+            "AND parent.content_hash IS NOT NULL AND parent.ranking_json IS NOT NULL END AS parent_valid, "
+            "CASE WHEN overlay.path IS NOT NULL THEN overlay.updated ELSE parent.updated END AS parent_updated, "
+            "CASE WHEN overlay.path IS NOT NULL THEN overlay.hash ELSE parent.content_hash END AS parent_hash "
+            "FROM matched m LEFT JOIN pending overlay ON overlay.path = m.parent "
+            "LEFT JOIN pages parent ON parent.path = m.parent AND overlay.path IS NULL), "
+            "emitted AS (SELECT path, hash, media_file, priority, ordinal, updated, "
+            "CASE WHEN parent_valid THEN parent ELSE path END AS emitted_path, "
+            "CASE WHEN parent_valid THEN parent_updated ELSE updated END AS emitted_updated, "
+            "CASE WHEN parent_valid THEN parent_hash ELSE hash END AS emitted_hash FROM parents), "
+            "ranked AS (SELECT *, ROW_NUMBER() OVER encounter AS source_rank, "
+            "FIRST_VALUE(CASE WHEN path <> emitted_path AND NULLIF(media_file, '') IS NOT NULL "
+            "THEN path END) OVER annotation AS frame_path, "
+            "FIRST_VALUE(CASE WHEN path <> emitted_path AND NULLIF(media_file, '') IS NOT NULL "
+            "THEN hash END) OVER annotation AS frame_hash FROM emitted "
+            "WINDOW encounter AS (PARTITION BY emitted_path ORDER BY priority, ordinal, updated DESC, path DESC), "
+            "annotation AS (PARTITION BY emitted_path ORDER BY "
+            "CASE WHEN path <> emitted_path AND NULLIF(media_file, '') IS NOT NULL THEN 0 ELSE 1 END, "
+            "priority, ordinal, updated DESC, path DESC)) "
+            "SELECT emitted_path, emitted_hash, path, hash, frame_path, frame_hash FROM ranked "
+            "WHERE source_rank = 1 ORDER BY COALESCE(NULLIF(emitted_updated, ''), '0000-00-00') DESC, "
+            "emitted_path DESC LIMIT ?",
+            [json.dumps(pending_rows, ensure_ascii=False), *params, max(0, int(limit))],
+        )
+        groups = []
+        for path, parent_hash, source, source_hash, frame, frame_hash in rows:
+            hashes = {path: parent_hash, source: source_hash}
+            if frame is not None:
+                hashes[frame] = frame_hash
+            groups.append(KeywordGroup(path, source, frame, hashes))
+        return groups

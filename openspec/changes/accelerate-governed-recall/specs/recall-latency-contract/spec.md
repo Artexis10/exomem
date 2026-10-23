@@ -285,11 +285,13 @@ latency ceilings instead.
 
 Markdown page reads SHALL track the candidate count plus a fixed overfetch, as
 `Structural Scaling Is The CI Gate` states; the candidates are the hits that
-the response hydrates, each with its own page and at most one frame page that
-supplies its excerpt or its frame annotation. Keyword recall SHALL order and
-limit its matches from the catalogue before it reads a page, and SHALL return
-the same hits, in the same order, with the same excerpts and frame annotations,
-as a recall that reads every matching page. Each derived store SHALL open at
+the response hydrates, each with its own page and selected frame sources.
+Each keyword hit SHALL use at most two distinct frame pages for its excerpt and annotation;
+other hits SHALL use at most one frame page. Keyword recall SHALL order and
+limit emitted groups from admitted catalogue metadata and the entire frozen
+pending overlay before it reads a page. For unchanged admitted evidence, it
+SHALL return the same hits, order, excerpts and frame annotations as exhaustive
+recall. Each derived store SHALL open at
 most one connection and run at most one readiness proof per scope per request.
 Ranking, temporal, graph-seed and unit-lane stages SHALL read page and unit
 metadata from the maintained catalogue and sidecars for the current generation,
@@ -298,6 +300,21 @@ corpus sizes that hold the same candidate set, and SHALL NOT pin absolute work
 counts. The gate and every query-plan check SHALL also run on the older
 reference SQLite (see `The Reference Corpus And Query Mix Are Fixed`), and the
 gate's report SHALL name each SQLite version it ran on.
+
+Keyword grouping SHALL use admitted parent parseability, independent of later
+canonical existence. An absent or invalid admitted parent leaves its child as
+an orphan. Existing authorization SHALL still suppress a child whose referenced
+parent is denied, including a missing parent. An authorized parent outside the
+raw candidate scope MAY receive an in-scope child.
+
+Keyword selection SHALL preserve pending-first encounter order for excerpt and
+annotation sources. Annotation precedence SHALL remain: the first source's
+child annotation, then the emitted parent's transcript and nearest-frame
+fallback, then the first later matching child that supplies a frame.
+Selected canonical drift SHALL omit the affected group, mark coverage
+incomplete, and SHALL NOT promote children, rerank groups, or refill the answer.
+Cached keyword hits SHALL retain and validate every selected Markdown source
+hash that supplies their disclosed excerpt or frame annotation.
 
 #### Scenario: Corpus growth cannot hide per-candidate work
 
@@ -319,6 +336,47 @@ gate's report SHALL name each SQLite version it ran on.
 - **THEN** recall omits that evidence and marks coverage incomplete while preserving unaffected admitted results
 - **AND** the partial selection does not enter the shared result cache
 - **AND** access-policy and semantic-identity changes retain their existing refusal behavior
+
+#### Scenario: A deleted parent does not promote an unread child
+
+- **WHEN** a managed keyword selection admits a recent child under an older parent
+- **AND** another emitted group ranks above that parent
+- **AND** the parent's canonical page disappears after admission
+- **THEN** the child retains its admitted group and does not outrank the other group
+- **AND** selected evidence that cannot be validated is omitted with incomplete coverage and no refill
+
+#### Scenario: Separate excerpt and annotation sources remain verified
+
+- **WHEN** a keyword hit takes its excerpt from a child without a frame file and its annotation from a later matching child
+- **THEN** selection retains both child identities and hashes alongside the emitted page
+- **AND** a cached read validates both selected child sources before disclosing their evidence
+- **AND** a changed child causes that group to be omitted with incomplete coverage
+
+#### Scenario: Modern dense chunks hydrate only selected evidence
+
+- **WHEN** fusion selects a fixed prefix from modern proof-bearing dense candidates
+- **THEN** frame collapse carries chunk references without fetching their text
+- **AND** only selected excerpts, transcript localization, frame annotations and rerank passages consume chunk text
+- **AND** unchanged evidence preserves hits, order, excerpts, timestamps and rerank passages
+
+#### Scenario: Unrelated publication preserves a selected chunk
+
+- **WHEN** another path is published after a modern chunk was scored
+- **AND** the existing contiguous path log proves that its source path is unchanged in the same epoch, instance and vector space
+- **THEN** the selected chunk text may be read with that proof in one short transaction
+
+#### Scenario: Lost chunk proof cannot replace selected evidence
+
+- **WHEN** a selected modern chunk is missing or its scored publication can no longer be proved
+- **THEN** recall omits that selected evidence and marks coverage incomplete without shared caching
+- **AND** it does not refill from lower fused rows or substitute a current body or another passage
+- **AND** a present empty chunk remains distinct from missing or unproved text
+
+#### Scenario: Legacy dense selection remains explicit debt
+
+- **WHEN** the NumPy matrix belongs to a generation-zero sidecar without durable publication proof
+- **THEN** it keeps the existing eager text path and tie behavior
+- **AND** modern deferred-text completion and latency claims do not cover that path
 
 #### Scenario: A per-candidate scan fails the gate
 

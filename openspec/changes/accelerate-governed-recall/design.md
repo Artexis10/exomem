@@ -526,15 +526,39 @@ it with the current path on the reference corpus.
   slice 6.6 computes those statistics once per catalogue generation and
   admitted set.
 - **Dense search.** The vector lane asks for 3 x `candidate_k` chunk rows and
-  hydrates the text of every row with an OR of primary-key pairs
-  (`embedding_index.py:1822`), but it keeps only the best chunk per file. Three
-  consumers read that text:
-  - frame collapse attributes frame children with it
-    (`collapse_frame_children`, `find_candidates.py:94`, called at `:590`);
-  - the rerank prefix uses it as each hit's passage (`find.py:4749`);
-  - excerpts use it for returned hits (`find.py:4603`).
+  hydrates every row, although it retains only the best chunk per file.
+  Frame collapse moves auxiliary values; it does not inspect chunk text.
+  The consumers are the selected excerpt, transcript localization and its
+  nearest-frame annotation, and the rerank prefix's passage.
 
-  Text is hydrated by primary key only for the rows that those consumers read.
+  Modern selections carry immutable chunk references through existing auxiliary
+  maps. Each reference identifies the source index, path, chunk ordinal, vector
+  space and scored publication token. The NumPy proof comes from the exact cache
+  object that supplied the scored matrix, including that object's stored space.
+  Reading a mutable index identity after scoring cannot establish this proof.
+  The disk scan retains its scoring transaction's token. The vec path runs its
+  synchronization gate before opening the scoring transaction, because the gate
+  can commit. Its KNN, binary rescore and row mapping share that transaction.
+
+  Final selection freezes its eligible `target_n` prefix before chunk proof
+  checks. One short read transaction validates the proof and reads selected text
+  through the existing primary-key lookup. Equal positive tokens need no log.
+  A later generation needs the existing contiguous chunk-path log, unchanged
+  epoch, instance and space, and no change to the selected source path.
+  The same path-log predicate also serves publication validation.
+
+  Missing text, a failed read or lost proof omits the selected evidence, marks
+  coverage incomplete and prevents shared caching. It never refills from lower
+  fused rows or substitutes another passage. A present empty string retains its
+  existing fallback behavior. Selected strings are captured before the catalogue
+  selection closes, because reranking finishes after that boundary.
+  The existing private source-hash map covers the emitted page, original chunk
+  source and separate frame source. No second cache or provenance map is added.
+
+  Generation-zero NumPy sidecars keep their existing eager path. Their cached
+  matrix has no durable publication proof, and switching to disk scoring can
+  change tied winners. This legacy path remains unoptimized and unattested;
+  modern proof loss never enters it. Task 6.7 stays open for that exception.
 - **Response blocks.** `_with_due_state` (`commands.py:6427`) runs after the
   find timings close, so 21 / 58 ms of the request is outside `total_ms`. It
   becomes the registered stage `due_state` and reads role state once per
@@ -546,31 +570,46 @@ it with the current path on the reference corpus.
   with the matches, not with the hits it returns, which breaks the bound that
   Markdown reads track the candidate count.
 
-  Today's order and membership depend only on data that the catalogue holds:
+  With unchanged admitted evidence, order and membership come from the catalogue:
   - The hits sort by the emitted page's `updated or "0000-00-00"` and then its
     path, both descending. A frame child emits under its parent video, whose
     `updated` is its own. The catalogue holds each row's `updated` and path,
-    its `emitted_parent_path`, and the parent's own row.
+    its `emitted_parent_path`, and the parent's own parsed metadata. A stored
+    parent row alone does not prove parseability: invalid pages retain rows.
   - The structured filters apply to the emitted page, and the page-metadata
     index answers them (decision 1). The eligible and admitted sets are path
     sets.
-  - Page bytes decide only the content of a hit: the excerpt comes from the
-    first matched row of its group in today's walk order, and the frame
-    annotation from the first matched frame child.
+  - Page bytes supply the selected excerpt and annotation evidence. Frame
+    precedence follows the latency contract; the first matched child does not
+    always supply the annotation. A parent encountered first can attach its
+    transcript's nearest frame before later matching children are considered.
 
   Slice 6.14 therefore orders and limits in SQL before any page read. One
-  query groups the matched rows by emitted identity, orders the groups by the
-  hit list's key, and returns the first `limit` groups, each with its first
-  matched row and first matched frame child. Only those pages are read.
-  Pending rows lead, as today, as the fixed overfetch. Two checks still read
-  the file per row: `is_recall_candidate` and the page parse. A row that fails
-  either drops, as today, and the slice reads the next group in order, so a
-  drop costs one read and never shortens or reorders the list.
+  query merges the entire frozen pending overlay, groups matching rows by
+  emitted identity, and returns the first `limit` groups. One pending parent
+  edit can affect many matching children, so patching an already capped prefix
+  is insufficient. Selection preserves pending-first source order and existing
+  referenced-parent authorization, including authorized out-of-scope parents.
 
-  Results stay identical, so no result contract changes. If an identity case
-  shows that today's order depends on data that only the page holds, slice
-  6.14 records the difference as a contract change in this change's
-  `recall-latency-contract` delta, with a scenario, before it lands.
+  Canonical orphan promotion conflicts with the read bound. Consider recent
+  children under old parents and an ordinary hit between those dates. Any
+  vanished parent could promote a child above that hit. Proving the old order
+  can require reading every parent, even when every parent remains valid.
+  Ordering by the largest possible parent or child key does not remove that
+  worst case.
+
+  The retained-generation contract therefore fixes grouping at admission.
+  Selected hydration omits changed evidence with incomplete coverage; it does
+  not promote children or refill the answer. Filesystem existence checks run
+  only for selected hydration, never to regroup unread candidates. The delta
+  records this canonical-drift difference and limits exhaustive parity to
+  unchanged admitted evidence.
+
+  A child without a frame file can supply the excerpt while another child
+  supplies the annotation. The read bound accounts for those distinct sources.
+  Private, deduplicated source hashes travel through the existing hit cache;
+  cache hits validate selected child evidence alongside the emitted page.
+  This adds no cache, sidecar, session framework or runtime setting.
 
 The temporal lane decides "temporal" with a word regex, `TEMPORAL_MARKERS`
 (`find_policy.py:41`, read by `is_temporal_query` at `:427`). Three more

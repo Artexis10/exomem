@@ -286,7 +286,7 @@ def test_heterogeneous_filter_eligibility_is_identical_for_vector_backends(
     # vec0 query and post-hoc trim a bounded top-k result.
     monkeypatch.setenv("EXOMEM_VEC_BACKEND", requested_backend)
     observed_searches: list[tuple[set[str], set[str]]] = []
-    original_search = index.search
+    original_search = index.select_chunks
 
     def observed_search(
         query_vector: np.ndarray,
@@ -302,7 +302,7 @@ def test_heterogeneous_filter_eligibility_is_identical_for_vector_backends(
         )
         return result
 
-    monkeypatch.setattr(index, "search", observed_search)
+    monkeypatch.setattr(index, "select_chunks", observed_search)
 
     def forbidden_unfiltered_vec_query(*_args: object, **_kwargs: object) -> None:
         pytest.fail("filtered vector search must not call unfiltered vec0 KNN")
