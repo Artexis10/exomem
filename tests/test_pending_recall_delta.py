@@ -1179,10 +1179,10 @@ def test_managed_guest_scene_admission_uses_pending_parent_changes(
 def test_keyword_groups_apply_a_pending_parent_to_all_children_before_the_cap(
     tmp_path: Path, warm_managed_cell, change: str,
 ) -> None:
-    """A parent outside the raw scope can reorder many matching children at once."""
+    """A nonmatching parent can reorder many matching children at once."""
     vault = tmp_path
     _seed_corpus(vault)
-    parent = "Reference/pending-group-parent.md"
+    parent = "Knowledge Base/Notes/pending-group-parent.md"
     marker = "pendinggroupmarker"
     before = None if change == "create" else _page(
         title="Parent", body="Parent transcript.",
@@ -1225,7 +1225,7 @@ def test_keyword_pending_parent_membership_stays_fixed_after_admission(
 ) -> None:
     vault = tmp_path
     _seed_corpus(vault)
-    parent = "Reference/admitted-group-parent.md"
+    parent = "Knowledge Base/Notes/admitted-group-parent.md"
     before = _write(vault, parent, _page(
         title="Parent", body="Original transcript.", updated="2026-01-01",
     ))
