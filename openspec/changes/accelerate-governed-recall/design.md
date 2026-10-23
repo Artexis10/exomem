@@ -546,31 +546,46 @@ it with the current path on the reference corpus.
   with the matches, not with the hits it returns, which breaks the bound that
   Markdown reads track the candidate count.
 
-  Today's order and membership depend only on data that the catalogue holds:
+  With unchanged admitted evidence, order and membership come from the catalogue:
   - The hits sort by the emitted page's `updated or "0000-00-00"` and then its
     path, both descending. A frame child emits under its parent video, whose
     `updated` is its own. The catalogue holds each row's `updated` and path,
-    its `emitted_parent_path`, and the parent's own row.
+    its `emitted_parent_path`, and the parent's own parsed metadata. A stored
+    parent row alone does not prove parseability: invalid pages retain rows.
   - The structured filters apply to the emitted page, and the page-metadata
     index answers them (decision 1). The eligible and admitted sets are path
     sets.
-  - Page bytes decide only the content of a hit: the excerpt comes from the
-    first matched row of its group in today's walk order, and the frame
-    annotation from the first matched frame child.
+  - Page bytes supply the selected excerpt and annotation evidence. Frame
+    precedence follows the latency contract; the first matched child does not
+    always supply the annotation. A parent encountered first can attach its
+    transcript's nearest frame before later matching children are considered.
 
   Slice 6.14 therefore orders and limits in SQL before any page read. One
-  query groups the matched rows by emitted identity, orders the groups by the
-  hit list's key, and returns the first `limit` groups, each with its first
-  matched row and first matched frame child. Only those pages are read.
-  Pending rows lead, as today, as the fixed overfetch. Two checks still read
-  the file per row: `is_recall_candidate` and the page parse. A row that fails
-  either drops, as today, and the slice reads the next group in order, so a
-  drop costs one read and never shortens or reorders the list.
+  query merges the entire frozen pending overlay, groups matching rows by
+  emitted identity, and returns the first `limit` groups. One pending parent
+  edit can affect many matching children, so patching an already capped prefix
+  is insufficient. Selection preserves pending-first source order and existing
+  referenced-parent authorization, including authorized out-of-scope parents.
 
-  Results stay identical, so no result contract changes. If an identity case
-  shows that today's order depends on data that only the page holds, slice
-  6.14 records the difference as a contract change in this change's
-  `recall-latency-contract` delta, with a scenario, before it lands.
+  Canonical orphan promotion conflicts with the read bound. Consider recent
+  children under old parents and an ordinary hit between those dates. Any
+  vanished parent could promote a child above that hit. Proving the old order
+  can require reading every parent, even when every parent remains valid.
+  Ordering by the largest possible parent or child key does not remove that
+  worst case.
+
+  The retained-generation contract therefore fixes grouping at admission.
+  Selected hydration omits changed evidence with incomplete coverage; it does
+  not promote children or refill the answer. Filesystem existence checks run
+  only for selected hydration, never to regroup unread candidates. The delta
+  records this canonical-drift difference and limits exhaustive parity to
+  unchanged admitted evidence.
+
+  A child without a frame file can supply the excerpt while another child
+  supplies the annotation. The read bound accounts for those distinct sources.
+  Private, deduplicated source hashes travel through the existing hit cache;
+  cache hits validate selected child evidence alongside the emitted page.
+  This adds no cache, sidecar, session framework or runtime setting.
 
 The temporal lane decides "temporal" with a word regex, `TEMPORAL_MARKERS`
 (`find_policy.py:41`, read by `is_temporal_query` at `:427`). Three more

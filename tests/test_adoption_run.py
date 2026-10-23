@@ -406,6 +406,71 @@ def test_finish_runs_recall_check_and_first_question(tmp_path: Path) -> None:
     assert (vault / manifest_path).exists()
 
 
+def test_staged_cloud_folder_resumes_into_searchable_sources_without_replacing_notes(
+    tmp_path: Path,
+) -> None:
+    """A staged folder must become readable memory, not only a successful upload."""
+    from exomem import find, get_page
+
+    vault = _legacy_vault(tmp_path)
+    folder = "_Imports/6619ea22-235a-40fb-9664-46cde7cde292"
+    staged = vault / folder
+    staged.mkdir(parents=True)
+    original = f"{folder}/observations.md"
+    (vault / original).write_text(
+        "# Observations\n\nLibration changes the visible lunar surface. 月面の観測記録。\n",
+        encoding="utf-8",
+    )
+    (staged / "procedure.txt").write_text(
+        "Repeat the observation after sunset.\n", encoding="utf-8"
+    )
+    (staged / "diagram.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    existing = vault / "Knowledge Base/Notes/existing.md"
+    existing.write_text("# Existing conclusion\n\nKeep this conclusion.\n", encoding="utf-8")
+    existing_bytes = existing.read_bytes()
+    originals = _snapshot(vault, subdir=folder)
+
+    run = adoption_run.start(vault, path=folder, today=TODAY)
+    run_id = run["run_id"]
+    inventory = {row["path"]: row for row in run["inventory"]}
+    assert inventory[f"{folder}/diagram.png"]["reason"] == "UNSUPPORTED_IMPORT_TYPE"
+    selected = adoption_run.select(vault, run_id=run_id, include=[folder])
+    assert set(selected["selection"]["paths"]) == {original, f"{folder}/procedure.txt"}
+    planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
+    plan_id = planned["plan"]["plan_id"]
+
+    first = adoption_run.apply(
+        vault, run_id=run_id, plan_id=plan_id, only_paths=[original], today=TODAY
+    )
+    first_path = first["outcomes"][original]["target_path"]
+    first_bytes = (vault / first_path).read_bytes()
+    resumed = adoption_run.status(vault, run_id=run_id)
+    assert resumed["source_root"] == folder
+    assert resumed["outcomes"][original]["status"] == "applied"
+    assert f"{folder}/procedure.txt" not in resumed["outcomes"]
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    assert applied["phase"] == "applied"
+    assert applied["outcomes"][original]["status"] == "already-applied"
+    assert (vault / first_path).read_bytes() == first_bytes
+    remaining = applied["outcomes"][f"{folder}/procedure.txt"]
+    assert remaining["status"] == "applied"
+    remaining_page = get_page.get_page(vault, path=remaining["target_path"])
+    assert "Repeat the observation after sunset." in remaining_page.body
+    assert remaining_page.frontmatter["imported_from"] == f"{folder}/procedure.txt"
+
+    hits = find.find(vault, query="libration", mode="keyword", graph=False)
+    assert first_path in {hit.path for hit in hits}
+    page = get_page.get_page(vault, path=first_path)
+    assert "Libration changes the visible lunar surface." in page.body
+    assert "月面の観測記録。" in page.body
+    assert page.frontmatter["imported_from"] == original
+    assert page.frontmatter["original_sha256"] == hashlib.sha256(originals[original]).hexdigest()
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    assert finished["phase"] == "done"
+    assert existing.read_bytes() == existing_bytes
+    assert _snapshot(vault, subdir=folder) == originals
+
+
 # --- fix round: run-level ADOPTION_SOURCE_CHANGED, distinct from PLAN_STALE ---
 def test_apply_refuses_with_adoption_source_changed_when_every_source_drifted(
     tmp_path: Path,

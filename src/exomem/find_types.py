@@ -304,6 +304,8 @@ class Hit:
     result_type: str | None = None
     mixed_units_truncated: int = 0
     snapshot_hash: str | None = None
+    # Managed keyword excerpts and annotations can disclose separate child snapshots.
+    keyword_sources: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     # Release-plane annotation, attached by `governance.egress.annotate_hits`
     # strictly AFTER `find()` returns (design D2). It is per-principal, so it
     # must never be present on a candidate stored in the shared `_FIND_CACHE`
