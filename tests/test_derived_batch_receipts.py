@@ -2393,6 +2393,46 @@ def test_a_batch_prepared_before_the_catalogue_component_reads_drains_and_replay
         ).fetchone() == ("completed",)
 
 
+def test_a_rollback_from_a_release_with_a_wider_check_keeps_its_rows_and_writes(vault: Path) -> None:
+    """A later release that adds a component widens the CHECK and records the wider set."""
+    protocol = _protocol()
+    _prepare_one(vault, batch_id="later-release")
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        ddl = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'derived_batch_components'"
+        ).fetchone()[0]
+        connection.execute("ALTER TABLE derived_batch_components RENAME TO older_components")
+        connection.execute(ddl.replace("'context_catalogue'", "'context_catalogue', 'future_component'"))
+        connection.execute("INSERT INTO derived_batch_components SELECT * FROM older_components")
+        connection.execute("DROP TABLE older_components")
+        connection.execute(
+            "INSERT INTO derived_batch_components SELECT batch_id, 'future_component', revision, "
+            "'completed', lease_revision, NULL, NULL, attempt_count, next_attempt_at, created_at, "
+            "updated_at, NULL FROM derived_batch_components "
+            "WHERE batch_id = 'later-release' AND component = 'freshness'"
+        )
+        (marker,) = connection.execute(
+            "SELECT value FROM maintenance_state WHERE key = ?", (deferred_index._COMPONENT_CHECK_KEY,)
+        ).fetchone()
+        connection.execute(
+            "UPDATE maintenance_state SET value = ? WHERE key = ?",
+            (marker + ",future_component", deferred_index._COMPONENT_CHECK_KEY),
+        )
+        connection.commit()
+
+    # This release opens the store again after the rollback, and writes.
+    assert protocol._load_receipt(vault, "later-release").batch_id == "later-release"
+    _prepare_one(vault, batch_id="after-rollback")
+
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT state FROM derived_batch_components WHERE component = 'future_component'"
+        ).fetchall() == [("completed",)]
+        assert connection.execute(
+            "SELECT count(*) FROM derived_batch_components WHERE batch_id = 'after-rollback'"
+        ).fetchone() == (10,)
+
+
 def test_frozen_protocol_fake_drives_the_store_consumer_lifecycle() -> None:
     protocol = _protocol()
     fake = DerivedReceiptProtocolFake()

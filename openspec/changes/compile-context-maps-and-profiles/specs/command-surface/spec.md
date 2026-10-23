@@ -9,7 +9,7 @@ The generated `read_memory` signature SHALL expose an optional bounded string `c
 - A continuation bound to the same view and caller but to a different generation SHALL return `CONTINUATION_STALE`.
 - No adapter SHALL decode the token into a caller-selectable offset, principal, session, purpose or generation.
 
-The same trusted principal and request SHALL receive the same page and generation on every surface, modulo the registered transport framing exclusions. A continuation minted on one surface SHALL open the same next page on every other surface; its bytes carry the second it was minted, so two reads can differ only in that field.
+The same trusted principal and request SHALL receive the same page and generation on every surface, modulo the registered transport framing exclusions. A continuation minted on one surface SHALL open the same next page on every other surface; its bytes carry the second it was minted and a signature over it, so two tokens for the same next page can differ.
 
 #### Scenario: Cross-surface view parity
 - **WHEN** the same trusted principal reads consecutive pages of `exomem://map` through MCP, REST, Hosted, CLI and in-process dispatch

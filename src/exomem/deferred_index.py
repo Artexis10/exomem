@@ -29,9 +29,8 @@ _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
 #: debt at the same value".
 _GRAPH_FULL_REBUILD_MARKS_KEY = "graph_full_rebuild_marks"
 _PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
-#: Set, in the transaction that rebuilds it, when the component table's CHECK
-#: names every component this release knows. Its value names that component set,
-#: so a release that adds a component widens the CHECK once.
+#: Set, in the transaction that rebuilds it, to the component names the table's
+#: CHECK accepts, so a release that adds a component widens the CHECK once.
 _COMPONENT_CHECK_KEY = "derived_batch_component_check:v1"
 
 # Additive fields on the existing queue. Legacy writers may update revision
@@ -78,9 +77,13 @@ def _known_components() -> tuple[str, ...]:
     return tuple(component.value for component in DerivedComponent)
 
 
-def _components_table_ddl(name: str, *, if_not_exists: bool) -> str:
-    """The component table. Its CHECK is the enum's names, so the two cannot drift."""
-    names = ", ".join(f"'{component}'" for component in _known_components())
+def _components_table_ddl(
+    name: str, *, if_not_exists: bool, components: tuple[str, ...] | None = None
+) -> str:
+    """The component table. Its CHECK is the enum's names (plus any a rebuild keeps), so the two cannot drift."""
+    names = ", ".join(
+        "'" + component.replace("'", "''") + "'" for component in components or _known_components()
+    )
     create = "CREATE TABLE IF NOT EXISTS" if if_not_exists else "CREATE TABLE"
     return f"""
         {create} {name} (
@@ -111,31 +114,45 @@ def _components_table_ddl(name: str, *, if_not_exists: bool) -> str:
 
 
 def derived_component_check_current(conn: sqlite3.Connection) -> bool:
-    """Whether the component table's CHECK already names this release's component set."""
+    """Whether the component table's CHECK already accepts every component this release knows.
+
+    A later release's wider CHECK counts as current: narrowing it would refuse
+    that release's rows after a rollback.
+    """
     row = conn.execute(
         "SELECT value FROM maintenance_state WHERE key = ?", (_COMPONENT_CHECK_KEY,)
     ).fetchone()
-    return row is not None and str(row[0]) == ",".join(_known_components())
+    return row is not None and set(str(row[0]).split(",")) >= set(_known_components())
 
 
 def _widen_component_check(conn: sqlite3.Connection) -> None:
     """Let a store made by an older release accept every component this release knows.
 
     SQLite cannot widen a CHECK in place, so the table is rebuilt once with the
-    same rows copied across verbatim. No row is added: a batch with no row for a
-    component never owed that work, and the receipt reader says so (an older
-    release can still write such a batch after a rollback).
+    same rows copied across verbatim. The new CHECK also keeps every name a row
+    already holds, so no stored row is refused. No row is added: a batch with no
+    row for a component never owed that work, and the receipt reader says so (an
+    older release can still write such a batch after a rollback).
     """
     if derived_component_check_current(conn):
         return
-    components = _known_components()
     nested = conn.in_transaction
     conn.execute("SAVEPOINT derived_component_check" if nested else "BEGIN IMMEDIATE")
     try:
         # Another opener may have finished while this one waited for the write lock.
         if not derived_component_check_current(conn):
+            known = _known_components()
+            stored = tuple(
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT DISTINCT component FROM derived_batch_components ORDER BY component"
+                )
+            )
+            components = known + tuple(name for name in stored if name not in known)
             conn.execute(
-                _components_table_ddl("derived_batch_components_rebuilt", if_not_exists=False)
+                _components_table_ddl(
+                    "derived_batch_components_rebuilt", if_not_exists=False, components=components
+                )
             )
             conn.execute(
                 "INSERT INTO derived_batch_components_rebuilt(batch_id, component, "
