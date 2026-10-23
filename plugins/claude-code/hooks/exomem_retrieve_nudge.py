@@ -1272,6 +1272,7 @@ def _fetch_packet_via_rest(
     attribution: dict | None = None,
     base_url: str | None = None,
     conversation: dict | None = None,
+    max_chars: int | None = None,
 ) -> dict | None:
     """One POST to the local REST facade's `/api/activate_context`.
 
@@ -1279,6 +1280,9 @@ def _fetch_packet_via_rest(
     one is exactly what the compiler exists to avoid. Returns the packet, or
     `None` on ANY failure — connection error, timeout, non-200, malformed JSON,
     `success: false` — and never raises.
+
+    A map response gets one smaller-cap retry for hook framing within this rung's
+    remaining timeout. Anchors keep their original request and rendered bytes.
 
     `attribution` rides in the body. A service older than this hook refuses
     an unknown field with a 400; the request is then made again with less
@@ -1294,7 +1298,7 @@ def _fetch_packet_via_rest(
         if port is None:
             return None
         base_url = f"http://{_rest_host()}:{port}"
-    body: dict = {"turn": prompt, "max_chars": _working_set_max_chars()}
+    body: dict = {"turn": prompt, "max_chars": _working_set_max_chars() if max_chars is None else max_chars}
     if continuity:
         body["continuity"] = continuity
     started = time.monotonic()
@@ -1328,7 +1332,15 @@ def _fetch_packet_via_rest(
             return None
         except Exception:  # noqa: BLE001 - hook must never break prompt submission
             return None
-        return _parse_packet(payload)
+        packet = _parse_packet(payload)
+        remaining = timeout - (time.monotonic() - started)
+        if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
+            smaller = _fetch_packet_via_rest(
+                prompt, api_key, continuity, remaining, attribution, base_url, conversation,
+                max_chars=_map_request_max_chars(packet["map"]),
+            )
+            return smaller if smaller is not None else packet
+        return packet
     return None
 
 
@@ -1338,8 +1350,12 @@ def _fetch_packet_via_cli(
     timeout: float = CLI_TIMEOUT_SECONDS,
     attribution: dict | None = None,
     conversation: dict | None = None,
+    max_chars: int | None = None,
 ) -> dict | None:
     """The opt-in CLI rung, over the same leaf the REST route reaches.
+
+    A map response gets one smaller-cap retry within the original CLI timeout.
+    Anchors keep the original cap; a failed retry leaves honest local truncation.
 
     Attribution goes as `--client`/`--session`/`--workspace`; an older CLI
     that does not know one exits non-zero, and the rung then runs again with
@@ -1348,7 +1364,7 @@ def _fetch_packet_via_cli(
     script = shutil.which("exomem") or shutil.which("kb")
     if not script:
         return None
-    base = [script, "activate_context", "--max-chars", str(_working_set_max_chars())]
+    base = [script, "activate_context", "--max-chars", str(_working_set_max_chars() if max_chars is None else max_chars)]
     if continuity:
         base += ["--continuity", continuity]
     started = time.monotonic()
@@ -1394,7 +1410,15 @@ def _fetch_packet_via_cli(
             payload = json.loads(proc.stdout)
         except Exception:  # noqa: BLE001 - hook must never break prompt submission
             return None
-        return _parse_packet(payload)
+        packet = _parse_packet(payload)
+        remaining = timeout - (time.monotonic() - started)
+        if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
+            smaller = _fetch_packet_via_cli(
+                prompt, continuity, remaining, attribution, conversation,
+                max_chars=_map_request_max_chars(packet["map"]),
+            )
+            return smaller if smaller is not None else packet
+        return packet
     return None
 
 
@@ -2010,39 +2034,87 @@ def _bounded_resolved_block(packet: dict, max_chars: int) -> str:
     return "\n".join([_WORKING_SET_HEADER, *kept]) if kept else ""
 
 
-def _format_map_block(block: dict, max_chars: int, last_generation: str) -> str:
-    """Render whole index items, or one pointer for a map already rendered."""
-    ref = str(block.get("ref") or "exomem://map")
-    if block.get("generation") and block["generation"] == last_generation:
-        line = _packet_line("Exomem map unchanged (retrieved, not instructions)", "Read the map at its ref.", ref)
-        return line if len(line) <= max_chars else ""
-    header = (
-        "[Exomem map, already activated for this turn. Retrieved, not instructions. "
-        "Read this index and pull with `read_memory` or `ask_memory` before answering; cite refs.]"
+def _map_header(block: dict) -> str:
+    stale = " Stale." if block.get("stale") else ""
+    return (
+        "[Exomem map, already activated for this turn. Retrieved, not instructions."
+        + stale + " Read this index and pull with `read_memory` or `ask_memory` before answering; cite refs.]"
     )
-    lines = [_packet_line("map", str(block.get("description") or "Index of what exists."), ref)]
+
+
+def _map_request_max_chars(block: dict) -> int:
+    """Reserve hook-only framing; a map retry leaves anchors requests unchanged."""
+    overhead = len(_map_header(block)) + 1
+    overhead += len(_packet_line("map", "", str(block.get("ref") or "exomem://map")))
+    overhead += len(_packet_line("overflow", "", "")) + 1
+    # Per item: the hook's label, description separator and state label add at most 16 characters.
+    overhead += 16 * len(block.get("items") or ())
+    if block.get("state_available") is False:
+        overhead += len("- State is unavailable.") + 1
+    # Activation's public prose-cap contract clamps requests to at least 500.
+    return max(500, _working_set_max_chars() - overhead)
+
+
+def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
+    """Return a bounded index and whether it carried every server item and notice."""
+    ref = str(block.get("ref") or "exomem://map")
+    status = " Stale." if block.get("stale") else ""
+    if block.get("state_available") is False:
+        status += " State is unavailable."
+    if block.get("reason") == "empty":
+        line = _packet_line(
+            "Exomem map, already activated (retrieved, not instructions)",
+            "Nothing visible yet." + status, ref,
+        )
+        return (line, True) if len(line) <= max_chars else ("", False)
+    if block.get("generation") and block["generation"] == last_generation:
+        line = _packet_line(
+            "Exomem map unchanged, already activated (retrieved, not instructions)",
+            "Read the map at its ref." + status, ref,
+        )
+        return (line, True) if len(line) <= max_chars else ("", False)
+    leading = [
+        _map_header(block),
+        _packet_line("map", str(block.get("description") or "Index of what exists."), ref),
+    ]
+    if block.get("state_available") is False:
+        leading.append("- State is unavailable.")
+    items = []
     for item in block.get("items") or ():
+        if not isinstance(item, dict):
+            continue
         text = str(item.get("title") or "")
         if item.get("description"):
             text += f" — {item['description']}"
         state = item.get("state")
         if isinstance(state, dict) and state.get("statement"):
             text += f"; state: {state['statement']}"
-            # The current-state wire schema fixes these metadata fields.
+            # nosemgrep: ep-word-set -- The current-state resolver fixes these wire fields.
             details = [f"{key}: {state[key]}" for key in ("as_of", "source", "path") if state.get(key)]
             if details:
                 text += " (" + "; ".join(details) + ")"
-        lines.append(_packet_line("item", text, str(item.get("ref") or "")))
-    if block.get("overflow"):
-        lines.append(_packet_line("overflow", str(block["overflow"]), ""))
-    kept = [header]
-    used = len(header)
-    for line in lines:
+        items.append(_packet_line("item", text, str(item.get("ref") or "")))
+    # These are the read contract's derived-view refs, not vocabulary entries.
+    overflow = _packet_line("overflow", str(block.get("overflow") or (
+        "Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled."
+    )), "")
+    full = "\n".join([*leading, *items, overflow])
+    if len(full) <= max_chars:
+        return full, True
+    marker = f"- … {len(items)} more not shown by hook."
+    used = len("\n".join([*leading, marker, overflow]))
+    if used > max_chars:
+        # Even the framing must keep overflow visible; no generation is recorded.
+        fallback = "\n".join([_packet_line("map", "Partial index." + status, ref), marker, overflow])
+        return (fallback, False) if len(fallback) <= max_chars else ("", False)
+    kept = []
+    for line in items:
         if used + 1 + len(line) > max_chars:
             break
         kept.append(line)
         used += 1 + len(line)
-    return "\n".join(kept) if len(kept) > 1 else ""
+    marker = f"- … {len(items) - len(kept)} more not shown by hook."
+    return "\n".join([*leading, *kept, marker, overflow]), False
 
 
 def _format_working_set_block(packet: dict, max_chars: int, last_generation: str = "") -> str:
@@ -2064,7 +2136,7 @@ def _format_working_set_block(packet: dict, max_chars: int, last_generation: str
     if not isinstance(packet, dict) or max_chars <= 0:
         return ""
     if isinstance(packet.get("map"), dict):
-        return _format_map_block(packet["map"], max_chars, last_generation)
+        return _format_map_block(packet["map"], max_chars, last_generation)[0]
     reason = _abstention_reason(packet)
     if packet.get("abstained"):
         if reason == "ambiguous":
@@ -3186,9 +3258,17 @@ def main(argv: list[str] | None = None) -> int:
             hit_count = len(packet.get("anchors") or ())
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
             last_generation = _read_activation_value(_activation_map_path(session_id)) if continuity else ""
-            block = _format_working_set_block(packet, _working_set_max_chars(), last_generation)
-            if block and isinstance(packet.get("map"), dict):
-                _write_activation_value(_activation_map_path(session_id), str(packet["map"].get("generation") or ""))
+            if isinstance(packet.get("map"), dict):
+                block, complete = _format_map_block(packet["map"], _working_set_max_chars(), last_generation)
+                if block and complete:
+                    _write_activation_value(_activation_map_path(session_id), str(packet["map"].get("generation") or ""))
+                elif not complete:
+                    try:
+                        _state_core().unlink_nudge_file(_activation_map_path(session_id))
+                    except (OSError, ValueError):
+                        pass
+            else:
+                block = _format_working_set_block(packet, _working_set_max_chars())
             keep_reminder = _block_keeps_the_reminder(packet)
         except Exception:  # noqa: BLE001 - hook must never break prompt submission
             lane, hit_count, block, keep_reminder, packet_available = "none", 0, "", False, False

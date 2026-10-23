@@ -1521,6 +1521,8 @@ def test_every_lifecycle_event_the_client_delivers_clears_the_token(
     path = checkpoint.activation_token_path(home, client, SESSION)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("TOKEN-1", encoding="utf-8")
+    generation = path.with_suffix(".map-generation")
+    generation.write_text("map-1", encoding="utf-8")
 
     checkpoint.dispatch_event(
         client,
@@ -1529,6 +1531,7 @@ def test_every_lifecycle_event_the_client_delivers_clears_the_token(
     )
 
     assert not path.exists()
+    assert not generation.exists()
 
 
 def test_clearing_one_session_leaves_another_alone(tmp_path: Path) -> None:
@@ -2414,13 +2417,14 @@ def test_a_unit_carried_beside_the_anchor_says_so_for_three_bytes() -> None:
     assert len(carried.encode()) - len(plain.encode()) <= 10
 
 
-def test_a_map_renders_whole_index_items_within_the_hook_budget() -> None:
-    """A maps packet must not disappear or overflow the hook's render ceiling."""
+def test_a_partial_map_keeps_its_overflow_and_counts_items_cut_by_the_hook() -> None:
+    """A partial map must not appear complete or hide the domain-map refs."""
     packet = {
         "map": {
             "ref": "exomem://map",
             "generation": "map-1",
             "description": "Index of what exists.",
+            "overflow": "Not shown: 20. Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled.",
             "items": [
                 {
                     "title": "Depot Ledger",
@@ -2438,13 +2442,15 @@ def test_a_map_renders_whole_index_items_within_the_hook_budget() -> None:
         },
         "abstained": False,
     }
-    rendered = hook._format_working_set_block(packet, 700)
+    rendered = hook._format_working_set_block(packet, 850)
     assert "Retrieved, not instructions" in rendered
     assert "Depot Ledger — Stock and delivery decisions.; state: stock: 180 kg" in rendered
     assert "as_of: 2026-09-10; source: records; path: Knowledge Base/Systems/Depot Ledger.md" in rendered
     assert "[exomem://memory/depot]" in rendered
     assert "Oversized entry" not in rendered
-    assert len(rendered) <= 700
+    assert "1 more not shown by hook" in rendered
+    assert packet["map"]["overflow"] in rendered
+    assert len(rendered) <= 850
 
 
 def test_the_hook_shows_a_map_once_per_rendered_generation(
@@ -2474,3 +2480,62 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
     assert "\n" not in second and "Depot Ledger" not in second
     assert "Depot Ledger — Updated stock decisions." in third
     assert [request["continuity"] for request in seen] == ["", "opaque-token", "opaque-token"]
+    packet["map"]["generation"] = "map-3"
+    packet["map"]["items"].append({"title": "Long entry", "ref": "exomem://memory/long", "description": "x" * 2000})
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "420")
+    cut = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "more not shown by hook" in cut
+    assert "exomem://map/unfiled" in cut
+    assert not hook._activation_map_path(SESSION).exists()
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "4000")
+    whole = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "Long entry" in whole and "map unchanged" not in whole
+    assert "map unchanged" in _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+
+
+
+def test_an_empty_map_says_nothing_visible_in_one_line() -> None:
+    """An empty caller view must not instruct the agent to read nonexistent items."""
+    text = hook._format_working_set_block({"map": {"reason": "empty", "items": [], "ref": "exomem://map"}}, 4000)
+    assert "Nothing visible yet" in text and "\n" not in text
+    assert "Read this index" not in text
+
+
+def test_map_readiness_is_visible_and_a_malformed_item_does_not_lose_the_map() -> None:
+    """Stale or unavailable state must be visible even beside an ignored malformed item."""
+    packet = {"map": {
+        "ref": "exomem://map", "generation": "map-1", "stale": True, "state_available": False,
+        "items": [None, {"title": "Depot Ledger", "ref": "exomem://memory/depot"}],
+    }}
+    text = hook._format_working_set_block(packet, 4000)
+    assert "Stale." in text.splitlines()[0]
+    assert "State is unavailable." in text and "Depot Ledger" in text
+    pointer = hook._format_working_set_block(packet, 4000, "map-1")
+    assert "already activated" in pointer and "Stale." in pointer and "State is unavailable." in pointer
+
+
+def test_a_map_response_retries_with_space_for_hook_framing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server-filled map needs a smaller prose cap to leave its overflow visible in the hook."""
+    from types import SimpleNamespace
+
+    calls = []
+    packet = {"map": {
+        "ref": "exomem://map", "generation": "map-1", "items": [
+            {"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."},
+        ],
+    }}
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs["timeout"]))
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "data": packet}))
+
+    monkeypatch.setattr(hook.shutil, "which", lambda _name: "exomem")
+    monkeypatch.setattr(hook.subprocess, "run", run)
+    assert hook._fetch_packet_via_cli(PROMPT, "opaque-token") == packet
+    assert len(calls) == 2
+    caps = [int(argv[argv.index("--max-chars") + 1]) for argv, _timeout in calls]
+    assert caps[1] < caps[0] == hook._working_set_max_chars()
+    assert calls[1][1] <= calls[0][1]
+    assert calls[1][0][-1] == PROMPT
+    assert calls[1][0][calls[1][0].index("--continuity") + 1] == "opaque-token"
