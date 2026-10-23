@@ -8,7 +8,7 @@ recomputes it and compares, which is the protocol's last chain check.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
 from . import protocol, stats
@@ -277,7 +277,25 @@ def _differences(
 
 
 def _not_evaluable(reason: str) -> dict:
-    return {"evaluable": False, "holds": False, "reason": reason}
+    return {"evaluable": False, "holds": False, "reason": reason, "inconclusive": []}
+
+
+def _inconclusive(rule: dict, number: int, *, short: Collection[int]) -> dict:
+    """A tested rule's reasons to read as inconclusive rather than as held or
+    failed (design, "Groups" and "Power")."""
+
+    reasons: list[str] = []
+    if rule["evaluable"]:
+        if rule["groups"] < protocol.MIN_GROUPS:
+            reasons.append(
+                f"rule {number}: {rule['groups']} groups, fewer than {protocol.MIN_GROUPS}"
+            )
+        if not rule["holds"] and number in short:
+            reasons.append(
+                f"rule {number}: failed, and the power step recorded it short of "
+                f"{protocol.POWER_TARGET:.0%} at the cap"
+            )
+    return {**rule, "inconclusive": reasons}
 
 
 def rules(
@@ -288,9 +306,12 @@ def rules(
     deltas: Mapping[int, float],
     seed: int,
     arm_ids: Sequence[str],
+    short: Collection[int] = (),
 ) -> dict:
     """The five rules (design, "Rule"). A rule without its arms or cases is not
-    evaluable, and a rule that is not evaluable does not hold."""
+    evaluable, and a rule that is not evaluable does not hold. A tested rule
+    with too few groups, or a failed rule in ``short`` (the rules the power
+    step recorded short at the cap), reads as inconclusive."""
 
     groups = {case.case_id: case.group for case in cases}
     in_split = [c for c in cases if c.split == split and c.case_id in table]
@@ -343,6 +364,7 @@ def rules(
             "evaluable": True,
             "holds": test["superiority"]["passes"],
             "cases": len(expecting),
+            "groups": test["superiority"]["groups"],
             "strata": strata,
             "M_minus_A": test,
         }
@@ -359,6 +381,7 @@ def rules(
             "evaluable": True,
             "holds": test["non_inferiority"]["passes"],
             "cases": len(ordinary),
+            "groups": test["non_inferiority"]["groups"],
             "M_minus_A": test,
         }
 
@@ -384,6 +407,7 @@ def rules(
             if beats
             else ("non-inferior with fewer calls" if cheaper else None),
             "cases": len(pooled),
+            "groups": score["superiority"]["groups"],
             "M_minus_P": score,
             "P_calls_minus_M_calls": calls,
         }
@@ -402,6 +426,7 @@ def rules(
             "holds": counts["M"] <= counts["A"] + protocol.CONTAMINATION_TOLERANCE,
             "cases": len(no_memory),
             "contaminated": counts,
+            "inconclusive": [],
         }
 
     if not (has("M") and has("A")):
@@ -423,23 +448,34 @@ def rules(
             "cases": len(positives),
             "losses": sorted(losses),
             "excluded_no_gold": no_gold,
+            "inconclusive": [],
         }
 
-    out["switch"] = all(out[str(n)]["holds"] for n in range(1, 6))
+    for number in (1, 2, 3):
+        out[str(number)] = _inconclusive(out[str(number)], number, short=short)
+    out["switch"] = all(
+        out[str(n)]["holds"] and not out[str(n)]["inconclusive"] for n in range(1, 6)
+    )
     return out
 
 
 def decide(decided: Mapping, *, void: bool, split: str) -> str:
-    """What the rules decide. A switch needs all five, so one evaluable rule that
-    fails keeps anchors; otherwise a rule that is not evaluable leaves the
-    decision unknown and says why. The product default stays anchors either way."""
+    """What the rules decide. A switch needs all five, so one rule that fails
+    conclusively keeps anchors; otherwise a rule that is not evaluable or reads
+    as inconclusive leaves the decision open and says why. The product default
+    stays anchors either way."""
 
     numbered = [decided[str(n)] for n in range(1, 6)]
-    if any(rule["evaluable"] and not rule["holds"] for rule in numbered):
+    if any(r["evaluable"] and not r["holds"] and not r["inconclusive"] for r in numbered):
         return "keep anchors"
-    unknown = sorted({rule["reason"] for rule in numbered if not rule["evaluable"]})
-    if unknown:
-        return "not evaluable: " + "; ".join(unknown)
+    unknown = sorted({r["reason"] for r in numbered if not r["evaluable"]})
+    unsure = [reason for r in numbered for reason in r["inconclusive"]]
+    open_parts = [
+        *(["not evaluable: " + "; ".join(unknown)] if unknown else []),
+        *(["inconclusive: " + "; ".join(unsure)] if unsure else []),
+    ]
+    if open_parts:
+        return "; ".join(open_parts)
     return "switch to maps" if not void and split == protocol.SPLIT_HELDOUT else "keep anchors"
 
 
@@ -520,6 +556,7 @@ def score_run(
     deltas: Mapping[int, float],
     seed: int,
     project_sessions: int | None = None,
+    short: Collection[int] = (),
 ) -> dict:
     for rule, delta in deltas.items():
         if not protocol.DELTA_FLOOR <= delta <= protocol.DELTA_CAP:
@@ -531,7 +568,13 @@ def score_run(
     )
     void = len(built["struck"]) > protocol.MAX_STRUCK_CASES
     decided = rules(
-        cases=cases, table=built["cases"], split=split, deltas=deltas, seed=seed, arm_ids=arm_ids
+        cases=cases,
+        table=built["cases"],
+        split=split,
+        deltas=deltas,
+        seed=seed,
+        arm_ids=arm_ids,
+        short=short,
     )
     return {
         "split": split,

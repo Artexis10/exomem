@@ -63,6 +63,9 @@ DELTA_FLOOR = 0.10
 DELTA_CAP = 0.15
 POWER_TARGET = 0.80
 
+#: "Cases and key", "Groups": a rule with fewer than 6 groups reads as inconclusive.
+MIN_GROUPS = 6
+
 #: "Rule" 4: M contaminates no more cases than A does, plus at most one.
 CONTAMINATION_TOLERANCE = 1
 

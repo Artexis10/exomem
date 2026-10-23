@@ -632,11 +632,12 @@ def cmd_score(args: argparse.Namespace) -> int:
     )
     for rule in ("1", "2", "3", "4", "5"):
         verdict = result["rules"][rule]
-        state = (
-            "holds"
-            if verdict["holds"]
-            else ("fails" if verdict["evaluable"] else f"not evaluable: {verdict['reason']}")
-        )
+        if not verdict["evaluable"]:
+            state = f"not evaluable: {verdict['reason']}"
+        elif verdict["inconclusive"]:
+            state = "inconclusive: " + "; ".join(verdict["inconclusive"])
+        else:
+            state = "holds" if verdict["holds"] else "fails"
         print(f"rule {rule}: {state}")
     excluded = result["rules"]["5"].get("excluded_no_gold")
     if excluded:

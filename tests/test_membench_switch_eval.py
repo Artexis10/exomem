@@ -204,6 +204,34 @@ def test_rule_3_holds_when_m_beats_p_on_quality_though_it_makes_more_calls() -> 
     assert rule["holds"]
 
 
+def test_a_rule_with_fewer_than_six_groups_reads_as_inconclusive_not_as_failed() -> None:
+    # Five winning groups: the smallest sign-flip p-value is 1/32, above 0.025, whatever the data.
+    cases = [_case(f"miss-{n}") for n in range(5)]
+    table = {c.case_id: {"M": {"score": 1.0, "contaminated": False}, "A": {"score": 0.0, "contaminated": False}} for c in cases}
+
+    decided = rules(cases=cases, table=table, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "M"])
+
+    assert decided["1"]["inconclusive"]
+    assert "inconclusive: rule 1" in decide(decided, void=False, split=protocol.SPLIT_HELDOUT)
+
+
+def test_a_failed_rule_that_the_power_step_found_short_reads_as_inconclusive_not_as_harm() -> None:
+    # M loses three of twelve ordinary turns: rule 2 is not non-inferior within 0.10.
+    cases = [_case(f"turn-{n}", kind="ordinary", expects_memory=False) for n in range(12)]
+    table = {
+        c.case_id: {
+            "M": {"score": 0.0 if n < 3 else 1.0, "contaminated": False},
+            "A": {"score": 1.0, "contaminated": False},
+        }
+        for n, c in enumerate(cases)
+    }
+
+    decided = rules(cases=cases, table=table, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "M"], short={2})
+
+    assert not decided["2"]["holds"] and decided["2"]["inconclusive"]
+    assert decide(decided, void=False, split=protocol.SPLIT_HELDOUT) != "keep anchors"
+
+
 # -- the judge's view ---------------------------------------------------------
 
 
