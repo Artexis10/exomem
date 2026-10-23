@@ -2875,7 +2875,13 @@ def _finish_unit_candidates(
             verified.relation_match = candidate.relation_match
             verified.mixed_units_truncated = candidate.mixed_units_truncated
             out.append(verified)
-        except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+            trace = error.__traceback__
+            while trace is not None and trace.tb_next is not None:
+                trace = trace.tb_next
+            if trace is not None:
+                log.debug("unit verification failed in %s:%d (%s)",
+                          trace.tb_frame.f_code.co_name, trace.tb_lineno, type(error).__name__)
             if catalog is not None:
                 catalog.incomplete = True
             if failed_out is not None and "semantic_units_current" not in failed_out:
