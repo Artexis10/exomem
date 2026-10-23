@@ -2640,6 +2640,37 @@ def test_true_multiprocess_same_id_delivery_creates_no_duplicate_history(tmp_pat
     assert not list(state.glob("*.tmp-*"))
 
 
+def test_first_checkpoint_survives_a_concurrent_home_creator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "first-use-home"
+    real_mkdir = checkpoint.os.mkdir
+    raced = False
+
+    def create_before_mkdir(path, mode=0o777, *, dir_fd=None):
+        nonlocal raced
+        if Path(path).name == home.name and not raced:
+            raced = True
+            real_mkdir(path, mode=mode, dir_fd=dir_fd)
+        return real_mkdir(path, mode=mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(checkpoint.os, "mkdir", create_before_mkdir)
+    event = {
+        "client": "codex", "event": "PreCompact", "session_id": "first-use",
+        "trigger": "auto", "turn_id": None, "source": None, "cwd": None,
+        "transcript_path": None, "model": None,
+    }
+
+    result = checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+
+    assert raced
+    assert result["status"] == "written"
+    state = checkpoint.session_state_dir(home, "codex", "first-use")
+    stored = checkpoint.load_checkpoint(state / "current.json")
+    assert stored is not None
+    assert stored["checkpoint_id"] == result["checkpoint_id"]
+
+
 def test_true_multiprocess_older_observation_cannot_replace_newer(tmp_path: Path) -> None:
     home = tmp_path / "home"
     code = (

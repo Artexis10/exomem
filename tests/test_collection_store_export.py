@@ -65,6 +65,14 @@ SESSION = {"occurred_on": "2026-08-03", "title": "Pull", "status": "completed",
            "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}]}
 
 
+def _view_is_stamped(path):
+    """Publication can move the old view aside before its no-clobber install."""
+    try:
+        return b"exomem_view:" in path.read_bytes()
+    except FileNotFoundError:
+        return False
+
+
 def run_export(root, *flags, operator=True):
     """`exomem collections export`, the operator credential set only in the apply shell."""
     with pytest.MonkeyPatch.context() as shell:
@@ -129,7 +137,7 @@ def test_an_unwritten_collection_exports_exact_originals_after_view_stamping(env
                                                             (LEDGER_ID,)))]
     service = start_service(root)
     try:
-        _until(lambda: all(b"exomem_view:" in (root / path).read_bytes() for path in paths))
+        _until(lambda: all(_view_is_stamped(root / path) for path in paths))
         queried = call(root, "record_memory", action="query", collection=selected, include_agent_history=True)
         assert queried["source_versions"]
         assert {event["transition_id"] for event in queried["agent_history"]["events"]} == transitions
@@ -156,7 +164,7 @@ def test_a_legacy_view_moved_before_first_stamp_keeps_its_path_and_accepts_an_ow
         capability.COLLECTION_VIEWS_V1, capability.RECORDS_SUMMARY_V1})
     service = start_service(root)
     try:
-        _until(lambda: b"exomem_view:" in destination.read_bytes())
+        _until(lambda: _view_is_stamped(destination))
         assert not source.exists()
         queried = call(root, "record_memory", action="query", collection=WORK)
         assert any(entry["path"] == destination.relative_to(root).as_posix() for entry in queried["source_versions"])
@@ -246,7 +254,7 @@ def test_a_backfill_interrupted_before_replication_retries_before_stamping_origi
     assert {path: digest for path, digest in vault_bytes(root).items() if path in before} == before
     service = start_service(root)
     try:
-        _until(lambda: b"exomem_view:" in (root / WORK).read_bytes())
+        _until(lambda: _view_is_stamped(root / WORK))
         with closing(connection.open_reader(replica_path)) as conn:
             assert conn.execute("SELECT COUNT(*) FROM store_meta WHERE key LIKE 'legacy-original:%'").fetchone()[0] > 0
     finally:
