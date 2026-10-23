@@ -88,6 +88,7 @@ def _reached(packet: dict) -> set[str]:
         "Read {/srv/home/handoff.md} and pick it up.",
         "Read notes,/srv/home/handoffs and pick it up.",
         "Read \u2018/srv/home/handoff.md\u2019 and pick it up.",
+        "‘Unfinished quotation\nRead ‘/srv/archive notes/records review.md’ please.",
         "Read /srv/vault/Knowledge Base/Records/Home/Sync Notes.md and pick it up.",
     ],
     ids=[
@@ -110,6 +111,7 @@ def _reached(packet: dict) -> set[str]:
         "braces",
         "after-a-comma",
         "curly-single-quotes",
+        "unclosed-on-earlier-line",
         "rooted-vault-path-with-spaces",
     ],
 )
