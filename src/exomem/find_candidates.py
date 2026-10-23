@@ -11,14 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from . import find_policy, find_results, find_types
-from .find_types import FindTimings, GraphProvenance, ParsedPage
+from .find_types import FindTimings, GraphProvenance, ParsedPage, RankingPage
 from .ranking_config import LANE_ORDER, RankingConfig
 
 log = logging.getLogger(__name__)
 _span = find_types.timing_span
 _mark_source = find_types.timing_mark_source
 
-PageOf = Callable[[str], ParsedPage | None]
+PageOf = Callable[[str], ParsedPage | RankingPage | None]
 
 
 @dataclass(frozen=True)
@@ -177,6 +177,8 @@ class CandidateBundle:
     #: lane gave them before it did (`WITHHELD_REASON`). The lane rankings above
     #: are the ones fusion used, so they no longer hold these pages.
     lexical_votes_withheld: dict[str, dict[str, int]] = field(default_factory=dict)
+    frame_sources: dict[str, str] = field(default_factory=dict)
+    ranking_pages: dict[str, RankingPage | None] = field(default_factory=dict)
 
 
 def empty_bundle(
@@ -221,6 +223,8 @@ def collapse_frame_children(
     *aux_maps: dict,
     parent_hints: Mapping[str, str | None] | None = None,
     recall_paths: AbstractSet[str] | None = None,
+    metadata_paths: AbstractSet[str] | None = None,
+    frame_sources: dict[str, str] | None = None,
 ) -> list[str]:
     """Remap scene-frame sidecar candidates onto their parent video sidecar."""
     if not ranking:
@@ -239,14 +243,11 @@ def collapse_frame_children(
     for rel in ranking:
         if not admitted(rel):
             continue
-        # A ready catalog's explicit NULL proves this is an ordinary page, so
-        # avoid its otherwise pointless Markdown hydration. A non-NULL hint is
-        # only a hydration selector: the parsed child remains authoritative if
-        # it was deleted, became malformed, or changed parent_media after the
-        # catalog snapshot.
+        # Offline hints select hydration. Managed ranking retains the admitted
+        # generation; only selected output and frame evidence reopen Markdown.
         page = (
             None
-            if parent_hints is not None and parent_hints.get(rel) is None and rel in parent_hints
+            if metadata_paths is None and parent_hints is not None and parent_hints.get(rel) is None and rel in parent_hints
             else page_of(rel)
         )
         parent = page.parent_media if page is not None else None
@@ -254,10 +255,16 @@ def collapse_frame_children(
             parent_sidecar = parent + ".md"
             if (
                 admitted(parent_sidecar)
-                and recall_policy.is_recall_candidate(vault_root, vault_root / parent_sidecar)
-                and (vault_root / parent_sidecar).exists()
+                and (
+                    parent_sidecar in metadata_paths
+                    if metadata_paths is not None
+                    else recall_policy.is_recall_candidate(vault_root, vault_root / parent_sidecar)
+                    and (vault_root / parent_sidecar).exists()
+                )
             ):
                 attribution.setdefault(parent_sidecar, (page.media_file or rel, page.frame_ts))
+                if frame_sources is not None:
+                    frame_sources.setdefault(parent_sidecar, rel)
                 for m in aux_maps:
                     if rel in m:
                         v = m.pop(rel)
@@ -287,7 +294,7 @@ def _lexical_visibility(
     window: int,
     page_of: PageOf,
 ) -> LexicalVisibility:
-    """The dense-lead guard (`find_policy.lexical_visibility`) over parsed pages."""
+    """The dense-lead guard over admitted ranking fields or offline pages."""
     return find_policy.lexical_visibility(
         query=query,
         vector_ranking=vector_ranking,
@@ -334,6 +341,7 @@ def collect_candidates(
     shadow: Callable[[list[str]], list[str]] | None = None,
     status_basis: Any = None,
     type_basis: Any = None,
+    ranking_metadata: Callable[[set[str]], Mapping[str, RankingPage | None]] | None = None,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them.
 
@@ -382,6 +390,7 @@ def collect_candidates(
             if path in recall_paths and (eligible_paths is None or path in eligible_paths)
         ]
     frame_attribution: dict[str, tuple[str, float | None]] = {}
+    frame_sources: dict[str, str] = {}
     lane_statuses: dict[str, dict[str, Any]] = {}
 
     vector_ranking: list[str] = []
@@ -783,45 +792,61 @@ def collect_candidates(
         if hint_result.readiness.complete:
             parent_hints = hint_result.value
 
+    ranking_pages: dict[str, RankingPage | None] = {}
+    ranking_of = page_of
+    if ranking_metadata is not None:
+        if admitted_raw_paths:
+            with _span(timings, "fusion"):
+                ranking_pages.update(ranking_metadata(admitted_raw_paths))
+        ranking_of = ranking_pages.get
+
     vector_ranking = collapse_frame_children(
         vector_ranking,
         vault_root,
-        page_of,
+        ranking_of,
         frame_attribution,
         chunk_text_by_path,
         vector_score_by_path,
         parent_hints=parent_hints,
         recall_paths=recall_paths,
+        metadata_paths=ranking_pages.keys() if ranking_metadata is not None else None,
+        frame_sources=frame_sources,
     )
     vector_ranking = _eligible(vector_ranking)
     clip_ranking = collapse_frame_children(
         clip_ranking,
         vault_root,
-        page_of,
+        ranking_of,
         frame_attribution,
         clip_score_by_path,
         clip_frame_ts_by_path,
         parent_hints=parent_hints,
         recall_paths=recall_paths,
+        metadata_paths=ranking_pages.keys() if ranking_metadata is not None else None,
+        frame_sources=frame_sources,
     )
     clip_ranking = _eligible(clip_ranking)
     bm25_ranking = collapse_frame_children(
         bm25_ranking,
         vault_root,
-        page_of,
+        ranking_of,
         frame_attribution,
         bm25_score_by_path,
         parent_hints=parent_hints,
         recall_paths=recall_paths,
+        metadata_paths=ranking_pages.keys() if ranking_metadata is not None else None,
+        frame_sources=frame_sources,
     )
     bm25_ranking = _eligible(bm25_ranking)
     keyword_ranking = collapse_frame_children(
         keyword_ranking,
         vault_root,
-        page_of,
+        ranking_of,
         frame_attribution,
         parent_hints=parent_hints,
         recall_paths=recall_paths,
+        metadata_paths=ranking_pages.keys() if ranking_metadata is not None else None,
+        frame_sources=frame_sources,
     )
     keyword_ranking = _eligible(keyword_ranking)
     visibility = _LEXICALLY_VISIBLE
@@ -835,7 +860,7 @@ def collect_candidates(
                 lane_weights=tuple(guard_weights[:3]),
                 rrf_k=config.rrf_k,
                 window=candidate_k,
-                page_of=page_of,
+                page_of=ranking_of,
             )
     if capture_trace and mode != "vector":
         lane_statuses["keyword"] = {
@@ -898,11 +923,11 @@ def collect_candidates(
                         if p in vector_set:
                             graph_seeds.append(p)
                             continue
-                        page = page_of(p)
+                        page = ranking_of(p)
                         if page is None:
                             continue
                         if (
-                            find_results.make_excerpt(page, query_norm) is not None
+                            find_results.literal_tokens_present(page, query_norm)
                             or find_results.stem_tokens_present(page, query_norm)
                         ):
                             graph_seeds.append(p)
@@ -1004,7 +1029,7 @@ def collect_candidates(
                         # Passing None to the legacy helper would construct a
                         # resolver on the reader, undoing the admission decision.
                         for seed_rel in legacy_seeds if resolver is not None else ():
-                            page = page_of(seed_rel)
+                            page = ranking_of(seed_rel)
                             if page is None:
                                 continue
                             for target_rel in outbound_wikilink_paths(
@@ -1055,7 +1080,7 @@ def collect_candidates(
                 with _span(timings, "graph.expand"):
                     seen_target = set()
                     for seed_rel in graph_seeds if resolver is not None else ():
-                        page = page_of(seed_rel)
+                        page = ranking_of(seed_rel)
                         if page is None:
                             continue
                         for target_rel in outbound_wikilink_paths(
@@ -1105,7 +1130,7 @@ def collect_candidates(
             pool: list[str] = []
             for lane in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking):
                 pool.extend(lane)
-            temporal_ranking = find_policy.recency_ranking(pool, page_of, candidate_k)
+            temporal_ranking = find_policy.recency_ranking(pool, ranking_of, candidate_k)
         if capture_trace:
             lane_statuses["temporal"] = {
                 "status": "participated" if temporal_ranking else "available_nonmatching",
@@ -1143,6 +1168,10 @@ def collect_candidates(
         fused = fusion.reciprocal_rank_fusion_weighted(
             active_lists, active_weights, k=config.rrf_k
         )
+        if ranking_metadata is not None:
+            missing = {path for path, _score in fused if path not in ranking_pages}
+            if missing:
+                ranking_pages.update(ranking_metadata(missing))
         raw_fused_score_by_path = dict(fused) if capture_trace else {}
         multiplier_chain_by_path: (
             dict[str, list[dict[str, float | str]]] | None
@@ -1156,7 +1185,7 @@ def collect_candidates(
             status_basis=status_basis,
             type_basis=type_basis,
             temporal=temporal,
-            page_of=page_of,
+            page_of=ranking_of,
             usage_map=usage_map,
             evidence_out=multiplier_chain_by_path,
             # Bound the pass at the depth this system already says it needs.
@@ -1203,4 +1232,6 @@ def collect_candidates(
         multiplier_chain_by_path=multiplier_chain_by_path,
         lexical_crossing=visibility.crossing,
         lexical_votes_withheld=lexical_votes_withheld,
+        frame_sources=frame_sources,
+        ranking_pages=ranking_pages,
     )
