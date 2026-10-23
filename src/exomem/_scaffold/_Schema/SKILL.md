@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 33ef03363699d6fa8e1cf85a1da9a2c8ce86bcf66c3063da835f0b561e1c0757
+  skill_contract: ce2739315f6105bed7171dce60478107a3b0b54490ff7864c99d1468f0474103
   version: "0.32.0"
 ---
 
@@ -135,6 +135,9 @@ Follow the live recall policy: at `balanced`, skip unrelated fresh tasks; at
 authorize sending context or saving it.
 
 Before a substantive turn with no prior context, call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
+
+If activation returns a map, read it as an index of what exists. Pull by ref
+with `read_memory` or use `ask_memory` before answering; cite the refs you use.
 
 After new evidence, a task change, or continuation restoration, judge whether
 the context needs refresh. When the exposed tool supports it, set

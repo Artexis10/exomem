@@ -139,6 +139,14 @@ already injected this turn's working set. For a known information gap, use
 `ask_memory`, then `read_memory` on selected refs. Activation is read-only and
 abstains rather than guessing.
 
+A packet may instead carry a map: an index of what exists, with titles, refs,
+descriptions and current state when available. Read the map and pull by ref
+with `read_memory`, or query `ask_memory`, before answering; cite the refs you use.
+Read `exomem://map` for the paginated index and follow its domain-map refs for
+material beyond the packet. A map is not a claim that its items fit the turn.
+The retrieve hook shows the index once per generation. Later turns with the
+same generation show a pointer to the map; a changed generation shows it again.
+
 An unresolved packet can mean an unidentified subject or missing facts about a
 known subject. Use the turn and relevant held context to distinguish them. For an
 unidentified subject, ask for clarification instead of surveying unrelated records.

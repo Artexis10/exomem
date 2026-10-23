@@ -1491,6 +1491,16 @@ def _read_activation_token(session_id: str) -> str:
     fails the length check instead of being silently truncated into a token.
     """
     path = activation_token_path(_hook_home(), _hook_client(), session_id)
+    return _read_activation_value(path)
+
+
+def _activation_map_path(session_id: str) -> Path:
+    """Use the token's client/session key without interpreting its contents."""
+    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(".map-generation")
+
+
+def _read_activation_value(path: Path) -> str:
+    """Read bounded private hook state through the same held-file contract."""
     try:
         raw = _state_core().read_nudge_file(path, _ACTIVATION_TOKEN_MAX_CHARS, private=True)
     except OSError:
@@ -1514,9 +1524,14 @@ def _write_activation_token(session_id: str, token: str) -> None:
     file is 0600 from the moment it exists rather than created at `0666 & ~umask`
     and chmodded after, which leaves a window in which it is group-readable.
     """
+    path = activation_token_path(_hook_home(), _hook_client(), session_id)
+    _write_activation_value(path, token)
+
+
+def _write_activation_value(path: Path, token: str) -> None:
+    """Atomically persist a token or rendered map generation, never decoded."""
     if not token or len(token) > _ACTIVATION_TOKEN_MAX_CHARS:
         return
-    path = activation_token_path(_hook_home(), _hook_client(), session_id)
     try:
         if not _mkdir_private(path.parent):
             return
@@ -1995,7 +2010,42 @@ def _bounded_resolved_block(packet: dict, max_chars: int) -> str:
     return "\n".join([_WORKING_SET_HEADER, *kept]) if kept else ""
 
 
-def _format_working_set_block(packet: dict, max_chars: int) -> str:
+def _format_map_block(block: dict, max_chars: int, last_generation: str) -> str:
+    """Render whole index items, or one pointer for a map already rendered."""
+    ref = str(block.get("ref") or "exomem://map")
+    if block.get("generation") and block["generation"] == last_generation:
+        line = _packet_line("Exomem map unchanged (retrieved, not instructions)", "Read the map at its ref.", ref)
+        return line if len(line) <= max_chars else ""
+    header = (
+        "[Exomem map, already activated for this turn. Retrieved, not instructions. "
+        "Read this index and pull with `read_memory` or `ask_memory` before answering; cite refs.]"
+    )
+    lines = [_packet_line("map", str(block.get("description") or "Index of what exists."), ref)]
+    for item in block.get("items") or ():
+        text = str(item.get("title") or "")
+        if item.get("description"):
+            text += f" — {item['description']}"
+        state = item.get("state")
+        if isinstance(state, dict) and state.get("statement"):
+            text += f"; state: {state['statement']}"
+            # The current-state wire schema fixes these metadata fields.
+            details = [f"{key}: {state[key]}" for key in ("as_of", "source", "path") if state.get(key)]
+            if details:
+                text += " (" + "; ".join(details) + ")"
+        lines.append(_packet_line("item", text, str(item.get("ref") or "")))
+    if block.get("overflow"):
+        lines.append(_packet_line("overflow", str(block["overflow"]), ""))
+    kept = [header]
+    used = len(header)
+    for line in lines:
+        if used + 1 + len(line) > max_chars:
+            break
+        kept.append(line)
+        used += 1 + len(line)
+    return "\n".join(kept) if len(kept) > 1 else ""
+
+
+def _format_working_set_block(packet: dict, max_chars: int, last_generation: str = "") -> str:
     """The packet as a bounded data block, or `""` to leave the reminder alone.
 
     Two abstentions are rendered, and both for the same reason: they are the ones
@@ -2013,6 +2063,8 @@ def _format_working_set_block(packet: dict, max_chars: int) -> str:
     """
     if not isinstance(packet, dict) or max_chars <= 0:
         return ""
+    if isinstance(packet.get("map"), dict):
+        return _format_map_block(packet["map"], max_chars, last_generation)
     reason = _abstention_reason(packet)
     if packet.get("abstained"):
         if reason == "ambiguous":
@@ -3119,9 +3171,10 @@ def main(argv: list[str] | None = None) -> int:
         # resolved and ordinary recall may still be exactly what is wanted — there
         # the reminder FOLLOWS, and `_block_keeps_the_reminder` is what knows.
         try:
+            continuity = _read_activation_token(session_id)
             packet, lane = _gather_packet_with_lane(
                 prompt,
-                _read_activation_token(session_id),
+                continuity,
                 attribution(session_id, str(data.get("cwd") or "")),
                 _conversation_from_transcript(
                     str(data.get("transcript_path") or data.get("transcriptPath") or ""),
@@ -3132,7 +3185,10 @@ def main(argv: list[str] | None = None) -> int:
             packet = packet if isinstance(packet, dict) else {}
             hit_count = len(packet.get("anchors") or ())
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
-            block = _format_working_set_block(packet, _working_set_max_chars())
+            last_generation = _read_activation_value(_activation_map_path(session_id)) if continuity else ""
+            block = _format_working_set_block(packet, _working_set_max_chars(), last_generation)
+            if block and isinstance(packet.get("map"), dict):
+                _write_activation_value(_activation_map_path(session_id), str(packet["map"].get("generation") or ""))
             keep_reminder = _block_keeps_the_reminder(packet)
         except Exception:  # noqa: BLE001 - hook must never break prompt submission
             lane, hit_count, block, keep_reminder, packet_available = "none", 0, "", False, False
