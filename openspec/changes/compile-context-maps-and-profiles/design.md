@@ -259,6 +259,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - If index code changes, seed the original slot with the donor's complete machine state and rerun product publication before creating successor proof. Retain accepted vectors only when their fingerprint and coverage remain compatible; report encoding activity.
    - Keep donor provenance and vector-build CPU budget distinct from successor preparation. Record custody before moving the seeded vault; an interrupted preparation preserves the seed and cannot fall through to a destructive fresh build.
    - Capture every successor arm's surface anew. Record donor provenance, verify donor score recomputation, and report the successor's readiness and unchanged-vault proof.
+   - Retain the donor's pinned scorer. It reads the original vault's page inventory; later recomputation temporarily returns that unchanged vault to the archive while both rounds are idle, then restores it to the successor. Do not substitute another scorer, rewrite stage digests, or create placeholder files.
    - Donor and successor work never overlap. Reuse does not change cases, keys, removals, arm budgets, or the one blind held-out decision.
 
 ### Ready before held-out generation

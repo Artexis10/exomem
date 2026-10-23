@@ -336,6 +336,7 @@ def cmd_state(args: argparse.Namespace) -> int:
                 source_vault=source,
                 parent_env=os.environ,
                 cpu_threads=args.cpu_threads,
+                seed_build_from=Path(args.seed_build_from) if args.seed_build_from else None,
             )
             print(
                 f"arm {arm} tree {tree}: state {record['state_digest'][:16]} vault {record['vault_digest'][:16]} (shared tree build {record['build_seconds']} s)"
@@ -344,6 +345,12 @@ def cmd_state(args: argparse.Namespace) -> int:
             print(
                 f"tree {tree}: build CPU override {budget if budget is not None else 'production default'}; resumed {record.get('resumed', 'unrecorded')}"
             )
+            if record.get("seed_build") is not None:
+                print(f"tree {tree}: seed {json.dumps(record['seed_build'], sort_keys=True)}")
+                print(f"tree {tree}: vector origin {json.dumps(record['vector_build'], sort_keys=True)}; preparation {json.dumps(record['preparation'], sort_keys=True)}")
+            processed = record["build"].get("vectors", {}).get("chunks_processed")
+            print(f"tree {tree}: vector chunks processed (encoded or copied): {processed if processed is not None else 'unavailable'}")
+            print(f"tree {tree}: owner coverage {json.dumps(record['build'].get('owner_coverage', {'available': False}), sort_keys=True)}")
     hashes = _arm_hashes(layout, inputs, specs, needed)
     (layout.run / "arm-hashes.json").write_text(
         json.dumps(hashes, indent=2, sort_keys=True), encoding="utf-8"
@@ -707,6 +714,10 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
         state_builds[tree] = {
             "cpu_threads": record.get("cpu_threads"),
             "resumed": record.get("resumed"),
+            "vector_build": record.get("vector_build"),
+            "preparation": record.get("preparation"),
+            "seed_build": record.get("seed_build"),
+            "vectors": record.get("build", {}).get("vectors"),
         }
     return {**result, "power_step": power_digest, "state_builds": state_builds}
 
@@ -913,6 +924,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     p = sub.add_parser("state", help="build each tree once and capture each arm surface")
     p.add_argument("--run", required=True)
+    p.add_argument(
+        "--seed-build-from",
+        help="republish an archived run's baseline at its original absolute slot path",
+    )
     p.add_argument(
         "--cpu-threads",
         type=int,

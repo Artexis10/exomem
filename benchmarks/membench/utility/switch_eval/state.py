@@ -228,12 +228,16 @@ def _child_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[str
     return env
 
 
-def prepare_build_slot(layout: Layout, source_vault: Path, *, move_vault: bool = False) -> Slot:
+def prepare_build_slot(
+    layout: Layout, source_vault: Path, *, move_vault: bool = False, custody: Mapping | None = None
+) -> Slot:
     recover_session_vault(layout)
     slot = Slot(layout.slot)
     slot.wipe()
     for path in (slot.runtime, slot.cwd, slot.hook_home):
         path.mkdir(parents=True)
+    if custody is not None:
+        _write_json_atomically(layout.run / "slot-vault.json", custody)
     if move_vault:
         _rename_vault(source_vault, slot.vault)
     else:
@@ -302,12 +306,17 @@ def build_state(vault: Path) -> dict:
         or not index_paths.sidecar_path(vault).is_file()
     ):
         raise StateError(f"vector publication did not complete: {vector_state}, sidecar={sidecar}")
+    vector_status = recall_migration.status(vault)
+    # The product counter includes copied vectors as well as new encodes.
+    processed = vector_status.pop("chunks_encoded", None)
     vectors = {
-        **recall_migration.status(vault),
+        **vector_status,
+        "chunks_processed": processed,
         "seconds": round(time.monotonic() - vector_started, 3),
     }
     convergence = converge_media(vault)
-    catalogue = ContextCatalogue(vault).rebuild()
+    context_catalogue = ContextCatalogue(vault)
+    catalogue = context_catalogue.rebuild()
     return {
         "convergence": convergence,
         "vectors": vectors,
@@ -316,6 +325,7 @@ def build_state(vault: Path) -> dict:
         "catalogue": {
             key: value for key, value in catalogue.items() if isinstance(value, (int, str))
         },
+        "owner_coverage": context_catalogue.owner_coverage(),
         "seconds": round(time.monotonic() - started, 2),
     }
 
@@ -584,6 +594,62 @@ def validate_build_cpu_threads(cpu_threads: int | None) -> None:
         raise StateError(f"--cpu-threads must be between 1 and {available}")
 
 
+def _prepare_build_seed(
+    layout: Layout, spec: ArmSpec, *, tree: str, snapshot_digest: str, donor_run: Path
+) -> tuple[dict, dict, Path]:
+    """Validate retained donor evidence before moving its original vault."""
+
+    from exomem import state_migration, state_paths
+
+    donor = Layout.at(donor_run)
+    # Preparation wipes successor paths; neither run may contain the donor's evidence.
+    if donor.run.resolve().is_relative_to(layout.run.resolve()) or layout.run.resolve().is_relative_to(donor.run.resolve()):
+        raise StateError("the build donor and successor run roots must be disjoint")
+    # Operational sequencing excludes live donors; receipt absence cannot prove that.
+    if (donor.run / "slot-vault.json").exists():
+        raise StateError("recover the donor's pending custody before archiving its build")
+    baseline, target = donor.shared_tree(tree), layout.shared_tree(tree)
+    try:
+        metadata = (baseline / "state.json").read_bytes()
+        record = json.loads(metadata)
+    except (OSError, ValueError) as error:
+        raise StateError(f"tree {tree}: donor build metadata is missing or unreadable") from error
+    _require_build_proof(record)
+    if record["snapshot_digest"] != snapshot_digest or record["profile"] != profile_settings(spec.profile):
+        raise StateError(f"tree {tree}: seed snapshot or retrieval profile does not match")
+    if tree_digest(baseline / "state") != record["state_digest"]:
+        raise StateError(f"tree {tree}: donor state does not match its build digest")
+    vault = Slot(layout.slot).vault
+    identity = state_paths.vault_state_key(vault)
+    try:
+        manifest = state_migration._load_manifest(baseline / "state" / identity, vault_root=vault)
+    except state_migration.StateMigrationManifestError as error:
+        raise StateError(f"tree {tree}: seed manifest does not match the successor slot") from error
+    if manifest is None or manifest["state"] != "complete":
+        raise StateError(f"tree {tree}: seed requires a complete migration manifest for the successor slot")
+    intent = {
+        "donor_run": str(donor.run),
+        "donor_metadata_digest": hashlib.sha256(metadata).hexdigest(),
+        "donor_state_digest": record["state_digest"],
+        "vault_state_key": identity,
+    }
+    pending = target / "seed-build.json"
+    if pending.exists() and json.loads(pending.read_text(encoding="utf-8")) != intent:
+        raise StateError(f"tree {tree}: pending seed differs from the retained donor evidence")
+    original, returned = baseline / "vault", target / "vault"
+    if original.exists() == returned.exists() or (returned.exists() and not pending.exists()):
+        raise StateError(f"tree {tree}: seed requires exactly one original vault at its recorded location")
+    location = original if original.exists() else returned
+    if tree_digest(location) != record["vault_digest"] or signature_digest(location) != record["vault_signature_digest"]:
+        raise StateError(f"tree {tree}: original seed vault differs from its build content or signatures")
+    target.mkdir(parents=True, exist_ok=True)
+    # Persist provenance before the first rename, including an interrupt before slot custody exists.
+    _write_json_atomically(pending, intent)
+    if original.exists():
+        _rename_vault(original, returned)
+    return record, intent, baseline / "state"
+
+
 def build_tree(
     layout: Layout,
     spec: ArmSpec,
@@ -592,11 +658,16 @@ def build_tree(
     source_vault: Path,
     parent_env: Mapping[str, str],
     cpu_threads: int | None = None,
+    seed_build_from: Path | None = None,
 ) -> dict:
     """Publish one tree baseline; packet mode does not affect index construction."""
 
     validate_build_cpu_threads(cpu_threads)
+    recover_session_vault(layout)
     target = layout.shared_tree(tree)
+    pending_seed = target / "seed-build.json"
+    if pending_seed.exists() and seed_build_from is None:
+        raise StateError(f"tree {tree}: pending seed requires --seed-build-from before retry")
     snapshot_digest = tree_digest(source_vault)
     profile = profile_settings(spec.profile)
     if (target / "state.json").exists():
@@ -606,82 +677,128 @@ def build_tree(
             raise StateError(
                 f"tree {tree}: snapshot or retrieval profile changed; build a fresh run"
             )
+        if pending_seed.exists():
+            _prepare_build_seed(
+                layout, spec, tree=tree, snapshot_digest=snapshot_digest,
+                donor_run=seed_build_from,
+            )
+            pending_seed.unlink()
         return record
     resumed = target.exists() or layout.slot.exists()
+    seed = None
+    if seed_build_from is not None:
+        seed = _prepare_build_seed(
+            layout, spec, tree=tree, snapshot_digest=snapshot_digest, donor_run=seed_build_from
+        )
     if (target / "state").exists():
         shutil.rmtree(target / "state")
     # An interrupted proof may have returned the original here. Reuse it, never copy it.
     returned = target / "vault"
-    slot = prepare_build_slot(
-        layout, returned if returned.exists() else source_vault, move_vault=returned.exists()
-    )
-    env = _child_env(parent_env, slot, spec)
-    # Only publication gets the speed override; all server proofs keep serving defaults.
-    build_env = dict(env)
-    if cpu_threads is not None:
-        build_env[CPU_THREADS_ENV] = str(cpu_threads)
-    target.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
-    completed = subprocess.run(  # noqa: S603 - the harness's own builder entry point
-        [
-            python_executable(),
-            "-m",
-            "membench.utility.switch_eval",
-            "build-state",
-            "--vault",
-            str(slot.vault),
-        ],
-        env=build_env,
-        cwd=slot.cwd,
-        capture_output=True,
-        text=True,
-        timeout=None,
-    )
-    (target / "build.stdout").write_text(completed.stdout, encoding="utf-8")
-    (target / "build.stderr").write_text(completed.stderr, encoding="utf-8")
-    if completed.returncode != 0:
-        raise StateError(f"tree {tree}: state build exited {completed.returncode}; see {target}")
-    build = json.loads(completed.stdout.strip().splitlines()[-1])
-    # The first arm's surface is captured before freezing the vault, as the protocol requires.
-    surface_out = layout.arm_tree(spec.arm_id, tree)
-    surface = capture_surface(slot, spec, env=env, out=surface_out)
-    record = {
-        "tree": tree,
-        "profile": profile,
-        "source_vault": str(source_vault),
-        "snapshot_digest": snapshot_digest,
-        "vault_digest": tree_digest(slot.vault),
-        "vault_signatures": signature_manifest(slot.vault),
-        "vault_signature_digest": signature_digest(slot.vault),
-        "build": build,
-        "cpu_threads": cpu_threads,
-        "resumed": resumed,
+    slot = Slot(layout.slot)
+    custody = None if seed is None else {
+        "arm": spec.arm_id, "tree": tree, "session": f"seed-{tree}",
+        "digest": seed[0]["vault_digest"], "signatures": seed[0]["vault_signature_digest"],
+        "shared": True,
     }
-    # Freeze a baseline before the proof server can add process-local activity.
-    shutil.move(str(slot.state), str(target / "state"))
-    shutil.copytree(target / "state", slot.state, symlinks=True)
-    _write_json_atomically(
-        layout.run / "slot-vault.json",
-        {
-            "arm": spec.arm_id,
+    try:
+        slot = prepare_build_slot(
+            layout, returned if returned.exists() else source_vault,
+            move_vault=returned.exists(), custody=custody,
+        )
+        if seed is not None:
+            shutil.copytree(seed[2], slot.state, symlinks=True)
+            if tree_digest(slot.state) != seed[0]["state_digest"]:
+                raise StateError(f"tree {tree}: seeded state copy differs from the retained donor")
+        env = _child_env(parent_env, slot, spec)
+        # Only publication gets the speed override; all server proofs keep serving defaults.
+        build_env = dict(env)
+        if cpu_threads is not None:
+            build_env[CPU_THREADS_ENV] = str(cpu_threads)
+        target.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        completed = subprocess.run(  # noqa: S603 - the harness's own builder entry point
+            [
+                python_executable(),
+                "-m",
+                "membench.utility.switch_eval",
+                "build-state",
+                "--vault",
+                str(slot.vault),
+            ],
+            env=build_env,
+            cwd=slot.cwd,
+            capture_output=True,
+            text=True,
+            timeout=None,
+        )
+        (target / "build.stdout").write_text(completed.stdout, encoding="utf-8")
+        (target / "build.stderr").write_text(completed.stderr, encoding="utf-8")
+        if completed.returncode != 0:
+            raise StateError(f"tree {tree}: state build exited {completed.returncode}; see {target}")
+        build = json.loads(completed.stdout.strip().splitlines()[-1])
+        # The first arm's surface is captured before freezing the vault, as the protocol requires.
+        surface_out = layout.arm_tree(spec.arm_id, tree)
+        surface = capture_surface(slot, spec, env=env, out=surface_out)
+        if seed is not None and (
+            tree_digest(slot.vault) != seed[0]["vault_digest"]
+            or signature_digest(slot.vault) != seed[0]["vault_signature_digest"]
+        ):
+            raise StateError(f"tree {tree}: seeded vault changed during preparation; preserved {slot.vault}")
+        record = {
             "tree": tree,
-            "session": f"quiescence-{tree}",
-            "digest": record["vault_digest"],
-            "signatures": record["vault_signature_digest"],
-            "shared": True,
-        },
-    )
-    record["quiescence"] = prove_quiescence(slot, spec, env=env, out=target, before=record)
-    recover_session_vault(layout)
-    record.update(
-        state_digest=tree_digest(target / "state"),
-        build_seconds=round(time.monotonic() - started, 2),
-    )
-    slot.wipe()
-    (target / "state.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
-    # Reuse this capture only for the arm that supplied the tree's first environment.
-    record["first_surface"] = surface
-    return record
+            "profile": profile,
+            "source_vault": str(source_vault),
+            "snapshot_digest": snapshot_digest,
+            "vault_digest": tree_digest(slot.vault),
+            "vault_signatures": signature_manifest(slot.vault),
+            "vault_signature_digest": signature_digest(slot.vault),
+            "build": build,
+            "cpu_threads": cpu_threads,
+            "resumed": resumed,
+        }
+        if seed is not None:
+            donor, provenance, _state = seed
+            record.update(
+                cpu_threads=donor.get("cpu_threads"), resumed=donor.get("resumed"),
+                seed_build=provenance,
+                vector_build=donor.get("vector_build", {
+                    "run": provenance["donor_run"],
+                    "metadata_digest": provenance["donor_metadata_digest"],
+                    "cpu_threads": donor.get("cpu_threads"), "resumed": donor.get("resumed"),
+                }),
+                preparation={"cpu_threads": cpu_threads, "resumed": resumed},
+            )
+        # Freeze a baseline before the proof server can add process-local activity.
+        shutil.move(str(slot.state), str(target / "state"))
+        shutil.copytree(target / "state", slot.state, symlinks=True)
+        _write_json_atomically(
+            layout.run / "slot-vault.json",
+            {
+                "arm": spec.arm_id,
+                "tree": tree,
+                "session": f"quiescence-{tree}",
+                "digest": record["vault_digest"],
+                "signatures": record["vault_signature_digest"],
+                "shared": True,
+            },
+        )
+        record["quiescence"] = prove_quiescence(slot, spec, env=env, out=target, before=record)
+        recover_session_vault(layout)
+        record.update(
+            state_digest=tree_digest(target / "state"),
+            build_seconds=round(time.monotonic() - started, 2),
+        )
+        slot.wipe()
+        _write_json_atomically(target / "state.json", record)
+        pending_seed.unlink(missing_ok=True)
+        # Reuse this capture only for the arm that supplied the tree's first environment.
+        record["first_surface"] = surface
+        return record
+    finally:
+        if seed is not None:
+            # A changed vault refuses recovery and keeps both its receipt and evidence.
+            recover_session_vault(layout)
+            slot.wipe()
 
 
 def build_arm(
@@ -692,10 +809,13 @@ def build_arm(
     source_vault: Path,
     parent_env: Mapping[str, str],
     cpu_threads: int | None = None,
+    seed_build_from: Path | None = None,
 ) -> dict:
     """Copy the tree baseline for this arm and capture its own product surface."""
 
     recover_session_vault(layout)
+    if (layout.shared_tree(tree) / "seed-build.json").exists() and seed_build_from is None:
+        raise StateError(f"tree {tree}: pending seed requires --seed-build-from before retry")
     target = layout.arm_tree(spec.arm_id, tree)
     if (target / "state.json").exists():
         record = json.loads((target / "state.json").read_text(encoding="utf-8"))
@@ -708,6 +828,7 @@ def build_arm(
         source_vault=source_vault,
         parent_env=parent_env,
         cpu_threads=cpu_threads,
+        seed_build_from=seed_build_from,
     )
     target.mkdir(parents=True, exist_ok=True)
     if (target / "state").exists():
@@ -738,8 +859,10 @@ def _require_build_proof(record: Mapping) -> None:
     # Old snapshots lack the startup proofs required before any arm can use them.
     if record.get("build", {}).get("vectors", {}).get("state") != "current":
         raise StateError("arm state lacks completed vector publication; build a fresh run")
-    if not record.get("quiescence", {}).get("signatures_unchanged") or not record.get(
-        "vault_signature_digest"
+    if (
+        not record.get("quiescence", {}).get("content_unchanged")
+        or not record.get("quiescence", {}).get("signatures_unchanged")
+        or not record.get("vault_signature_digest")
     ):
         raise StateError("state lacks startup quiescence and signature proof; build a fresh run")
 
