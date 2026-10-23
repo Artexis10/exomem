@@ -133,6 +133,7 @@ class Context:
     resolver: Resolver
     report: Report
     cli_image: str | None = None
+    owner_export_image: str | None = None
     operator_restore_abort: bool = False
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
@@ -1168,9 +1169,17 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
 
             with stage(ctx.report, "cloud_import"):
                 ctx.report.stages["cloud_import"]["evidence"] = await import_folder(ctx, ctx.cli_image)
+        if number == 2 and ctx.owner_export_image:
+            from .owner_export import run_export
+
+            with stage(ctx.report, "owner_export"):
+                await run_export(ctx, ctx.owner_export_image)
     if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
         with stage(ctx.report, "operator_restore_abort"):
             raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
+    if ctx.owner_export_image and "owner_export" not in ctx.report.stages:
+        with stage(ctx.report, "owner_export"):
+            raise StepFailure("the requested owner export stage requires provisioning at step 2")
 
 
 async def close_clients(ctx: Context) -> None:

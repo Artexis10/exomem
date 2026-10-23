@@ -39,7 +39,7 @@ from typing import Any
 import yaml
 
 from . import images, tls
-from .infra import BACKUP_BUCKET, K3S_POD_CIDR, K3S_SERVICE_CIDR, S3_PORT, Stack
+from .infra import BACKUP_BUCKET, K3S_POD_CIDR, K3S_SERVICE_CIDR, S3_PORT, Stack, docker_labels
 from .shell import run, wait_for
 
 PLATFORM_CHART = images.REPO_ROOT / "infra/helm/platform"
@@ -184,6 +184,7 @@ def render_chart(
     ]
     # Only the template goes to stdout; the fetches report on stderr.
     script = [
+        "cp -R /chart-input/. /chart",
         *([f"helm repo add {dep['name']} {dep['repository']} >&2" for dep in chart_yaml.get("dependencies", [])]
           if dependencies else []),
         *(["helm dependency build /chart >&2"] if dependencies else []),
@@ -193,8 +194,9 @@ def render_chart(
         [
             # As this user, so the chart copy stays removable; Helm keeps its
             # repositories and cache in the container's /tmp.
-            "docker", "run", "--rm", "--entrypoint", "sh", "--user", f"{os.getuid()}:{os.getgid()}", "--env", "HOME=/tmp",
-            "--mount", f"type=bind,source={chart},target=/chart",
+            "docker", "run", "--rm", *docker_labels(stack.run_id), "--entrypoint", "sh", "--user", f"{os.getuid()}:{os.getgid()}", "--env", "HOME=/tmp",
+            "--mount", f"type=bind,source={chart},target=/chart-input,readonly",
+            "--tmpfs", "/chart:mode=1777", "--tmpfs", "/tmp",
             "--mount", f"type=bind,source={stack.workdir / 'platform-values.yaml'},target=/values.yaml,readonly",
             images.HELM, "-ec", " && ".join(script),
         ],

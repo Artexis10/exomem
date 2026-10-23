@@ -557,6 +557,15 @@ def _state_core():
     return module
 
 
+def _mcp_activation_context() -> str:
+    try:
+        guidance = _state_core().MEMORY_CITATION_GUIDANCE
+    except (AttributeError, ImportError, OSError):
+        # A partial hook update must keep native activation usable.
+        return _MCP_ACTIVATION
+    return _MCP_ACTIVATION + "\nBefore replying, check memory citations: " + guidance
+
+
 def _touch(stamp: Path) -> None:
     try:
         _state_core().write_nudge_file(stamp, str(time.time()).encode("utf-8"))
@@ -3070,7 +3079,7 @@ def _refresh_main(args, data: object) -> bool:
         # Native correlation says nothing about meaning or human origin. The
         # agent decides initial activation; legacy prompt heuristics stay separate.
         if prompt.strip():
-            context += "\n" + _MCP_ACTIVATION
+            context += "\n" + _mcp_activation_context()
     if result["status"] in {"evidence_observed", "association_cleared"} and _prominence() != "off":
         context += "\n" + _REFRESH_GAP_GUIDANCE
     output = {"hookEventName": event, "additionalContext": context}
@@ -3260,7 +3269,7 @@ def main(argv: list[str] | None = None) -> int:
     additional_context = REMINDER
     lane, hit_count = "off", 0
     if mode == _MCP_MODE:
-        additional_context, lane = _MCP_ACTIVATION, "mcp"
+        additional_context, lane = _mcp_activation_context(), "mcp"
     elif mode == _WORKING_SET_MODE:
         # Usually a payload REPLACEMENT rather than an upgrade: a packet that
         # resolved, or that hands over a choice between senses that each did,
@@ -3328,7 +3337,7 @@ def main(argv: list[str] | None = None) -> int:
                 block + "\n\n" + REMINDER if keep_reminder and global_ok else block
             )
         elif not packet_available:
-            additional_context = _MCP_ACTIVATION
+            additional_context = _mcp_activation_context()
         elif not global_ok:
             additional_context = ""
     elif mode == _STUB_MODE:
