@@ -240,7 +240,8 @@ def observe_query_timeouts(log_path: Path):
                         parent = caller.f_back
                         if parent is not None:
                             module = parent.f_globals.get("__name__", "")
-                            if module.startswith("exomem.query_engine."):
+                            # Native storage checks the same deadline; retain its technical frame too.
+                            if module.startswith(("exomem.query_engine.", "exomem.collection_store.")):
                                 frame["failure_check_parent"] = {
                                     "module": module, "function": parent.f_code.co_name,
                                     "line": parent.f_lineno,
