@@ -2640,27 +2640,62 @@ def test_true_multiprocess_same_id_delivery_creates_no_duplicate_history(tmp_pat
     assert not list(state.glob("*.tmp-*"))
 
 
+def test_first_checkpoint_survives_a_concurrent_home_creator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "first-use-home"
+    real_mkdir = checkpoint.os.mkdir
+    raced = False
+
+    def create_before_mkdir(path, mode=0o777, *, dir_fd=None):
+        nonlocal raced
+        if Path(path).name == home.name and not raced:
+            raced = True
+            real_mkdir(path, mode=mode, dir_fd=dir_fd)
+        return real_mkdir(path, mode=mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(checkpoint.os, "mkdir", create_before_mkdir)
+    event = {
+        "client": "codex", "event": "PreCompact", "session_id": "first-use",
+        "trigger": "auto", "turn_id": None, "source": None, "cwd": None,
+        "transcript_path": None, "model": None,
+    }
+
+    result = checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+
+    assert raced
+    assert result["status"] == "written"
+    state = checkpoint.session_state_dir(home, "codex", "first-use")
+    stored = checkpoint.load_checkpoint(state / "current.json")
+    assert stored is not None
+    assert stored["checkpoint_id"] == result["checkpoint_id"]
+
+
 def test_true_multiprocess_older_observation_cannot_replace_newer(tmp_path: Path) -> None:
     home = tmp_path / "home"
     code = (
-        "import json,sys,time; from pathlib import Path; "
+        "import json,sys; from pathlib import Path; "
         "from exomem._hooks import exomem_continuation_checkpoint as c; "
-        "time.sleep(float(sys.argv[4])); "
         "e={'client':'codex','event':'PreCompact','session_id':'ordered','turn_id':None,"
         "'trigger':sys.argv[2],'source':None,'cwd':None,'transcript_path':None,'model':None}; "
         "print(json.dumps(c.write_checkpoint(e,Path(sys.argv[1]),observed_at_ns=int(sys.argv[3]))))"
     )
-    newer = subprocess.Popen(
-        [sys.executable, "-c", code, str(home), "auto", "200", "0"],
-        stdout=subprocess.PIPE,
+    newer = subprocess.run(
+        [sys.executable, "-c", code, str(home), "auto", "200"],
+        capture_output=True,
         text=True,
+        check=True,
+        timeout=_OBSERVE_SECONDS,
     )
-    older = subprocess.Popen(
-        [sys.executable, "-c", code, str(home), "manual", "100", "0.2"],
-        stdout=subprocess.PIPE,
+    assert json.loads(newer.stdout)["status"] == "written"
+    older = subprocess.run(
+        [sys.executable, "-c", code, str(home), "manual", "100"],
+        capture_output=True,
         text=True,
+        check=True,
+        timeout=_OBSERVE_SECONDS,
     )
-    assert newer.wait(_OBSERVE_SECONDS) == 0 and older.wait(_OBSERVE_SECONDS) == 0
+    assert json.loads(older.stdout)["status"] == "stale"
     state = checkpoint.session_state_dir(home, "codex", "ordered")
     current = checkpoint.load_checkpoint(state / "current.json")
     assert current["structural"]["trigger"] == "auto"
