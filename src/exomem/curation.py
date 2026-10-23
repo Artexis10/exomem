@@ -1188,6 +1188,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
     from . import (
         commands,
         relation_queue,
+        vocabulary_resolution,
     )
     from . import delete_file as delete_module
     from . import (
@@ -1219,13 +1220,18 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 for key in ("relation_disposition", "relation_review_reason")
                 if key in args
             }
-            validation = commands.op_remember(vault_root, validate_only=True, **args)
-            preparation = validation.get("vocabulary_preparation")
-            if isinstance(preparation, Mapping):
+            preflight = commands._invoke_note(
+                vault_root,
+                validate_only=True,
+                note_type=args.get("note_type", "insight"),
+                **{key: value for key, value in args.items() if key != "note_type"},
+            )
+            if isinstance(preflight, vocabulary_resolution.VocabularyPreparation):
                 raise _error(
                     "CURATION_VOCABULARY_PREPARATION_REQUIRED",
-                    canonical_json({"vocabulary_preparation": preparation}),
+                    canonical_json({"vocabulary_preparation": preflight.evidence}),
                 )
+            validation = preflight.as_dict()
             path = normalize_target_path(validation["destination"], field="destination")
             if not _guarded_absent(vault_root, path):
                 raise _error("CURATION_BINDING_STALE", f"create destination {path!r} exists")
@@ -1239,16 +1245,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             }
             if review:
                 prepared["relation_review_hash"] = validation["draft_hash"]
-            exact_preflight = note_module.note(
-                vault_root,
-                validate_only=True,
-                draft_id=validation["draft_id"],
-                draft_hash=validation["draft_hash"],
-                draft_token=validation["draft_token"],
-                note_type=args.get("note_type", "insight"),
-                **{key: value for key, value in args.items() if key != "note_type"},
-            )
-            after_hash = text_content_hash(exact_preflight.source)
+            after_hash = text_content_hash(preflight.source)
             effect_before = [{"path": path, "absent": True}]
             effect_after = [{"path": path, "content_hash": after_hash}]
         elif kind == "edit":

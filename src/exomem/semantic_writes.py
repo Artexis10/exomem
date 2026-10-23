@@ -4299,6 +4299,7 @@ def preflight_creation(
     predecessor_content_hash: str | None = None,
     vocabulary_binding: Any | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    resolver: vault.WikilinkResolver | None = None,
 ) -> CreationPreflight:
     # A fixed phase label. Its fields split out the two corpus-sized parts as
     # whole milliseconds: `structural_ms` and `relation_review_ms`.
@@ -4318,6 +4319,7 @@ def preflight_creation(
             predecessor_content_hash=predecessor_content_hash,
             vocabulary_binding=vocabulary_binding,
             status_basis=status_basis,
+            resolver=resolver,
         )
 
 
@@ -4337,6 +4339,7 @@ def _preflight_creation(
     predecessor_content_hash: str | None,
     vocabulary_binding: Any | None,
     status_basis: lifecycle_statuses.Basis | None,
+    resolver: vault.WikilinkResolver | None,
 ) -> CreationPreflight:
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
@@ -4363,6 +4366,7 @@ def _preflight_creation(
         root,
         source,
         destination=path,
+        resolver=resolver,
     )
     if not closure_plan.inspection.closed:
         raise SemanticWriteError(

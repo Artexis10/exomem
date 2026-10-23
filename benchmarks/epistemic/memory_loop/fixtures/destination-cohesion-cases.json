@@ -1,0 +1,74 @@
+{
+  "artifact_type": "destination-source-cases.v1",
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "D01",
+      "original_turn": "The atlas publishing trial settled the route export issue. The visitor edition will use a separate copy of the route layer with access gates and staff-only shortcuts removed. The maintenance edition keeps the full route layer. We cannot share one layer between the editions: a later styling change can reveal paths that were only hidden. The next edition should use that split. Does that give us a workable publication approach?",
+      "prior_notes": [
+        {
+          "seed_id": "D01-N01",
+          "title": "Community atlas working notebook",
+          "body": "# Community atlas working notebook\n\nThis notebook accumulated the decisions, checks and loose ends from preparation of the community atlas. It remains the place people scan for the state of the whole effort.\n\n## Working inventory\n\n| Area | Current state | Next action |\n| --- | --- | --- |\n| Route exports | The export trial compares the visitor and maintenance editions. | Review the trial result. |\n| Index layout | Place entries in two columns. Keep cross-references beside the entry that needs them. | Check the last spread. |\n| Contributor introductions | New contributors receive the short map-reading example before editing a route description. | Add the next introduction slot. |\n| Event programme | The walk-through happens before the question session. Keep the final half hour free for corrections. | Confirm the order on the printed programme. |\n| Place labels | Labels use the full approved place name on first mention and the short form afterward. | Reconcile the label sheet with the index. |\n| Illustration captions | Captions explain what the drawing shows rather than restating its title. | Review the remaining captions. |\n| Archive bundle | Preserve the editable map, exported editions and change summary together for each edition. | Check that the edition identifier matches. |\n| Feedback intake | Collect route corrections separately from comments on the publication layout. | Read the two lists before the next editing meeting. |\n| Reading session | Read route descriptions aloud before finalizing punctuation. | Arrange the next reading order. |\n| Print proof | A proof reader checks that symbols remain legible when the page is reduced. | Compare the final spread at its printed size. |\n\n## Recent editorial notes\n\nThe index discussion settled column layout. It did not change route geometry. The contributor example concerns how descriptions are edited; it does not define which routes belong in an edition.\n\nThe publication archive is an edition record. It should preserve what was actually released even when a later edition changes a route. Corrections received after release belong to the next edition unless an existing release needs an explicit correction notice.\n\n## Programme notes\n\nThe walk-through introduces the atlas as a whole. The question session follows it because readers can then refer to a concrete route. The open correction period is for gathering feedback, not for deciding the map style during the event.\n\nThe first print proof exposed a caption that repeated its heading. That caption needs a description of the drawing instead. This is separate from the symbol-size check on the reduced spread.\n"
+        },
+        {
+          "seed_id": "D01-N02",
+          "title": "Atlas route export contract",
+          "body": "# Atlas route export contract\n\nThis note defines which route geometry each edition includes and how an export implements that choice.\n\n## Current rule\n\nThe visitor edition and maintenance edition currently reuse one route layer. The visitor style hides access gates and staff-only shortcuts. The maintenance style shows the full route layer.\n\n## Unresolved check\n\nThe export trial must establish whether style-only hiding remains reliable when someone changes the visitor style. The trial has not yet settled this question.\n\n## Scope\n\nThis contract covers route inclusion and the public or maintenance export boundary. Index layout, captions, contributor introductions and event planning have their own purposes.\n"
+        }
+      ],
+      "later_ordinary_question": "Before the next atlas edition goes out, which route layers should the visitor and maintenance exports use, and why is a shared layer unsafe?"
+    },
+    {
+      "case_id": "D02",
+      "original_turn": "The parallel-text pilot settled how we handle an untranslatable word. Keep the source word in the body with an inline marker and explain it in a numbered note. Reuse that note number when the word repeats within the chapter, then restart numbering in the next chapter. A forced replacement lost the ambiguity that the side-by-side edition is meant to preserve. This is the convention for the next chapters. Does that give us a consistent editorial approach?",
+      "prior_notes": [
+        {
+          "seed_id": "D02-N01",
+          "title": "Parallel-text edition working notebook",
+          "body": "# Parallel-text edition working notebook\n\nThe pilot edition is complete. The next chapters will reuse its page dimensions and side-by-side layout.\n\n| Area | State |\n| --- | --- |\n| Contributor introductions | Explain the paired source and translated pages before assigning a chapter. |\n| Chapter handoff | Include the source text, translation and the editor's unresolved questions. |\n| Reading session | Read both versions before gathering comments on rhythm. |\n| Illustration placement | Keep each illustration beside the passage that it describes. |\n| Publication archive | Keep the released source and translated versions together for each edition. |\n\nThe pilot left several editorial conventions open. The next editing session will resolve them before work begins on the remaining chapters.\n"
+        },
+        {
+          "seed_id": "D02-N02",
+          "title": "Contributor introductions for parallel-text work",
+          "body": "# Contributor introductions for parallel-text work\n\nA new contributor first reads one paired passage. The editor then explains the difference between a literal translation and an editorial choice.\n\nThe contributor's first assignment is a short passage with an existing translation. They compare the two versions and bring their questions to the editor before accepting a full chapter.\n\nThis note concerns joining the editing process. It does not set conventions for the published text.\n"
+        }
+      ],
+      "later_ordinary_question": "How should an untranslatable word appear when it repeats several times in one chapter and then appears again in the next chapter?"
+    },
+    {
+      "case_id": "D03",
+      "original_turn": "One small clarification from the trail sign review: the second reviewer checks destination names against the approved route list. The first reviewer still checks arrow directions against the map. We are keeping the same two-person review and publication order. Can you phrase the updated review step clearly?",
+      "prior_notes": [
+        {
+          "seed_id": "D03-N01",
+          "title": "Trail sign review workflow",
+          "body": "# Trail sign review workflow\n\nThis workflow covers the text and direction arrows on trail signs before publication.\n\n## Review\n\nThe first reviewer checks arrow directions against the map. The second reviewer checks destination names, but the reference used for that check has not yet been specified. Both reviewers record any correction on the draft.\n\n## Publication\n\nAfter both reviewers complete their checks, the editor resolves recorded corrections. The editor then publishes the sign text. A later change returns through the same review before publication.\n"
+        },
+        {
+          "seed_id": "D03-N02",
+          "title": "Trail description reading sessions",
+          "body": "# Trail description reading sessions\n\nRead a route description aloud from beginning to end. Mark wording that makes the route hard to follow, then check the wording against the map.\n\nThese sessions concern descriptive prose. The sign text follows its own review workflow.\n"
+        }
+      ],
+      "later_ordinary_question": "Before trail sign text is published, what does each of the two reviewers check, and what happens after their checks?"
+    },
+    {
+      "case_id": "D04",
+      "original_turn": "The transcription rehearsal confirmed one missing exception. When two leaves carry the same printed page number, keep both leaves, use their capture sequence for ordering, and put both opening phrases in the handoff manifest so the next shift can distinguish them. Nothing else in the batch protocol changes. Please give me the revised exception step.",
+      "prior_notes": [
+        {
+          "seed_id": "D04-N01",
+          "title": "Transcription batch handoff protocol",
+          "body": "# Transcription batch handoff protocol\n\nThis protocol follows one batch of captured leaves from intake through transcription and shift handoff. The manifest, text and review state travel together because the next shift must reconstruct the exact order and see which decisions remain open.\n\n## Batch identity and order\n\nAssign the batch its edition identifier and sequence range before transcription begins. Use the capture sequence as the ordering authority. A printed page number helps a reader identify a leaf, but it does not replace the capture sequence.\n\nRecord an unnumbered leaf in its capture position. Put the phrase that begins that leaf in the manifest so that a reviewer can distinguish it from an empty gap. Keep a blank leaf in the sequence and mark it as blank; do not silently remove it.\n\n## Manifest fields\n\n| Field | Meaning | Handoff check |\n| --- | --- | --- |\n| Edition | The edition to which the batch belongs. | It matches the text and review sheet. |\n| Capture sequence | The leaf's order in this captured batch. | Every captured leaf has one position. |\n| Printed page number | The number visible on the leaf, if present. | A missing number remains explicitly absent. |\n| Opening phrase | The first readable words on the leaf. | It distinguishes an unnumbered leaf. |\n| Text state | Whether the leaf awaits transcription, review or resolution. | The next shift can identify the next useful action. |\n| Open question | The text or order issue that still needs a decision. | It points to the leaf and the uncertain passage. |\n| Review result | The result of comparing the transcription with the leaf. | It records corrections without pretending an open question is settled. |\n\n## Work through the batch\n\n| Stage | Action | Result carried forward |\n| --- | --- | --- |\n| Intake | Compare the captured leaves with the manifest. | Each leaf has a place in the capture sequence. |\n| First pass | Transcribe each leaf in capture order. | Text remains associated with its leaf. |\n| Unclear text | Preserve the readable text and mark the uncertain passage. | The question stays visible to the next reviewer. |\n| Review pass | Compare the transcription against the captured leaf. | Corrections and unresolved passages remain distinct. |\n| Order check | Compare leaf transitions with the manifest. | A missing or duplicated position becomes an open question. |\n| Shift handoff | Assemble the manifest, current text and review sheet. | The next shift can continue without guessing. |\n\n## Exceptions\n\nAn unnumbered leaf keeps its capture position and opening phrase. A blank leaf stays in the manifest. If a leaf is unreadable, record that state and continue with the next captured leaf; do not fill the gap from context.\n\nIf a transition appears inconsistent, leave the capture sequence intact and record the question for review. Do not silently reorder leaves based only on how the sentences sound. The protocol does not yet state a specific procedure for two distinct leaves that share one printed page number.\n\n## Complete the handoff\n\nRead the manifest from the first capture position to the last. Check that every position still has a leaf or an explicit unresolved state. Compare edition and sequence identifiers across the manifest, text and review sheet.\n\nAt shift end, write a short handoff summary that identifies the next incomplete position and any open questions. A complete batch can still contain an unresolved reading if that reading is marked and assigned for review. Do not describe the batch as fully resolved merely because every leaf has a transcription.\n\nThe incoming shift starts with the manifest, then opens the corresponding text and review sheet. It should be possible to distinguish a leaf awaiting review from one that was reviewed and still needs a decision.\n"
+        },
+        {
+          "seed_id": "D04-N02",
+          "title": "Transcription reading session format",
+          "body": "# Transcription reading session format\n\nA reading session compares the sound of a completed passage with its intended punctuation. Readers mark difficult phrasing for the editor.\n\nThe session does not decide captured leaf order or replace the batch handoff checks.\n"
+        }
+      ],
+      "later_ordinary_question": "A transcription batch has two leaves marked page 18 followed by an unnumbered leaf. How do I preserve their order and make the shift handoff unambiguous?"
+    }
+  ]
+}

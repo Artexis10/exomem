@@ -1487,6 +1487,15 @@ def _parse_page_state(
         title=title,
         mtime=0.0,
     )
+    connectable_placed = activation.structurally_placed(
+        root, parsed, tiers=activation.CONNECTABLE_TIERS
+    )
+    writable_placed = (
+        connectable_placed and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
+    )
+    compiled = writable_placed and note_types.Basis(root, owner_local=True).selects(
+        activation.normalized_page_type(parsed.page_type), note_types.compiled
+    )
     return SemanticPageState(
         path=rel_path,
         identity_kind=identity_kind,
@@ -1508,16 +1517,9 @@ def _parse_page_state(
         connectable_target=False,
         # Shared, caller-independent structure: the census reads the owner's
         # note types; a request enriches the state with its own basis.
-        structurally_compiled=activation.structurally_eligible(
-            root,
-            parsed,
-            selects=note_types.compiled,
-            type_basis=note_types.Basis(root, owner_local=True),
-        ),
-        structurally_placed=activation.structurally_placed(root, parsed),
-        structurally_placed_connectable=activation.structurally_placed(
-            root, parsed, tiers=activation.CONNECTABLE_TIERS
-        ),
+        structurally_compiled=compiled,
+        structurally_placed=writable_placed,
+        structurally_placed_connectable=connectable_placed,
         body_wikilinks=tuple(body_links),
         body=body,
         candidates=candidates,
