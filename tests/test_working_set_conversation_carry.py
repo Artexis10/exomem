@@ -26,6 +26,7 @@ from test_working_set_index import _seed_planning, _seed_structure
 
 from exomem import (
     commands,
+    freshness,
     lexstore,
     working_set_heat,
     working_set_index,
@@ -336,9 +337,7 @@ def test_the_compiler_classifies_all_disclosed_fifth_cases(fifth_disclosures_vau
 
 
 @pytest.mark.parametrize("limit", [500, 600, 700])
-def test_round7_conversation_footprint_preserves_the_ordinary_budget(
-    cvault: Path, limit: int, caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_round7_conversation_footprint_preserves_the_ordinary_budget(cvault: Path, limit: int) -> None:
     # A long lede and eight facts: partial anchors read the lede lane, while
     # own-word resolution can also serve their ordinary units neighbourhood.
     page = cvault / "Knowledge Base/Entities/People/Ottilie Marsh.md"
@@ -347,22 +346,15 @@ def test_round7_conversation_footprint_preserves_the_ordinary_budget(
         "Ottilie Marsh coordinates the estuary team. "
         + "The estuary survey records distinct observations for the next review. " * 8,
     ))
+    freshness.on_files_changed(cvault, changed=[page])
     working_set_index.WorkingSetIndex(cvault).rebuild()
     lexstore.ensure_fresh(cvault)
     working_set_runtime.reset_caches_for_tests()
     carried = _activate(cvault, "which one should we review", max_chars=limit, conversation=THREAD)
     _assert_bounded_conversation(carried, "Ottilie Marsh", limit)
-    caplog.set_level("DEBUG", logger="exomem.find")
     named = _activate(cvault, "which one should we review for Ottilie Marsh", max_chars=limit)
     assert named["generation"].get("carried_by") != "conversation"
-    assert _carry_cost(named) > limit // 3, (
-        f"limit={limit} cost={_carry_cost(named)} "
-        f"units={len(named['units'])} lengths={[len(item['text']) for item in named['units']]} "
-        f"pointers={len(named['pointers'])} "
-        f"lengths={[len(item['title']) + len(item['why']) for item in named['pointers']]} "
-        f"state_lengths={[len(item['statement']) for item in named['current_state']]} "
-        f"missing={[(item.get('role'), item.get('reason')) for item in named['missing']]}"
-    )
+    assert _carry_cost(named) > limit // 3
     assert named["budget"]["limit_chars"] == limit
 
 
