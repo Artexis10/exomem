@@ -35,7 +35,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from . import call_spans, deferred_index, semantic_index
-from .derived_receipts import DerivedComponent, DerivedComponentStatus
+from .derived_receipts import UNACKNOWLEDGED_COMPONENTS, DerivedComponent, DerivedComponentStatus
 
 if TYPE_CHECKING:
     from .graph_sync import GraphSyncCheckpoint
@@ -111,6 +111,7 @@ _FAST_ACK_NON_GRAPH_COMPONENTS = tuple(
     component
     for component in DerivedComponent
     if component not in {DerivedComponent.GRAPH, DerivedComponent.WRITE_ADVISORY}
+    and component not in UNACKNOWLEDGED_COMPONENTS
 )
 
 
@@ -174,6 +175,7 @@ def derived_acknowledgement_snapshot(
                 status.failure_code,
             )
             for status in by_component.values()
+            if status.component not in UNACKNOWLEDGED_COMPONENTS
         )
     )
     return DerivedAcknowledgementSnapshot(
@@ -207,6 +209,7 @@ def superseded_acknowledgement_snapshot(
             sorted(
                 (status.component.value, status.state, status.failure_code)
                 for status in statuses
+                if status.component not in UNACKNOWLEDGED_COMPONENTS
             )
         ),
     )
@@ -2095,7 +2098,8 @@ def delete_after_remove(
 #: Which reported component proves each closed receipt component. ``freshness``
 #: maps to no report row because it is proven by the fan-out's own corpus-change
 #: publication rather than by a sidecar; ``write_advisory`` is absent because
-#: Lane 4 owns it and this seam must never claim to have converged it.
+#: Lane 4 owns it and this seam must never claim to have converged it, and
+#: ``context_catalogue`` is absent because it diffs the vault itself.
 _DERIVED_COMPONENT_REPORT_KEY: Final[dict[str, str | None]] = {
     DerivedComponent.FRESHNESS.value: None,
     DerivedComponent.MEMORY_REFS.value: "memory_refs",
@@ -2217,6 +2221,12 @@ def converge_derived_component(
     claim rotates and the fan-out runs again under the store's own backoff.
     """
     key = DerivedComponent(component).value
+    if DerivedComponent(component) is DerivedComponent.CONTEXT_CATALOGUE:
+        # Not read from the fan-out's report: the report is bounded, and a
+        # catalogue fault must not mark the other components of the batch degraded.
+        from . import context_catalogue
+
+        return context_catalogue.keep_current(vault_root)
     if key not in _DERIVED_COMPONENT_REPORT_KEY:
         return False
     root = Path(vault_root)

@@ -915,6 +915,21 @@ _EXOMEM_PATH_PREFIXES = ("exomem://vault/", "exomem://source/")
 MAX_DIRECT_TEXT_REFERENCES = 64
 
 
+def without_wikilinks(text: str) -> str:
+    """`text` with every wikilink removed whole, target and alias, as this guard reads one.
+
+    A derived description or title is served without its links, so whether a linked page
+    exists, or is withheld, changes no byte of it. The grammar is the guard's own, so nothing
+    is left that the guard would read as a link. Removing an inner link can close an outer
+    pair (`[[a [[b]] c]]`), so it repeats until no link is left.
+    """
+    while True:
+        unlinked = _WIKILINK_ANYWHERE.sub("", text)
+        if unlinked == text:
+            return text
+        text = unlinked
+
+
 def _unwrap_reference(raw: str, *, is_wikilink_target: bool = False) -> tuple[str, bool]:
     """`(path-ish text, explicitly-a-reference)` for one reference string.
 
@@ -1580,8 +1595,27 @@ def registered_kinds() -> frozenset[str]:
 # Per-request decision memo (D2)
 # ---------------------------------------------------------------------------
 
-_DECISION_MEMO_MAX = 4096
+#: Room for one request's own decisions when no scan has asked for more.
+_DECISION_MEMO_FLOOR = 4096
+#: Hard ceiling on retained decisions, whatever a scan asks for. A memory bound: a decision
+#: and its key held about 1 KB at 8,000 notes, so the ceiling holds about 32 MB, and the
+#: membership memos sized with it hold less each.
+_DECISION_MEMO_CEILING = 32_768
+_DECISION_MEMO_MAX = _DECISION_MEMO_FLOOR
 _DECISION_MEMO: OrderedDict[tuple[Any, ...], Decision] = OrderedDict()
+
+
+def reserve_decision_memo(entries: int) -> None:
+    """Keep a scan of `entries` decisions, plus a request's own, until the next scan reuses them.
+
+    A least-recently-used memo smaller than a sequential scan evicts each decision before
+    the next scan reaches it, so every read of a restricted view re-decides every entry and
+    re-parses its page. The page memberships the decisions read are sized with them. The
+    bound only grows, because a smaller vault's scan must not evict a larger one's.
+    """
+    global _DECISION_MEMO_MAX
+    _DECISION_MEMO_MAX = min(_DECISION_MEMO_CEILING, max(_DECISION_MEMO_MAX, entries + _DECISION_MEMO_FLOOR))
+    membership_module.reserve_memo(_DECISION_MEMO_MAX)
 
 
 def clear_decision_memo() -> None:
@@ -3535,6 +3569,23 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
+    if "map" in guarded:
+        from .. import context_views
+
+        caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
+        map_block = context_views.pinned_map_block(vault_root, guarded, caller)
+        if map_block is None:
+            # No map that this request compiled for this packet: no block field reaches the wire.
+            guarded = context_views.unavailable_map_packet(guarded)
+        else:
+            guarded["map"] = map_block
+            map_block["items"] = _guard_view_items(
+                vault_root, map_block, caller=caller, policy=policy, release_gate_active=release_gate_active,
+                who=who, purpose=purpose,
+            )
+            # The record holds the compiled display; release filtering only removes fields, text or items, so the cap holds.
+            guarded["budget"]["used_chars"] = context_views.map_packet_chars(map_block)
+
     ctx = _packet_release(
         vault_root,
         guarded,
@@ -3784,7 +3835,7 @@ def guard_working_set(
 #: under every existing reading, and withholding its item if none exists.
 #: `_is_page_shaped` plays no part here; that classifier is for `ref` alone,
 #: and only on an item that ALSO carries one of these (T2).
-_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via")
+_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via", "corrects")  # nosemgrep: ep-word-set -- Fixed packet path fields.
 #: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
 #: Harvested so a page mentioned only inside a sentence still gets a release
 #: decision: `release.withheld_paths` carries what hit projection happened to
@@ -3874,16 +3925,34 @@ def _matches_explicit_non_page_shape(text: str) -> bool:
     (`working_set.py`, `working_set_index.py`) can legitimately produce
     that is NOT a page reference at all — exhaustively enumerated, never
     guessed at by how the string looks: a memory-id reference, the
-    synthetic project-anchor id, the synthetic plan-anchor id. R1's default
-    is that every OTHER non-empty path-bearing-field string is a candidate
-    that must be decided or withheld — nothing else is exempted.
+    synthetic project-anchor id, the synthetic plan-anchor id, a map or
+    topic-profile ref (`exomem://map...`, `exomem://profile/topic/...`). An
+    anchor-profile ref is not exempt: it names its anchor, which
+    `_working_set_paths` decides instead (`_anchor_profile_subject`). R1's
+    default is that every OTHER non-empty path-bearing-field string is a
+    candidate that must be decided or withheld — nothing else is exempted.
     """
     fragment_stripped = text.split("#", 1)[0]
     if memory_refs.parse_memory_ref(fragment_stripped) is not None:
         return True
     if _matches_project_anchor_shape(text):
         return True
-    return _matches_plan_anchor_shape(text)
+    from .. import context_views
+
+    target = context_views.parse_view_ref(fragment_stripped)
+    return _matches_plan_anchor_shape(text) or (
+        target is not None and target.kind != context_views.PROFILE_ANCHOR
+    )
+
+
+def _anchor_profile_subject(text: str) -> str | None:
+    """The anchor ref an anchor-profile ref names, or None for any other string."""
+    from .. import context_views
+
+    target = context_views.parse_view_ref(text.split("#", 1)[0])
+    if target is None or target.kind != context_views.PROFILE_ANCHOR:
+        return None
+    return target.key
 
 
 def _is_page_shaped(text: str) -> bool:
@@ -4093,6 +4162,11 @@ def _working_set_paths(
 
     def _add(candidate: str, *, strict: bool) -> None:
         text = candidate.strip()
+        # An anchor-profile ref is decided as the anchor it names, under the
+        # original string, so a withheld anchor withholds the item that carries it.
+        subject = _anchor_profile_subject(text)
+        decided = candidate if subject is None else subject
+        text = decided.strip()
         if not text or _matches_explicit_non_page_shape(text):
             return
         if not strict and not _is_page_shaped(text):
@@ -4104,7 +4178,7 @@ def _working_set_paths(
             # branch: EVERY non-empty, non-exempt value in one is a
             # candidate, page-shaped or not.
             return
-        readings = _interpretations_for(candidate)
+        readings = _interpretations_for(decided)
         if not readings:
             unresolvable.add(candidate)
             return
@@ -4185,6 +4259,12 @@ def _working_set_paths(
         elif isinstance(value, (list, tuple)):
             for item in value:
                 _collect(item, ref_strict=ref_strict)
+
+    map_block = packet.get("map")
+    if isinstance(map_block, Mapping):
+        for item in map_block.get("items") or ():
+            if isinstance(item, Mapping):
+                _collect(item, ref_strict=not _item_has_own_page_field(item))
 
     for section in (
         "recent_context",
@@ -4343,14 +4423,17 @@ def _guarded_anchor(
     withheld: frozenset[str],
     decisions: Mapping[str, Decision | None],
     invalid_refs: frozenset[str] = frozenset(),
+    *,
+    check_title: bool = True,
 ) -> dict[str, Any] | None:
     if (
         _names_withheld(anchor.get("path"), withheld)
         or _names_withheld(anchor.get("ref"), withheld, reference_field=True)
         # `title` is authored prose: a hub called "Open hub (supersedes
         # [[kill-switch-for-risky-releases]])" names the withheld page as plainly
-        # as a path field would.
-        or _names_withheld(anchor.get("title"), withheld, reference_field=True)
+        # as a path field would. A derived-view title is the catalogue's own,
+        # served without links (`check_title=False`, `guard_view_response`).
+        or (check_title and _names_withheld(anchor.get("title"), withheld, reference_field=True))
         # An un-unwrappable candidate never joins `withheld` -- see
         # `guard_working_set` -- so it is checked by exact match here instead.
         or anchor.get("path") in invalid_refs
@@ -4405,6 +4488,111 @@ def _guarded_anchor(
         if isinstance(stripped, Mapping):
             out.update(stripped)
     return out
+
+
+def _guarded_view_item(item: Mapping[str, Any], ctx: _PacketRelease) -> dict[str, Any] | None:
+    """One derived-view item as the caller may be served it, or `None`.
+
+    An item is anchor-shaped, so its typed page fields pass the anchor rules. Its title and
+    description are the catalogue's own, served without links (`guard_view_response`), so no
+    rule reads them: a rule that did could drop an item only when the page it names exists. A
+    `state` is an optional addition, decided by the page it was read from: when that page is
+    withheld or invalid, the state is removed and the item stays. Its statement is served
+    without links (`context_views._served_state`), so no rule resolves the pages it mentions.
+    """
+    from .. import context_views
+
+    kept = _guarded_anchor(item, ctx.frozen, ctx.decisions, ctx.invalid_refs, check_title=False)
+    if kept is None:
+        return None
+    if any(
+        _names_withheld(kept.get(field), ctx.frozen, reference_field=True)
+        for field in _WORKING_SET_PROSE_FIELDS
+        if field not in context_views.DISPLAY_FIELDS
+    ):
+        return None
+    state = kept.get("state")
+    if isinstance(state, Mapping) and (
+        _names_withheld(state.get("path"), ctx.frozen)
+        or _value_names_an_invalid_reference(state.get("path"), ctx.invalid_refs)
+    ):
+        kept["state"] = None
+    return kept
+
+
+def _guard_view_items(
+    vault_root: Path, response: Mapping[str, Any], *, caller: Any, policy: Policy,
+    release_gate_active: bool, who: RequestPrincipal, purpose: str | None,
+) -> list[dict[str, Any]]:
+    """Restore the compiled items, then apply the current release decisions for every view consumer."""
+    from .. import context_views
+
+    items = context_views.pinned_items(vault_root, response, caller)
+    # An anchor's pinned profile ref encodes its own ref; the anchor's release decision covers both.
+    ctx = _packet_release(
+        vault_root, {"anchors": items}, AnnotatedHits(hits=[]), policy=policy,
+        release_gate_active=release_gate_active, who=who, purpose=purpose, record="all",
+    )
+    if ctx is None:
+        return items
+    return [kept for kept in (_guarded_view_item(item, ctx) for item in items) if kept is not None]
+
+
+def guard_view_response(
+    vault_root: Path,
+    response: Mapping[str, Any],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Mapping[str, Any]:
+    """Apply release decisions to a derived-view response (`context_views.read_view`).
+
+    The view is computed over the caller's own view, so this is the second line. No item is taken
+    from the response: the items are the ones this request's compile served this caller for the
+    response's ref, generation and page (`context_views.pinned_items`), and a response that no
+    compile in this request served gets none. So both passes serve the text the generation was
+    computed from. Then every path the items name is decided under the authorization that stands
+    now, and an item that names a withheld or invalid one is dropped. The same three states as every other consumer: no
+    governance and nothing withheld -> no decision; `blocked` or an unresolved-but-expected
+    principal -> no items and no continuation; otherwise each item is decided. `purpose` is the
+    one the request declared.
+    """
+    items = response.get("items")
+    if not isinstance(items, list):
+        return response
+    from .. import context_views
+
+    vault_root = Path(vault_root)
+    policy, release_gate_active = gate_state(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.blocked or (not policy.empty and not who.resolved):
+        _record_blocked_outcome(who.audience_id)
+        return {**response, "items": [], "continuation": None}
+    guarded = copy.deepcopy(dict(response))
+    # The caller's view the compile built: the same principal argument, so the same binding.
+    caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
+    target = context_views.parse_view_ref(str(guarded.get("ref") or ""))
+    if target is not None and target.profile:
+        guarded["items"] = context_views.pinned_items(vault_root, guarded, caller)
+        packet = {
+            section: [item for item in guarded["items"] if item.get("kind") == section]
+            for section in context_views.PROFILE_SECTIONS
+        }
+        packet["missing"] = context_views.pinned_missing(vault_root, guarded, caller)
+        kept = guard_working_set(vault_root, packet, AnnotatedHits(hits=[]), principal=who, purpose=purpose)
+        guarded["items"] = [
+            item for section in context_views.PROFILE_SECTIONS for item in (kept or {}).get(section, ())
+        ]
+        if "missing" in guarded or (kept or {}).get("missing"):
+            guarded["missing"] = context_views.profile_markers(vault_root, (kept or {}).get("missing", ()))
+        if kept is None:
+            guarded["continuation"] = None
+        return guarded
+    guarded["items"] = _guard_view_items(
+        vault_root, guarded, caller=caller, policy=policy, release_gate_active=release_gate_active,
+        who=who, purpose=purpose,
+    )
+    return guarded
 
 
 def _recent_entry_chars(entry: Mapping[str, Any]) -> int:
@@ -5312,6 +5500,7 @@ def _withheld_cross_check(
     result: Any,
     *,
     principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
     _artifact_scan_demand: _ArtifactScanDemand | None = None,
     _current_parent_binding: tuple[str, str] | None = None,
 ) -> Any:
@@ -5330,7 +5519,7 @@ def _withheld_cross_check(
     `is_dir()`); `blocked` or an unresolved principal -> every path-bearing
     entry dropped; otherwise decide each named path.
     """
-    return filter_withheld_entries(vault_root, result, principal=principal,
+    return filter_withheld_entries(vault_root, result, principal=principal, purpose=purpose,
                                    _artifact_scan_demand=_artifact_scan_demand,
                                    _current_parent_binding=_current_parent_binding)
 
@@ -5410,13 +5599,22 @@ def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
 
 
 @_at_release_boundary
-def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
+def postfilter(
+    command_name: str,
+    result: Any,
+    vault_root: Path,
+    *,
+    request_kwargs: Mapping[str, Any] | None = None,
+) -> Any:
     """The terminal egress filter: always-on scrubber + withheld cross-check.
 
     Called from `writer_lease.invoke_command` — the ONE dispatcher shared by
     MCP, REST, hosted, and CLI, which is why `bind_vault` (MCP-only) is a
     second pass rather than the primary site: the `EXOMEM_RETRIEVE_INJECT`
     hook reaches memory over REST-then-CLI, both of which skip `bind_vault`.
+
+    `request_kwargs` are the arguments the command was called with. A derived
+    view is decided under the `purpose` they declare, the one its compile used.
 
     Idempotent: running it twice over the same result is a no-op, because a
     replaced credential is already `NOTICE` text and matches nothing.
@@ -5450,12 +5648,19 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
             if parent_binding is None:
                 result = dict(result)
                 result.pop("revision_history")
+    view_purpose = None
+    if command_name == "read_memory" and isinstance(result, Mapping):
+        from .. import context_views
+
+        if isinstance(result.get("ref"), str) and context_views.parse_view_ref(result["ref"]) is not None:
+            view_purpose = (request_kwargs or {}).get("purpose")
+            result = guard_view_response(vault_root, result, purpose=view_purpose)
     artifact_scan_demand = _ArtifactScanDemand()
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
         result = _withheld_cross_check(
-            vault_root, result, _artifact_scan_demand=artifact_scan_demand,
+            vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
             _current_parent_binding=parent_binding,
         )
     from ..collection_store import governance as canonical_governance
@@ -7206,11 +7411,14 @@ class ReaderView:
         *,
         principal: RequestPrincipal | None,
         purpose: str | None,
+        unit_identity_only: bool = False,
     ) -> None:
         self._root = Path(vault_root)
         self._pages = pages
         self._principal = principal
         self._purpose = purpose
+        # Profiles admit a unit by its own source and ref; mentions cannot change their view.
+        self._unit_identity_only = unit_identity_only
         self._verdicts: dict[str, str] = {}
 
     def __call__(self, rel_path: str) -> bool:
@@ -7228,6 +7436,11 @@ class ReaderView:
 
     def verdicts(self, units: Sequence[Mapping[str, Any]]) -> list[str]:
         """`classify_units` for each unit, by everything but its `role`."""
+        if self._unit_identity_only:
+            units = [
+                {"ref": unit.get("ref"), "provenance": {"path": (unit.get("provenance") or {}).get("path")}}
+                for unit in units
+            ]
         keys = [
             json.dumps({k: v for k, v in unit.items() if k != "role"}, sort_keys=True, default=str)
             for unit in units
@@ -7263,13 +7476,14 @@ def reader_view(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    unit_identity_only: bool = False,
 ) -> ReaderView | None:
     """The caller's `ReaderView`, or `None` when nothing is withheld from it
     (`visible_page_filter`: the owner, or no bound caller)."""
     pages = visible_page_filter(vault_root, principal=principal, purpose=purpose)
     if pages is None:
         return None
-    return ReaderView(vault_root, pages, principal=principal, purpose=purpose)
+    return ReaderView(vault_root, pages, principal=principal, purpose=purpose, unit_identity_only=unit_identity_only)
 
 
 def release_allows_download(

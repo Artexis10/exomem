@@ -27,6 +27,7 @@ None.
 ### Modified Capabilities
 
 - `context-activation`: Add a `maps` packet mode, selected by `EXOMEM_ACTIVATION_PACKET`, that serves a map projected from the context catalogue with profile reads by ref, alongside the current `anchors` mode. The continuity, conversation-aware activation and retrieve-hook contracts keep binding `anchors` mode; `maps` mode defines its own continuity and conversation behaviour.
+- `command-surface`: Add an optional `continuation` to `read_memory` for derived-view refs, the `CONTINUATION_STALE` refusal, and optional `summary` and `topics` inputs on `remember`, generated on every surface.
 
 ## Impact
 

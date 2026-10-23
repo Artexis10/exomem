@@ -1045,3 +1045,19 @@ def test_the_capture_alias_forwards_all_three_axes() -> None:
         "california-trip-2026",
         "client-project",
     ]
+
+
+def test_one_plan_registers_every_new_domain_a_write_names(vault: Path) -> None:
+    """A write that names two new topics must land both in one registry write."""
+    taxonomy = st.load_taxonomy(vault)
+    plan = st.plan_registrations(
+        vault,
+        domains=[taxonomy.resolve_domain("harbour-works"), taxonomy.resolve_domain("tide-tables")],
+    )
+    assert [(item.axis, item.key) for item in plan.introductions] == [
+        ("domain", "harbour-works"),
+        ("domain", "tide-tables"),
+    ]
+    registry_text = plan.writes[0].content
+    assert plan.writes[0].path == st.registry_path(vault)
+    assert "harbour-works" in registry_text and "tide-tables" in registry_text

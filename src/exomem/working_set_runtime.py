@@ -75,6 +75,23 @@ log = logging.getLogger(__name__)
 
 CACHE_SIZE = 16
 
+_PACKET_WARNING_EMITTED = False
+
+
+def activation_packet_mode() -> str:
+    """The two packet modes fixed by the activation specification; invalid settings keep the default."""
+    global _PACKET_WARNING_EMITTED
+    mode = os.environ.get("EXOMEM_ACTIVATION_PACKET", "anchors")
+    # nosemgrep: ep-word-set -- The activation specification fixes both packet modes.
+    if mode in ("anchors", "maps"):
+        return mode
+    with _CACHE_LOCK:
+        if not _PACKET_WARNING_EMITTED:
+            log.warning("invalid EXOMEM_ACTIVATION_PACKET; using anchors")
+            _PACKET_WARNING_EMITTED = True
+    return "anchors"
+
+
 _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
     "activation_deferred_index_builds", default=None
 )
@@ -330,6 +347,7 @@ def encode_continuity(
     thread: str = "",
     thread_ns: int | None = None,
     salt: str = "",
+    map_generation: str | None = None,
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
@@ -368,6 +386,8 @@ def encode_continuity(
         # deliberately kept, not dead weight to be tidied away.
         "roles": [str(role) for role in roles if str(role)],
     }
+    if map_generation is not None:
+        payload["map_generation"] = str(map_generation)
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
     if thread:
@@ -459,7 +479,7 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         started if isinstance(started, int) and not isinstance(started, bool) and started > 0 else None
     )
     mac = payload.get("mac")
-    return {
+    decoded = {
         "identity": identity,
         "roles_hash": roles_hash,
         "conventions_hash": conventions_hash,
@@ -471,6 +491,9 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
         "thread_ns": thread_ns if thread else None,
         "mac": mac if thread and isinstance(mac, str) else "",
     }
+    if isinstance(payload.get("map_generation"), str):
+        decoded["map_generation"] = payload["map_generation"]
+    return decoded
 
 
 def continuity_minted_ns(token: str | None) -> int | None:
@@ -2149,7 +2172,25 @@ def join_builds(vault_root: Path) -> None:
         thread.join()
 
 
-def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
+def _warm_index(root: Path, freshness_stamp: str, stop: threading.Event | None) -> None:
+    """The default background pass: bring the activation index up to the vault."""
+    from . import runtime_resources
+
+    # The one pass that may load a cold activation encoder: it runs off
+    # the request thread, which never loads a model.
+    with runtime_resources.model_work("bulk", cancel_event=stop):
+        working_set_index.WorkingSetIndex(root).update(
+            freshness_stamp=freshness_stamp or None, load_encoder=True
+        )
+
+
+def _schedule_build(
+    vault_root: Path,
+    *,
+    freshness_stamp: str = "",
+    job: Callable[[], None] | None = None,
+    label: str = "activation index",
+) -> None:
     """Single-flight a cold or stale build away from the request thread.
 
     The build records the freshness key it was scheduled for, exactly as the
@@ -2160,35 +2201,39 @@ def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
     moved again in between simply reads as stale once more. A build already in
     flight keeps its own key, and the next request decides whether that was
     enough.
+
+    `job` replaces the activation index pass with a sibling sidecar's own; the
+    context catalogue passes its fold here so both share one slot per vault, one
+    shutdown binding and one thread name, and the fold reads cancellation through
+    `foreground_priority.check_cancelled`.
+    A custom job writes its own sidecar, not the evidence `defer_index_refreshes`
+    holds back for the request, so it is dispatched at once. `label` names the
+    job in the log.
     """
     root = Path(vault_root).absolute()
-    from . import foreground_priority, runtime_resources
+    from . import foreground_priority
 
     pending = _DEFERRED_BUILDS.get()
     with _CACHE_LOCK:
         stop = _BUILD_SHUTDOWNS.get(root)
         if (stop is not None and stop.is_set()) or root in _BUILDS:
             return
-        if pending is not None:
+        if pending is not None and job is None:
             # Preserve the first dispatch's stamp, as the existing single-flight owner does.
             pending.setdefault(root, freshness_stamp)
             return
 
     def _warm() -> None:
         try:
-            # The one pass that may load a cold activation encoder: it runs off
-            # the request thread, which never loads a model.
-            with (
-                foreground_priority.cancellable(stop),
-                runtime_resources.model_work("bulk", cancel_event=stop),
-            ):
-                working_set_index.WorkingSetIndex(root).update(
-                    freshness_stamp=freshness_stamp or None, load_encoder=True
-                )
+            with foreground_priority.cancellable(stop):
+                if job is None:
+                    _warm_index(root, freshness_stamp, stop)
+                else:
+                    job()
         except foreground_priority.BulkCancelled:
             pass
         except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
-            log.warning("activation index background build failed", exc_info=True)
+            log.warning("%s background build failed", label, exc_info=True)
         finally:
             with _CACHE_LOCK:
                 _BUILDS.pop(root, None)
@@ -2204,7 +2249,7 @@ def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
             thread.start()
         except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
             _BUILDS.pop(root, None)
-            log.warning("activation index background build could not start", exc_info=True)
+            log.warning("%s background build could not start", label, exc_info=True)
 
 
 def serve(

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -162,6 +163,76 @@ def resolve_notes_domain(
         registry_guard=registry_guard,
         parent_guard=parent_guard,
     )
+
+
+@dataclass(frozen=True)
+class TopicResolution:
+    """The topics a list of declared values names, and the values that name none.
+
+    `resolved` holds canonical domain keys in declaration order, deduplicated;
+    a deprecated value contributes its replacement. `unresolved` holds the raw
+    values the registry does not know, plus values that cannot become a key.
+    """
+
+    resolved: tuple[str, ...]
+    unresolved: tuple[str, ...]
+
+
+def resolve_topics(taxonomy: source_taxonomy.SourceTaxonomy, values: Iterable[object]) -> TopicResolution:
+    """Resolve declared topic values against the domain registry.
+
+    A topic is a domain key. Per value, the resolver's `builtin`, `registered`
+    and `alias` statuses resolve to the canonical key and `deprecated` resolves
+    to its replacement. `unregistered` does not resolve: the open vocabulary
+    still accepts the key at capture, but a map never invents a topic from it.
+    The caller supplies the taxonomy, so a read path stays lenient and a
+    write path can pass the strict one.
+    """
+    resolved: dict[str, None] = {}
+    unresolved: dict[str, None] = {}
+    for value in values:
+        try:
+            resolution = taxonomy.resolve_domain(value)
+        except source_taxonomy.TaxonomyError:
+            unresolved.setdefault(str(value), None)
+            continue
+        key = resolution.replaced_by if resolution.status == "deprecated" else resolution.key
+        if resolution.status == "unregistered" or not key:
+            unresolved.setdefault(resolution.raw, None)
+        else:
+            resolved.setdefault(key, None)
+    return TopicResolution(tuple(resolved), tuple(unresolved))
+
+
+def plan_topic_registrations(
+    vault_root: Path, values: str | list[str]
+) -> tuple[list[str], source_taxonomy.TaxonomyPlan, list[str]]:
+    """Resolve page topics and fold all introductions into one capture-style plan."""
+    requested = [values] if isinstance(values, str) else values
+    if not isinstance(requested, list):
+        raise VocabularyResolutionError("INVALID_SOURCE", "topics must be a domain key or a list of domain keys")
+    taxonomy, _, snapshot = _strict_taxonomy(Path(vault_root))
+    try:
+        resolutions = [taxonomy.resolve_domain(value) for value in requested]
+    except source_taxonomy.TaxonomyError as error:
+        raise VocabularyResolutionError("INVALID_SOURCE", str(error)) from error
+    plan = source_taxonomy.plan_registrations(vault_root, domains=resolutions)
+    if plan.writes and registry_text_snapshot(plan.source_text) != snapshot:
+        raise VocabularyResolutionError(
+            "STALE_VOCABULARY_BINDING", "domain vocabulary changed while the topics resolved; retry the write"
+        )
+    topics = resolve_topics(plan.taxonomy, requested)
+    if topics.unresolved:
+        raise VocabularyResolutionError("INVALID_SOURCE", "topics must resolve to active domain keys")
+    warnings = [f"NEW_DOMAIN: registered {item.key!r}" for item in plan.introductions]
+    for resolution in resolutions:
+        if resolution.close_match:
+            warnings.append(
+                f"DOMAIN_NEAR_MISS: {resolution.key!r} closely resembles existing domain "
+                f"{resolution.close_match!r}. Kept as supplied — re-capture with the "
+                "existing domain if this was a typo."
+            )
+    return list(topics.resolved), plan, warnings
 
 
 def _require_bounded_destination(folder: str) -> None:

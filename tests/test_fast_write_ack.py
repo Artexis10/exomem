@@ -1080,6 +1080,8 @@ def test_superseded_batch_reports_store_state_without_an_advisory_ref(
     )
     diagnostics = terminal["diagnostics"]["derived_components"]
     assert {item["component"] for item in diagnostics} == {
-        component.value for component in derived_receipts.DerivedComponent
+        component.value
+        for component in derived_receipts.DerivedComponent
+        if component not in derived_receipts.UNACKNOWLEDGED_COMPONENTS
     }
     assert {item["state"] for item in diagnostics} == {"superseded"}

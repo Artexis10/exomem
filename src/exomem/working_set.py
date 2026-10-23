@@ -1158,8 +1158,12 @@ def run_lanes(
     request_anchors: Sequence[Any] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     request_segment: str = "turn",
+    lane_failed: Callable[[str, Exception], None] | None = None,
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
+
+    `lane_failed` lets profiles report a captured exception once per generation.
+    Without it, activation retains its existing debug log.
 
     `precedent_reach` is called inside the `precedents` lane, behind that lane's
     own budget gate and timing span, and returns the pages the lane also reads
@@ -1251,8 +1255,11 @@ def run_lanes(
                     result = _with_standing_units(result, standing_pages)
             except (egress.ReaderViewUnavailable, lifecycle_statuses.ClassificationUnavailable):
                 raise
-            except Exception:  # noqa: BLE001 - one lane's failure is not the packet's
-                log.debug("activation lane %s failed", role_id, exc_info=True)
+            except Exception as error:  # noqa: BLE001 - one lane's failure is not the packet's
+                if lane_failed is not None:
+                    lane_failed(role_id, error)
+                else:
+                    log.debug("activation lane %s failed", role_id, exc_info=True)
                 failed = True
         if failed:
             missing.append({"role": role_id, "reason": "lane_failed"})
@@ -1876,7 +1883,7 @@ def _material_lane(
         if not any(start < index < end for _anchor, spans in named for start, end in spans)
     )})
     requests: dict[tuple[str, frozenset[tuple[str, ...]]], tuple[frozenset[str], frozenset[str]]] = {}
-    for start, end in zip(breaks, breaks[1:]):
+    for start, end in zip(breaks, breaks[1:], strict=False):
         associated = [anchor for anchor, spans in named
             if any(start <= left < right <= end for left, right in spans)]
         if len(associated) != 1 or getattr(associated[0], "status", "") != "resolved":
@@ -1937,7 +1944,7 @@ def _material_lane(
     coverage = [frozenset(
         request for request, (scope, terms) in enumerate(requests.values())
         if item.path in scope and terms.intersection(stems)
-    ) for item, stems in zip(items, content)]
+    ) for item, stems in zip(items, content, strict=False)]
     request_refs = [anchor_ref for anchor_ref, _retained in requests]
     anchor_coverage = [frozenset(request_refs[request] for request in covered) for covered in coverage]
     # Among equal coverage, compiled units keep their existing preference and

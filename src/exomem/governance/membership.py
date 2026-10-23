@@ -72,6 +72,12 @@ class MembershipOutcome:
         )
 
 
+def reserve_memo(bound: int) -> None:
+    """Raise each memo's bound to `bound`. `egress.reserve_decision_memo` sizes it with its own."""
+    global _MEMO_MAX
+    _MEMO_MAX = max(_MEMO_MAX, bound)
+
+
 def clear_memo() -> None:
     _MEMO.clear()
     _SNAPSHOT_MEMO.clear()
