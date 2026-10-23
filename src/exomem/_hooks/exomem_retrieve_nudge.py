@@ -835,11 +835,14 @@ def _gather_packet_with_lane(
     continuity: str,
     attribution: dict | None = None,
     conversation: dict | None = None,
+    max_chars: int | None = None,
 ) -> tuple[dict | None, str]:
     """Working-set mode's rungs on the same ladder, under the same budget.
 
-    Without a conversation the fetchers are called exactly as they always were."""
+    Without a conversation or remembered cap, the fetchers keep their original arguments."""
     extra = {"conversation": conversation} if conversation else {}
+    if max_chars is not None:
+        extra["max_chars"] = max_chars
     return _gather_with_lane(
         lambda api_key, timeout, base_url=None: _fetch_packet_via_rest(
             prompt,
@@ -1281,8 +1284,8 @@ def _fetch_packet_via_rest(
     `None` on ANY failure — connection error, timeout, non-200, malformed JSON,
     `success: false` — and never raises.
 
-    A map response gets one smaller-cap retry for hook framing within this rung's
-    remaining timeout. Anchors keep their original request and rendered bytes.
+    A first map response gets one smaller-cap retry within this rung's timeout.
+    Remembered maps start at the reduced cap. Unmarked anchors keep the original cap.
 
     `attribution` rides in the body. A service older than this hook refuses
     an unknown field with a 400; the request is then made again with less
@@ -1337,7 +1340,7 @@ def _fetch_packet_via_rest(
         if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_rest(
                 prompt, api_key, continuity, remaining, attribution, base_url, conversation,
-                max_chars=_map_request_max_chars(packet["map"]),
+                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"])),
             )
             return smaller if smaller is not None else packet
         return packet
@@ -1354,8 +1357,8 @@ def _fetch_packet_via_cli(
 ) -> dict | None:
     """The opt-in CLI rung, over the same leaf the REST route reaches.
 
-    A map response gets one smaller-cap retry within the original CLI timeout.
-    Anchors keep the original cap; a failed retry leaves honest local truncation.
+    A first map response gets one smaller-cap retry within the original timeout.
+    Remembered maps start at the reduced cap; failed retries keep honest local truncation.
 
     Attribution goes as `--client`/`--session`/`--workspace`; an older CLI
     that does not know one exits non-zero, and the rung then runs again with
@@ -1415,7 +1418,7 @@ def _fetch_packet_via_cli(
         if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_cli(
                 prompt, continuity, remaining, attribution, conversation,
-                max_chars=_map_request_max_chars(packet["map"]),
+                max_chars=_map_request_max_chars(_map_render_overhead(packet["map"])),
             )
             return smaller if smaller is not None else packet
         return packet
@@ -1520,7 +1523,25 @@ def _read_activation_token(session_id: str) -> str:
 
 def _activation_map_path(session_id: str) -> Path:
     """Use the token's client/session key without interpreting its contents."""
-    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(".map-generation")
+    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
+        _state_core().ACTIVATION_MAP_GENERATION_SUFFIX
+    )
+
+
+def _activation_map_overhead_path(session_id: str) -> Path:
+    """Remember map framing independently of whether every item fit."""
+    return activation_token_path(_hook_home(), _hook_client(), session_id).with_suffix(
+        _state_core().ACTIVATION_MAP_OVERHEAD_SUFFIX
+    )
+
+
+def _read_map_request_max_chars(session_id: str) -> int | None:
+    """A prior map uses the reduced cap; missing or malformed state uses the original."""
+    try:
+        overhead = int(_read_activation_value(_activation_map_overhead_path(session_id)))
+    except ValueError:
+        return None
+    return _map_request_max_chars(overhead) if overhead >= 0 else None
 
 
 def _read_activation_value(path: Path) -> str:
@@ -2042,8 +2063,8 @@ def _map_header(block: dict) -> str:
     )
 
 
-def _map_request_max_chars(block: dict) -> int:
-    """Reserve hook-only framing; a map retry leaves anchors requests unchanged."""
+def _map_render_overhead(block: dict) -> int:
+    """Reserve hook-only framing without depending on the configured render cap."""
     overhead = len(_map_header(block)) + 1
     overhead += len(_packet_line("map", "", str(block.get("ref") or "exomem://map")))
     overhead += len(_packet_line("overflow", "", "")) + 1
@@ -2051,6 +2072,10 @@ def _map_request_max_chars(block: dict) -> int:
     overhead += 16 * len(block.get("items") or ())
     if block.get("state_available") is False:
         overhead += len("- State is unavailable.") + 1
+    return overhead
+
+
+def _map_request_max_chars(overhead: int) -> int:
     # Activation's public prose-cap contract clamps requests to at least 500.
     return max(500, _working_set_max_chars() - overhead)
 
@@ -3244,6 +3269,8 @@ def main(argv: list[str] | None = None) -> int:
         # the reminder FOLLOWS, and `_block_keeps_the_reminder` is what knows.
         try:
             continuity = _read_activation_token(session_id)
+            max_chars = _read_map_request_max_chars(session_id)
+            request_budget = {"max_chars": max_chars} if max_chars is not None else {}
             packet, lane = _gather_packet_with_lane(
                 prompt,
                 continuity,
@@ -3252,6 +3279,7 @@ def main(argv: list[str] | None = None) -> int:
                     str(data.get("transcript_path") or data.get("transcriptPath") or ""),
                     prompt,
                 ),
+                **request_budget,
             )
             packet_available = isinstance(packet, dict)
             packet = packet if isinstance(packet, dict) else {}
@@ -3259,6 +3287,12 @@ def main(argv: list[str] | None = None) -> int:
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
             last_generation = _read_activation_value(_activation_map_path(session_id)) if continuity else ""
             if isinstance(packet.get("map"), dict):
+                overhead = _map_render_overhead(packet["map"])
+                budget = packet.get("budget")
+                if isinstance(budget, dict) and isinstance(budget.get("limit_chars"), int):
+                    # Retain the cap the server used, even when that smaller map has fewer prefixes.
+                    overhead = max(overhead, _working_set_max_chars() - budget["limit_chars"])
+                _write_activation_value(_activation_map_overhead_path(session_id), str(overhead))
                 block, complete = _format_map_block(packet["map"], _working_set_max_chars(), last_generation)
                 if block and complete:
                     _write_activation_value(_activation_map_path(session_id), str(packet["map"].get("generation") or ""))
@@ -3268,6 +3302,13 @@ def main(argv: list[str] | None = None) -> int:
                     except (OSError, ValueError):
                         pass
             else:
+                generation = packet.get("generation")
+                # Maps retain this wire field while warming; no map alone does not prove a mode change.
+                if packet_available and isinstance(generation, dict) and "map_generation" not in generation:
+                    try:
+                        _state_core().unlink_nudge_file(_activation_map_overhead_path(session_id))
+                    except (OSError, ValueError):
+                        pass
                 block = _format_working_set_block(packet, _working_set_max_chars())
             keep_reminder = _block_keeps_the_reminder(packet)
         except Exception:  # noqa: BLE001 - hook must never break prompt submission

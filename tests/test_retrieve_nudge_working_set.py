@@ -234,7 +234,7 @@ def _serve(monkeypatch: pytest.MonkeyPatch, packet: dict | None) -> list[dict]:
     """Answer the working-set rung with `packet`, recording every request body."""
     seen: list[dict] = []
 
-    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None):
+    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None, max_chars=None):
         seen.append(
             {
                 "prompt": prompt,
@@ -1523,6 +1523,8 @@ def test_every_lifecycle_event_the_client_delivers_clears_the_token(
     path.write_text("TOKEN-1", encoding="utf-8")
     generation = path.with_suffix(".map-generation")
     generation.write_text("map-1", encoding="utf-8")
+    overhead = path.with_suffix(checkpoint.ACTIVATION_MAP_OVERHEAD_SUFFIX)
+    overhead.write_text("300", encoding="utf-8")
 
     checkpoint.dispatch_event(
         client,
@@ -1532,6 +1534,7 @@ def test_every_lifecycle_event_the_client_delivers_clears_the_token(
 
     assert not path.exists()
     assert not generation.exists()
+    assert not overhead.exists()
 
 
 def test_clearing_one_session_leaves_another_alone(tmp_path: Path) -> None:
@@ -2487,6 +2490,7 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
     assert "more not shown by hook" in cut
     assert "exomem://map/unfiled" in cut
     assert not hook._activation_map_path(SESSION).exists()
+    assert hook._activation_map_overhead_path(SESSION).exists()
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "4000")
     whole = _context(_run(monkeypatch, capsys, _event(), tmp_path))
     assert "Long entry" in whole and "map unchanged" not in whole
@@ -2515,12 +2519,20 @@ def test_map_readiness_is_visible_and_a_malformed_item_does_not_lose_the_map() -
     assert "already activated" in pointer and "Stale." in pointer and "State is unavailable." in pointer
 
 
-def test_a_map_response_retries_with_space_for_hook_framing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A server-filled map needs a smaller prose cap to leave its overflow visible in the hook."""
+def test_maps_use_one_reduced_call_after_discovery_and_mode_changes_restore_the_original_cap(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, working_set_mode,
+) -> None:
+    """Remembered maps must avoid a second call; a mode change must not keep shrinking anchors."""
     from types import SimpleNamespace
 
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", "1")
+    monkeypatch.setattr(hook, "_resolve_local_credential", lambda: ("", None))
+    monkeypatch.setattr(hook, "_resolve_rest_key", lambda: ("", "none"))
     calls = []
-    packet = {"map": {
+    packet = {"continuity": "opaque-token", "map": {
         "ref": "exomem://map", "generation": "map-1", "items": [
             {"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."},
         ],
@@ -2528,14 +2540,36 @@ def test_a_map_response_retries_with_space_for_hook_framing(monkeypatch: pytest.
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs["timeout"]))
+        packet["budget"] = {"limit_chars": int(argv[argv.index("--max-chars") + 1])}
         return SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "data": packet}))
 
     monkeypatch.setattr(hook.shutil, "which", lambda _name: "exomem")
     monkeypatch.setattr(hook.subprocess, "run", run)
-    assert hook._fetch_packet_via_cli(PROMPT, "opaque-token") == packet
+    first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "Depot Ledger" in first
     assert len(calls) == 2
     caps = [int(argv[argv.index("--max-chars") + 1]) for argv, _timeout in calls]
     assert caps[1] < caps[0] == hook._working_set_max_chars()
     assert calls[1][1] <= calls[0][1]
     assert calls[1][0][-1] == PROMPT
-    assert calls[1][0][calls[1][0].index("--continuity") + 1] == "opaque-token"
+    second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "map unchanged" in second
+    assert len(calls) == 3, "The second maps turn must make only one call."
+    assert int(calls[2][0][calls[2][0].index("--max-chars") + 1]) == caps[1]
+    assert calls[2][0][calls[2][0].index("--continuity") + 1] == "opaque-token"
+
+    packet.clear()
+    packet.update({"generation": {"map_generation": None}, "abstained": True, "abstention": {"reason": "index_warming"}})
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert len(calls) == 4
+    assert hook._activation_map_overhead_path(SESSION).exists()
+
+    packet.clear()
+    packet.update(_packet())
+    changed = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert changed == hook._format_working_set_block(packet, 4000)
+    assert len(calls) == 5
+    assert not hook._activation_map_overhead_path(SESSION).exists()
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert len(calls) == 6, "Unmarked anchors must make only one call."
+    assert int(calls[5][0][calls[5][0].index("--max-chars") + 1]) == 4000
