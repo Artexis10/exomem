@@ -113,7 +113,7 @@ def _mapping_sources(mapping, manifest, fmt):
             if spec.items is not None:
                 descendants(target, source, spec.items)
 
-    from .importer import basis_paths
+    from .import_time import basis_paths
 
     for target, source in mapping.get("fields", {}).items():
         if isinstance(source, dict) and "const" in source:

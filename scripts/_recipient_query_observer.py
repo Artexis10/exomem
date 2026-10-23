@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import json
 import sys
 import threading
@@ -20,16 +21,22 @@ def observe_query_timeouts(log_path: Path):
     Nested durations overlap and include observer overhead. They do not identify
     host I/O or garbage collection as a cause.
     ``read_session.finish`` includes the final temporary-state check and teardown.
-    CPU deltas cover observed session entry to the first observed timeout.
+    CPU deltas cover observed session entry to the first observed failure.
     Process CPU includes other service threads; it does not prove contention.
     Coarse phase CPU excludes new per-row samples. The first-check location
     and wall-clock anchor help align a failure with the service log.
     Parent phases and one largest hydration retain context without a call log.
     Derived row-source offsets cover wrapper intervals, not isolated SQL waits.
+    GC totals cover collections in this query thread; unavailable clocks leave them null.
+    Continuation failures retain bounded technical exception frames without values or messages.
     """
     originals = []
+    gc_callback = None
 
     def restore():
+        if gc_callback is not None:
+            with contextlib.suppress(ValueError):
+                gc.callbacks.remove(gc_callback)
         for owner, name, original, wrapper in reversed(originals):
             with contextlib.suppress(Exception):
                 if getattr(owner, name, None) is wrapper:
@@ -56,6 +63,30 @@ def observe_query_timeouts(log_path: Path):
         state = threading.local()
         emission_lock = threading.Lock()
         emitted = False
+
+        def observe_gc(phase, info):
+            # The Python GC callback protocol fixes start/stop; retain only query-local timing.
+            try:
+                if phase == "start":
+                    frame = getattr(state, "active", None)
+                    state.gc_started = None if frame is None else (
+                        frame, time.perf_counter(), time.thread_time(),
+                    )
+                elif phase == "stop":
+                    started = getattr(state, "gc_started", None)
+                    state.gc_started = None
+                    if started is not None:
+                        frame, elapsed, cpu = started
+                        frame["gc"]["elapsed_ms"] += (time.perf_counter() - elapsed) * 1000
+                        frame["gc"]["thread_cpu_ms"] += (time.thread_time() - cpu) * 1000
+                        frame["gc"]["collections"] += 1
+            except Exception:  # noqa: BLE001 - observation cannot alter collection or query execution
+                frame = getattr(state, "active", None)
+                if frame is not None:
+                    frame["gc"] = None
+
+        gc_callback = observe_gc
+        gc.callbacks.append(gc_callback)
 
         def phase_cpu(label):
             # These fixed technical phases run a bounded number of times per query.
@@ -311,8 +342,23 @@ def observe_query_timeouts(log_path: Path):
                     if emitted:
                         return
                     emitted = True  # One bounded failure record per observed child, even if I/O fails.
+                    causes, cause = [], error
+                    for _ in range(4):
+                        if cause is None:
+                            break
+                        frames, trace = [], cause.__traceback__
+                        while trace is not None and len(frames) < 8:
+                            module = trace.tb_frame.f_globals.get("__name__", "")
+                            # Fixed query, storage and crypto namespaces expose no paths or local values.
+                            if module.startswith(("exomem.query_engine.", "exomem.collection_store.", "cryptography.fernet")):
+                                frames.append({"module": module, "function": trace.tb_frame.f_code.co_name,
+                                               "line": trace.tb_lineno})
+                            trace = trace.tb_next
+                        causes.append({"type": type(cause).__name__, "frames": frames})
+                        cause = cause.__cause__ or cause.__context__
                     record = {"observer": "journey-query-timeout-v1",
                               "error": {"code": error.code, "type": type(error).__name__},
+                              "exception_causes": causes,
                               "route_elapsed_ms": (time.perf_counter() - started) * 1000,
                               **{key: value for key, value in frame.items() if key != "stack"},
                               "phase_timings_overlap": True}
@@ -328,6 +374,7 @@ def observe_query_timeouts(log_path: Path):
             previous = getattr(state, "active", None)
             try:
                 frame = {"stack": [], "phases": {}, "timeout_ms": None,
+                         "gc": {"elapsed_ms": 0.0, "thread_cpu_ms": 0.0, "collections": 0},
                          "query_deadline_elapsed_ms": None, "failure_phase_stack": None,
                          "observed_query_window_ms": None, "query_thread_cpu_ms": None,
                          "query_process_cpu_ms": None,
@@ -341,7 +388,8 @@ def observe_query_timeouts(log_path: Path):
             try:
                 return original_route(*args, **kwargs)
             except runtime.QueryError as error:
-                if error.code == "QUERY_TIMEOUT":
+                # These are fixed query refusal codes, not classifications of user input.
+                if error.code in ("QUERY_TIMEOUT", "QUERY_CURSOR_INVALID"):
                     emit(frame, error, started)
                 raise
             finally:
