@@ -431,13 +431,14 @@ def _observe_publication_intent(
             and proof[2] == intent.before_size
         )
         if (
-            not matches_after
-            and (disposition != start_disposition or phase != start_phase)
+            not (matches_before or matches_after)
+            and (proof is None or disposition != start_disposition or phase != start_phase)
             and not fenced
             and not changed
             and attempt == 0
         ):
             # Replacement can invalidate an open BEFORE descriptor entirely.
+            # The rename can precede the token's phase update; retry that read too.
             # Re-read once after a publication boundary; after the rename only
             # exact current AFTER bytes remain admissible.
             continue
