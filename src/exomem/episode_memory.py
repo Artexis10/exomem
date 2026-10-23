@@ -385,17 +385,22 @@ def record(
         if not idempotent:
             # A retry wrote nothing and records no new heat.
             try:
-                working_set_heat.note_episode(
-                    vault_root,
-                    source["path"],
-                    about_heat_paths,
-                    attribution=working_set_heat.attribution_for(
+                heat_source_path = source["path"]
+                with call_spans.span("episode.heat_attribution"):
+                    attribution = working_set_heat.attribution_for(
                         vault_root, client=client, session=recap.key
-                    ),
-                )
+                    )
+                with call_spans.span("episode.heat_record"):
+                    working_set_heat.note_episode(
+                        vault_root,
+                        heat_source_path,
+                        about_heat_paths,
+                        attribution=attribution,
+                    )
             except Exception as error:  # noqa: BLE001 - the recap already committed
                 log.debug("episode heat failed after commit: %s", type(error).__name__)
-        episode_nudge.note_record(vault_root)
+        with call_spans.span("episode.nudge"):
+            episode_nudge.note_record(vault_root)
 
     if not defer_housekeeping_until_terminal_persisted(record_housekeeping):
         record_housekeeping()

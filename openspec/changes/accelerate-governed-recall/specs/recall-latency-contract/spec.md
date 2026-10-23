@@ -306,6 +306,20 @@ gate's report SHALL name each SQLite version it ran on.
 - **AND** the work per matched row of each full-text lane stays within 1.5 times
 - **AND** Markdown page reads stay within the candidate count plus the fixed overfetch, and connections and readiness proofs within one per store and scope
 
+#### Scenario: An unread candidate retains its admitted ranking
+
+- **WHEN** a managed recall admits one catalogue generation and freezes its pending overlay
+- **AND** a candidate's canonical bytes change after admission and that candidate is not selected for output
+- **THEN** ranking, graph seeds and emitted-parent collapse use the admitted metadata and frozen overlay
+- **AND** the later bytes do not rerank the retained selection or cause a ranking-time Markdown read
+
+#### Scenario: Changed selected evidence reduces coverage
+
+- **WHEN** final hydration finds that a selected page or frame differs from its admitted content hash
+- **THEN** recall omits that evidence and marks coverage incomplete while preserving unaffected admitted results
+- **AND** the partial selection does not enter the shared result cache
+- **AND** access-policy and semantic-identity changes retain their existing refusal behavior
+
 #### Scenario: A per-candidate scan fails the gate
 
 - **WHEN** a catalogue query for the candidate set scans every KB row for each candidate, or the candidate list once for each KB row

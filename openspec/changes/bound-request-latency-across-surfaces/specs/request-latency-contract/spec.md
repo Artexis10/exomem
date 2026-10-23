@@ -133,12 +133,26 @@ Reports SHALL distinguish public dispatch, public leaf, caller elapsed time, inn
 
 The existing `embeddings.encode` span SHALL report `execution_wait_us` for elapsed time entering the execution context, and `model_encode_us` for elapsed time evaluating and executing the `model.encode(...)` call expression after context entry. The latter includes argument evaluation and the backend call, and ends before context exit. The producer SHALL sum integer microseconds across batches in the same encode invocation. It SHALL record an interval when that interval starts, including when the interval raises, and SHALL omit a field when its interval does not start. These nested durations SHALL NOT be added as exclusive time or treated as native-kernel time.
 
+The existing `recall.semantic.search` span SHALL retain its aggregate duration and count.
+Its `entry_ms` field SHALL measure the semantic entry call, including completion when the caller does not defer it.
+Its `finish_ms` field SHALL measure only a separate deferred completion.
+The producer SHALL sum whole milliseconds, rounded down per entered interval, and omit fields for intervals that never start.
+The nested `recall.semantic.preflight` span SHALL cover lazy imports, registry bases, snapshot setup and catalogue readiness before candidate collection.
+The public timing table SHALL retain its existing aggregate, and nested durations MUST NOT be added as exclusive time.
+
 #### Scenario: An encode exposes entered intervals without inventing skipped time
 
 - **WHEN** an encode enters the execution context and calls `model.encode`
 - **THEN** `execution_wait_us` covers execution-context entry and `model_encode_us` covers evaluation and execution of the call expression
 - **AND** a failed entered interval remains reported while an interval never entered is absent
 - **AND** the span retains its existing count and caller attribution
+
+#### Scenario: Deferred completion remains distinguishable in a retained aggregate
+
+- **WHEN** a semantic read enters selection and later invokes its deferred completion
+- **THEN** the aggregate retains both intervals and reports their `entry_ms` and `finish_ms` fields separately
+- **AND** a failed entered interval remains reported without inventing an unstarted phase
+- **AND** preflight time remains nested inside the aggregate
 
 #### Scenario: A short validation span conceals a slow acknowledgement
 

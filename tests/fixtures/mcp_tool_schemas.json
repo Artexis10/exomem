@@ -128,6 +128,12 @@
         },
         "mode": {
           "default": "scan-only",
+          "enum": [
+            "scan-only",
+            "save-manifest",
+            "copy-as-sources",
+            "compile-selected"
+          ],
           "type": "string"
         },
         "max_depth": {
@@ -189,6 +195,18 @@
       "properties": {
         "action": {
           "description": "Lifecycle step.",
+          "enum": [
+            "start",
+            "status",
+            "select",
+            "plan",
+            "apply",
+            "cancel",
+            "finish",
+            "work-item",
+            "propose",
+            "apply-proposal"
+          ],
           "type": "string"
         },
         "run_id": {
@@ -785,7 +803,18 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-relation, resolve-entity, create-entity, accept-relation.",
+          "description": "create-entity and accept-relation write; the others read.",
+          "enum": [
+            "suggest-links",
+            "suggest-relations",
+            "context",
+            "graph-context",
+            "inbound-links",
+            "resolve-entity",
+            "create-entity",
+            "accept-relation",
+            "resolve-relation"
+          ],
           "type": "string"
         },
         "path": {
@@ -1966,7 +1995,19 @@
       "properties": {
         "operation": {
           "default": "list",
-          "description": "list, create, append, move, reclassify, propose-reclassification, revert-reclassification, delete, trash-list, or recover.",
+          "description": "list, trash-list and propose-reclassification read; create and append read with validate_only; the others write.",
+          "enum": [
+            "list",
+            "create",
+            "append",
+            "move",
+            "delete",
+            "trash-list",
+            "recover",
+            "reclassify",
+            "propose-reclassification",
+            "revert-reclassification"
+          ],
           "type": "string"
         },
         "path": {
@@ -2119,6 +2160,12 @@
         "operation": {
           "default": "add",
           "description": "add, update, remove, or validate.",
+          "enum": [
+            "add",
+            "update",
+            "remove",
+            "validate"
+          ],
           "type": "string"
         },
         "category": {
@@ -3441,6 +3488,26 @@
         "mode": {
           "default": "attention",
           "description": "vocabulary records questions; item/write-advisory-result need ref. No authority: apply through connect_memory accept-relation, adoption_studio apply-proposal or triage_memory. Modes: references/governance.md.",
+          "enum": [
+            "attention",
+            "activation",
+            "item",
+            "audit",
+            "dispositions",
+            "provenance",
+            "evolution",
+            "compilation",
+            "stale",
+            "contradiction",
+            "unprocessed-sources",
+            "relation-debt",
+            "relation-queue",
+            "adoption",
+            "upkeep",
+            "plan-progress",
+            "write-advisory-result",
+            "vocabulary"
+          ],
           "type": "string"
         },
         "categories": {
@@ -3540,6 +3607,27 @@
       "properties": {
         "operation": {
           "description": "Operation for the subject; see references/operation-routing.md.",
+          "enum": [
+            "infer",
+            "validate",
+            "diff",
+            "inventory",
+            "inspect",
+            "resolve",
+            "preview",
+            "save",
+            "refresh",
+            "save-entity-types",
+            "resolve-entity-type",
+            "propose-relation",
+            "save-relations",
+            "census",
+            "propose",
+            "save-roles",
+            "save-conventions",
+            "history",
+            "restore"
+          ],
           "type": "string"
         },
         "name": {

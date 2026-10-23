@@ -127,10 +127,14 @@ def host(root, base, name, *, vault_id="gate"):
         try:
             yield Host(root, session, manager, LeaseCoordinatorClient(replace(config, token="operator")))
         finally:
-            manager._stop.set()
-            runtime = manager._collection_store
-            if runtime is not None and runtime._handle is not None:
-                runtime._handle.close()
+            with manager._store_condition:
+                manager._stop.set()
+                manager._store_closed = True
+                # A running publication borrows this connection until its exclusion window closes.
+                manager._store_condition.wait_for(lambda: not manager._store_publishing)
+                runtime = manager._collection_store
+                if runtime is not None and runtime._handle is not None:
+                    runtime._handle.close()
 
 
 def _host_main(sender, state, base, name, action, root, database, vault_id):

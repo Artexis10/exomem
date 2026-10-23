@@ -77,6 +77,7 @@ from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
 
 from . import call_spans, foreground_priority, reserved_paths
+from .find_types import RankingPage
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -432,6 +433,36 @@ def _eligibility_view_json(page: Any) -> str:
     )
 
 
+def _ranking_metadata_json(page: Any) -> str:
+    import yaml
+
+    payload = vars(RankingPage.from_page(page)).copy()
+    # YAML preserves authored types, including malformed status values and dates.
+    payload["frontmatter_yaml"] = yaml.safe_dump(payload.pop("frontmatter"))
+    payload["stem_set"] = sorted(payload["stem_set"])
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _ranking_metadata(raw: str) -> RankingPage:
+    import yaml
+
+    from . import vault
+
+    payload = json.loads(raw)
+    try:
+        frontmatter = vault.yaml_safe_load(payload.pop("frontmatter_yaml"))
+    except yaml.YAMLError as error:
+        raise ValueError("invalid ranking frontmatter") from error
+    if not isinstance(frontmatter, dict):
+        raise ValueError("invalid ranking frontmatter")
+    for key in ("stem_set", "outbound_targets"):  # nosemgrep: ep-word-set -- fixed ranking payload fields
+        if not isinstance(payload[key], list) or not all(isinstance(value, str) for value in payload[key]):
+            raise ValueError("invalid ranking text projection")
+    payload["stem_set"] = frozenset(payload["stem_set"])
+    payload["outbound_targets"] = tuple(payload["outbound_targets"])
+    return RankingPage(frontmatter=frontmatter, **payload)
+
+
 def _unit_eligibility_columns(unit: object) -> tuple[str | None, ...]:
     """`(verdict, check_by_day, check_by_json, tags_canonical_json)` for one unit.
 
@@ -665,7 +696,8 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: A v11 catalogue is rebuilt before revision-bound counts can be cached.
 #: 13: `semantic_units` holds selection-free structural occurrences and
 #: `pages.structure_json` their summary; readers interpret both per operation.
-SCHEMA_VERSION = 13
+#: 14: `pages.ranking_json` holds ranking and link inputs from the page snapshot.
+SCHEMA_VERSION = 14
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -3336,6 +3368,7 @@ class EligibilityMetadata:
     media_file: str | None
     frame_ts: float | None
     units: tuple[dict[str, Any], ...] = ()
+    ranking: RankingPage | None = None
 
 
 def parent_children_result(
@@ -3372,11 +3405,13 @@ def eligibility_metadata_result(
     freshness: tuple | None,
     include_units: bool = False,
     parents_only: bool = False,
+    include_ranking: bool = False,
 ) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
     """Exact filter views and parent hints from one proven catalogue snapshot.
 
     `parents_only` reads no filter view: its rows carry only the parent and
     `updated`, for a caller that decides on parents alone (recall admission).
+    `include_ranking` adds snapshot-bound search and interpretation inputs.
     """
     if not _catalog_usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
@@ -3384,7 +3419,8 @@ def eligibility_metadata_result(
         scope,
         freshness,
         lambda conn: _eligibility_metadata_query(
-            vault_root, conn, paths, include_units=include_units, parents_only=parents_only
+            vault_root, conn, paths, include_units=include_units, parents_only=parents_only,
+            include_ranking=include_ranking,
         ),
         "lexical eligibility metadata query failed (%s); filter eligibility declines",
     )
@@ -3397,33 +3433,38 @@ def _eligibility_metadata_query(
     *,
     include_units: bool,
     parents_only: bool = False,
+    include_ranking: bool = False,
 ) -> dict[str, EligibilityMetadata]:
     from .vocabulary.registry import RegistryError
 
     view = "NULL" if parents_only else "p.eligibility_view_json"
+    ranking = "p.ranking_json, p.content_hash" if include_ranking else "NULL, NULL"
     rows = conn.execute(
         "WITH requested AS (SELECT value AS path FROM json_each(?)), "
         "wanted AS (SELECT path FROM requested UNION "
         "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
-        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated "
+        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated, {ranking} "
         "FROM wanted w CROSS JOIN pages p ON p.path = w.path WHERE p.in_vault = 1",
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
     result = {}
     try:
-        for path, payload, parent, updated in rows:
+        for path, payload, parent, updated, ranking, content_hash in rows:
             payload = None if payload is None else json.loads(payload)
             view = (
                 None
                 if payload is None
                 else {key: _decode_filter_value(value) for key, value in payload["view"].items()}
             )
+            if include_ranking and content_hash is not None and ranking is None:
+                raise ValueError("missing ranking metadata")
             result[str(path)] = EligibilityMetadata(
                 view,
                 parent,
                 updated,
                 None if payload is None else payload["media_file"],
                 None if payload is None else payload["frame_ts"],
+                ranking=None if ranking is None else _ranking_metadata(ranking),
             )
         if not include_units:
             return result
@@ -4759,8 +4800,9 @@ class LexicalStore:
 
     # The current normal-table shape sentinels. An older `pages` table lacks
     # one or more of these, so it must be rebuilt before a new-column INSERT.
+    # nosemgrep: ep-word-set -- the catalogue schema fixes these column names.
     _CURRENT_PAGES_COLUMNS = frozenset(
-        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json", "structure_json"}
+        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json", "structure_json", "ranking_json"}
     ) | frozenset(_ELIGIBILITY_COLUMNS)
     #: The eligibility sentinels on `semantic_units`. A catalog missing any of
     #: them cannot answer a governed unit filter, so it is a legacy shape.
@@ -4852,7 +4894,7 @@ class LexicalStore:
             " updated_day TEXT,"
             " updated_json TEXT,"
             " eligibility_view_json TEXT,"
-            " content_hash TEXT, structure_json TEXT)"
+            " content_hash TEXT, structure_json TEXT, ranking_json TEXT)"
         )
         # Per-scope walk triples this sidecar was last VERIFIED against
         # (repr'd) — the cross-process "nothing changed while we were down"
@@ -5603,6 +5645,7 @@ class LexicalStore:
             eligibility = _eligibility_columns(page)
             eligibility_view = _eligibility_view_json(page)
             content_hash = getattr(page, "snapshot_hash", None)
+            ranking = _ranking_metadata_json(page)
         else:
             try:
                 rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
@@ -5618,13 +5661,14 @@ class LexicalStore:
             eligibility = _EMPTY_ELIGIBILITY
             eligibility_view = None
             content_hash = None
+            ranking = None
         is_nav = path.name.lower() in _NAV_BASENAMES
         cur = conn.execute(
             "INSERT INTO pages(path, title, mtime_ns, updated, in_kb, in_vault, is_nav, "
             "emitted_parent_path, "
             + ", ".join(_ELIGIBILITY_COLUMNS)
-            + ", eligibility_view_json, content_hash) "
-            "VALUES(" + ", ".join("?" * (10 + len(_ELIGIBILITY_COLUMNS))) + ")",
+            + ", eligibility_view_json, content_hash, ranking_json) "
+            "VALUES(" + ", ".join("?" * (11 + len(_ELIGIBILITY_COLUMNS))) + ")",
             (
                 rel,
                 title,
@@ -5637,6 +5681,7 @@ class LexicalStore:
                 *eligibility,
                 eligibility_view,
                 content_hash,
+                ranking,
             ),
         )
         rowid = cur.lastrowid
