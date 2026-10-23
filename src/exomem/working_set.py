@@ -50,6 +50,7 @@ from . import (
     working_set_resolve,
     working_set_state,
 )
+from .governance import policy as governance_policy
 
 if TYPE_CHECKING:
     from .find import UnitParentReads
@@ -345,6 +346,8 @@ class LaneItem:
     relations: tuple[Mapping[str, Any], ...] = ()
     #: Categorical task matches follow standing knowledge and lifecycle ordering.
     task_order: int = UNIT_LANE_LIMIT
+    #: Sidecar evidence stays private until the packet selects this unit.
+    unit_candidate: Any = field(default=None, compare=False, repr=False)
 
 
 class LaneResult(NamedTuple):
@@ -506,6 +509,7 @@ def build_packet(
     """Order, cap and budget the lane output into the packet the caller sees."""
     status_basis = status_basis or lifecycle_statuses.Basis(None)
     correction_status = None
+    parent_reads = None
     outgoing_pointers: dict[tuple[str, str, str, str], LaneItem] = {}
     if status_basis.root is not None and any(item.level == "unit" for item in items):
         from . import find, unit_corrections
@@ -691,6 +695,7 @@ def build_packet(
     # pays for, so the same ceiling bounds them. Once the budget is spent the
     # overflow is not reported at all rather than silently breaking the bound.
     pointers: list[dict[str, Any]] = []
+    pointer_sources: dict[int, str] = {}
     # Roles that lost at least one item to the ceiling. An item that fits neither
     # as a unit nor as a pointer leaves no trace otherwise, and a packet that
     # silently drops six of eight candidates reads exactly like one where the
@@ -706,7 +711,9 @@ def build_packet(
             and not item.request_anchors - represented
         )
 
-    def _budget_pointer(item: LaneItem, reason: str, *, exact_path: bool = False) -> None:
+    def _budget_pointer(
+        item: LaneItem, reason: str, *, exact_path: bool = False, source_ref: str | None = None,
+    ) -> None:
         nonlocal used, promoted_used
         if _material_capped(item):
             capped_material.setdefault(item.role, None)
@@ -723,6 +730,8 @@ def build_packet(
             starved.setdefault(item.role, None)
             return
         pointers.append(pointer)
+        if source_ref is not None:
+            pointer_sources[id(pointer)] = source_ref
         if item.role in material_roles:
             per_role[item.role] = per_role.get(item.role, 0) + 1
             represented.update(item.request_anchors)
@@ -856,7 +865,35 @@ def build_packet(
                 _budget_pointer(replace(pointer_item, role=source.role, anchor=source.path, promoted=source.promoted,
                                         why=history + pointer_item.why,
                                         request_anchors=source.request_anchors),
-                                "requires_read", exact_path=True)
+                                "requires_read", exact_path=True, source_ref=source.ref)
+
+    selected_candidates = [item.unit_candidate for item in served_sources.values() if item.unit_candidate is not None]
+    verification_missing = []
+    if selected_candidates:
+        from . import find
+
+        by_root: dict[Path, list[Any]] = {}
+        for candidate in selected_candidates:
+            root = status_basis.root if status_basis.root is not None else candidate.vault_root
+            by_root.setdefault(root, []).append(candidate)
+        stale = set()
+        for root, candidates in by_root.items():
+            # Rootless packets share reads within each origin, never between vaults.
+            verified = find._finish_unit_candidates(
+                root, candidates, parent_reads=parent_reads if status_basis.root is not None else None,
+            )
+            kept = {hit.unit_ref for hit in verified}
+            stale.update(candidate.unit_ref for candidate in candidates if candidate.unit_ref not in kept)
+        removed = [unit for unit in units if unit["ref"] in stale]
+        units = [unit for unit in units if unit["ref"] not in stale]
+        used -= sum(_charge("units", unit) for unit in removed)
+        removed_pointers = [pointer for pointer in pointers if pointer_sources.get(id(pointer)) in stale]
+        pointers = [pointer for pointer in pointers if pointer_sources.get(id(pointer)) not in stale]
+        used -= sum(_charge("pointers", pointer) for pointer in removed_pointers)
+        verification_missing = [
+            {"role": item.role, "reason": "lane_failed"}
+            for item in served_sources.values() if item.ref in stale
+        ]
 
     packet: dict[str, Any] = {
         "recent_context": recent_entries,
@@ -867,6 +904,7 @@ def build_packet(
         "current_state": state_entries,
         "missing": [
             *(dict(entry) for entry in missing),
+            *verification_missing,
             *(({"role": "ambiguity", "reason": "lane_truncated"},)
                 if len(ambiguity) > len(listed_ambiguity) else ()),
             *({"role": role, "reason": "budget"} for role in starved),
@@ -1140,6 +1178,7 @@ def _date_rank(updated: str) -> int:
 # --------------------------------------------------------------------------- #
 
 
+@governance_policy.request_policy_snapshot()
 def run_lanes(
     vault_root: Path,
     *,
@@ -1584,6 +1623,7 @@ def _units_lane(
             truncated_out=capped,
             status_basis=status_basis,
             parent_reads=parent_reads,
+            _defer_hydration=True,
         )
         return found, bool(capped)
 
@@ -1635,8 +1675,9 @@ def _units_lane(
                     added.append(candidate)
                     existing.add(candidate.unit_ref)
             stale: list[str] = []
-            records = find_module._hydrate_indexed_unit_records(
+            records = find_module._select_indexed_unit_records(
                 vault_root, added, plan=plan, stale_out=stale, parent_reads=parent_reads,
+                scope="kb", freshness_key=snapshot.for_scope("kb"),
             )
             if stale:
                 return baseline._replace(task_status="unavailable")
@@ -1703,6 +1744,8 @@ def hits_in_view(hits: Sequence[Any], visible: Callable[[str], bool] | None) -> 
 def _unit_items(
     role: context_roles.ContextRole | None, hits: Sequence[Any], *, parent_reads: Any = None,
 ) -> tuple[LaneItem, ...]:
+    from .find import _UnitCandidate
+
     out: list[LaneItem] = []
     for hit in hits:
         parent = str(getattr(hit, "parent_path", "") or "")
@@ -1711,7 +1754,10 @@ def _unit_items(
             "superseded" if superseded_by else str(getattr(hit, "parent_status", None) or "active")
         )
         held = parent_reads.parents.get(parent) if parent_reads is not None else None
-        definitions = held.state.definitions if held is not None and held.state is not None else None
+        definitions = (
+            hit.selected_parent.definitions if isinstance(hit, _UnitCandidate)
+            else held.state.definitions if held is not None and held.state is not None else None
+        )
         selected_registry = definitions.snapshots["relations"].typed if definitions is not None else None
         supersedes = working_set_currency.relation_targets(
             getattr(hit, "relations", None), registry=selected_registry,
@@ -1743,6 +1789,7 @@ def _unit_items(
                 },
                 why=(role.description or f"{role.id} lane") if role is not None else "",
                 relations=tuple(getattr(hit, "relations", ()) or ()),
+                unit_candidate=hit if isinstance(hit, _UnitCandidate) else None,
             )
         )
     return tuple(out)
@@ -3878,6 +3925,7 @@ def _mark_promoted(
     ), promoted_paths
 
 
+@governance_policy.request_policy_snapshot()
 def compile_packet(
     vault_root: Path, *, status_basis: lifecycle_statuses.Basis | None = None, **kwargs: Any
 ) -> dict[str, Any]:

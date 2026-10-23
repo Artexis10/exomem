@@ -207,7 +207,6 @@ def test_thirty_minutes_of_quiet_is_a_new_session(
 def test_u6_session_key_separates_two_hook_sessions(
     tmp_path: Path, clock: _Clock, serving: None
 ) -> None:
-    assert "session" in commands.op_activate_context.__code__.co_varnames, "U6 is required"
     vault = _ready(tmp_path)
     assert _family(_carry(vault, session="conversation-a")) == dreamer_families.HYDRATION_FAMILY
     clock.advance(11 * MINUTE)

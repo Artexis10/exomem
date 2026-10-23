@@ -170,6 +170,42 @@ def test_an_incoming_correction_is_served_when_only_old_claim_was_selected(tmp_p
     assert any("pack-wide cap" in reason for reason in limited["truncation"])
 
 
+def test_a_stale_selected_source_cannot_publish_its_outgoing_pointer(tmp_path: Path) -> None:
+    """Final source rejection must also remove a pointer admitted through that source."""
+    from exomem import ranking_config, structured_filters
+
+    root, index = _built(tmp_path)
+    _publish(index)
+    lexstore.ensure_fresh(root)
+    selected = find._find_semantic_units(
+        root, query="", limit=1, scope="kb", mode="keyword",
+        plan=structured_filters.compile_filter({"unit.category": {"$eq": "config"}}),
+        snapshot=find.FreshnessSnapshot(root), prefer_active=False,
+        config=ranking_config.DEFAULT_RANKING, degraded_out=[], failed_out=[],
+        allowed_parent_paths={SOURCE}, _defer_hydration=True,
+    )
+    assert len(selected) == 1
+    items = working_set._unit_items(None, selected)
+
+    def packet():
+        return working_set.build_packet(
+            items=items, anchors=(), roles=(), current_state=(), ambiguity=(), missing=(),
+            max_chars=4000, generation={}, status="resolved", status_basis=lifecycle_statuses.Basis(root),
+        )
+
+    before = packet()
+    assert before["units"]
+    assert any(pointer["ref"].endswith("#rich-1") for pointer in before["pointers"])
+    source = (root / SOURCE).read_text(encoding="utf-8")
+    (root / SOURCE).write_text(source.replace("Source body.", "Changed source body."), encoding="utf-8")
+
+    after = packet()
+
+    assert after["units"] == []
+    assert after["pointers"] == []
+    assert any(entry["reason"] == "lane_failed" for entry in after["missing"])
+
+
 def test_hidden_corrective_units_spend_no_slots_or_lifecycle_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

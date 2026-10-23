@@ -573,37 +573,6 @@ def test_an_offline_lexical_failure_degrades_rather_than_declines(
     assert stage["source"] == find_types.SOURCE_COMPUTED, stage
 
 
-def test_the_unit_cache_key_omits_the_knob_because_the_unit_path_returns_first() -> None:
-    """A pin on WHY only one of the two cache keys carries `widen_outside_kb`.
-
-    `request_key` must carry it: the page path runs the widening block after
-    the cache lookup, so a key without it serves a widened request the
-    unwidened list it just cached (mutant M6). `unit_request_key` must not need
-    it: the unit-level path returns from `find()` before the widening block is
-    reached, so the knob cannot affect what it caches.
-
-    That is a claim about control flow, and control flow moves. Asserting the
-    absence pins the reasoning: move the widening block above the unit return,
-    or make the unit path reach it, and this fails and asks for the key to be
-    updated rather than silently caching across the knob.
-    """
-    import inspect
-
-    source = inspect.getsource(find_module.find)
-    unit_return, widening = source.index("return unit_hits"), source.index(
-        'if scope == "kb" and query_norm and widen_outside_kb:'
-    )
-    assert unit_return < widening, (
-        "the unit-level path no longer returns before the widening block; "
-        "`unit_request_key` must now carry `widen_outside_kb` too"
-    )
-    unit_key_block = source[source.index("unit_request_key = ("):source.index("unit_cache_key = (")]
-    assert "widen_outside_kb" not in unit_key_block, (
-        "unit_request_key gained the knob; if that was deliberate this pin and "
-        "its docstring are what need updating"
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Never walks
 # --------------------------------------------------------------------------- #

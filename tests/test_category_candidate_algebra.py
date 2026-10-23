@@ -24,13 +24,19 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from exomem import find as find_module
-from exomem import freshness, lexstore, semantic_index, structured_filters
+from exomem import (
+    commands,
+    embedding_index,
+    freshness,
+    lexstore,
+    semantic_index,
+    structured_filters,
+)
 
 needs_fts5 = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5"
@@ -308,7 +314,7 @@ def test_default_scope_auto_widen_keeps_safe_category_plan_indexed(
 
     monkeypatch.setattr(find_module, "_eligible_filter_paths", forbidden_scan)
 
-    hits = find_module.find(
+    response = commands.op_find(
         tmp_path,
         query="shared needle",
         scope="kb",
@@ -316,15 +322,20 @@ def test_default_scope_auto_widen_keeps_safe_category_plan_indexed(
         mode="keyword",
         graph=False,
         result_level="page",
-        categories=["config"],
+        filters={"unit.category": {"$eq": "config"}},
         limit=5,
     )
 
-    assert {hit.path for hit in hits} == {
+    hits = response["hits"] if isinstance(response, dict) else response
+    assert {hit["path"] for hit in hits} == {
         "Knowledge Base/Notes/in-kb.md",
         "Projects/outside.md",
     }
-    assert next(hit for hit in hits if hit.path == "Projects/outside.md").outside_kb
+    outside = next(hit for hit in hits if hit["path"] == "Projects/outside.md")
+    assert outside["outside_kb"]
+    assert len(outside["matched_units"]) == 1
+    assert outside["matched_units"][0]["anchor"] == "outside"
+    assert "indexed outside candidate" in outside["matched_units"][0]["excerpt"]
 
 
 @needs_fts5
@@ -781,11 +792,12 @@ def test_vector_unit_exact_candidates_are_post_filtered_before_limit(
     )
     assert catalog.readiness.complete
     ranked = [
-        SimpleNamespace(
+        embedding_index.SemanticUnitVectorHit(
             unit_ref=row.unit_ref,
             parent_path=row.parent_path,
             parent_generation=row.parent_generation,
-            source_order=row.source_order,
+            parent_source_hash=row.parent_source_hash,
+            parser_version=row.parser_version,
             cosine=1.0 - index / 1000,
         )
         for index, row in enumerate(catalog.value or [])
