@@ -541,7 +541,8 @@ jobs:
   retrieval-latency:
     name: retrieval latency (2k synthetic vault)
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    # Keep this benchmark on its calibrated Ubuntu 24.04 runtime.
+    runs-on: ubuntu-24.04
     # Green CI took 9m38s; one case allows 15m. Let the remaining suite report
     # its result after that case while keeping every latency assertion unchanged.
     timeout-minutes: 30

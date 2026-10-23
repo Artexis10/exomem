@@ -239,6 +239,8 @@ class SemanticPageState:
     definitions_explicit: bool = False
     definitions_unavailable: bool = False
     neutral_document: SemanticUnitDocument | None = field(default=None, repr=False)
+    # None means that an older state did not retain carrier coverage.
+    prose_carriers: Mapping[str, Any] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frontmatter", _freeze(dict(self.frontmatter)))
@@ -1416,7 +1418,13 @@ def _parse_page_state(
 
     # Reserved attribution is not authored semantic content. Blank it before
     # parsing, retaining positions and line numbers for the surrounding prose.
-    for start, end in reversed(provenance.parse_owned_origin(body, owner_path=rel_path).spans):
+    owned = provenance.parse_owned_origin(body, owner_path=rel_path).spans
+    # This separately versioned namespace holds parser positions, never caller decisions.
+    prose_carriers = {
+        "format": 1, "body_length": len(body), "owned": owned,
+        "withheld": provenance.withheld_spans(body, owner_path=rel_path),
+    }
+    for start, end in reversed(owned):
         body = body[:start] + re.sub(r"[^\n]", " ", body[start:end]) + body[end:]
     candidates = semantic_units.scan_semantic_units(body, path=rel_path)
     document = semantic_units.parse_semantic_units(
@@ -1514,6 +1522,7 @@ def _parse_page_state(
         body=body,
         candidates=candidates,
         neutral_document=document,
+        prose_carriers=prose_carriers,
     )
 
 

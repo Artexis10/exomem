@@ -352,6 +352,32 @@ hash that supplies their disclosed excerpt or frame annotation.
 - **AND** a cached read validates both selected child sources before disclosing their evidence
 - **AND** a changed child causes that group to be omitted with incomplete coverage
 
+#### Scenario: Modern dense chunks hydrate only selected evidence
+
+- **WHEN** fusion selects a fixed prefix from modern proof-bearing dense candidates
+- **THEN** frame collapse carries chunk references without fetching their text
+- **AND** only selected excerpts, transcript localization, frame annotations and rerank passages consume chunk text
+- **AND** unchanged evidence preserves hits, order, excerpts, timestamps and rerank passages
+
+#### Scenario: Unrelated publication preserves a selected chunk
+
+- **WHEN** another path is published after a modern chunk was scored
+- **AND** the existing contiguous path log proves that its source path is unchanged in the same epoch, instance and vector space
+- **THEN** the selected chunk text may be read with that proof in one short transaction
+
+#### Scenario: Lost chunk proof cannot replace selected evidence
+
+- **WHEN** a selected modern chunk is missing or its scored publication can no longer be proved
+- **THEN** recall omits that selected evidence and marks coverage incomplete without shared caching
+- **AND** it does not refill from lower fused rows or substitute a current body or another passage
+- **AND** a present empty chunk remains distinct from missing or unproved text
+
+#### Scenario: Legacy dense selection remains explicit debt
+
+- **WHEN** the NumPy matrix belongs to a generation-zero sidecar without durable publication proof
+- **THEN** it keeps the existing eager text path and tie behavior
+- **AND** modern deferred-text completion and latency claims do not cover that path
+
 #### Scenario: A per-candidate scan fails the gate
 
 - **WHEN** a catalogue query for the candidate set scans every KB row for each candidate, or the candidate list once for each KB row

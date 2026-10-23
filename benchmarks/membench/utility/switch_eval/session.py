@@ -53,6 +53,7 @@ from .arms import (
 )
 from .cases import Case
 from .state import (
+    PRODUCT_ENV_PREFIXES,
     SERVER_NAME,
     Layout,
     Slot,
@@ -242,7 +243,7 @@ def session_env(parent: Mapping[str, str], slot: Slot, spec: ArmSpec) -> dict[st
     """
 
     floor, _removed = environment_floor(parent)
-    env = {key: value for key, value in floor.items() if not key.startswith(("EXOMEM_", "KB_"))}
+    env = {key: value for key, value in floor.items() if not key.startswith(PRODUCT_ENV_PREFIXES)}
     env.update(product_env(slot, spec))
     env["EXOMEM_RETRIEVE_INJECT_CLI"] = "1"
     env.update(CLIENT_PINS)

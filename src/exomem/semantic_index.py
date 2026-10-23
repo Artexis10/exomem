@@ -42,6 +42,8 @@ class SemanticParentIndexState:
     candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False)
     definitions: instances.PageDefinitions | None = field(default=None, repr=False)
     definitions_unavailable: bool = False
+    # None means unknown coverage for states built by older callers.
+    prose_carriers: Mapping[str, Any] | None = field(default=None, repr=False)
 
     @property
     def occurrences(self) -> tuple[semantic_units.StructuralOccurrence, ...]:
@@ -182,8 +184,18 @@ def validate_parent_record(
         return SemanticIndexFreshness(False, "missing_parent", parent_path)
     except (OSError, UnicodeError, vault.PathGuardError):
         return SemanticIndexFreshness(False, "parent_unavailable", parent_path)
-    current_source_hash = vault.content_hash(source)
-    current_ref = memory_refs.ref_from_markdown(source)
+    return validate_parent_snapshot(
+        parent_path=parent_path, parent_generation_value=parent_generation_value,
+        parent_source_hash=parent_source_hash, parser_version=parser_version,
+        current_source_hash=vault.content_hash(source), current_ref=memory_refs.ref_from_markdown(source),
+    )
+
+
+def validate_parent_snapshot(
+    *, parent_path: str, parent_generation_value: str, parent_source_hash: str,
+    parser_version: int, current_source_hash: str, current_ref: str | None,
+) -> SemanticIndexFreshness:
+    """Check already-guarded canonical bytes against every semantic generation input."""
     language = semantic_language_registry.core_registry()
     relations = relation_registry.core_registry()
     language_hash, relation_hash = _registry_hashes(language, relations)
@@ -206,6 +218,31 @@ def validate_parent_record(
     if parent_generation_value != current_generation:
         return SemanticIndexFreshness(False, "parent_generation_mismatch", **common)
     return SemanticIndexFreshness(True, "current", **common)
+
+
+def prose_carrier_spans(metadata: Mapping[str, Any], *, projected: bool) -> tuple[tuple[int, int], ...]:
+    """Read known neutral carrier geometry; absent or malformed coverage stays unknown."""
+    coverage = metadata.get("prose_carriers")
+    if not isinstance(coverage, Mapping) or type(coverage.get("format")) is not int or coverage["format"] != 1:
+        raise ValueError("SEMANTIC_CARRIER_COVERAGE_UNAVAILABLE")
+    body_length = coverage.get("body_length")
+    if type(body_length) is not int or body_length < 0:
+        raise ValueError("SEMANTIC_CARRIER_COVERAGE_UNAVAILABLE")
+    spans = {}
+    # These names are the two projections of the closed carrier-position protocol.
+    for name in ("owned", "withheld"):  # nosemgrep: ep-word-set -- fixed carrier geometry fields
+        values = coverage.get(name)
+        if not isinstance(values, (list, tuple)):
+            raise ValueError("SEMANTIC_CARRIER_COVERAGE_UNAVAILABLE")
+        checked = []
+        for value in values:
+            if (not isinstance(value, (list, tuple)) or len(value) != 2
+                    or any(type(offset) is not int for offset in value)
+                    or value[0] < 0 or not value[0] < value[1] <= body_length):
+                raise ValueError("SEMANTIC_CARRIER_COVERAGE_UNAVAILABLE")
+            checked.append(tuple(value))
+        spans[name] = tuple(checked)
+    return spans["withheld" if projected else "owned"]
 
 
 def build_parent_index_state(
@@ -249,6 +286,7 @@ def build_parent_index_state(
         ),
         parser_version=PARSER_VERSION,
         document=document, body=body, frontmatter=frontmatter, candidates=candidates,
+        prose_carriers=neutral.prose_carriers,
     )
 
 
@@ -345,6 +383,7 @@ def from_semantic_page_state(state: Any) -> SemanticParentIndexState:
         parser_version=PARSER_VERSION,
         document=state.neutral_document or state.document,
         body=state.body, frontmatter=state.frontmatter, candidates=state.candidates,
+        prose_carriers=getattr(state, "prose_carriers", None),
     )
 
 
@@ -370,6 +409,7 @@ def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
         "parent_source_hash": state.parent_source_hash,
         "parser_version": state.parser_version,
         "structural_complete": True,
+        **({"prose_carriers": state.prose_carriers} if state.prose_carriers is not None else {}),
     }
 
 
@@ -432,25 +472,29 @@ class Interpretations:
 
     def __init__(self, vault_root: Path) -> None:
         self.root = Path(vault_root)
+        self.selection = instances.DefinitionsSelection(self.root, INTERPRETATION_SUBJECTS)
         self._snapshots: dict[str | None, Mapping[str, Any] | None] = {}
         self._parents: dict[tuple[str, str], SelectedParent] = {}
 
     def snapshots(self, scope: str | None) -> Mapping[str, Any] | None:
         """One instance's admitted snapshots, or None when this caller cannot use it."""
-        from .vocabulary import registry, registry_spec
-
         scope = None if scope == instances.PUBLIC_INSTANCE else scope
         if scope not in self._snapshots:
             try:
-                specs = [instances.select(self.root, registry_spec(subject), scope)
-                         for subject in INTERPRETATION_SUBJECTS]
                 self._snapshots[scope] = {
-                    "binding": specs[-1].binding_revision,
-                    "snapshots": {spec.name: registry.load(spec, self.root) for spec in specs},
+                    "binding": self.selection.binding_revision(INTERPRETATION_SUBJECTS[-1], scope),
+                    "snapshots": {
+                        subject: self.selection.snapshot(subject, scope)
+                        for subject in INTERPRETATION_SUBJECTS
+                    },
                 }
             except (ValueError, OSError):
                 self._snapshots[scope] = None
         return self._snapshots[scope]
+
+    def dependency(self) -> tuple:
+        """The selected inputs this operation uses, including extension definitions."""
+        return self.selection.dependency()
 
     def admitted_instances(self) -> tuple[tuple[str, Mapping[str, Any]], ...]:
         """Every configured instance this caller may interpret, public first.

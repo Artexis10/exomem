@@ -793,6 +793,63 @@ def test_a_snapshot_echo_read_as_installation_begins_is_held(
     assert watcher._drain()[1] == []
 
 
+@pytest.mark.parametrize("start_phase", ["prepared", "installing"])
+def test_a_snapshot_echo_spanning_installation_is_not_external(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, start_phase: str
+) -> None:
+    """A rename may invalidate a read before its phase update reaches the token."""
+    target = vault / "Knowledge Base" / "index.md"
+    target.write_bytes(b"old")
+    stage = vault / "stage.tmp"
+    stage.write_bytes(b"new")
+    descriptor = os.open(stage, os.O_RDONLY)
+    try:
+        intents = file_watcher.register_publication_intents(
+            vault,
+            [(target, descriptor, hashlib.sha256(b"new").hexdigest(),
+              hashlib.sha256(b"old").hexdigest(), 3)],
+        )
+    finally:
+        os.close(descriptor)
+    assert len(intents) == 1
+    if start_phase == "installing":
+        file_watcher.begin_publication_installation(intents)
+    watcher = file_watcher.FileWatcher(vault)
+    real_read = os.read
+    reads = 0
+
+    def read_across_installation(fd: int, size: int) -> bytes:
+        nonlocal reads
+        content = real_read(fd, size)
+        reads += 1
+        if reads == 1:
+            if start_phase == "prepared":
+                file_watcher.begin_publication_installation(intents)
+            else:
+                stage.replace(target)
+        elif reads == 2 and stage.exists():
+            stage.replace(target)
+            file_watcher.mark_publication_installed(intents)
+        return content
+
+    with monkeypatch.context() as reading:
+        reading.setattr(os, "read", read_across_installation)
+        watcher._record(target, deleted=False)
+    # Each schedule must run its race through the hooked read.
+    assert reads == (1 if start_phase == "prepared" else 2)
+
+    # Finish the publication if the first, already-valid BEFORE proof was held.
+    if stage.exists():
+        stage.replace(target)
+    file_watcher.mark_publication_installed(intents)
+    registered = file_watcher.register_self_write(vault, [target])
+    file_watcher.finalize_publication_intents(intents, succeeded=registered)
+    watcher._record(target, deleted=False)
+
+    assert freshness.external_pending(vault) is False
+    assert watcher._drain()[1] == []
+
+
 def _remember_reviewed(vault: Path, title: str, slug: str) -> dict:
     remember = next(c for c in commands.PRODUCT_COMMANDS if c.name == "remember")
     kwargs = {

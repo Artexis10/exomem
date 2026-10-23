@@ -701,7 +701,7 @@ _DECLARED_UNBOUNDED_JOINS = {
     "filter never waits",
     (
         "embedding_index.py",
-        "EmbeddingIndex.all_vectors",
+        "EmbeddingIndex._all_vector_snapshot",
         "loading.join",
     ): "single-flight corpus-matrix load: bounded by the one load the inline reader would "
     "otherwise run itself; a managed recall defers with matrix_warming and never waits",
