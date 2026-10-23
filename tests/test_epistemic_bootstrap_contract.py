@@ -595,23 +595,17 @@ def _post_write(vault: Path, profile: str) -> dict:
     return _op(vault, profile=profile)["authoring_contract"]["post_write"]
 
 
-def test_full_contract_teaches_pre_write_destination_choice(vault: Path) -> None:
-    """Routing a divergent thread is a write-time act, not a reply to a detector.
+@pytest.mark.parametrize("profile", ["full", "compact", "diagnostics"])
+def test_destination_rule_reaches_the_pre_write_loop(vault: Path, profile: str) -> None:
+    """A hookless writer receives the canonical rule before drafting a note."""
+    from exomem.semantic_authoring import AUTHORING_CONTRACT
 
-    The semantic scope-divergence sensor is a safety net for routing that was
-    missed. An agent taught only the net will let a page accumulate structural
-    debt until something fires, which is the 2026-08-29 shape the sensor exists to
-    catch and this clause exists to prevent.
-    """
-    clause = _post_write(vault, "full")["destination_choice"]
+    authoring = _op(vault, profile=profile)["authoring_contract"]
+    clause = AUTHORING_CONTRACT.routes["destination_fitness"]
+    loop = authoring["canonical_loop"]
 
-    assert "at write time" in clause
-    assert "declared scope" in clause
-    # The routing act itself: find an existing home or make one.
-    assert "existing destination" in clause and "create one" in clause
-    # And the ordering against the detector, explicitly.
-    assert "safety net" in clause
-    assert "never the primary mechanism" in clause
+    assert authoring["post_write"]["destination_choice"].startswith(clause)
+    assert loop.index(clause) < loop.index("draft the smallest durable compiled conclusion")
 
 
 def test_destination_choice_names_no_tool(vault: Path) -> None:
@@ -622,32 +616,3 @@ def test_destination_choice_names_no_tool(vault: Path) -> None:
     """
     clause = _post_write(vault, "full")["destination_choice"]
     assert "(" not in clause and "_memory" not in clause
-
-
-def test_compact_payload_carries_the_destination_choice_clause(vault: Path) -> None:
-    """Named replacement for `test_compact_payload_stays_byte_identical_without_the_clause`.
-
-    That pin held the clause out of compact and named its own successor: compact
-    sat 24 bytes under a ceiling whose docstring pre-commits the next addition to
-    TRIMMING compact rather than raising it, so carriage "belongs to the queued
-    compact-bootstrap trim". This is that delivery. The clause is now paid for out
-    of trimmed redundancy rather than deferred, so the pin flips from absence to
-    carriage rather than being deleted: compact carries the teaching, condensed
-    wording allowed, and both halves of the rule must survive the condensation.
-    """
-    clause = _post_write(vault, "compact")["destination_choice"]
-
-    # Half one -- the routing act, at write time, against the declared scope.
-    assert "at write time" in clause
-    assert "declared scope" in clause
-    assert "existing destination" in clause and "create one" in clause
-    # Half two -- the detector is the net, never the mechanism.
-    assert "safety net" in clause
-    assert "never the primary mechanism" in clause
-    # Compact is the payload a hookless surface receives, which is exactly where
-    # `_filter_bootstrap_payload` deletes a string naming an unavailable command.
-    assert "(" not in clause and "_memory" not in clause
-
-    # Admission is not a move: full and diagnostics still carry it too.
-    for profile in ("full", "diagnostics"):
-        assert "destination_choice" in _post_write(vault, profile)

@@ -1770,6 +1770,7 @@ def op_bootstrap(
             "canonical_loop": [
                 "ask_memory for relevant prior notes and sources",
                 "read_memory enough context; use ask_memory(deep=true) for synthesis",
+                semantic_authoring_module.AUTHORING_CONTRACT.routes["destination_fitness"],
                 "draft the smallest durable compiled conclusion",
                 "identify the Sources/ or Evidence/ pages this conclusion draws from; they become `sources:` and each receives an `ingested_into:` back-reference",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
@@ -1898,29 +1899,10 @@ def op_bootstrap(
                     if profile == "compact"
                     else "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due"
                 ),
-                # Carried by EVERY profile. It was full-only while compact sat 24
-                # bytes under its ceiling; the queued compact-bootstrap trim has
-                # since paid for it out of redundancy elsewhere in the payload, and
-                # compact is the payload a hookless client receives, which is the
-                # surface with no detector-aware skill behind it. Compact states
-                # the same rule in fewer words -- both halves, the write-time
-                # routing act and the advisory as the net rather than the
-                # mechanism; full keeps its own wording unchanged.
                 "destination_choice": (
-                    "choose the destination at write time: when a coherent durable thread "
-                    "emerges outside the current page's declared scope, search for a focused "
-                    "existing destination, or create one, and link it. Post-write structural "
-                    "advisories are the safety net for missed routing, never the primary "
-                    "mechanism"
-                    if profile == "compact"
-                    else "choosing the destination is part of writing, not a reaction to an "
-                    "advisory. When a coherent durable thread emerges in conversation that "
-                    "sits outside the current page's declared scope, search for a focused "
-                    "existing destination and link it, or create one, at write time. "
-                    "Post-write structural advisories are the safety net for routing that "
-                    "was missed, never the primary mechanism: a page left to accumulate "
-                    "structural debt until a detector speaks has already cost the reader "
-                    "what the routing would have given them."
+                    f"{authoring_contract.routes['destination_fitness']} "
+                    "Choose and link the home before writing; post-write structural advisories are the "
+                    "safety net for missed routing, never the primary mechanism."
                 ),
             },
             "note_type_recipes": {

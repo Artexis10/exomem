@@ -2,7 +2,7 @@
 name: exomem-research
 description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
 metadata:
-  skill_contract: 1496455827106c6207692ebd02e7b121402a2f56a64e44698ef8409ea3150b65
+  skill_contract: d5a7d6da289d2d2e7363bd2a4e8de522a2add038b0b75b24a2c78e0fda298cb8
   version: "0.1.0"
 ---
 
@@ -60,10 +60,12 @@ Save findings that answer the question, change a decision, or create reusable co
 ## Mistakes to avoid
 Do not research from scratch before checking Exomem. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.
 
-<!-- exomem-semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d -->
+<!-- exomem-semantic-authoring:v9 sha256:80611c297969dd7a1e73dcf4a43d0ee3f6559e62bb00afffe74f971dba01a56c -->
 ## Semantic authoring contract
 
-Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
+Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
+
+Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
 
 Semantic roles:
 
