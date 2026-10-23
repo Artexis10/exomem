@@ -82,7 +82,7 @@ def _bootstrap(monkeypatch, level: str, surface: str | None, *, populated: bool 
             profile="product-cloud",
             tier2_enabled=True,
             product_commands=tuple(
-                command.name
+                command.public_name
                 for command in commands.product_commands_for("mcp")
                 if command.name not in commands.CLOUD_SURFACE_EXCLUSIONS
             ),
@@ -117,10 +117,10 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "workflow-activation-before-extra-recall": (
         CARRYING,
-        lambda core: "activate_context" not in core["active_capabilities"]["available_product_tools"]
+        lambda core: "recall_context" not in core["active_capabilities"]["available_product_tools"]
         or any(
-            "activate_context" in step
-            for step in core["workflow"]["loop"][:core["workflow"]["loop"].index("ask_memory for cheap product recall")]
+            "recall_context" in step
+            for step in core["workflow"]["loop"][:core["workflow"]["loop"].index("search_memory only for evidence gaps in the current context")]
         ),
     ),
     "capture-at-every-stepping-stone": (
@@ -212,17 +212,17 @@ def test_every_surface_the_split_applies_to_carries_a_recall_rule(monkeypatch, l
     exported = set(core["active_capabilities"]["available_product_tools"])
     if level in CARRYING:
         assert "Search memory" in recall
-        if "activate_context" in exported:
-            assert "activate_context" in recall
+        if "recall_context" in exported:
+            assert "recall_context" in recall
         else:
-            assert "activate_context" not in recall
-            assert "ask_memory" in recall and "ask_memory" in exported
+            assert "recall_context" not in recall
+            assert "search_memory" in recall and "search_memory" in exported
 
 
 @pytest.mark.parametrize("level", ("off", "light"))
 def test_the_quiet_levels_do_not_instruct_unprompted_recall(monkeypatch, level):
     core = _bootstrap(monkeypatch, level, None)
-    assert "activate_context" not in core["engagement"]["contract"]["recall"]
+    assert "recall_context" not in core["engagement"]["contract"]["recall"]
 
 
 # --------------------------------------------------------------------------- #

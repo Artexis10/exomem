@@ -194,7 +194,7 @@ def test_remember_discovery_schema_is_vault_invariant(
     before = {
         tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(mcp_before.list_tools())
-    }["remember"]
+    }["create_note"]
 
     vault_root = tmp_path / "schema_vault"
     project_keys_module.register_project_key(vault_root, "new-project-key")
@@ -202,7 +202,7 @@ def test_remember_discovery_schema_is_vault_invariant(
     after = {
         tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(mcp_after.list_tools())
-    }["remember"]
+    }["create_note"]
 
     assert after == before, (
         "remember discovery changed when the vault gained a project key; dynamic "
@@ -240,7 +240,7 @@ def test_hand_registered_exceptions_are_explicit(
     mcp = _build_server(monkeypatch, tmp_path)
     live = set(_live_schemas(mcp))
 
-    generated = {c.name for c in commands_module.PRODUCT_COMMANDS if "mcp" in c.surfaces}
+    generated = {c.public_name for c in commands_module.PRODUCT_COMMANDS if "mcp" in c.surfaces}
     exceptions = set(commands_module.HAND_REGISTERED_EXCEPTIONS)
 
     # No tool is both generated and a hand-registered exception.

@@ -77,8 +77,8 @@ def test_product_mcp_retrieval_schemas_are_safe(
     assert "find" not in tools
     assert "get" not in tools
 
-    ask_schema = tools["ask_memory"]["outputSchema"]
-    assert "explain" in tools["ask_memory"]["inputSchema"]["properties"]
+    ask_schema = tools["search_memory"]["outputSchema"]
+    assert "explain" in tools["search_memory"]["inputSchema"]["properties"]
     # The published schema names only the two shapes (hits or one envelope);
     # the fields inside them are asserted on the runtime payload below and the
     # typed model stays in the return annotation.
@@ -145,7 +145,7 @@ def test_legacy_mcp_leaf_names_are_opt_in(
     monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
     compat_tools = _mcp_tools(_build_server(monkeypatch, vault))
 
-    assert "remember" in compat_tools
+    assert "create_note" in compat_tools
     assert "manage_memory_file" in compat_tools
     assert "note" in compat_tools
     assert "create_file" in compat_tools

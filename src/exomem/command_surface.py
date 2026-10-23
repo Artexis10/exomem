@@ -11,7 +11,7 @@ import time
 import types
 import typing
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -336,6 +336,16 @@ class Command:
     mcp_annotation_pin: Mapping[str, object] | None = field(
         default=None, compare=False, hash=False
     )
+    preferred_name: str | None = None
+
+    @property
+    def public_name(self) -> str:
+        """Preferred discovery spelling; ``name`` remains the execution identity."""
+        return self.preferred_name or self.name
+
+    @property
+    def callable_names(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((self.public_name, self.name)))
 
     @property
     def doc(self) -> str:
@@ -357,9 +367,17 @@ class Command:
         """MCP behaviour hints for this command's generated tool."""
         if self.mcp_annotation_pin is not None:
             return ToolAnnotations(**dict(self.mcp_annotation_pin))
-        return mcp_tool_annotations(
+        annotations = mcp_tool_annotations(
             self.name, read_only=self.read_only, open_world=self.name in OPEN_WORLD_OPS
         )
+        if self.preferred_name:
+            annotations.title = self.public_name.replace("_", " ").title()
+        return annotations
+
+
+def resolve_command(name: str, commands: Iterable[Command]) -> Command | None:
+    """Resolve either spelling only within the adapter's already-filtered registry."""
+    return next((command for command in commands if name in command.callable_names), None)
 
 
 def bind_vault(

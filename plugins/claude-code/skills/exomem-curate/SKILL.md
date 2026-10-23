@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
 metadata:
-  skill_contract: 1496455827106c6207692ebd02e7b121402a2f56a64e44698ef8409ea3150b65
+  skill_contract: 1ca0144a0db2a02e76ffe52f9a07e4c44aeaa34e7c8de0f40db2af52df62fd37
   version: "0.2.0"
 ---
 
@@ -39,7 +39,7 @@ and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
 ## Workflow
-1. Search related notes with `ask_memory`; use `connect_memory(operation="suggest-links")` for link candidates, `"suggest-relations"` when direction matters, and `"graph-context"` for graph shape or inbound links.
+1. Search related notes with `search_memory`; use `connect_memory(operation="suggest-links")` for link candidates, `"suggest-relations"` when direction matters, and `"graph-context"` for graph shape or inbound links.
 2. Identify safe improvements — missing links, stale wording, weak titles, duplicate tags, or unlinked entities — starting from `review_memory(mode="relation-debt")` for pages with no outbound edges and `mode="relation-queue"` for already-reviewed candidates.
 3. For a bounded set of explicitly selected pages, call `maintain_memory(mode="curation", curation_action="work-item", refs=[...], paths=[...])`. This is `structural_suggestions`: it assembles recorded context and never chooses semantics or writes content.
 4. Author the typed plan yourself, then call `maintain_memory(mode="curation", curation_action="propose", plan={...})`. Inspect it with `maintain_memory(mode="curation", curation_action="preview", run_id=...)`; preview the immutable plan once and surface its exact actions, blockers, fingerprint, and compensation classes.
@@ -74,7 +74,7 @@ Preserve history. Prefer supersession when meaning changes. Keep links useful, n
 ## Mistakes to avoid
 Do not rewrite raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords. Do not reuse a forward approval for compensation, silently continue a partial or blocked run, or turn one confirmation into standing approval.
 
-<!-- exomem-semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d -->
+<!-- exomem-semantic-authoring:v8 sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2 -->
 ## Semantic authoring contract
 
 Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement.
@@ -99,7 +99,7 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Exact applicability: obtain `bootstrap(profile="compact", section="authoring")` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(profile="full")` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `schema_memory(subject="note-types", operation="inspect")` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
-- Routes: use `remember` for a new compiled note, `replace_memory` for a replacement, `observe_memory` for one unit, and `edit_memory` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits.
+- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `observe_memory` for one unit, and `edit_note` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
 - Findings: `missing_semantic_unit` means an applicable live-class compiled result has no valid non-empty unit; `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.
 - Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`.
 - Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body.

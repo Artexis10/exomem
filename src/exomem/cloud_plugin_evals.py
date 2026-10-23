@@ -37,20 +37,21 @@ def _calls(observations: list) -> list[dict]:
 
 
 @functools.cache
-def _product_commands() -> dict:
+def _product_commands() -> tuple:
     # Imported here, not at module load: the registry is heavy and only the
     # write check needs it.
     from .commands import PRODUCT_COMMANDS
 
-    return {command.name: command for command in PRODUCT_COMMANDS}
+    return PRODUCT_COMMANDS
 
 
 def _is_write(call: dict) -> bool:
     """Whether an observed call can change memory, as the command registry classifies it."""
+    from .command_surface import resolve_command
     from .commands import invocation_is_read_only
     from .governance.egress import SelectorCoverageError
 
-    command = _product_commands().get(call.get("name"))
+    command = resolve_command(call.get("name"), _product_commands())
     if command is None:
         return False
     arguments = call.get("arguments")
@@ -214,6 +215,16 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
         for o in observations
     ):
         return _report(issues + ["observations_invalid"])
+    from .command_surface import resolve_command
+
+    # Normalize only API name fields in this evaluation view; preserve the captured trace.
+    observations = [
+        {**observation, "name": command.name}
+        if observation.get("kind") == "tool"
+        and (command := resolve_command(observation.get("name"), _product_commands()))
+        else observation
+        for observation in observations
+    ]
     users = [o.get("text", "") for o in observations if o["kind"] == "user"]
     expected_prompt = case["prompt"].format(marker=marker)
     if not users or users[0] != expected_prompt:

@@ -838,7 +838,7 @@ def test_a_surface_without_the_preference_control_is_taught_a_route_it_can_take(
         surface="rest",
         profile="hosted-alpha-agent-test",
         tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory", "remember"),
+        product_commands=("bootstrap", "search_memory", "create_note"),
     )
     with active_surface(descriptor):
         payload = commands.op_bootstrap(vault, profile="compact", section="all")

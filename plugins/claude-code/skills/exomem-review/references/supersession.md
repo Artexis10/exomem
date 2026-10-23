@@ -14,7 +14,7 @@ Preserve a false historical proposition and author its verdict when its history 
 Add a distinct corrective unit and exact links when that makes the evidence clearer.
 Refutation and contradiction do not imply supersession or reduce a unit's rank.
 
-Use `replace_memory` when the agent judges that another page should become the current answer.
+Use `supersede_note` when the agent judges that another page should become the current answer.
 Honor the active engagement policy for that operation.
 Do not create a replacement only to retain old wording: guarded edits already retain prior Markdown.
 Read those revisions with `read_memory(include_history=true)`; the `revision_history` envelope remains separate from the page log.
@@ -116,9 +116,9 @@ checks (orphan detection, etc.).
 
 These conditions are checked by audit. Violations are reported.
 
-## Tool: `replace_memory`
+## Tool: `supersede_note`
 
-`replace_memory` performs the steps above in one call. Replacement is a new
+`supersede_note` performs the steps above in one call. Replacement is a new
 source claim: every non-empty `sources` entry must resolve to authorized
 governed Source or Evidence material even when the old page carried an
 unresolved citation (`UNRESOLVED_SOURCE_CITATION`). Capture the original first

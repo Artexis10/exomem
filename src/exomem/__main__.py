@@ -4223,7 +4223,10 @@ def _core_op_names(*, expose_tier2: bool | None = None) -> frozenset[str]:
     if expose_tier2 is None:
         expose_tier2 = _expose_tier2()
     return frozenset(
-        c.name for c in commands_module.product_commands_for("cli", expose_tier2=expose_tier2)
+        spelling
+        for command in commands_module.product_commands_for("cli", expose_tier2=expose_tier2)
+        for name in command.callable_names
+        for spelling in (name, name.replace("_", "-"))
     )
 
 
@@ -4620,7 +4623,14 @@ def _core_op_main(argv: list[str]) -> int:
 
     expose_tier2 = _expose_tier2()
     registered_commands = commands_module.product_commands_for("cli", expose_tier2=expose_tier2)
-    cmds = {command.name: command for command in registered_commands}
+    from .command_surface import resolve_command
+
+    cmds = {command.public_name: command for command in registered_commands}
+    if argv:
+        # CLI command tokens support both underscore and hyphen spellings.
+        resolved = resolve_command(argv[0].replace("-", "_"), registered_commands)
+        if resolved is not None:
+            argv = [resolved.public_name, *argv[1:]]
 
     preverified_root = None
     preverified_admission = None
@@ -4649,7 +4659,7 @@ def _core_op_main(argv: list[str]) -> int:
         summary = (cmd.description or name).strip().splitlines()[0]
         detail = (
             f"{summary}\n\n{semantic_authoring.CLI_REST_POINTER}"
-            if name in semantic_authoring.AUTHORING_TOOLS
+            if cmd.name in semantic_authoring.AUTHORING_TOOLS
             else summary
         )
         sp = sub.add_parser(name, help=summary, description=detail)

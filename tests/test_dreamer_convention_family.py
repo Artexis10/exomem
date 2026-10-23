@@ -111,7 +111,7 @@ def test_the_tag_item_is_served_on_the_minority_note_with_counts(tmp_path: Path)
     assert f'"{fx.TAG_MAJORITY}" on 2' in item["why"]
     assert f'"{fx.TAG_MINORITY}" on 1' in item["why"]
     assert item["route"] == {
-        "tool": "edit_memory",
+        "tool": "edit_note",
         "args": {"path": fx.TAG_MINOR, "operation": {"kind": "replace_tags"}},
     }
     current = upkeep.item(vault, item["ref"])["item"]
@@ -179,7 +179,7 @@ def test_a_label_folding_to_one_registered_category_is_proposed(tmp_path: Path) 
     assert row["reason_code"] == "category_fold_registered"
     assert row["subject_path"] == fx.CATEGORY_NOTE
     assert [item["path"] for item in row["evidence"]] == [fx.CATEGORY_NOTE]
-    assert row["route"]["tool"] == "edit_memory"
+    assert row["route"]["tool"] == "edit_note"
     assert row["route"]["args"]["path"] == fx.CATEGORY_NOTE
     [item] = _served(vault, "convention.category")
     assert "field_trial" in item["why"]

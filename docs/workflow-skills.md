@@ -11,8 +11,8 @@ to return.
 
 | Layer | What it is | Example |
 | --- | --- | --- |
-| Exomem product commands | Product MCP/REST/CLI commands that read and write the KB | `ask_memory`, `read_memory`, `remember`, `capture_source`, `review_memory` |
-| Context packs | Retrieval-time evidence bundles returned by `ask_memory(deep=true)` | top hits, extracted claims, graph neighborhood, contradiction signals |
+| Exomem product commands | Product MCP/REST/CLI commands that read and write the KB | `search_memory`, `read_memory`, `create_note`, `capture_source`, `review_memory` |
+| Context packs | Retrieval-time evidence bundles returned by `search_memory(deep=true)` | top hits, extracted claims, graph neighborhood, contradiction signals |
 | Knowledge packs | Product/domain guidance selected during setup | technical, creative, legal/warranty, personal records |
 | Workflow skills | Agent-visible workflows for common user intent | `exomem-continue`, `exomem-capture`, `exomem-review` |
 
@@ -58,6 +58,6 @@ Every workflow skill preserves the same Exomem contract:
 - Search before claiming prior context.
 - Keep raw `Sources/` and `Evidence/` separate from compiled notes.
 - Use compiled notes for durable conclusions only.
-- Prefer `replace_memory` over silent rewrites when a conclusion changes.
+- Prefer `supersede_note` over silent rewrites when a conclusion changes.
 - Treat review, stale, and contradiction signals as measurement, not judgment.
 - Cite the pages, sources, or artifacts used.

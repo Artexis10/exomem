@@ -104,7 +104,10 @@ def _observed(vault: Path, *paths: str) -> None:
 
 
 def _tool(vault: Path, name: str, **kwargs):
-    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
+    from exomem.command_surface import resolve_command
+
+    command = resolve_command(name, commands.PRODUCT_COMMANDS)
+    assert command is not None
     return invoke_command(command, vault, **kwargs)
 
 
@@ -303,7 +306,7 @@ def test_pages_of_two_origins_linking_a_page_without_a_summary_make_one_profile_
         fx.SEAL_WEAR,
     }
     assert row["route"] == {
-        "tool": "edit_memory",
+        "tool": "edit_note",
         "args": {
             "path": fx.ENTITY,
             "operation": {"kind": "patch_frontmatter", "field": "summary"},

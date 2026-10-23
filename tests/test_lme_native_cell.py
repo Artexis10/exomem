@@ -229,7 +229,8 @@ def test_native_cell_scrubs_caller_environment_and_denies_external_ingest(
     asyncio.run(exercise())
 
 
-def test_native_cell_preserves_result_lists_and_reads_their_diagnostics(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ("ask_memory", "search_memory"))
+def test_native_cell_preserves_result_lists_and_reads_their_diagnostics(tmp_path: Path, name: str) -> None:
     cell = NativeCell(
         tmp_path / "cell",
         python=PYTHON,
@@ -242,8 +243,8 @@ def test_native_cell_preserves_result_lists_and_reads_their_diagnostics(tmp_path
     class ListResultClient:
         calls = 0
 
-        async def call_tool_mcp(self, name: str, arguments: dict) -> SimpleNamespace:
-            assert name == "ask_memory"
+        async def call_tool_mcp(self, supplied_name: str, arguments: dict) -> SimpleNamespace:
+            assert supplied_name == name
             assert arguments == {"query": "sentinel"}
             self.calls += 1
             effective_mode = "hybrid" if self.calls == 1 else "vector_lexical_fallback"
@@ -258,13 +259,13 @@ def test_native_cell_preserves_result_lists_and_reads_their_diagnostics(tmp_path
     cell._client = ListResultClient()
 
     async def exercise() -> None:
-        result = await cell.call("ask_memory", {"query": "sentinel"})
+        result = await cell.call(name, {"query": "sentinel"})
         assert result["structuredContent"]["result"] == [
             {"path": "Notes/hit.md", "effective_mode": "hybrid"}
         ]
         assert cell._fallback_detected is False
         assert cell._semantic_retrieval_verified is True
-        await cell.call("ask_memory", {"query": "sentinel"})
+        await cell.call(name, {"query": "sentinel"})
         assert cell._fallback_detected is True
         assert cell._semantic_retrieval_verified is True
         json.dumps(result, allow_nan=False)

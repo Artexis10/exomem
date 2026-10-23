@@ -79,8 +79,8 @@ when Exomem cannot capture; move durable results to Exomem when it can.
 
 | Simple action | User phrasing | Product route |
 |---|---|---|
-| `ask` | "what do I know," "find what I concluded," "show the context" | `ask_memory(detail="compact", rerank=false)` first; `read_memory` or `ask_memory(deep=true)` when synthesis needs context |
-| `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
+| `ask` | "what do I know," "find what I concluded," "show the context" | `search_memory(detail="compact", rerank=false)` first; `read_memory` or `search_memory(deep=true)` when synthesis needs context |
+| `create_note` | "remember this," "save this conclusion," "write this decision" | `create_note`; use `supersede_note` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | Pick the lane first, then the transport. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
 | `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `plan_memory` for intended future state in a configured Planning collection |
 | `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `record_memory` for observed state in a configured Record collection |
@@ -169,7 +169,7 @@ Examples:
 
 - "Remember this decision" -> write a concise compiled note and report
   `Saved -> <path>`.
-- "What did I conclude about onboarding?" -> `ask_memory` first, cite hits, and
+- "What did I conclude about onboarding?" -> `search_memory` first, cite hits, and
   retry with adjacent terms before treating a miss as meaningful.
 - "Save this article" -> `capture_source` with provenance; ask about compiling
   only if a conclusion is present.
@@ -190,7 +190,7 @@ Examples:
 - "Compile these three sources" -> ensure the three originals are already
   captured as Source/Evidence pages (capture any missing originals first), then
   draft a sourced note with
-  `remember(suggestions=true, response_detail="full")` link suggestions, then
+  `create_note(suggestions=true, response_detail="full")` link suggestions, then
   write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for
   keep/edit/supersede/archive.

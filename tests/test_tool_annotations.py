@@ -73,8 +73,8 @@ def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch, tmp_pa
     for cmd in commands_module.PRODUCT_COMMANDS:
         if "mcp" not in cmd.surfaces:
             continue  # note: hand-registered for MCP, checked below
-        assert ann[cmd.name]["readOnlyHint"] is cmd.read_only, (
-            f"{cmd.name}: readOnlyHint={ann[cmd.name]['readOnlyHint']} "
+        assert ann[cmd.public_name]["readOnlyHint"] is cmd.read_only, (
+            f"{cmd.name}: readOnlyHint={ann[cmd.public_name]['readOnlyHint']} "
             f"but registry cli_writes={cmd.cli_writes}"
         )
 
@@ -90,14 +90,14 @@ def test_destructive_hint_only_for_overwrite_ops(
         if "mcp" not in cmd.surfaces or cmd.read_only:
             continue
         expected = cmd.name in commands_module.DESTRUCTIVE_OPS
-        assert ann[cmd.name]["destructiveHint"] is expected, (
-            f"{cmd.name}: destructiveHint={ann[cmd.name]['destructiveHint']} expected {expected}"
+        assert ann[cmd.public_name]["destructiveHint"] is expected, (
+            f"{cmd.name}: destructiveHint={ann[cmd.public_name]['destructiveHint']} expected {expected}"
         )
 
 
 def test_ask_memory_is_a_safe_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # The public recall command remains a safe read.
-    a = _live_annotations(_build_server(monkeypatch, tmp_path))["ask_memory"]
+    a = _live_annotations(_build_server(monkeypatch, tmp_path))["search_memory"]
     assert a["readOnlyHint"] is True
     assert a["destructiveHint"] is False
     assert a["openWorldHint"] is False

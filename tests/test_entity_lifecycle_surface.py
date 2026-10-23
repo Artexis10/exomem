@@ -778,7 +778,7 @@ def test_bootstrap_skips_recurrence_when_category_read_is_not_callable(tmp_path:
         surface="mcp",
         profile="reduced",
         tier2_enabled=False,
-        product_commands=("bootstrap", "ask_memory"),
+        product_commands=("bootstrap", "search_memory"),
     )
     with active_surface(descriptor):
         payload = commands.op_bootstrap(tmp_path, section="all")

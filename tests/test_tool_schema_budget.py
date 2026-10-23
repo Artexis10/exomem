@@ -28,28 +28,28 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # contract (five authoring tools) and the retained-history read and observe fields,
 # then by 80 for browse_memory's page fields (`limit`, `cursor`), then by 650 for the
 # registry selector enums on six selector tools, then by 150 for read_memory's derived
-# view refs and `continuation` field, then by 225 for remember's `summary` and `topics` fields.
+# view refs and `continuation` field, then by 225 for create_note's `summary` and `topics` fields.
 TOTAL_BUDGET = 92_755
 
 #: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
 # Registry selector enums (close-mcp-tool-selectors) raise six selector tools' ceilings.
 # The bounded viewer and original recovery use spare per-tool headroom; correction guidance raises the total.
 TOOL_CEILINGS: dict[str, int] = {
-    "edit_memory": 6950,
-    "remember": 5650,
-    "replace_memory": 4825,
+    "edit_note": 6950,
+    "create_note": 5650,
+    "supersede_note": 4825,
     "manage_memory_file": 4650,
     "connect_memory": 4325,
     "episode_memory": 4200,
     "record_memory": 4165,
-    "ask_memory": 4025,
+    "search_memory": 4025,
     "schema_memory": 4200,
     "observe_memory": 4400,
     "maintain_memory": 3725,
     "adoption_studio": 3325,
     "capture_source": 3325,
     "review_memory": 3475,
-    "activate_context": 2950,
+    "recall_context": 2950,
     "triage_memory": 2990,
     "govern_memory": 3100,
     "plan_memory": 2275,
@@ -64,14 +64,14 @@ TOOL_CEILINGS: dict[str, int] = {
     "process_media": 1025,
     "transfer_artifact": 1330,
     "browse_memory": 930,
-    "compile_source": 715,
+    "prepare_note": 715,
     "read_media": 625,
     "coordination_status": 500,
     "viewer_map": 3325,
 }
 
 AUTHORING_TOOLS = frozenset(
-    {"remember", "replace_memory", "edit_memory", "observe_memory", "manage_memory_file"}
+    {"create_note", "supersede_note", "edit_note", "observe_memory", "manage_memory_file"}
 )
 
 
@@ -216,14 +216,14 @@ def test_cli_help_and_rest_point_to_the_contract_but_the_mcp_wire_does_not(
     )
     for name in AUTHORING_TOOLS:
         assert openapi["paths"][f"/api/{name}"]["post"]["description"] == pointer
-    assert "description" not in openapi["paths"]["/api/ask_memory"]["post"]
+    assert "description" not in openapi["paths"]["/api/search_memory"]["post"]
 
     for name in sorted(AUTHORING_TOOLS):
         with pytest.raises(SystemExit):
             main([name, "--help"])
         assert " ".join(capsys.readouterr().out.split()).count(" ".join(pointer.split())) == 1, name
     with pytest.raises(SystemExit):
-        main(["ask_memory", "--help"])
+        main(["search_memory", "--help"])
     assert "Semantic authoring rules" not in capsys.readouterr().out
 
 

@@ -149,6 +149,7 @@ from .command_surface import (
     Param,  # noqa: F401 - re-exported for server.py
     bind_vault,  # noqa: F401 - re-exported for server.py
     mcp_tool_annotations,  # noqa: F401 - re-exported for server.py
+    resolve_command,
 )
 from .command_surface import (
     derive_params as _derive_params,
@@ -712,7 +713,7 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
         "migration": source_taxonomy_module.CAPTURE_KIND_MIGRATION,
     }
     if profile != "compact":
-        projection["recall"] = "ask_memory(source_kinds=, domains=, projects=), alone or combined."
+        projection["recall"] = "search_memory(source_kinds=, domains=, projects=), alone or combined."
         projection["source_kinds_known"] = sorted(taxonomy.kinds)
         projection["domains_known"] = sorted(taxonomy.domains)
         projection["exhaustive"] = False
@@ -920,7 +921,7 @@ def op_bootstrap(
     recall = engagement_policy["contract"].get("recall")
     if (
         isinstance(recall, str)
-        and "activate_context" not in active_descriptor.callable_commands
+        and "recall_context" not in active_descriptor.callable_commands
     ):
         engagement_policy["contract"]["recall"] = recall.replace(
             prominence_module.ACTIVATION_CARRIER_LINE, prominence_module.ASK_MEMORY_CARRIER_LINE
@@ -1709,14 +1710,14 @@ def op_bootstrap(
             "page_status": semantic_authoring_module.STATUS_CLASSIFICATION_RULE,
             "requested": requested_workflow,
             "loop": [
-                "bootstrap",
+                "reuse current bootstrap policy; load it only when missing or stale",
                 "adopt_vault or browse_memory when first seeing an existing vault",
                 *([
                     "when recall is warranted and context is not already injected, "
-                    "activate_context with the user's turn before extra recall"
-                ] if "activate_context" in active_product_names else []),
-                "ask_memory for cheap product recall",
-                "read_memory or reasoning_lookup for more context",
+                    "recall_context with the user's turn before extra recall"
+                ] if "recall_context" in active_product_names else []),
+                "search_memory only for evidence gaps in the current context",
+                "read_memory to open selected result refs",
                 MEMORY_CITATION_GUIDANCE,
                 "reason in the agent",
                 (
@@ -1739,12 +1740,12 @@ def op_bootstrap(
                 ),
                 (
                     "Address post-write link/duplicate warnings. write_feedback needs "
-                    "response_detail='full'; suggestions need remember(suggestions=true)."
+                    "response_detail='full'; suggestions need create_note(suggestions=true)."
                     if profile == "compact" else
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
                     "response_detail='full', and suggestions additionally need "
-                    "remember(suggestions=true)"
+                    "create_note(suggestions=true)"
                 ),
                 (
                     "Inspect vocabulary_sync; if warming/unavailable, use its recovery route "
@@ -1768,8 +1769,8 @@ def op_bootstrap(
         "workflow_skills": workflow_skills_module.bootstrap_entries(),
         "authoring_contract": {
             "canonical_loop": [
-                "ask_memory for relevant prior notes and sources",
-                "read_memory enough context; use ask_memory(deep=true) for synthesis",
+                "search_memory for relevant prior notes and sources",
+                "read_memory enough context; use search_memory(deep=true) for synthesis",
                 "draft the smallest durable compiled conclusion",
                 "identify the Sources/ or Evidence/ pages this conclusion draws from; they become `sources:` and each receives an `ingested_into:` back-reference",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
@@ -1778,23 +1779,23 @@ def op_bootstrap(
                     "`- supports [[Knowledge Base/Notes/Research/example-target]]`; "
                     "Dataview-style `supports:: [[...]]` fields are not relation syntax"
                 ),
-                "write with remember, observe_memory, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
+                "write with create_note, observe_memory, edit_note, supersede_note, capture_source, preserve_evidence, or connect_memory as appropriate",
                 (
                     "inspect the warnings on the write result; add "
                     "response_detail='full' to see write_feedback, and "
-                    "remember(suggestions=true) as well to see suggestions"
+                    "create_note(suggestions=true) as well to see suggestions"
                 ),
-                "apply any accepted links through edit_memory",
+                "apply any accepted links through edit_note",
                 "report the written path",
             ],
             "route_by_intent": {
                 "raw_material": "capture_source",
                 "raw_evidence_or_artifact": "preserve_evidence, preserve_artifacts, or transfer_artifact",
-                "new_durable_conclusion": "remember",
-                "conclusion_drawn_from_captured_material": "remember(sources=[...]) naming those pages, which links the conclusion to its provenance and marks the source processed",
-                "small_correction": "edit_memory",
+                "new_durable_conclusion": "create_note",
+                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) naming those pages, which links the conclusion to its provenance and marks the source processed",
+                "small_correction": "edit_note",
                 "semantic_unit_mutation": "observe_memory",
-                "substantial_rewrite": "replace_memory",
+                "substantial_rewrite": "supersede_note",
                 "stable_named_entity": "connect_memory(operation='create-entity')",
             },
             "preflight": {
@@ -1802,8 +1803,8 @@ def op_bootstrap(
                 "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page; a write advisory carries a review ref and fingerprint so an exact dismissed or unexpired snoozed signal stays quiet until the counterpart changes or the written page changes the detected signal class",
             },
             "post_write": {
-                "remember_suggestions": "non-binding related pages returned by remember(suggestions=true); reachable via response_detail='full'",
-                "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
+                "remember_suggestions": "non-binding related pages returned by create_note(suggestions=true); reachable via response_detail='full'",
+                "write_feedback": "structural feedback from create_note(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
                 "structure_suggestion": (
                     "The committed response's advisory carries kind, strength (strong|moderate) and ordered reasons. scope_divergence means material exceeds declared scope; source_classification_debt counts sources without a chosen kind and their Sources/ folders."
                     if profile == "compact"
@@ -1826,7 +1827,7 @@ def op_bootstrap(
                     "and create only after that inline confirmation. Backfill only exactly dated "
                     "evidence units, citing each unit or artifact in sources"
                 ),
-                "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
+                "accepted_links": "persist only through edit_note/create_note/supersede_note; never auto-write suggestions",
                 # Deliberately command-free, exactly like the epistemic
                 # commitments: `_filter_bootstrap_payload` deletes any string
                 # naming a command the active surface cannot call, and these lines
@@ -1990,7 +1991,7 @@ def op_bootstrap(
                 ),
                 "adoption_handoff": (
                     "adopt_vault(mode='compile-selected') returns a proposal only; review "
-                    "it, then call remember() so normal semantic precommit still applies"
+                    "it, then call create_note() so normal semantic precommit still applies"
                 ),
             },
             "reviewed_existing_edit": (
@@ -2004,7 +2005,7 @@ def op_bootstrap(
                 if profile == "compact"
                 else {
                     "validate_call": {
-                        "tool": "edit_memory",
+                        "tool": "edit_note",
                         "arguments": {
                             "path": "Knowledge Base/Notes/Research/example.md",
                             "why": "refresh relation review",
@@ -2017,7 +2018,7 @@ def op_bootstrap(
                         },
                     },
                     "commit_call": {
-                        "tool": "edit_memory",
+                        "tool": "edit_note",
                         "arguments": {
                             "path": "Knowledge Base/Notes/Research/example.md",
                             "why": "refresh relation review",
@@ -2044,12 +2045,12 @@ def op_bootstrap(
         },
         "tool_defaults": {
             "normal_lookup": {
-                "tool": "ask_memory",
+                "tool": "search_memory",
                 "args": {"detail": "compact", "rerank": False},
                 "when": "normal cheap product recall",
             },
             "reasoning_lookup": {
-                "tool": "ask_memory",
+                "tool": "search_memory",
                 "args": {"deep": True},
                 "when": "synthesis over bounded context",
             },
@@ -2059,7 +2060,7 @@ def op_bootstrap(
                 "when": "first-run import/adoption of an existing vault",
             },
             "diagnostics_lookup": {
-                "tool": "ask_memory",
+                "tool": "search_memory",
                 "args": {
                     "detail": "compact",
                     "include_timings": True,
@@ -2068,16 +2069,16 @@ def op_bootstrap(
             },
             "read_full_page": {"tool": "read_memory", "when": "after choosing a hit"},
             "write_compiled_note": {
-                "tool": "remember",
+                "tool": "create_note",
                 "when": "new durable conclusion",
             },
-            "minor_edit": {"tool": "edit_memory", "when": "small correction to an existing page"},
+            "minor_edit": {"tool": "edit_note", "when": "small correction to an existing page"},
             "mutate_semantic_unit": {
                 "tool": "observe_memory",
                 "when": "add, update, remove, or validate one compact/rich semantic unit",
             },
             "supersede": {
-                "tool": "replace_memory",
+                "tool": "supersede_note",
                 "when": "substantial rewrite of compiled material",
             },
             "binary_upload": {
@@ -2181,12 +2182,12 @@ def op_bootstrap(
         ),
         "common_tools": [
             "adopt_vault",
-            "ask_memory",
+            "search_memory",
             "read_memory",
-            "remember",
-            "edit_memory",
+            "create_note",
+            "edit_note",
             "observe_memory",
-            "replace_memory",
+            "supersede_note",
             "connect_memory",
         ],
     }
@@ -2199,15 +2200,15 @@ def op_bootstrap(
             },
             {
                 "goal": "cheap proactive recall",
-                "call": "ask_memory(query='...', detail='compact', rerank=false)",
+                "call": "search_memory(query='...', detail='compact', rerank=false)",
             },
             {
                 "goal": "reason across top matches",
-                "call": "ask_memory(query='...', deep=true)",
+                "call": "search_memory(query='...', deep=true)",
             },
             {
                 "goal": "capture a durable conclusion",
-                "call": "remember(note_type='research-note'|'insight'|..., title='...', content='...')",
+                "call": "create_note(note_type='research-note'|'insight'|..., title='...', content='...')",
             },
             {
                 "goal": "preserve attached binary files when the client supplies file handles",
@@ -6366,7 +6367,7 @@ def op_ask_memory(
     """Retrieve evidence for a known information gap.
 
     Search compiled knowledge and originals. deep=true returns packed context.
-    activate_context compiles initial turn context; read_memory opens selected
+    recall_context compiles initial turn context; read_memory opens selected
     refs. Returns evidence, not an answer. Help: bootstrap(profile="full").
 
     Args:
@@ -6465,7 +6466,7 @@ def _with_due_state(
     product surface grows a carrier.
 
     The block is deliberately NOT declared in `retrieval_models.FindEnvelope`.
-    Declaring it would move `ask_memory`'s published `outputSchema`, and therefore
+    Declaring it would move `search_memory`'s published `outputSchema`, and therefore
     the packaged tool-surface fingerprint and the connector attestations bound to
     it — the one thing this change promises not to touch. The envelope's schema
     does not forbid additional properties, and the block is advisory by
@@ -7743,7 +7744,7 @@ def op_edit_memory(
     """Edit an existing memory page with an auditable reason.
 
     Small corrections, sections, strings, opinion rows or frontmatter;
-    substantial rewrites use replace_memory.
+    substantial rewrites use supersede_note.
 
     Source edits validate the final sources against authorized Source/Evidence;
     unrelated edits leave legacy citations alone.
@@ -7984,7 +7985,7 @@ def op_replace_memory(
     """Supersede compiled memory with a new version.
 
     The old page stays readable and points to the new one. Use for a changed
-    conclusion; small edits go to `edit_memory`.
+    conclusion; small edits go to `edit_note`.
 
     Replacement sources must resolve to authorized governed Source/Evidence,
     even if old citations did not. Capture originals first or pass an empty list
@@ -8070,7 +8071,7 @@ def op_capture_source(
     content is text; files are client handles (locally: exomem attach --lane
     source). Stored losslessly in Sources/. Proof goes to preserve_evidence or
     preserve_artifacts; choose by role, not transport. compile_guidance=true
-    returns a compilation proposal.
+    returns a proposal; reuse it instead of calling prepare_note.
 
     `source_kind` (what it IS) is required; `domain` (what it is ABOUT) is
     optional. Both are open vocabularies: a new slug registers.
@@ -8081,7 +8082,7 @@ def op_capture_source(
             set.
         url: Required for kinds that declare it, such as article, paper, video.
         tags: Secondary labels; not for kind, domain or project.
-        compile_guidance: Return a compilation proposal.
+        compile_guidance: Return a proposal; skip another prepare_note call.
         suggested_title: Title hint for the proposal.
         source_kind: What it IS, lowercase slug: the closest known kind or a
             new one. Differing values with source_type are refused.
@@ -8257,7 +8258,7 @@ def op_episode_memory(
     Record when requested or live proactive_capture permits; bootstrap reports
     unknown policy. At a durable stop, one-line
     items, never a transcript. Stores a Source in Sources/Episodes/; newest
-    revision leads activate_context recent_context. Same episode adds a revision,
+    revision leads recall_context recent_context. Same episode adds a revision,
     retiring the previous one; identical retry writes nothing.
 
     Changes: prepare, disposition, resume routed leaves; episode_workflow_disabled
@@ -8390,7 +8391,8 @@ def op_compile_source(
 ) -> dict:
     """Plan a sourced note; read-only.
 
-    Returns skeleton/related pages; write with remember.
+    Returns skeleton/related pages; write with create_note. Reuse a proposal
+    already returned by capture_source(compile_guidance=true).
 
     Args:
         sources: Source paths or wikilinks.
@@ -9948,11 +9950,11 @@ def op_connect_memory(
             )
 
         def _accept_relations_edit(vault_root: Path, **kw: Any) -> dict:
-            """`edit_memory` for the relation queue: identical to op_edit_memory,
+            """`edit_note` for the relation queue: identical to op_edit_memory,
             but creates the canonical `## Relations` section when a note has none
-            (remember() doesn't emit one), so accepting the first relation into a
+            (create_note() doesn't emit one), so accepting the first relation into a
             note doesn't fail HEADING_NOT_FOUND. create_missing stays server-side
-            only — it is not exposed on the edit_memory MCP tool."""
+            only — it is not exposed on the edit_note MCP tool."""
             try:
                 result = edit_module.edit(vault_root, create_missing_section=True, **kw)
             except edit_module.EditError as e:
@@ -12435,7 +12437,7 @@ def op_query_dataset(
 
 
 def remember_description(project_keys_hint: str) -> str:
-    """The `remember` MCP description with the live project-key hint substituted."""
+    """The `create_note` MCP description with the live project-key hint substituted."""
     return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
 
 
@@ -12705,9 +12707,9 @@ _SIMPLE_ACTION_PACK_ALIASES: dict[str, tuple[str, ...]] = {
 _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     "ask": {
         "intent": "Recall durable knowledge and cite useful context.",
-        "route": {"tool": "ask_memory", "args": {"detail": "compact", "rerank": False}},
+        "route": {"tool": "search_memory", "args": {"detail": "compact", "rerank": False}},
         "deep_route": {
-            "tool": "ask_memory",
+            "tool": "search_memory",
             "args": {"detail": "compact", "rerank": False, "deep": True},
         },
         "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
@@ -12716,13 +12718,13 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         # bounded packet, or abstains. The rest of the family assumes the agent
         # already knows what it is looking for.
         # These keys route registered product commands, a closed protocol vocabulary.
-        "advanced": ["activate_context", "read_memory", "query_dataset", "read_media", "viewer_map"],
+        "advanced": ["recall_context", "read_memory", "query_dataset", "read_media", "viewer_map"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
-        "route": {"tool": "remember", "args": {"note_type": "insight"}},
+        "route": {"tool": "create_note", "args": {"note_type": "insight"}},
         "safety": "additive write; uses note validation and does not preserve raw provenance unless sources are provided",
-        "advanced": ["replace_memory", "edit_memory", "observe_memory"],
+        "advanced": ["supersede_note", "edit_note", "observe_memory"],
     },
     "capture": {
         "intent": (
@@ -12737,7 +12739,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "safety": "additive write; Sources and Evidence preserve originals/provenance",
         "advanced": [
             "transfer_artifact",
-            "compile_source",
+            "prepare_note",
             "preserve_artifacts",
             "process_media",
             "episode_memory",
@@ -12751,7 +12753,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "advanced": [
             "review_item_context",
             "triage_memory",
-            "compile_source",
+            "prepare_note",
             "coordination_status",
         ],
     },
@@ -12766,7 +12768,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "intent": "Assess or import an existing vault safely.",
         "route": {"tool": "adopt_vault", "args": {"mode": "scan-only"}},
         "safety": "scan-only by default; copy/compile modes require explicit options and preserve originals",
-        "advanced": ["browse_memory", "compile_source", "adoption_studio"],
+        "advanced": ["browse_memory", "prepare_note", "adoption_studio"],
     },
     "maintain": {
         "intent": "Check vault health and repair drift only when explicitly requested.",
@@ -12960,6 +12962,7 @@ COMMANDS: tuple[Command, ...] = _build_commands()
 egress_module.assert_projectors_registered({command.name: command for command in COMMANDS})
 egress_module.assert_outcomes_registered({command.name: command for command in COMMANDS})
 
+# Preferred spellings are closed API tokens; execution names keep receipts and policies stable.
 _PRODUCT_SPEC: tuple[tuple, ...] = (
     (
         "configure_memory", op_configure_memory, 1, True, False, None, _MCRC,
@@ -12997,7 +13000,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "query",
         _MCRC,
         ("search", "find"),
-        {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+        {"preferred_name": "search_memory", "surface": "primary", "actions": ("ask",), "first_run_safe": True},
     ),
     (
         "activate_context",
@@ -13008,7 +13011,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "turn",
         _MCRC,
         ("activate_context",),
-        {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+        {"preferred_name": "recall_context", "surface": "primary", "actions": ("ask",), "first_run_safe": True},
     ),
     (
         "read_memory",
@@ -13057,7 +13060,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("note",),
-        {"surface": "primary", "actions": ("save", "update"), "first_run_safe": False},
+        {"preferred_name": "create_note", "surface": "primary", "actions": ("save", "update"), "first_run_safe": False},
     ),
     (
         "edit_memory",
@@ -13068,7 +13071,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("edit",),
-        {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+        {"preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
     ),
     (
         "observe_memory",
@@ -13090,7 +13093,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "old_path",
         _MCRC,
         ("replace",),
-        {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+        {"preferred_name": "supersede_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
     ),
     (
         "capture_source",
@@ -13128,7 +13131,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("propose_compilation",),
-        {"surface": "primary", "actions": ("review", "save"), "first_run_safe": True},
+        {"preferred_name": "prepare_note", "surface": "primary", "actions": ("review", "save"), "first_run_safe": True},
     ),
     (
         "preserve_evidence",
@@ -13471,6 +13474,7 @@ def _build_product_commands() -> tuple[Command, ...]:
         cmds.append(
             Command(
                 name=name,
+                preferred_name=meta.get("preferred_name"),
                 leaf=leaf,
                 params=params,
                 surfaces=surfaces,
@@ -13492,7 +13496,7 @@ def _build_product_commands() -> tuple[Command, ...]:
 
 
 PRODUCT_COMMANDS: tuple[Command, ...] = _build_product_commands()
-PRODUCT_PUBLIC_NAMES: tuple[str, ...] = tuple(c.name for c in PRODUCT_COMMANDS)
+PRODUCT_PUBLIC_NAMES: tuple[str, ...] = tuple(c.public_name for c in PRODUCT_COMMANDS)
 PRODUCT_ROUTE_HELPERS: frozenset[str] = frozenset({"transfer_token"})
 HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset()
 
@@ -13556,6 +13560,9 @@ def product_commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Co
 
 def validate_product_registry() -> dict:
     """Validate product route metadata against canonical implementation leaves."""
+    callable_names = [name for command in PRODUCT_COMMANDS for name in command.callable_names]
+    if len(callable_names) != len(set(callable_names)):
+        raise RuntimeError("product command spellings collide")
     canonical = {c.name for c in COMMANDS}
     route_refs = {route for cmd in PRODUCT_COMMANDS for route in cmd.routes}
     unknown = route_refs - canonical - PRODUCT_ROUTE_HELPERS
@@ -13599,8 +13606,9 @@ def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescripto
         profile="canonical-full-product",
         tier2_enabled=True,
         product_commands=tuple(
-            command.name for command in product_commands_for("mcp", expose_tier2=True)
+            command.public_name for command in product_commands_for("mcp", expose_tier2=True)
         ),
+        compatibility_commands=tuple(command.name for command in PRODUCT_COMMANDS if command.preferred_name),
     )
 
 
@@ -13613,17 +13621,18 @@ def product_tool_catalog(
     selected = tuple(
         command
         for command in PRODUCT_COMMANDS
-        if available_tools is None or command.name in available_tools
+        if available_tools is None or command.public_name in available_tools
     )
-    primary = [c.name for c in selected if c.product_surface == "primary"]
-    advanced = [c.name for c in selected if c.product_surface != "primary"]
+    primary = [c.public_name for c in selected if c.product_surface == "primary"]
+    advanced = [c.public_name for c in selected if c.product_surface != "primary"]
     return {
         "primary": primary,
         "advanced": advanced,
-        "first_run_safe": [c.name for c in selected if c.first_run_safe],
+        "first_run_safe": [c.public_name for c in selected if c.first_run_safe],
         "routes": {
-            c.name: [
-                route for route in c.routes if callable_tools is None or route in callable_tools
+            c.public_name: [
+                resolved.public_name if (resolved := resolve_command(route, PRODUCT_COMMANDS)) else route
+                for route in c.routes if callable_tools is None or route in callable_tools
             ]
             for c in selected
         },
@@ -13637,6 +13646,7 @@ def _bootstrap_known_callable_names() -> frozenset[str]:
     return frozenset(
         {
             *PRODUCT_PUBLIC_NAMES,
+            *(name for command in PRODUCT_COMMANDS for name in command.callable_names),
             *(command.name for command in COMMANDS),
             *PRODUCT_ROUTE_HELPERS,
             *simple_action_names(),
@@ -13767,7 +13777,7 @@ def simple_action_catalog(
     available_tools: frozenset[str] | set[str] | None = None,
 ) -> dict:
     """Product action map over product commands; no duplicate command logic."""
-    known_commands = {command.name for command in PRODUCT_COMMANDS} | {"doctor"}
+    known_commands = {command.public_name for command in PRODUCT_COMMANDS} | {"doctor"}
     out: dict[str, dict] = {}
     for action in _SIMPLE_ACTIONS:
         definition = _SIMPLE_ACTION_DEFS[action]
@@ -13832,12 +13842,12 @@ def product_front_door_catalog(
     """Map simple product verbs to the typed tools that enforce governance."""
     out = {action: {"primary_tools": [], "advanced_tools": []} for action in _PRODUCT_ACTIONS}
     for command in PRODUCT_COMMANDS:
-        if available_tools is not None and command.name not in available_tools:
+        if available_tools is not None and command.public_name not in available_tools:
             continue
         bucket = "primary_tools" if command.product_surface == "primary" else "advanced_tools"
         for action in command.product_actions:
             if action in out:
-                out[action][bucket].append(command.name)
+                out[action][bucket].append(command.public_name)
     out["adopt"]["contract"] = (
         "scan-only by default; write modes preserve originals and stay under Knowledge Base/"
     )
