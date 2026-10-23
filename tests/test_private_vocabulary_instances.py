@@ -44,6 +44,60 @@ def private_instances(configured_boundary, vault):
     return authenticate
 
 
+def test_catalogue_ranking_keeps_the_page_selected_status_instance(
+    private_instances, vault, warm_managed_cell, monkeypatch
+):
+    """Equal authored labels in two instances must retain their different multipliers."""
+    from test_recall_integration import _PageReadSentinel
+
+    from exomem import find as find_module
+    from exomem import find_policy, lifecycle_statuses
+    from exomem.governance.principal import request_scope
+    from exomem.ranking_config import DEFAULT_RANKING
+    from exomem.vocabulary import instances
+
+    who = private_instances("full")
+    with request_scope(who):
+        for scope, lifecycle in ((None, "live"), (SCOPE, "superseded")):
+            overlay = instances.select(vault, lifecycle_statuses.SPEC, scope).overlay(vault)
+            overlay.parent.mkdir(parents=True, exist_ok=True)
+            overlay.write_text(
+                "schema_version: 1\nentries:\n  locally-filed:\n"
+                f"    attributes: {{class: {lifecycle}}}\n", encoding="utf-8",
+            )
+        paths = []
+        for name, selected in (("public-ranking", False), ("private-ranking", True)):
+            rel = f"Knowledge Base/Notes/{name}.md"
+            (vault / rel).write_text(
+                "---\ntype: insight\nstatus: locally-filed\n"
+                + (f"project: private-project\nregistry_scope: {SCOPE}\n" if selected else "")
+                + "---\n\nranking instance marker\n", encoding="utf-8",
+            )
+            paths.append(rel)
+        warm_managed_cell(vault)
+        parsed = {rel: find_module._CACHE.get(vault / rel, vault) for rel in paths}
+        reads = _PageReadSentinel(vault)
+        reads.install(monkeypatch)
+        metadata = find_module._managed_page_metadata(
+            vault, set(paths), scope="kb", freshness_key=find_module.FreshnessSnapshot(vault).kb(),
+            pending=None, include_ranking=True,
+        )
+        views = {rel: row.ranking for rel, row in metadata.items()}
+        kwargs = dict(prefer_compiled=False, prefer_active=True, temporal=False)
+        expected = find_policy.apply_post_rrf_multipliers(
+            [(rel, 1.0) for rel in paths], "marker", DEFAULT_RANKING,
+            page_of=parsed.get, status_basis=lifecycle_statuses.Basis(vault), **kwargs,
+        )
+        actual = find_policy.apply_post_rrf_multipliers(
+            [(rel, 1.0) for rel in paths], "marker", DEFAULT_RANKING,
+            page_of=views.get, status_basis=lifecycle_statuses.Basis(vault), **kwargs,
+        )
+    assert actual == expected == [
+        (paths[0], 1.0), (paths[1], DEFAULT_RANKING.superseded_penalty),
+    ]
+    assert reads.count == 0, reads.report()
+
+
 @pytest.fixture
 def bound_private_session(private_instances, vault, tmp_path, monkeypatch, request):
     import test_authorization_session_wire_reconnect as wire

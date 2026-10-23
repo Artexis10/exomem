@@ -23,6 +23,7 @@ from pathlib import Path
 
 import yaml
 
+from .kbdir import kb_prefix
 from .vault import (
     PathGuard,
     PlannedWrite,
@@ -32,6 +33,11 @@ from .vault import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def registry_relpath() -> str:
+    """The project registry's vault-relative path: the path a release decision names it by."""
+    return f"{kb_prefix()}_Schema/project-keys.yaml"
 
 
 # Fallback used when project-keys.yaml is missing or malformed. A neutral
@@ -119,7 +125,7 @@ def load_project_registry(vault_root: Path) -> ProjectRegistry:
     Returns a fallback registry on any read/parse failure, with a warning
     logged so service-log readers can see the misconfiguration.
     """
-    path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
+    path = Path(vault_root) / registry_relpath()
     if not path.exists():
         log.warning(
             "project-keys.yaml missing at %s; using built-in fallback set", path
@@ -156,7 +162,7 @@ def filename_style(vault_root: Path) -> str | None:
     unrecognised value is refused there with the source named rather than
     silently becoming the default.
     """
-    path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
+    path = Path(vault_root) / registry_relpath()
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
@@ -344,7 +350,7 @@ def plan_project_keys(
     if type(keys) not in {list, tuple} or len(keys) > 64:
         raise ValueError("project key plan must contain at most 64 keys")
     root = Path(vault_root)
-    path = kb_root(root) / "_Schema" / "project-keys.yaml"
+    path = root / registry_relpath()
     try:
         text, guard = read_guarded_text(root, path)
         path_exists = True

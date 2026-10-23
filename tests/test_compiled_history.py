@@ -29,7 +29,7 @@ from exomem import (
     vault,
     vocabulary_auxiliaries,
 )
-from exomem.governance.principal import owner_principal, request_scope
+from exomem.governance.principal import library_scope, owner_principal, request_scope
 
 
 @pytest.fixture
@@ -55,14 +55,29 @@ def _correct(root: Path, value: str, reason: str, *, index: int = 0) -> dict:
     )
 
 
-def test_repeated_corrections_keep_prior_words_and_unit_identity(tmp_path: Path, owner) -> None:
+def test_repeated_corrections_keep_prior_words_and_identity_after_a_category_alias(
+    tmp_path: Path, owner
+) -> None:
     _write_page(
         tmp_path, source=_page_source("## Claim\n- category: rule\n- id: stable\n\nFirst wording.")
     )
     original = commands.op_read_memory(tmp_path, path=PAGE)
     unit = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
     first = _correct(tmp_path, "Second wording.", "New source clarified the rule.")
+    after_first = (tmp_path / PAGE).read_text(encoding="utf-8")
     second = _correct(tmp_path, "Third wording.", "A later source narrowed its scope.")
+    with library_scope():
+        categories = commands.op_schema_memory(tmp_path, subject="categories", operation="inspect")
+        commands.op_schema_memory(
+            tmp_path,
+            subject="categories",
+            operation="save",
+            proposal={"upsert": {"operating_rule": {
+                "description": "An operating constraint.", "aliases": ["rule"],
+            }}},
+            expected_hash=categories["content_hash"],
+            why="Register the existing category as an alias.",
+        )
     result = commands.op_read_memory(
         tmp_path, path=PAGE, unit_ref=unit.unit_ref, include_history=True
     )
@@ -72,11 +87,17 @@ def test_repeated_corrections_keep_prior_words_and_unit_identity(tmp_path: Path,
         "Second wording.",
         "First wording.",
     ]
+    assert [r["prior"]["unit"]["category"] for r in revisions] == [
+        "operating_rule", "operating_rule",
+    ]
+    assert revisions[0]["prior"]["source"] == after_first
     assert revisions[1]["prior"]["source"] == _page_source(
         "## Claim\n- category: rule\n- id: stable\n\nFirst wording."
     )
     assert revisions[1]["before_hash"] == original["content_hash"]
-    assert revisions[0]["reason"] == "A later source narrowed its scope."
+    assert [r["reason"] for r in revisions] == [
+        "A later source narrowed its scope.", "New source clarified the rule.",
+    ]
     assert result["unit"]["content"] == "Third wording."
     assert "history" not in result  # The page log keeps its existing page-only meaning.
 

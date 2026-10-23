@@ -2527,6 +2527,10 @@ def test_a_plain_path_with_zero_valid_interpretations_withholds_its_item_without
         ("malformed_memory_id", "exomem://memory/not-a-uuid", False),
         ("project_near_miss_path", "project:Products/plan.md", False),
         ("plan_near_miss_no_fragment", "plan:Products/plan.md", False),
+        ("topic_map", "exomem://map/topic/harbor", True),
+        ("project_anchor_profile", "exomem://profile/anchor/project%3Aharbor-survey", True),
+        # An anchor profile names its anchor's page, so it is decided as that page.
+        ("page_anchor_profile", "exomem://profile/anchor/Knowledge%20Base%2FNotes%2Fsecret.md", False),
     ],
 )
 def test_r1_skip_shapes_and_their_near_misses(

@@ -1522,8 +1522,9 @@ def test_emitted_parent_hints_missing_row_is_incomplete(tmp_path):
     assert scoped_out.value is None
 
 
+@pytest.mark.parametrize("include_ranking", [False, True])
 def test_eligibility_metadata_work_stays_bound_to_candidates(
-    tmp_path, monkeypatch, warm_managed_cell
+    tmp_path, monkeypatch, warm_managed_cell, include_ranking
 ):
     """Unrelated pages must not turn a fixed candidate lookup into a vault scan."""
     parent = "Knowledge Base/media/demo.mp4.md"
@@ -1563,6 +1564,7 @@ def test_eligibility_metadata_work_stays_bound_to_candidates(
             result = lexstore.eligibility_metadata_result(
                 root, {child, missing}, scope="kb", freshness=None,
                 parents_only=parents_only,
+                include_ranking=include_ranking,
             )
             work[parents_only].append(steps)
             assert result.readiness.complete
@@ -1571,6 +1573,9 @@ def test_eligibility_metadata_work_stays_bound_to_candidates(
             assert result.value[parent].parent is None
             assert result.value[child].updated == "2026-01-01"
             assert (result.value[child].view is None) == parents_only
+            if include_ranking:
+                assert result.value[child].ranking.parent_media == parent.removesuffix(".md")
+                assert result.value[child].ranking.frame_ts is None
 
     for parents_only, (small, large) in work.items():
         assert small > 0

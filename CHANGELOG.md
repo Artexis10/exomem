@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.134.5](https://github.com/Artexis10/exomem/compare/v0.134.4...v0.134.5) (2026-10-23)
+
+
+### Performance
+
+* **indexes:** isolate Source census and rendering costs ([#1996](https://github.com/Artexis10/exomem/issues/1996)) ([2283258](https://github.com/Artexis10/exomem/commit/2283258771fe340a40aaf48967f83a7ef1c71972))
+* **recall:** bound quote parsing and attribute resolver copies ([d8c9bac](https://github.com/Artexis10/exomem/commit/d8c9bac21a568f242ec661ab5ec9b7b752a60c3b))
+
+## [0.134.4](https://github.com/Artexis10/exomem/compare/v0.134.3...v0.134.4) (2026-10-23)
+
+
+### Performance
+
+* **recall:** rank managed candidates from catalogue metadata ([#1990](https://github.com/Artexis10/exomem/issues/1990)) ([5e894ff](https://github.com/Artexis10/exomem/commit/5e894ff71efba004b7918d59e81f352e2da794f4))
+
+## [0.134.3](https://github.com/Artexis10/exomem/compare/v0.134.2...v0.134.3) (2026-10-22)
+
+
+### Bug Fixes
+
+* **trace:** attribute source planning and episode housekeeping ([#1987](https://github.com/Artexis10/exomem/issues/1987)) ([7b3cb12](https://github.com/Artexis10/exomem/commit/7b3cb12d46daf3b410dfb8ae7ef66bb043075ddc))
+* **trace:** distinguish semantic search phase timings ([ed5d952](https://github.com/Artexis10/exomem/commit/ed5d952a075170080cbe112bd4bde77ee4ed404e))
+
+## [0.134.2](https://github.com/Artexis10/exomem/compare/v0.134.1...v0.134.2) (2026-10-22)
+
+
+### Bug Fixes
+
+* **mcp:** publish registry selector values as enums ([#1981](https://github.com/Artexis10/exomem/issues/1981)) ([8c0a8d5](https://github.com/Artexis10/exomem/commit/8c0a8d52aca649e6cf244e2099167d3f0954df59))
+
 ## [0.134.1](https://github.com/Artexis10/exomem/compare/v0.134.0...v0.134.1) (2026-10-22)
 
 

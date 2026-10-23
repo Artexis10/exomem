@@ -218,6 +218,19 @@ def _source_schema(vault: Path):
     return schema.load_source_schema(vault)
 
 
+def test_a_description_serves_no_part_of_a_page_it_links_to(vault: Path) -> None:
+    """A link is removed whole before the cut, which would otherwise fall inside it and serve half a page name."""
+    run_up = "a" * 230 + " see [[Harbour wiki page]] now"
+    _page(vault, "authored-cut", f"summary: {run_up}\n")
+    _page(vault, "lede-cut", body=run_up + "\n")
+    catalogue = _built(vault)
+
+    descriptions = {entry.path.rsplit("/", 1)[-1]: entry.description for entry in catalogue.entries()}
+
+    assert descriptions["authored-cut.md"] == "a" * 230 + " see now"
+    assert descriptions["lede-cut.md"] == "a" * 230 + " see now"
+
+
 def test_the_kill_switch_builds_and_reads_nothing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(vault)
     monkeypatch.setenv("EXOMEM_DISABLE_WORKING_SET", "1")

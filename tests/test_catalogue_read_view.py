@@ -244,6 +244,58 @@ def test_data_publication_preserves_an_admitted_recall(
     assert "recall_projection" in degraded
 
 
+@library_scope()
+@pytest.mark.parametrize("evidence", ["page", "frame"])
+def test_changed_selected_ranking_page_is_omitted_and_the_partial_answer_is_not_cached(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, evidence: str
+) -> None:
+    """Metadata ranking must not let later selected bytes borrow an admitted hash."""
+    from exomem import find as find_module
+    from exomem import find_candidates, find_types
+
+    changed = vault / "Knowledge Base/Notes/ranking-changed.md"
+    stable = vault / "Knowledge Base/Notes/ranking-stable.md"
+    for path in (changed, stable):
+        path.write_text("# Ranked\n\nrankedbindingmarker\n", encoding="utf-8")
+    source = changed
+    if evidence == "frame":
+        changed.write_text("---\nmedia_type: video\n---\n\nParent transcript.\n", encoding="utf-8")
+        source = vault / "Knowledge Base/Notes/ranking-frame.md"
+        source.write_text(
+            "---\nparent_media: Knowledge Base/Notes/ranking-changed\n"
+            "evidence_file: Knowledge Base/Notes/ranking-frame\nframe_ts: 4.5\n---\n\n"
+            "rankedbindingmarker\n", encoding="utf-8",
+        )
+    before = source.read_bytes()
+    warm_managed_cell(vault)
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "16")
+    original = find_candidates.collect_candidates
+    altered = False
+
+    def change_selected(*args, **kwargs):
+        nonlocal altered
+        bundle = original(*args, **kwargs)
+        if not altered:
+            altered = True
+            source.write_bytes(before + b"Later canonical bytes.\n")
+        return bundle
+
+    monkeypatch.setattr(find_candidates, "collect_candidates", change_selected)
+    kwargs = dict(query="rankedbindingmarker", scope="kb-only", graph=False, rerank=False)
+    degraded = []
+    hits = find_module.find(vault, degraded_out=degraded, **kwargs)
+    assert [hit.path for hit in hits] == [stable.relative_to(vault).as_posix()]
+    assert "recall_projection" in degraded
+
+    source.write_bytes(before)
+    timings = find_types.FindTimings()
+    recovered = find_module.find(vault, timings=timings, **kwargs)
+    assert {hit.path for hit in recovered} == {
+        changed.relative_to(vault).as_posix(), stable.relative_to(vault).as_posix(),
+    }
+    assert timings.cache["hit"] is False
+
+
 @pytest.mark.parametrize(
     "mode,query",
     [

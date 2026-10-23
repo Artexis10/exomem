@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import secrets
 import sqlite3
 import threading
 from collections.abc import Iterable, Mapping
@@ -51,7 +52,8 @@ from .working_set_runtime import READY
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+#: 2: titles and descriptions are stored without their wikilinks.
+SCHEMA_VERSION = 2
 SIDECAR_NAME = ".context-catalogue.sqlite"
 
 # The catalogue's entry kinds. A closed set the schema declares; topics are the
@@ -78,6 +80,11 @@ STATUS_UNAVAILABLE = "unavailable"
 # The relation registry schema declares this family value; membership edges are
 # the authored edges whose relation kind has it, never a list of relation names.
 MEMBERSHIP_FAMILY = "membership"
+
+# `RelationEdgeResult.status` when the graph answered with its authoritative edge set,
+# and when its sidecar is missing or still being built.
+EDGES_AVAILABLE = "available"
+EDGES_WARMING = "warming"
 
 #: Folds one write retries when another writer commits first. A resource bound.
 WRITE_ATTEMPTS = 3
@@ -304,6 +311,25 @@ class ContextCatalogue:
         row = conn.execute("SELECT value FROM catalogue_meta WHERE key = ?", (key,)).fetchone()
         return str(row[0]) if row else None
 
+    def secret(self) -> bytes:
+        """The key a continuation token is signed with, made on first use and kept in the sidecar.
+
+        It lives in `catalogue_meta`, so a wipe or a rebuilt sidecar issues a new key and every
+        token signed under the old one fails its check. Racing first calls settle on one key.
+        """
+        conn = self._connect()
+        if conn is None:
+            return b""
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO catalogue_meta (key, value) VALUES ('continuation_secret', ?)",
+                (secrets.token_hex(32),),
+            )
+            conn.commit()
+        except sqlite3.Error:
+            return b""
+        return (self._meta("continuation_secret") or "").encode("ascii")
+
     def entries(self, kind: str | None = None) -> tuple[Entry, ...]:
         """Every entry with its raw declarations, ordered by id."""
         conn = self._connect()
@@ -349,8 +375,12 @@ class ContextCatalogue:
 
     # -- owner-only reads --------------------------------------------------- #
 
-    def memberships(self) -> Memberships:
-        """Resolve every entry's declarations through the registries as they stand now.
+    def memberships(self, among: Iterable[Entry] | None = None, *, projects: bool = True) -> Memberships:
+        """Resolve each entry's declarations through the registries as they stand now.
+
+        `among` limits the join to the entries a reader may see (default: every entry),
+        so a relation to an entry outside it adds nothing. `projects=False` is for a
+        reader who may not read the project registry: no project key files an entry.
 
         An entry belongs to the topics its own `topics` values resolve to, the
         domains of its project keys, and the topics its membership-relation
@@ -361,8 +391,10 @@ class ContextCatalogue:
         from . import project_keys, vocabulary_resolution
 
         taxonomy = source_taxonomy.load_taxonomy(self.vault_root)
-        project_registry = project_keys.load_project_registry(self.vault_root)
-        entries = self.entries()
+        project_registry = (
+            project_keys.load_project_registry(self.vault_root) if projects else project_keys.ProjectRegistry({}, {})
+        )
+        entries = tuple(self.entries() if among is None else among)
         edges = self.membership_edges()
         project_topics: dict[str, vocabulary_resolution.TopicResolution] = {}
 
@@ -581,6 +613,8 @@ class _Fold:
         self.entry_count = 0
         self.full = False
         self.edge_state = ""
+        self.edges_read = False
+        self.graph_token = ""
         self.expected: dict[str, freshness.FileSignature] = {}
         self.edges: list[tuple[str, str]] = []
         self._kinds: dict[str, tuple[str, str] | None] = {}
@@ -639,8 +673,31 @@ class _Fold:
                 entry_id for entry_id in self.stored if entry_id not in self.new and entry_id not in self.pending
             )
         self.removed.difference_update(self.new)
-        self.edge_state, self.edges = _membership_edges(self.root)
+        self._read_edges()
         self.entry_count = len((set(self.stored) - self.removed) | set(self.new))
+
+    def _read_edges(self) -> None:
+        """Pull the membership edges from the graph, unless it has not moved since the last pull.
+
+        The graph's generation token is read first, so a graph write between the
+        token and the pull leaves an older token stored and the next fold pulls
+        again. A page entry the catalogue does not hold yet is pulled for
+        whatever the token says: the graph may have indexed it before the
+        catalogue did.
+        """
+        token = _graph_token(self.root)
+        new_source = any(entry_id == entry.path and entry_id not in self.stored for entry_id, entry in self.new.items())
+        if (
+            token
+            and not new_source
+            and self.meta.get("graph_state") == EDGES_AVAILABLE
+            and self.meta.get("graph_token") == token
+        ):
+            self.edge_state, self.graph_token = EDGES_AVAILABLE, token
+            return  # the stored edges are the graph's edges at this token
+        self.edge_state, self.edges = _membership_edges(self.root)
+        self.edges_read = True
+        self.graph_token = token if self.edge_state == EDGES_AVAILABLE else ""
 
     def _basis_state(self) -> str:
         """Whether the status registry the stored classes came from still holds."""
@@ -778,11 +835,12 @@ class _Fold:
         entry_kind, anchor_kind = kind
         stem = rel.rpartition("/")[2].removesuffix(".md")
         manifest = self.collections.get(rel)
-        title = str(frontmatter.get("title") or page.title or stem).strip()
+        titles = [frontmatter.get("title"), page.title, stem]
         status = str(page.status or "").strip()
         if manifest is not None:
-            title = str(getattr(manifest[0], "title", "") or title).strip()
+            titles.insert(0, getattr(manifest[0], "title", ""))
             status = str(getattr(manifest[0], "lifecycle", "") or status).strip()
+        title = _title(*titles)
         description, origin = _describe(frontmatter.get("summary"), page.body, rel)
         thread_key = thread_order = ""
         if entry_kind == KIND_THREAD:
@@ -820,7 +878,7 @@ class _Fold:
                 anchor_kind=row.kind,
                 path=row.path,
                 ref=row.ref,
-                title=row.title,
+                title=_title(row.title),
                 description="",
                 description_origin=ORIGIN_NONE,
                 status=row.lifecycle,
@@ -830,7 +888,7 @@ class _Fold:
                 thread_order="",
                 source_signature="",
                 # Activation names a project anchor `project:<key>`; the key is its membership declaration.
-                projects=(row.anchor_id.partition(":")[2],) if row.kind == "project" else (),
+                projects=(row.anchor_id.partition(":")[2],) if row.kind == working_set_index.PROJECT_ANCHOR_KIND else (),
             )
         self.removed.update(
             entry_id for entry_id, row in self.stored.items() if entry_id != row.path and entry_id not in wanted
@@ -849,7 +907,8 @@ class _Fold:
             digest = entry.digest()
             if digests.get(entry_id) == digest:
                 continue
-            _delete_entry(conn, entry_id)
+            # A replaced entry keeps its edges: the edge commit below diffs them against the graph, and a fold that did not read the graph must not drop them.
+            _delete_entry(conn, entry_id, keep_edges=True)
             _insert_entry(conn, entry, digest)
             moved = True
         moved |= self._commit_pending(conn)
@@ -868,8 +927,8 @@ class _Fold:
         return True
 
     def _commit_edges(self, conn: sqlite3.Connection) -> bool:
-        if self.edge_state != "available":
-            return False  # a graph miss leaves the stored edges as they were
+        if not self.edges_read or self.edge_state != EDGES_AVAILABLE:
+            return False  # a graph miss, or a graph that has not moved, leaves the stored edges as they were
         sources = {str(entry_id) for (entry_id,) in conn.execute("SELECT entry_id FROM entries WHERE entry_id = path")}
         desired = {(src, dst) for src, dst in self.edges if src in sources}
         stored = {(str(src), str(dst)) for src, dst in conn.execute("SELECT entry_id, target_path FROM membership_edges")}
@@ -886,6 +945,7 @@ class _Fold:
             "status_dependency": json.dumps(list(self.basis.dependency)),
             "activation_token": json.dumps(list(self.activation_token)),
             "graph_state": self.edge_state,
+            "graph_token": self.graph_token,
         }
         if freshness_stamp is not None:
             updates["freshness_key"] = freshness_stamp
@@ -901,14 +961,38 @@ def _sorted_values(value: object) -> tuple[str, ...]:
     return tuple(sorted(set(working_set_index._strings(value))))  # noqa: SLF001 - activation's frontmatter string reader
 
 
-def _describe(summary: object, body: str, rel: str) -> tuple[str, str]:
-    """A one-line description and its origin: the authored `summary`, else the page's lede, else none."""
-    from . import provenance
+def _title(*candidates: object) -> str:
+    """The first candidate that has text once its wikilinks are removed, else empty.
 
-    if isinstance(summary, str) and summary.strip():
-        return " ".join(summary.split())[: working_set_index.LEDE_MAX_CHARS], ORIGIN_AUTHORED
+    A title is stored without its links, as a description is (`_describe`).
+    """
+    from .governance import egress
+
+    for candidate in candidates:
+        title = " ".join(egress.without_wikilinks(str(candidate)).split()) if candidate else ""
+        if title:
+            return title
+    return ""
+
+
+def _describe(summary: object, body: str, rel: str) -> tuple[str, str]:
+    """A one-line description and its origin: the authored `summary`, else the page's lede, else none.
+
+    Every wikilink is removed whole before the text is normalised and cut, so no cut
+    can fall inside one. A link the egress guard reads would make the description's
+    fate depend on whether the linked page exists and is withheld, which tells a
+    caller that it exists.
+    """
+    from . import provenance
+    from .governance import egress
+
+    if isinstance(summary, str):
+        summary = " ".join(egress.without_wikilinks(summary).split())
+        if summary:
+            return summary[: working_set_index.LEDE_MAX_CHARS], ORIGIN_AUTHORED
     # Read withheld, as the activation signature does: an origin carrier is never a lede.
-    lede = working_set_index.lede(provenance.withheld_prose(body, owner_path=rel)) if body else ""
+    prose = egress.without_wikilinks(provenance.withheld_prose(body, owner_path=rel)) if body else ""
+    lede = " ".join(working_set_index.lede(prose).split())
     return (lede, ORIGIN_LEDE) if lede else ("", ORIGIN_NONE)
 
 
@@ -928,6 +1012,18 @@ def _collections(vault_root: Path, token: tuple[int, int, int]) -> dict[str, tup
             signature = manifest.manifest_version.hash if selected_writer(vault_root, manifest) is not None else ""
             out[rel] = (manifest, signature)
     return out
+
+
+def _graph_token(vault_root: Path) -> str:
+    """The graph sidecar's content generation as a string, or "" when it has none to read."""
+    from . import epistemic_graph
+
+    try:
+        token = epistemic_graph.cache_token(vault_root)
+    except Exception:  # noqa: BLE001 - an unreadable graph token means the edges are pulled
+        log.debug("context catalogue: graph token unavailable", exc_info=True)
+        return ""
+    return json.dumps(list(token)) if token else ""
 
 
 def _membership_edges(vault_root: Path) -> tuple[str, list[tuple[str, str]]]:
@@ -957,8 +1053,10 @@ def _stored(conn: sqlite3.Connection) -> list[_Stored]:
     ]
 
 
-def _delete_entry(conn: sqlite3.Connection, entry_id: str) -> None:
+def _delete_entry(conn: sqlite3.Connection, entry_id: str, *, keep_edges: bool = False) -> None:
     for table in ("entries", "declared_topics_raw", "entry_projects", "membership_edges", "source_refs"):
+        if keep_edges and table == "membership_edges":
+            continue
         conn.execute(f"DELETE FROM {table} WHERE entry_id = ?", (entry_id,))
 
 
@@ -984,6 +1082,40 @@ _INLINE_LOCKS: dict[Path, threading.Lock] = {}
 _CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
 
 
+def keep_current(vault_root: Path) -> bool:
+    """Bring a built catalogue to the vault as it is now; False when a retry is owed.
+
+    The derived-sync component calls this once its batch's graph work is done.
+    It diffs the whole KB against the stored rows, not only the paths the batch
+    names: a move or a delete runs the synchronous fan-out and its old path is
+    in no receipt, so the diff is what drops the old entry, and a rename
+    arrives as a removed row plus a new one. The activation index comes up to
+    date first, because the fold mirrors its anchors and reads the collection
+    manifests it publishes. Nothing is owed when the catalogue is switched off
+    or was never built: the first read builds it from the vault, and a build in
+    flight is caught up by the read path's own freshness delta. The calling
+    drain is the background owner here, so this folds inline and schedules
+    nothing.
+    """
+    root = Path(vault_root)
+    if disabled() or not sidecar_path(root).exists():
+        return True
+    catalogue = ContextCatalogue(root)
+    try:
+        if not catalogue.built():
+            return True
+        refreshed = working_set_index.WorkingSetIndex(root).update()
+        if refreshed.get("unavailable"):
+            return False
+        result = catalogue.update()
+        if result.get("unavailable") or result.get("pending"):
+            return False
+        # A graph still being built owes the membership edges; its own pipeline publishes them and a retry reads them.
+        return catalogue.graph_state() != EDGES_WARMING
+    finally:
+        catalogue.close()
+
+
 def ensure(
     vault_root: Path, *, freshness_stamp: str = ""
 ) -> tuple[str, ContextCatalogue | None, bool]:
@@ -995,6 +1127,22 @@ def ensure(
     builds it, and a warm one folds only the freshness delta, a bounded burst
     inline and the rest in the background. An unmanaged process has no
     background worker, so it updates inline.
+    """
+    state, catalogue, unlisted = ensure_unlisted(vault_root, freshness_stamp=freshness_stamp)
+    return state, catalogue, unlisted or (catalogue is not None and bool(catalogue.pending()))
+
+
+def ensure_unlisted(
+    vault_root: Path, *, freshness_stamp: str = ""
+) -> tuple[str, ContextCatalogue | None, bool]:
+    """`ensure`, naming only the lag that has no list: `(state, catalogue, unlisted)`.
+
+    `unlisted` is True when the catalogue may be behind by work that
+    `pending()` does not name: an unbridged freshness delta, a lagging
+    activation index, or an update that failed. The paths `pending()` does
+    name are the other kind of lag. A reader that serves only some callers
+    needs the two apart, because a caller can ask whether a listed path is
+    one it may see, and can ask nothing of an unlisted one.
     """
     if disabled():
         return DISABLED, None, False
@@ -1021,14 +1169,14 @@ def ensure(
             return READY, catalogue, index_stale
         with _inline_lock(root.absolute()):
             result = catalogue.update(freshness_stamp=freshness_stamp or None)
-        return READY, catalogue, index_stale or bool(result.get("unavailable") or catalogue.pending())
+        return READY, catalogue, index_stale or bool(result.get("unavailable"))
     return READY, catalogue, _advance(root, catalogue, index, freshness_stamp) or index_stale
 
 
 def _advance(
     root: Path, catalogue: ContextCatalogue, index: working_set_index.WorkingSetIndex, freshness_stamp: str
 ) -> bool:
-    """Fold the freshness delta of a warm catalogue; True when it may still be behind."""
+    """Fold the freshness delta of a warm catalogue; True when it may be behind by work `pending()` cannot list."""
     pending = catalogue.pending()
     mirrored = catalogue.mirrored_activation_token() == json.dumps(list(index.token()))
     if freshness_stamp and catalogue.freshness_stamp() == freshness_stamp and mirrored and not pending:
@@ -1055,7 +1203,7 @@ def _advance(
         if result.get("deferred"):
             _schedule(root, freshness_stamp)
         _CHECKPOINTS[key] = delta.to
-    return bool(catalogue.pending())
+    return False
 
 
 def _managed() -> bool:

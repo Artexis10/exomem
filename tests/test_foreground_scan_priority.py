@@ -250,7 +250,7 @@ def test_dispatcher_foreground_scope_covers_postfilter_and_completion(
             assert foreground_activity.foreground_active(vault)
             events.append("exit")
 
-    def postfilter(_name, result, root):
+    def postfilter(_name, result, root, **_kwargs):
         assert root == vault
         assert foreground_activity.foreground_active(vault)
         events.append("postfilter")

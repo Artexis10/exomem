@@ -29,7 +29,7 @@ import re
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
@@ -57,6 +57,7 @@ from . import capabilities as capabilities_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
 from . import context_roles as context_roles_module
+from . import context_views as context_views_module
 from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
@@ -73,7 +74,6 @@ from . import episode_memory as episode_memory_module
 from . import episode_nudge as episode_nudge_module
 from . import episode_workflow as episode_workflow_module
 from . import epistemic_graph as epistemic_graph_module
-from .viewer_map import op_viewer_map
 from . import evolution as evolution_module
 from . import find as find_module
 from . import (
@@ -172,6 +172,7 @@ from .vault import (
     VaultPathError,
     resolve_under_vault,
 )
+from .viewer_map import op_viewer_map
 
 log = logging.getLogger(__name__)
 
@@ -221,6 +222,18 @@ _WorkflowContextArgument = Annotated[
 _OptionalRelationText = Annotated[
     str | None,
     WithJsonSchema({"anyOf": [{"type": "string"}, {"type": "null"}]}),
+]
+# The bound is `context_views.CONTINUATION_MAX_CHARS`; `read_view` checks it on every token.
+_OptionalViewContinuation = Annotated[
+    str | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string", "maxLength": context_views_module.CONTINUATION_MAX_CHARS},
+                {"type": "null"},
+            ]
+        }
+    ),
 ]
 _OptionalRelationProposal = Annotated[
     dict | None,
@@ -5265,6 +5278,8 @@ def op_note(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     vocabulary_decision: _DomainVocabularyDecisionArgument = None,
+    summary: str | None = None,
+    topics: str | list[str] | None = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -5303,6 +5318,8 @@ def op_note(
     suggested next actions. Treat it as write-shape feedback, not semantic truth.
 
     Args:
+        summary: Optional one-line page description, at most 1024 characters.
+        topics: Domain key or list of keys; new keys register with this write.
         content: Markdown body written after frontmatter. The writer adds or
             normalizes the leading `# <title>` H1, followed by the section
             conventions per type:
@@ -5424,6 +5441,8 @@ def op_note(
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
             vocabulary_decision=vocabulary_decision,
+            summary=summary,
+            topics=topics,
         )
     except note_module.NoteError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
@@ -6525,11 +6544,12 @@ def op_activate_context(
 ) -> dict:
     """Compile bounded authorized context; abstain rather than guess.
 
-    Follow live recall policy; reuse held context. For long threads or attachments,
-    pass conversation as needed. origin=focus marks agent cues, not human words;
+    Reuse live recall policy and held context. For long threads/attachments,
+    use conversation as needed. origin=focus: agent cues, not human words;
     focus cannot settle human ambiguity. Reads no attachments.
-    If the subject is unknown, clarify first. Preserve source identity and scope.
-    Due items and refresh grant no writes.
+    Clarify unknown subjects first. Keep source identity and scope.
+    Due items/refresh grant no writes.
+    Packets may carry maps; pull refs with read_memory.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -6831,9 +6851,14 @@ def _op_activate_context_body(
             if token_now:
                 packet["continuity"] = token_now
             packet["generation"]["continuity_thread"] = state
+        if packet_mode == "maps":
+            # Maps never inherit an anchors token through the wrapper's abstention carry.
+            packet["generation"]["continuity_thread"] = "absent"
+            packet["generation"]["conversation"] = working_set_conversation_module.ABSENT
         return packet
 
-    if not turn.strip():
+    packet_mode = working_set_runtime_module.activation_packet_mode()
+    if packet_mode == "anchors" and not turn.strip():
         return _abstain(activation_result_module.UNRESOLVED)
     if working_set_index_module.disabled():
         # The tool stays on the surface under the kill switch so the published
@@ -6989,6 +7014,47 @@ def _op_activate_context_body(
         # would have nothing current to read against, so activation
         # abstains here rather than either reprojecting or cold-walking.
         return _abstain(working_set_runtime_module.WARMING)
+
+    if packet_mode == "maps":
+        if working_set_module.budget_exhausted("working_set.catalogue"):
+            return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+        try:
+            # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
+            with principal_module.invocation_scope():
+                packet = context_views_module.activation_packet(
+                    vault_root, budget, purpose=purpose, timings=timings,
+                    generation={
+                        **generation_stub,
+                        "freshness_key": working_set_runtime_module._key_text(freshness_key),
+                        "index_generation": evidence_token[1] if evidence_token else 0,
+                    },
+                )
+                if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
+                    return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
+                with find_types.timing_span(timings, "working_set.guard"):
+                    guarded = egress_module.guard_working_set(
+                        vault_root, packet, egress_module.AnnotatedHits(hits=[]), purpose=purpose
+                    )
+            if guarded is None:
+                return _abstain(activation_result_module.WITHHELD, generation=packet["generation"])
+            packet = guarded
+        except Exception:  # noqa: BLE001 - an unreadable map never grants disclosure
+            log.warning("activation map unavailable; abstaining", exc_info=True)
+            return _abstain(activation_result_module.UNAVAILABLE)
+        _withhold_vault_generation(vault_root, packet)
+        packet["generation"]["continuity_thread"] = "absent"
+        packet["generation"]["conversation"] = working_set_conversation_module.ABSENT
+        map_generation = packet["generation"].get("map_generation")
+        if map_generation is not None and not packet.get("abstained"):
+            # Maps carry no anchor refs or conversation thread. The visible digest is the token's whole subject.
+            packet["continuity"] = working_set_runtime_module.encode_continuity(
+                identity=map_generation, roles_hash=packet["generation"]["roles_hash"],
+                conventions_hash=packet["generation"]["conventions_hash"], generation=0,
+                refs=(), roles=(), map_generation=map_generation,
+            )
+        if include_timings and timings is not None:
+            packet["timings"] = timings.as_dict()
+        return packet
 
     if working_set_module.budget_exhausted("working_set.lexical"):
         return _abstain(working_set_runtime_module.UNAVAILABLE, budget_caused=True)
@@ -7311,12 +7377,15 @@ def op_read_memory(
     purpose: str | None = None,
     history_limit: int | None = None,
     history_continuation: str | None = None,
+    continuation: _OptionalViewContinuation = None,
 ) -> dict:
     """Read a page or exact semantic unit selected by recall or known ref.
 
     unit_ref returns that current unit, parent citation/lifecycle and up to
     2,400 context characters. Missing/stale/ambiguous/superseded refs report
     status; never substituted. Without unit_ref, returns the page.
+    Also reads the paged views exomem://map, exomem://map/topic/<domain key>
+    and exomem://map/unfiled.
 
     Args:
         path: Vault-relative path or KB shorthand.
@@ -7328,7 +7397,17 @@ def op_read_memory(
         purpose: Declared purpose; governs visibility.
         history_limit: Retained revisions per page, from 1 to 50.
         history_continuation: Position from the previous revision_history envelope.
+        continuation: Next-page token of a view.
     """
+    # A derived view is not a page: it is dispatched before any identifier resolves. It takes
+    # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
+    if context_views_module.in_view_namespace(path):
+        if unit_ref is not None or frontmatter_only or include_history or links or include_raw:
+            raise ValueError(
+                "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
+                "unit_ref, frontmatter_only, include_history, links, or include_raw"
+            )
+        return context_views_module.read_view(vault_root, path, continuation=continuation, purpose=purpose)
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
     # (which has no `purpose` parameter of its own) see the declared purpose.
@@ -7346,7 +7425,10 @@ def op_read_memory(
                 unit_ref=unit_ref,
                 history_limit=history_limit,
                 history_continuation=history_continuation,
+                continuation=continuation,
             )
+    if continuation is not None:
+        raise context_views_module.invalid_continuation()
     if unit_ref is not None:
         if frontmatter_only or links or include_raw:
             raise ValueError(
@@ -7527,6 +7609,8 @@ def op_remember(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     vocabulary_decision: _DomainVocabularyDecisionArgument = None,
+    summary: str | None = None,
+    topics: str | list[str] | None = None,
 ) -> dict:
     """Remember a durable conclusion as compiled governed knowledge.
 
@@ -7540,6 +7624,8 @@ def op_remember(
     Details: references/writing.md.
 
     Args:
+        summary: Optional one-line page description, at most 1024 characters.
+        topics: Domain key or list of keys; new keys register with this write.
         content: Markdown body after frontmatter.
         note_type: research-note, insight, failure, pattern, experiment, or production-log.
         project: Required for research-note. __PROJECT_KEYS_HINT__
@@ -7596,6 +7682,8 @@ def op_remember(
         relation_review_hash=relation_review_hash,
         relation_review_reason=relation_review_reason,
         vocabulary_decision=vocabulary_decision,
+        summary=summary,
+        topics=topics,
     )
 
 
@@ -9748,9 +9836,7 @@ def op_connect_memory(
     Proposals are read-only; create-entity and accept-relation are additive writes.
 
     Args:
-        operation: context, suggest-links, suggest-relations, graph-context,
-            inbound-links, resolve-relation, resolve-entity, create-entity,
-            accept-relation.
+        operation: create-entity and accept-relation write; the others read.
         requested_relation: Relation label (resolve-relation needs this or
             query); on accept-relation, the active registered relation to apply.
         entity_type: Type id from the active entity registry, incl. `_Schema/entity-types.yaml`.
@@ -12037,9 +12123,8 @@ def op_manage_memory_file(
     flags.
 
     Args:
-        operation: list, create, append, move, reclassify,
-            propose-reclassification, revert-reclassification, delete,
-            trash-list, or recover.
+        operation: list, trash-list and propose-reclassification read; create and append
+            read with validate_only; the others write.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
@@ -13284,6 +13369,14 @@ def _build_product_commands() -> tuple[Command, ...]:
         # every renderer and runtime publishes the same tool contract.
         desc = inspect.cleandoc(leaf.__doc__ or "")
         params = _derive_params(leaf, skip=skip, positional=positional)
+        # A registry-covered selector lists the registry's values on every door.
+        selector = egress_module.selector_for_command(name)
+        if selector is not None:
+            values = tuple(egress_module.selector_registry()[(name, selector)])
+            params = tuple(
+                replace(param, choices=values) if param.name == selector else param
+                for param in params
+            )
         response_detail = "full" if name == "govern_memory" else "compact" if writes else None
         if name == "edit_memory":
             params = tuple(

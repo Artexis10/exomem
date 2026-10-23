@@ -397,6 +397,11 @@ def bind_vault(
         )
         for p in visible
     ]
+    if command is not None:
+        visible = [
+            _closed_selector(command.name, parameter, resolved, help_text)
+            for parameter in visible
+        ]
     if command is not None and command.name == "activate_context":
         from .working_set_conversation import public_input_schema
 
@@ -476,8 +481,9 @@ def bind_vault(
         # Resolve the canonical audience at the MCP boundary, beside the
         # existing `mcp_retry_scope()` identity derivation (design D5). Bound
         # for the whole invocation so every read leaf under it decides against
-        # the same principal; stdio resolves to `owner`.
-        with context, principal_module.request_scope(principal):
+        # the same principal; stdio resolves to `owner`. The invocation's
+        # record of what it served also covers the second pass below.
+        with context, principal_module.request_scope(principal), principal_module.invocation_scope():
             if command is None:
                 return leaf(*injected, **kwargs)
             from .commands import invocation_is_read_only
@@ -534,7 +540,7 @@ def bind_vault(
                     # One ownership proof for the pass, as in the dispatcher's;
                     # outside a scope every path decision proved its own.
                     with ownership.read_scope(injected[0]) as ownership_scope:
-                        result = postfilter(command.name, result, injected[0])
+                        result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
                         ownership_scope.finish()
                 from .governance import scrubber as governance_scrubber
 
@@ -864,6 +870,45 @@ def compact_input_schema(schema: object, *, optional_property: bool = False) -> 
         else:
             out["anyOf"] = rest
     return out
+
+
+def _closed_selector(
+    command_name: str,
+    parameter: inspect.Parameter,
+    resolved: Mapping[str, object],
+    help_text: Mapping[str, str],
+) -> inspect.Parameter:
+    """Publish a registry-covered selector as the enum the selector registry holds."""
+    from .governance.egress import selector_for_command, selector_registry
+
+    selector = selector_for_command(command_name)
+    if selector != parameter.name:
+        return parameter
+    values = tuple(selector_registry()[(command_name, selector)])
+    annotation = resolved.get(parameter.name, parameter.annotation)
+    declared = _literal_string_values(annotation)
+    if declared:
+        # Fail the build: a schema that disagrees with the lease and egress registry
+        # would advertise values the dispatcher refuses, or hide ones it accepts.
+        if set(declared) != set(values):
+            raise RuntimeError(
+                f"selector Literal and selector registry disagree: {command_name}.{selector}"
+            )
+        return parameter
+    if parameter.default is not inspect.Parameter.empty and parameter.default not in (
+        None,
+        *values,
+    ):
+        # Fail the build: an enum that excludes the default makes the default call invalid.
+        raise RuntimeError(
+            f"selector default outside the selector registry: {command_name}.{selector}"
+        )
+    closed: object = typing.Literal[values]
+    if parameter.default is None:
+        closed = closed | None
+    return parameter.replace(
+        annotation=_annotate_description(closed, help_text.get(parameter.name, ""))
+    )
 
 
 def _annotate_description(annotation: object, description: str) -> object:

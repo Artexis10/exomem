@@ -15,6 +15,7 @@ import io
 import json
 import urllib.error
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from test_retrieve_nudge_working_set import (
@@ -66,6 +67,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path / "hook-home"))
     monkeypatch.setenv("EXOMEM_HOOK_CLIENT", "claude")
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "working_set")
+    # Parsing assertions must not depend on host scheduling within the hook budget.
+    clock = Mock(wraps=hook.time)
+    clock.monotonic.return_value = 0.0
+    monkeypatch.setattr(hook, "time", clock)
 
 
 def _pairs(conversation: dict) -> list[tuple[str, str]]:

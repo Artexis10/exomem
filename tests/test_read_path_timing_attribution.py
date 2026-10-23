@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from exomem import commands, embeddings, readiness, recall_policy
+from exomem import call_spans, commands, embeddings, recall_policy
 from exomem import find as find_module
 from exomem.find_types import FindTimings
 
@@ -130,12 +130,10 @@ def test_the_query_log_projection_tolerates_no_timings() -> None:
 
 
 def test_real_find_attributes_graph_materialization_and_reranking(
-    vault: Path, monkeypatch
+    vault: Path, warm_managed_cell, monkeypatch
 ) -> None:
     """A live find call must not report its major stages as unattributed."""
-    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
-    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+    warm_managed_cell(vault)
 
     real_outbound_wikilinks = find_module._outbound_wikilink_paths
 
@@ -161,16 +159,28 @@ def test_real_find_attributes_graph_materialization_and_reranking(
         slow_rerank,
     )
 
-    result = commands.op_find(
-        vault,
-        query="metabolism",
-        mode="hybrid",
-        graph=True,
-        rerank=True,
-        include_timings=True,
-    )
+    token = "semantic-phase-attribution"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        result = commands.op_find(
+            vault,
+            query="metabolism",
+            mode="hybrid",
+            graph=True,
+            rerank=True,
+            include_timings=True,
+        )
+    finally:
+        spans = {row["name"]: row for row in call_spans.pop_call_spans(token)}
+        call_spans.MCP_CALL_TOKEN.reset(handle)
 
     timings = result["timings"]
+    semantic = spans["recall.semantic.search"]
+    assert semantic["count"] == 2
+    assert semantic["fields"]["entry_ms"] >= 0
+    assert semantic["fields"]["finish_ms"] >= 30
+    assert "recall.semantic.preflight" in spans
+    assert timings["stages"]["semantic.preflight"]["parent"] == "semantic.search"
     assert {"graph", "filter_hits", "rerank"} <= set(timings["stages"])
     assert timings["unattributed_ms"] <= 0.15 * timings["total_ms"]
 

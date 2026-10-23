@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from exomem import call_spans, freshness, lexstore, recall_policy
 from exomem import find as find_module
-from exomem import freshness, lexstore, recall_policy
 from exomem.vault import walk_vault_md
 
 
@@ -116,6 +116,34 @@ def test_resolver_build_from_current_sidecar_does_not_read_pages(
 
     assert resolver is not None
     assert reads == 0
+
+
+def test_resolver_timing_separates_build_and_warm_copy_work(tmp_path: Path) -> None:
+    """A warm copy must not look like another full resolver build in diagnostics."""
+    root = tmp_path / "vault"
+    _write(root, "Knowledge Base/Notes/One.md", "# One\n")
+    _write(root, "Knowledge Base/Notes/Two.md", "# Two\n")
+    _seed_sidecar(root)
+    token = "resolver-build-and-hit"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        built = find_module.recall_resolver_snapshot(root)
+        cached = find_module.recall_resolver_snapshot(root)
+        rows = {row["name"]: row for row in call_spans.pop_call_spans(token)}
+    finally:
+        call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    assert _resolver_entries(cached) == _resolver_entries(built)
+    assert rows["resolver.acquire"]["count"] == 2
+    copied = rows["resolver.fork"]
+    assert copied["count"] == 2
+    fields = {
+        key: value for key, value in copied["fields"].items()
+        if key not in call_spans.CPU_FIELDS
+    }
+    assert fields == {"build_returns": 1, "cache_hits": 1, "paths": 4}
+    assert 0 <= copied["ms"] <= rows["resolver.acquire"]["ms"]
 
 
 def test_sidecar_title_null_round_trips_and_exact_title_survives(tmp_path: Path) -> None:
