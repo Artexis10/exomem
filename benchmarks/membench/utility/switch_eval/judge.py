@@ -595,7 +595,10 @@ class Unblinded:
     routes: tuple[str, ...]
 
 
-def unblind(layout: Layout, *, routes: Sequence[str]) -> Unblinded:
+def unblind(layout: Layout, *, routes: Sequence[str], expected: Mapping[str, Mapping]) -> Unblinded:
+    """The stored arm key, checked entry by entry against ``expected``: the key
+    rebuilt from the frozen plan and the captured sessions (``build_items``)."""
+
     items = read_items(layout)
     key_path = layout.unblinding / "arm-key.json"
     if not key_path.exists():
@@ -605,6 +608,13 @@ def unblind(layout: Layout, *, routes: Sequence[str]) -> Unblinded:
     if set(arm_key) != ids:
         raise UnblindingError(
             f"the arm key names {len(set(arm_key) - ids)} ids no item has and misses {len(ids - set(arm_key))} item ids"
+        )
+    rebuilt = json.loads(json.dumps(expected))
+    differing = [i for i in set(arm_key) | set(rebuilt) if arm_key.get(i) != rebuilt.get(i)]
+    if differing:
+        raise UnblindingError(
+            f"the arm key differs from the key rebuilt from the plan and the captured sessions "
+            f"for {len(differing)} items"
         )
     if not routes or len(set(routes)) != len(routes) or set(routes) - set(ROUTES):
         raise UnblindingError(f"the standing routes must be distinct routes of {ROUTES}")

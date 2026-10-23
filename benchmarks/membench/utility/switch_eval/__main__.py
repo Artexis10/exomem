@@ -578,21 +578,26 @@ def cmd_judge(args: argparse.Namespace) -> int:
 
 
 def _score(layout, inputs, cases, plan, specs, args) -> dict:
-    from .judge import UnblindingError, resolved_verdicts, unblind
-    from .score import check_sessions, score_run
+    from .judge import UnblindingError, build_items, resolved_verdicts, unblind
+    from .score import check_judge_inputs, check_sessions, score_run
 
     routes = args.routes.split(",")
     problems = _stage_problems(layout, inputs, (*_STAGES_BEFORE_JUDGING, "judge"))
-    if problems:
-        raise SystemExit("chain check failed after judging:\n  " + "\n  ".join(problems))
-    try:
-        unblinded = unblind(layout, routes=routes)
-    except UnblindingError as error:
-        raise SystemExit(f"chain check failed after judging: {error}") from error
     hashes = json.loads((layout.run / "arm-hashes.json").read_text(encoding="utf-8"))
     session_problems, sessions = check_sessions(layout, plan=plan, arm_hashes=hashes)
-    if session_problems:
-        raise SystemExit("chain check failed after judging:\n  " + "\n  ".join(session_problems))
+    problems += session_problems
+    digest = _inputs_digest(inputs)
+    answered = list(sessions.values())
+    problems += check_judge_inputs(
+        layout, cases=cases, sessions=answered, seed=inputs["seed"], inputs_digest=digest
+    )
+    if problems:
+        raise SystemExit("chain check failed after judging:\n  " + "\n  ".join(problems))
+    rebuilt = build_items(cases, answered, seed=inputs["seed"], inputs_digest=digest)
+    try:
+        unblinded = unblind(layout, routes=routes, expected=rebuilt.arm_key)
+    except UnblindingError as error:
+        raise SystemExit(f"chain check failed after judging: {error}") from error
     verdicts = resolved_verdicts(layout, unblinded)
     return score_run(
         layout,

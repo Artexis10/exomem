@@ -485,7 +485,24 @@ def test_scoring_on_one_judge_is_refused_when_its_agreement_calls_for_recovery(t
         _write_verdict(layout, "codex", item_id, {"r1": "missing" if entry["rejudge_of"] else "used"})
 
     with pytest.raises(UnblindingError, match="recovery"):
-        unblind(layout, routes=["codex"])
+        unblind(layout, routes=["codex"], expected=item_set.arm_key)
+
+
+def test_unblinding_refuses_an_arm_key_that_names_another_arm_for_a_session(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    sessions = [_session(layout, "case-1", arm, 1, AttemptResult(OK, answer="An answer.")) for arm in protocol.ARM_IDS]
+    item_set = build_items([_case("case-1")], sessions, seed=7, inputs_digest="inputs")
+    write_items(layout, item_set)
+    for item_id in item_set.arm_key:
+        _write_verdict(layout, "codex", item_id, {})
+    stored = json.loads((layout.unblinding / "arm-key.json").read_text(encoding="utf-8"))
+    # M's item now claims arm A while it keeps M's session: the tie-break would favour it.
+    m_item = next(item_id for item_id, entry in stored.items() if entry["arm"] == "M")
+    stored[m_item]["arm"] = "A"
+    (layout.unblinding / "arm-key.json").write_text(json.dumps(stored), encoding="utf-8")
+
+    with pytest.raises(UnblindingError):
+        unblind(layout, routes=["codex"], expected=item_set.arm_key)
 
 
 def test_the_tie_break_needs_the_arm_key_and_runs_only_after_unblinding(tmp_path: Path) -> None:
@@ -503,7 +520,7 @@ def test_the_tie_break_needs_the_arm_key_and_runs_only_after_unblinding(tmp_path
             (layout.judge / "verdicts" / route / f"{item_id}.json").write_text(json.dumps({**verdict, "item_id": item_id}))
 
     with pytest.raises(UnblindingError):
-        unblind(layout, routes=["codex", "claude"])  # no arm key yet
+        unblind(layout, routes=["codex", "claude"], expected={})  # no arm key yet
     with pytest.raises(UnblindingError):
         tie_break({**first, "item_id": "item-m"}, {**second, "item_id": "item-m"}, unblinded={"item-m": {"arm": "M"}})
 
@@ -514,9 +531,9 @@ def test_the_tie_break_needs_the_arm_key_and_runs_only_after_unblinding(tmp_path
     (layout.unblinding / "arm-key.json").write_text(json.dumps(key), encoding="utf-8")
     (layout.judge / "verdicts" / "claude" / "item-a.json").unlink()
     with pytest.raises(UnblindingError):
-        unblind(layout, routes=["codex", "claude"])  # the second judge has not judged every item
+        unblind(layout, routes=["codex", "claude"], expected=key)  # the second judge has not judged every item
     (layout.judge / "verdicts" / "claude" / "item-a.json").write_text(json.dumps({**second, "item_id": "item-a"}))
-    unblinded = unblind(layout, routes=["codex", "claude"])
+    unblinded = unblind(layout, routes=["codex", "claude"], expected=key)
 
     # Where the judges disagree, the verdict that weighs against the switch stands.
     for_m = tie_break({**first, "item_id": "item-m"}, {**second, "item_id": "item-m"}, unblinded=unblinded)

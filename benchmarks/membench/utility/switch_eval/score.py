@@ -80,6 +80,9 @@ def check_sessions(
             problems.append(f"session {planned['session_id']}: no final record")
             continue
         sessions[planned["session_id"]] = record
+        planned_entry = {k: planned[k] for k in ("session_id", "case_id", "arm", "repeat")}
+        if {k: record.get(k) for k in planned_entry} != planned_entry:
+            problems.append(f"session {planned['session_id']}: its record names another session")
         if record["outcome"] != OK and not record["kind"]:
             problems.append(f"session {planned['session_id']}: a failure without its kind")
         if record["outcome"] == OK:
