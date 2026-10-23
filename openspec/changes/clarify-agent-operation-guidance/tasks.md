@@ -8,7 +8,7 @@
 
 - [x] 2.1 Align server instructions and bootstrap teaching; verify context reuse, activation fields, maps, continuation, and existing byte ceilings.
 - [x] 2.2 Align scaffold, workflow skills, and hook sources; verify structured recall, capture routes, source preservation, and mutation recovery.
-- [ ] 2.3 Regenerate current clients from the exact installed candidate; verify owning generator checks, privacy, schemas, and wheel/source agreement.
+- [x] 2.3 Regenerate current clients from the exact installed candidate; verify owning generator checks, privacy, schemas, and wheel/source agreement.
 
 ## 3. Integrated acceptance and delivery
 
