@@ -12,6 +12,7 @@ with the re-judged verdicts on the flagged items (``score.score_run``).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 
@@ -154,7 +155,8 @@ def rejudge_set(
     inputs_digest: str,
 ) -> tuple[list[dict], dict[str, dict]]:
     """The flagged items with their span removed and as many controls as they
-    are, shuffled together under fresh ids, with their key. Controls are
+    are, shuffled together under fresh ids, with their key. Each id carries a
+    digest of the item's content, so a changed span gives a new id. Controls are
     unchanged copies drawn from every original item, flagged ones included, so
     a run whose every item is flagged still has its noise baseline."""
 
@@ -174,13 +176,22 @@ def rejudge_set(
     for role, item_ids in ((FLAGGED, flagged), (CONTROL, controls)):
         for item_id in item_ids:
             entry = unblinded.arm_key[item_id]
-            fresh = _opaque(secret, "audit", role, entry["session_id"])
-            item = {**originals[item_id], "item_id": fresh}
+            view = {k: v for k, v in originals[item_id].items() if k != "item_id"}
             if role == FLAGGED:
-                item["answer"] = item["answer"].replace(guesses[item_id]["evidence_span"], "")
-            items.append(item)
+                view["answer"] = view["answer"].replace(guesses[item_id]["evidence_span"], "")
+            content = hashlib.sha256(_canonical(view).encode("utf-8")).hexdigest()
+            fresh = _opaque(secret, "audit", role, entry["session_id"], content)
+            items.append({**view, "item_id": fresh})
             key[fresh] = {**entry, "rejudge_of": item_id, "role": role}
     return list(shuffled(items, f"{secret}:audit-order")), key
+
+
+def _canonical(item: Mapping) -> str:
+    return json.dumps(item, sort_keys=True, ensure_ascii=False)
+
+
+def _items_text(items: Sequence[Mapping]) -> str:
+    return "".join(_canonical(item) + "\n" for item in items)
 
 
 def write_rejudge_set(
@@ -193,7 +204,7 @@ def write_rejudge_set(
     )
     items_path = layout.audit / "items.jsonl"
     key_path = layout.unblinding / "audit-key.json"
-    text = "".join(json.dumps(item, sort_keys=True, ensure_ascii=False) + "\n" for item in items)
+    text = _items_text(items)
     if items_path.exists() or key_path.exists():
         stored_key = json.loads(key_path.read_text(encoding="utf-8")) if key_path.exists() else None
         if items_path.read_text(encoding="utf-8") != text or stored_key != key:
@@ -235,12 +246,19 @@ def load_audit(
 ) -> dict | None:
     """What scoring reads from the audit, by session id: each guess, and the
     standing re-judged verdict of each flagged and control item. ``None`` when
-    the audit has not run; refused when it is partial or does not rebuild."""
+    the audit has not run; refused when it is partial or does not rebuild.
+    The stored re-judge items must be the ones the guesses rebuild, removed
+    spans included, before any cached verdict on them is read."""
 
     if not layout.audit.exists():
         return None
     guesses = load_guesses(layout, unblinded)
     items, key = rejudge_set(layout, unblinded, guesses, seed=seed, inputs_digest=inputs_digest)
+    items_path = layout.audit / "items.jsonl"
+    if not items_path.exists():
+        raise UnblindingError("the audit has no re-judge items: its verdicts judged nothing known")
+    if items_path.read_text(encoding="utf-8") != _items_text(items):
+        raise UnblindingError("the stored re-judge items differ from the ones the guesses build")
     key_path = layout.unblinding / "audit-key.json"
     if not key_path.exists() or json.loads(key_path.read_text(encoding="utf-8")) != key:
         raise UnblindingError("the stored audit key differs from the one the guesses build")

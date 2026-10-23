@@ -16,7 +16,13 @@ from pathlib import Path
 import pytest
 from membench.utility.switch_eval import protocol, stats
 from membench.utility.switch_eval.arms import arm_specs
-from membench.utility.switch_eval.audit import load_guesses, rejudge_set, run_guesses
+from membench.utility.switch_eval.audit import (
+    load_audit,
+    load_guesses,
+    rejudge_set,
+    run_guesses,
+    write_rejudge_set,
+)
 from membench.utility.switch_eval.cases import Case, Required, load_cases
 from membench.utility.switch_eval.judge import (
     ITEM_FIELDS,
@@ -687,6 +693,23 @@ def _guess_every_arm_right_from(layout: Layout, unblinded: Unblinded, span: str)
             guess = {"item_id": item_id, "arm_guess": entry["arm"], "confidence": 0.9, "evidence_span": span,
                      "evidence_kind": "describes_tools_or_retrieval"}  # fmt: skip
             (layout.audit / "guesses" / f"{item_id}.json").write_text(json.dumps(guess), encoding="utf-8")
+
+
+def test_scoring_refuses_a_cached_rejudge_verdict_once_its_flagged_span_changes(tmp_path: Path) -> None:
+    layout, unblinded = _judged_run_whose_answers_describe_the_map(tmp_path)
+    _guess_every_arm_right_from(layout, unblinded, "I read the map.")
+    for item in write_rejudge_set(layout, unblinded, seed=7, inputs_digest="inputs"):
+        folder = layout.audit / "verdicts" / "codex"
+        folder.mkdir(parents=True, exist_ok=True)
+        verdict = {"item_id": item["item_id"], "required": {"r1": "missing"}, "forbidden": {}, "contaminated": None, "span": None}
+        (folder / f"{item['item_id']}.json").write_text(json.dumps(verdict), encoding="utf-8")
+    assert load_audit(layout, unblinded, seed=7, inputs_digest="inputs") is not None
+
+    # A shorter span leaves "." in the answer: the cached verdicts judged another view.
+    _guess_every_arm_right_from(layout, unblinded, "I read the map")
+
+    with pytest.raises(UnblindingError):
+        load_audit(layout, unblinded, seed=7, inputs_digest="inputs")
 
 
 def test_the_audit_draws_its_controls_even_when_every_item_is_flagged(tmp_path: Path) -> None:
