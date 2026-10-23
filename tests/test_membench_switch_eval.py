@@ -55,14 +55,19 @@ from membench.utility.switch_eval.session import (
     run_session,
 )
 from membench.utility.switch_eval.state import Layout, Slot
-from membench.utility.switch_eval.tap import BUDGET_REFUSAL
+from membench.utility.switch_eval.tap import (
+    ACTIVATION_WARMING_REASON,
+    BUDGET_REFUSAL,
+    RECALL_WARMING_CODE,
+    ready_wait,
+)
 from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 
 # A stand-in MCP server: answers initialize, tools/list and tools/call; with
 # --crash-on-call exits mid-call, as a crashing server under test would, and
 # with --exit-at-start exits before it reads a message, as a broken build would.
 FAKE_SERVER = """
-import json, sys
+import json, sys, time
 if "--exit-at-start" in sys.argv:
     sys.exit(2)
 crash = "--crash-on-call" in sys.argv
@@ -82,12 +87,19 @@ for line in sys.stdin:
         if "--check-meta" in sys.argv:
             assert message["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
         probes += 1
+        if "--crash-on-probe" in sys.argv:
+            sys.exit(3)
         if "--never-ready" in sys.argv or ("--warming-once" in sys.argv and probes == 1):
+            if "--warming-once" in sys.argv:
+                time.sleep(6)
             result = {"structuredContent": {"result": {"success": False,
                       "error": {"code": "RETRIEVAL_INDEX_WARMING"}}}}
+        elif "--warming-once" in sys.argv and probes == 2:
+            result = {"structuredContent": {"result": {"hits": [],
+                      "warming": {"components": ["embeddings", "recall_projection"], "since_s": None}}}}
         else:
             result = {"structuredContent": {"result": {"hits": [],
-                      "warming": {"components": ["embeddings", "graph", "recall_projection"], "since_s": None}}}}
+                      "warming": {"components": ["embeddings", "graph", "pending_visibility"], "since_s": None}}}}
     else:
         if crash:
             sys.exit(3)
@@ -469,13 +481,13 @@ tap.wait(timeout=10)
         sys.executable, str(client), sys.executable, TAP_SCRIPT,
         "--log", str(slot.runtime / "tap.jsonl"), "--turn-file", str(slot.turn_file),
         "--budget", "1", "--allow", "read_memory",
-        "--ready-timeout", "5" if eventually_ready else "0.05",
+        "--ready-timeout", "30" if eventually_ready else "0.05",
         "--server-stderr", str(slot.runtime / "server.stderr"),
         "--", sys.executable, str(server), "--check-meta",
         "--warming-once" if eventually_ready else "--never-ready",
     ))
-    # Warm-up lasts a second; an actor turn gets only half a second.
-    executor = ClaudeSessionExecutor(Layout(tmp_path), {"P": spec}, "m", "v", {}, turn_timeout=0.5)
+    # Warm-up exceeds the turn limit; five seconds allow the interpreter starts.
+    executor = ClaudeSessionExecutor(Layout(tmp_path), {"P": spec}, "m", "v", {}, turn_timeout=5)
     result = executor(inputs, tmp_path / "attempt")
 
     tap_events = _log(tmp_path / "attempt" / "runtime" / "tap.jsonl")
@@ -484,14 +496,84 @@ tap.wait(timeout=10)
         assert result.outcome == HARNESS_FAULT and result.kind == "recall_not_ready"
         assert ready["outcome"] == "timeout"
         assert not any(e["event"] == "call" for e in tap_events)
+        with pytest.raises(RunAborted, match="recall_not_ready after 2 retries"):
+            run_session(inputs, tmp_path / "session", lambda *args: result)
         return
 
     assert result.outcome == OK and result.answer == "served 1"
-    assert ready["outcome"] == "ready" and ready["probes"] == 2
+    assert ready["outcome"] == "ready" and ready["probes"] == 3
     assert next(e["t"] for e in tap_events if e["event"] == "tools_list") >= ready["t"]
     turn = result.turns[0]
     assert turn["calls"] == 1 and turn["calls_refused_budget"] == 0
-    assert turn["ready_wait_seconds"] >= 1.0 and turn["wall_seconds"] < 0.5
+    assert turn["ready_wait_seconds"] >= 8.0 and turn["wall_seconds"] < 5
+    record = run_session(inputs, tmp_path / "session", lambda *args: result)
+    assert record["facts"]["ready_gate"]["warming"] == {
+        "components": ["embeddings", "graph", "pending_visibility"], "since_s": None,
+    }
+
+
+def test_a_lost_tap_cannot_suspend_the_turn_clock_past_its_gate_bound() -> None:
+    events = [{"event": "ready_started", "monotonic": 100, "timeout_seconds": 5}]
+
+    assert ready_wait(events, 100, 104) == 4
+    assert ready_wait(events, 100, 112) == 5
+    assert ready_wait(events, 107, 112) == 0
+
+
+def test_a_server_exit_during_the_gate_is_a_retried_setup_fault(tmp_path: Path) -> None:
+    tap, log, _turn_file = _start_tap(tmp_path, "--crash-on-probe")
+    _ask(tap, 1, "initialize", {})
+    assert _ask(tap, 2, "tools/list", {}) is None
+    tap.wait(timeout=30)
+    events = _log(log)
+
+    def exited(inputs: SessionInputs, attempt_dir: Path) -> AttemptResult:
+        return classify(
+            spec=arm_specs()["P"], model="m", client_version="v", events=[], turn_records=[],
+            tap_events=events, scored_turn=0, timed_out=False, quota=None, surface=None,
+        )
+
+    result = exited(_inputs(), tmp_path)
+    assert result.outcome == HARNESS_FAULT and result.kind == "recall_not_ready"
+    with pytest.raises(RunAborted, match="recall_not_ready after 2 retries"):
+        run_session(_inputs(), tmp_path / "session", exited)
+    assert len(_log(tmp_path / "session" / "attempts.jsonl")) == 3
+
+
+def test_the_warming_guard_tracks_the_product_refusal_constants() -> None:
+    from exomem.activation_result import INDEX_WARMING
+    from exomem.find import RetrievalIndexWarming
+
+    assert (ACTIVATION_WARMING_REASON, RECALL_WARMING_CODE) == (
+        INDEX_WARMING, RetrievalIndexWarming(site="catalog_proof_incomplete").code,
+    )
+
+
+def test_surface_capture_never_probes_or_waits_for_recall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from membench.utility.switch_eval import state
+
+    slot = Slot(tmp_path / "slot")
+    slot.runtime.mkdir(parents=True)
+    slot.cwd.mkdir()
+    server = tmp_path / "stand_in_server.py"
+    server.write_text(FAKE_SERVER, encoding="utf-8")
+    real_entry = state.mcp_server_entry
+
+    def stand_in_entry(*args, **kwargs):
+        entry = real_entry(*args, **kwargs)
+        # Only replace the product process; keep the surface stage's real tap configuration.
+        entry["args"][entry["args"].index("--") + 1:] = [sys.executable, str(server), "--crash-on-probe"]
+        return entry
+
+    monkeypatch.setattr(state, "mcp_server_entry", stand_in_entry)
+    spec = replace(arm_specs()["P"], tools=("read_memory",))
+    out = tmp_path / "surface"
+    surface = state.capture_surface(slot, spec, env={}, out=out)
+
+    assert surface["per_tool"]
+    events = [e for path in out.glob("*-tap.jsonl") for e in _log(path)]
+    assert len([e for e in events if e["event"] == "tools_list"]) == 2
+    assert not any(e["event"] in ("ready_started", "ready_finished", "call") for e in events)
 
 
 @pytest.mark.parametrize("refusal", [
@@ -605,7 +687,7 @@ def test_scoring_refuses_a_run_whose_failed_repeat_lost_its_record(tmp_path: Pat
 def test_usage_and_the_failure_report_read_every_attempt_not_only_the_last(tmp_path: Path) -> None:
     layout = Layout(tmp_path / "run")
     turn = {"calls": 1, "activation_calls": 0, "input_tokens": 100, "output_tokens": 10, "push_bytes": 0,
-            "wall_seconds": 1.0, "hook_responses": []}  # fmt: skip
+            "wall_seconds": 1.0, "ready_wait_seconds": 2.0, "hook_responses": []}  # fmt: skip
     record = _session(
         layout, "case-1", "A", 1,
         AttemptResult(HARNESS_FAULT, "rate_limit", turns=[turn]),
@@ -617,9 +699,11 @@ def test_usage_and_the_failure_report_read_every_attempt_not_only_the_last(tmp_p
     scored = score_run(
         layout, cases=[_case("case-1")], sessions={record["session_id"]: record}, verdicts={record["session_id"]: verdict},
         arm_ids=["A"], repeats=1, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0,
+        project_sessions=12,
     )  # fmt: skip
 
-    assert scored["usage"]["totals"] == {"input_tokens": 300, "output_tokens": 30, "wall_seconds": 3.0, "attempts": 3}
+    assert scored["usage"]["totals"] == {"input_tokens": 300, "output_tokens": 30, "wall_seconds": 3.0, "ready_wait_seconds": 6.0, "attempts": 3}
+    assert scored["usage"]["projected"]["ready_wait_seconds"] == 72.0
     assert scored["secondary"]["A"]["harness_faults_by_kind"] == {"rate_limit": 1, "transport": 1}
 
 
@@ -658,7 +742,7 @@ def test_a_skipped_struck_session_counts_no_usage_instead_of_making_usage_unavai
         deltas={2: 0.1, 3: 0.1}, seed=0,
     )  # fmt: skip
 
-    assert scored["usage"]["totals"] == {"input_tokens": 100, "output_tokens": 10, "wall_seconds": 1.0, "attempts": 1}
+    assert scored["usage"]["totals"] == {"input_tokens": 100, "output_tokens": 10, "wall_seconds": 1.0, "ready_wait_seconds": None, "attempts": 1}
 
 
 def test_the_activation_share_counts_user_turns_with_an_activate_context_call_not_calls(tmp_path: Path) -> None:

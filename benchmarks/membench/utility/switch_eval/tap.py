@@ -44,9 +44,13 @@ FILTER_REFUSAL = "Refused: this tool is not available in this session."
 #: client on the 2026-07-28 protocol sends instead. Protocol method names.
 HANDSHAKE_METHODS = frozenset({"initialize", "server/discover"})
 
-# Harness knob: a cold snapshot took about five minutes to admit recall.
-# Fifteen minutes leaves margin for contention; --ready-timeout can override it.
-READY_TIMEOUT_SECONDS = 900.0
+# Amendment 4 measured projection readiness near 450 s; allow contention margin.
+READY_TIMEOUT_SECONDS = 1200.0
+# Amendment 4's 2026-10-23 measurement (~447 s) and op_activate_context's read path justify clearing this closed product component for arm parity.
+REQUIRED_CLEAR_COMPONENTS = frozenset({"recall_projection"})
+# Product refusal tokens, pinned to their definitions by the harness tests.
+ACTIVATION_WARMING_REASON = "index_warming"
+RECALL_WARMING_CODE = "RETRIEVAL_INDEX_WARMING"
 
 
 def tool_payloads(message: dict):
@@ -77,11 +81,11 @@ def warming_refusal(message: dict) -> bool:
         if not isinstance(value, dict):
             continue
         abstention = value.get("abstention")
-        if isinstance(abstention, dict) and abstention.get("reason") == "index_warming":
+        if isinstance(abstention, dict) and abstention.get("reason") == ACTIVATION_WARMING_REASON:
             return True
         if (
-            value.get("code") == "RETRIEVAL_INDEX_WARMING"
-            or value.get("error_code") == "RETRIEVAL_INDEX_WARMING"
+            value.get("code") == RECALL_WARMING_CODE
+            or value.get("error_code") == RECALL_WARMING_CODE
         ):
             return True
     return False
@@ -90,11 +94,12 @@ def warming_refusal(message: dict) -> bool:
 def ready_wait(events: list[dict], start: float, end: float) -> float:
     """Gate time overlapping one turn, also while the gate is still running."""
 
-    began = next((e["monotonic"] for e in events if e.get("event") == "ready_started"), None)
-    if began is None:
+    gate = next((e for e in events if e.get("event") == "ready_started"), None)
+    if gate is None:
         return 0.0
+    began = gate["monotonic"]
     finished = next((e["monotonic"] for e in events if e.get("event") == "ready_finished"), end)
-    return max(0.0, min(end, finished) - max(start, began))
+    return max(0.0, min(end, finished, began + gate["timeout_seconds"]) - max(start, began))
 
 
 class ReadyGateError(RuntimeError):
@@ -161,13 +166,14 @@ class Tap:
         budget: Budget,
         allow: frozenset[str],
         ready_timeout: float = READY_TIMEOUT_SECONDS,
+        skip_ready_gate: bool = False,
     ) -> None:
         self.server = server
         self.log = log
         self.budget = budget
         self.allow = allow
         self.ready_timeout = ready_timeout
-        self._ready = False
+        self._ready = skip_ready_gate
         self._probe_id: str | None = None
         self._probe_replies: queue.Queue[dict] = queue.Queue()
         self._out_lock = threading.Lock()
@@ -240,6 +246,7 @@ class Tap:
         self.log.write("ready_started", monotonic=started, timeout_seconds=self.ready_timeout)
         probes = 0
         outcome = "timeout"
+        warming = None
         while time.monotonic() < deadline:
             probes += 1
             self._probe_id = f"switch-eval-ready-{probes}"
@@ -268,6 +275,14 @@ class Tap:
             if not warming_refusal(reply):
                 result = reply.get("result") or {}
                 payloads = list(tool_payloads(reply))
+                warming = next(
+                    (
+                        p["warming"]
+                        for p in payloads
+                        if isinstance(p, dict) and isinstance(p.get("warming"), dict)
+                    ),
+                    None,
+                )
                 failed = (
                     reply.get("error")
                     or result.get("isError")
@@ -276,18 +291,18 @@ class Tap:
                         for p in payloads
                     )
                 )
-                # A ranked response proves request admission. The product serves
-                # bounded projection lag and optional lanes with warming metadata;
-                # those disclosures are not refusals and must not hold this gate.
-                if not failed and any(
+                recall = any(
                     isinstance(p, list) or (isinstance(p, dict) and isinstance(p.get("hits"), list))
                     for p in payloads
-                ):
+                )
+                if failed or not recall:
+                    outcome = "probe_error"
+                    break
+                components = (warming or {}).get("components") or []
+                if not REQUIRED_CLEAR_COMPONENTS.intersection(components):
                     self._ready = True
                     outcome = "ready"
-                else:
-                    outcome = "probe_error"
-                break
+                    break
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
         self._probe_id = None
         finished = time.monotonic()
@@ -297,6 +312,7 @@ class Tap:
             outcome=outcome,
             wait_seconds=round(finished - started, 4),
             probes=probes,
+            warming=warming,
         )
         if not self._ready:
             raise ReadyGateError(outcome)
@@ -372,6 +388,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--budget", required=True, type=int)
     parser.add_argument("--ready-timeout", type=float, default=READY_TIMEOUT_SECONDS)
     parser.add_argument(
+        "--skip-ready-gate", action="store_true", help="capture discovery without recall probes"
+    )
+    parser.add_argument(
         "--allow", required=True, help="comma-separated tool names the arm may see and call"
     )
     parser.add_argument("--server-stderr", required=True, type=Path)
@@ -406,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         budget=Budget(args.turn_file, args.budget),
         allow=frozenset(args.allow.split(",")),
         ready_timeout=args.ready_timeout,
+        skip_ready_gate=args.skip_ready_gate,
     )
 
     closing = threading.Event()

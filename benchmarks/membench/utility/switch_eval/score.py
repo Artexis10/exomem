@@ -614,7 +614,8 @@ def _mean(values: Sequence[float | None]) -> float | None:
 
 def usage(layout: Layout, sessions: Mapping[str, Mapping], *, project_sessions: int | None) -> dict:
     """Measured usage per session over every attempt, and the projection for a
-    planned run size."""
+    planned run size. ``wall_seconds`` excludes the gate; ``ready_wait_seconds``
+    reports that setup cost separately."""
 
     records = list(sessions.values())
     if not records:
@@ -630,13 +631,17 @@ def usage(layout: Layout, sessions: Mapping[str, Mapping], *, project_sessions: 
         }
     attempts = [attempt for attempts in logged for attempt in attempts]
     turns = [turn for attempt in attempts for turn in attempt["turns"]]
+    waits = [turn.get("ready_wait_seconds") for turn in turns]
     totals = {
         "input_tokens": sum(t["input_tokens"] for t in turns),
         "output_tokens": sum(t["output_tokens"] for t in turns),
         "wall_seconds": sum(t["wall_seconds"] for t in turns),
+        "ready_wait_seconds": sum(waits) if all(w is not None for w in waits) else None,
         "attempts": len(attempts),
     }
-    per_session = {key: value / len(records) for key, value in totals.items()}
+    per_session = {
+        key: value / len(records) if value is not None else None for key, value in totals.items()
+    }
     out = {
         "sessions": len(records),
         "state": "complete",
@@ -646,7 +651,7 @@ def usage(layout: Layout, sessions: Mapping[str, Mapping], *, project_sessions: 
     if project_sessions:
         out["projected"] = {
             "sessions": project_sessions,
-            **{k: v * project_sessions for k, v in per_session.items()},
+            **{k: v * project_sessions if v is not None else None for k, v in per_session.items()},
         }
     return out
 

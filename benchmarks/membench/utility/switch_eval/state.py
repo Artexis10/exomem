@@ -221,7 +221,9 @@ def build_state(vault: Path) -> dict:
     }
 
 
-def mcp_server_entry(slot: Slot, spec: ArmSpec, *, log: Path, server_stderr: Path) -> dict:
+def mcp_server_entry(
+    slot: Slot, spec: ArmSpec, *, log: Path, server_stderr: Path, skip_ready_gate: bool = False
+) -> dict:
     """The ``--mcp-config`` server entry: the tap in front of the stdio server."""
 
     return {
@@ -238,6 +240,7 @@ def mcp_server_entry(slot: Slot, spec: ArmSpec, *, log: Path, server_stderr: Pat
             ",".join(spec.tools),
             "--server-stderr",
             str(server_stderr),
+            *(["--skip-ready-gate"] if skip_ready_gate else []),
             "--",
             python_executable(),
             "-m",
@@ -283,7 +286,11 @@ def _ask_surface(
     name = method.replace("/", "-")
     stderr = out / f"surface-{name}-server.stderr"
     entry = mcp_server_entry(
-        slot, spec, log=out / f"surface-{name}-tap.jsonl", server_stderr=stderr
+        slot,
+        spec,
+        log=out / f"surface-{name}-tap.jsonl",
+        server_stderr=stderr,
+        skip_ready_gate=True,
     )
     proc = subprocess.Popen(  # noqa: S603 - the harness's own tap and server
         [entry["command"], *entry["args"]],

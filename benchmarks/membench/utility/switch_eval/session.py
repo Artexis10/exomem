@@ -8,12 +8,12 @@ fresh session and one Exomem server process for the whole case (design,
 
 Classification reads structured fields only: the CLI's event types, its
 documented error kinds and the tap's log. A crash of the server under test
-after it answered the client's handshake is an actor failure and is never retried; a
-rate limit, a transport error, a host fault or a server that never started is
+after its ready gate opens is an actor failure and is never retried; a
+rate limit, a transport error, a host fault or a server that never becomes ready is
 a harness fault and is retried with the same inputs, up to the protocol's
 limit; a spent quota pauses the run (design, "Runs and failures"). A server
-that still does not start after the retries stops the run: every later session
-would share the fault, and a struck case would hide it.
+that still fails startup or readiness after the retries stops the run: every
+later session would share the fault, and a struck case would hide it.
 """
 
 from __future__ import annotations
@@ -87,12 +87,13 @@ _ABORT_ERRORS = frozenset({"authentication_failed", "billing_error", "invalid_re
 
 #: The fault kind of a server that never answered the client's handshake.
 SERVER_START = "server_start"
+RECALL_NOT_READY = "recall_not_ready"
 #: The fault kind of a client that never reported its session (no init
 #: event): a launcher that refused, or a client that died before it started.
 CLIENT_START = "client_start"
 #: Setup faults: retried like any harness fault, and one that outlasts the
 #: retries stops the run, because every later session would meet it too.
-_START_FAULTS = frozenset({SERVER_START, CLIENT_START})
+_START_FAULTS = frozenset({SERVER_START, CLIENT_START, RECALL_NOT_READY})
 
 #: The hook event of the protocol's push, the only hook an arm wires.
 PUSH_HOOK_EVENT = "UserPromptSubmit"
@@ -482,7 +483,7 @@ def classify(
     if gate_started and (gate is None or gate.get("outcome") != "ready"):
         return AttemptResult(
             HARNESS_FAULT,
-            "recall_not_ready",
+            RECALL_NOT_READY,
             str(gate.get("outcome")) if gate else "server ended during the ready gate",
             turns=list(turn_records),
         )
@@ -985,6 +986,7 @@ class ClaudeSessionExecutor:
             returncode=proc.returncode,
             orphan_server_ended=orphan,
             user_state_writes=_user_state_writes(started_wall),
+            ready_gate=next((e for e in tap_events if e.get("event") == "ready_finished"), None),
         )
         if result.kind == CLIENT_START:
             # A launcher's refusal reaches only its stderr.
