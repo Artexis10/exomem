@@ -25,6 +25,7 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import environment_floor
 
+from exomem.runtime_resources import CPU_THREADS_ENV
 from membench.judge.blinding import (
     SourceNumbering,
     deterministic_permutation,
@@ -497,6 +498,7 @@ def run_structured(
     # The launching agent session's variables would make the call a nested
     # child of that session; it starts as a plain headless run instead.
     env = {**environment_floor(os.environ)[0], **CLIENT_PINS}
+    env.pop(CPU_THREADS_ENV, None)
     answered = 0
     for item in items:
         target = out_dir / f"{item['item_id']}.json"
