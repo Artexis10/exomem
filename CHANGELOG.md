@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.134.4](https://github.com/Artexis10/exomem/compare/v0.134.3...v0.134.4) (2026-10-23)
+
+
+### Performance
+
+* **recall:** rank managed candidates from catalogue metadata ([#1990](https://github.com/Artexis10/exomem/issues/1990)) ([5e894ff](https://github.com/Artexis10/exomem/commit/5e894ff71efba004b7918d59e81f352e2da794f4))
+
 ## [0.134.3](https://github.com/Artexis10/exomem/compare/v0.134.2...v0.134.3) (2026-10-22)
 
 
