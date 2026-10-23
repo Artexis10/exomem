@@ -835,6 +835,8 @@ def test_a_snapshot_echo_spanning_installation_is_not_external(
     with monkeypatch.context() as reading:
         reading.setattr(os, "read", read_across_installation)
         watcher._record(target, deleted=False)
+    # Each schedule must run its race through the hooked read.
+    assert reads == (1 if start_phase == "prepared" else 2)
 
     # Finish the publication if the first, already-valid BEFORE proof was held.
     if stage.exists():
