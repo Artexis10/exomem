@@ -526,15 +526,39 @@ it with the current path on the reference corpus.
   slice 6.6 computes those statistics once per catalogue generation and
   admitted set.
 - **Dense search.** The vector lane asks for 3 x `candidate_k` chunk rows and
-  hydrates the text of every row with an OR of primary-key pairs
-  (`embedding_index.py:1822`), but it keeps only the best chunk per file. Three
-  consumers read that text:
-  - frame collapse attributes frame children with it
-    (`collapse_frame_children`, `find_candidates.py:94`, called at `:590`);
-  - the rerank prefix uses it as each hit's passage (`find.py:4749`);
-  - excerpts use it for returned hits (`find.py:4603`).
+  hydrates every row, although it retains only the best chunk per file.
+  Frame collapse moves auxiliary values; it does not inspect chunk text.
+  The consumers are the selected excerpt, transcript localization and its
+  nearest-frame annotation, and the rerank prefix's passage.
 
-  Text is hydrated by primary key only for the rows that those consumers read.
+  Modern selections carry immutable chunk references through existing auxiliary
+  maps. Each reference identifies the source index, path, chunk ordinal, vector
+  space and scored publication token. The NumPy proof comes from the exact cache
+  object that supplied the scored matrix, including that object's stored space.
+  Reading a mutable index identity after scoring cannot establish this proof.
+  The disk scan retains its scoring transaction's token. The vec path runs its
+  synchronization gate before opening the scoring transaction, because the gate
+  can commit. Its KNN, binary rescore and row mapping share that transaction.
+
+  Final selection freezes its eligible `target_n` prefix before chunk proof
+  checks. One short read transaction validates the proof and reads selected text
+  through the existing primary-key lookup. Equal positive tokens need no log.
+  A later generation needs the existing contiguous chunk-path log, unchanged
+  epoch, instance and space, and no change to the selected source path.
+  The same path-log predicate also serves publication validation.
+
+  Missing text, a failed read or lost proof omits the selected evidence, marks
+  coverage incomplete and prevents shared caching. It never refills from lower
+  fused rows or substitutes another passage. A present empty string retains its
+  existing fallback behavior. Selected strings are captured before the catalogue
+  selection closes, because reranking finishes after that boundary.
+  The existing private source-hash map covers the emitted page, original chunk
+  source and separate frame source. No second cache or provenance map is added.
+
+  Generation-zero NumPy sidecars keep their existing eager path. Their cached
+  matrix has no durable publication proof, and switching to disk scoring can
+  change tied winners. This legacy path remains unoptimized and unattested;
+  modern proof loss never enters it. Task 6.7 stays open for that exception.
 - **Response blocks.** `_with_due_state` (`commands.py:6427`) runs after the
   find timings close, so 21 / 58 ms of the request is outside `total_ms`. It
   becomes the registered stage `due_state` and reads role state once per

@@ -933,7 +933,7 @@ def _cached_selection_hits(vault_root: Path, hits: list[Any], pending: Any) -> l
     selected = []
     pages: dict[str, ParsedPage | None] = {}
     for hit in hits:
-        sources = getattr(hit, "keyword_sources", {})
+        sources = getattr(hit, "evidence_sources", {})
         if sources:
             for path in sources:
                 if path not in pages:
@@ -4801,7 +4801,7 @@ def _find_managed_keyword(
                 continue
             hit.scene_frame, hit.scene_frame_ts = frame.media_file, frame.frame_ts
             sources[frame.rel_path] = group.hashes[frame.rel_path]
-        hit.keyword_sources = sources
+        hit.evidence_sources = sources
         hits.append(hit)
     return hits
 
@@ -5268,6 +5268,21 @@ def _find_semantic(
     )
     hits: list[Hit] = []
     seen: set[str] = set()
+    selected: list[tuple[str, ParsedPage, str | None]] = []
+
+    def incomplete() -> None:
+        view = lexstore._admitted_catalog_view(vault_root)
+        if view is not None:
+            view.incomplete = True
+        if degraded_out is not None and _RECALL_PROJECTION_STALE_COMPONENT not in degraded_out:
+            degraded_out.append(_RECALL_PROJECTION_STALE_COMPONENT)
+
+    # Legacy indexes and injected providers still supply strings. Modern
+    # references travel through the same collapse map without reading text.
+    from .embedding_index import ChunkRef
+
+    chunk_refs = {path: ref for path, ref in chunk_text_by_path.items() if isinstance(ref, ChunkRef)}
+    chunk_text_by_path = {path: text for path, text in chunk_text_by_path.items() if isinstance(text, str)}
 
     def _supported_stems(page: ParsedPage | find_types.RankingPage) -> bool:
         if semantic_lanes_absent:
@@ -5377,6 +5392,46 @@ def _find_semantic(
                 if keyword_excerpt is None:
                     body = page.body.strip()
                     keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
+            selected.append((rel_path, page, keyword_excerpt))
+            if len(selected) >= target_n:
+                break
+
+        # Freeze the eligible prefix before proof checks. Missing selected text
+        # reduces coverage; it must not pull lower fused rows into the answer.
+        selected_refs = {}
+        for rel_path, _page, _excerpt in selected:
+            ref = chunk_refs.get(rel_path)
+            if ref is not None:
+                selected_refs.setdefault(ref.proof, []).append((rel_path, ref))
+        for proof, entries in selected_refs.items():
+            try:
+                texts = proof.index._texts_for([(ref.path, ref.chunk) for _rel, ref in entries], proof=proof)
+            except Exception:  # noqa: BLE001 — lost selected evidence reduces coverage
+                texts = {}
+            for rel_path, ref in entries:
+                pair = (ref.path, ref.chunk)
+                if pair in texts:
+                    chunk_text_by_path[rel_path] = texts[pair]
+
+        for rel_path, page, keyword_excerpt in selected:
+            sources = {page.rel_path: page.snapshot_hash}
+            ref = chunk_refs.get(rel_path)
+            if ref is not None:
+                if rel_path not in chunk_text_by_path:
+                    incomplete()
+                    continue
+                chunk_page = _page_of(ref.path)
+                if chunk_page is None:
+                    incomplete()
+                    continue
+                sources[chunk_page.rel_path] = chunk_page.snapshot_hash
+            frame_path = bundle.frame_sources.get(rel_path)
+            if frame_path is not None:
+                frame_page = _page_of(frame_path)
+                if frame_page is None:
+                    incomplete()
+                    continue
+                sources[frame_page.rel_path] = frame_page.snapshot_hash
             chunk = chunk_text_by_path.get(rel_path)
             excerpt = _semantic_excerpt(page, query_norm, chunk, keyword_excerpt)
             is_graph_only = (
@@ -5432,9 +5487,13 @@ def _find_semantic(
                     nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
                     if nf is not None:
                         hit.scene_frame, hit.scene_frame_ts = nf
+                        frame_page = _page_of(hit.scene_frame + ".md")
+                        if frame_page is None:
+                            incomplete()
+                            continue
+                        sources[frame_page.rel_path] = frame_page.snapshot_hash
+            hit.evidence_sources = sources
             hits.append(hit)
-            if len(hits) >= target_n:
-                break
 
     def finish() -> list[Hit]:
         nonlocal hits

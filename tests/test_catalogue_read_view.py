@@ -164,7 +164,7 @@ def test_encoder_cutover_cannot_cache_old_serving_results_under_the_new_key(
         return []
 
     monkeypatch.setattr(embeddings, "embed_texts", encode)
-    monkeypatch.setattr(embeddings.EmbeddingIndex, "search", search)
+    monkeypatch.setattr(embeddings.EmbeddingIndex, "select_chunks", search)
     monkeypatch.setattr(embeddings.EmbeddingIndex, "search_semantic_units", search)
     degraded: list[str] = []
     hits = find_module.find(
