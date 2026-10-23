@@ -112,6 +112,7 @@ tests/test_membench_scoring_families.py
 tests/test_membench_scoring_gates.py
 tests/test_membench_source_reliability.py
 tests/test_membench_subday.py
+tests/test_membench_switch_eval.py
 tests/test_membench_template_suite.py
 tests/test_membench_trackc.py
 tests/test_membench_trackc_join.py
