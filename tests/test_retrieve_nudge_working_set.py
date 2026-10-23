@@ -817,7 +817,8 @@ def test_a_transport_failure_requests_native_activation(
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
-    assert context == hook._MCP_ACTIVATION
+    assert context.startswith(hook._MCP_ACTIVATION)
+    assert checkpoint.MEMORY_CITATION_GUIDANCE in context
 
 
 def test_a_raising_transport_requests_native_activation(
@@ -835,7 +836,8 @@ def test_a_raising_transport_requests_native_activation(
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
-    assert context == hook._MCP_ACTIVATION
+    assert context.startswith(hook._MCP_ACTIVATION)
+    assert checkpoint.MEMORY_CITATION_GUIDANCE in context
 
 
 def test_a_malformed_response_is_not_usable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1913,7 +1915,9 @@ def test_transport_failure_under_client_wide_cooldown_requests_native_activation
     output = _run(monkeypatch, capsys, _event(session_id="fresh-tab"), home)
 
     assert len(seen) == 1
-    assert _context(output) == hook._MCP_ACTIVATION
+    context = _context(output)
+    assert context.startswith(hook._MCP_ACTIVATION)
+    assert checkpoint.MEMORY_CITATION_GUIDANCE in context
 
 
 def test_an_unresolved_block_under_the_client_wide_cooldown_drops_the_reminder(
