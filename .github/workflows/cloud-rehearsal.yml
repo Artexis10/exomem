@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM. operator-restore-abort: interrupted in-place recovery after steps 1-2. local-storage-drill: node-loss recovery."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery."
         type: choice
-        options: [full, full-coexistence, operator-restore-abort, local-storage-drill]
+        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill]
         default: full
 
 permissions:
@@ -93,8 +93,9 @@ jobs:
           HARNESS_CHECK: ${{ github.event_name == 'pull_request' && '--harness-check' || '' }}
           COEXISTENCE: ${{ inputs.mode == 'full-coexistence' && '--local-storage-coexistence' || '' }}
           RESTORE_ABORT: ${{ inputs.mode == 'operator-restore-abort' && '--operator-restore-abort --steps 1,2 --harness-check' || '' }}
+          OWNER_EXPORT: ${{ inputs.mode == 'owner-export' && '--owner-export --steps 1,2 --harness-check' || '' }}
         run: |
-          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
+          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} ${OWNER_EXPORT} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
       - name: Summarize the report
         if: always()
         run: |

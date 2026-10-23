@@ -100,8 +100,26 @@ class Stack:
     adaptations: list[str] = field(default_factory=list)
     containers: list[str] = field(default_factory=list)
     networks: list[str] = field(default_factory=list)
+    volumes: list[str] = field(default_factory=list)
     pki: tls.RehearsalPki | None = None
     sealed_network: str | None = None
+
+
+def docker_labels(run_id: str, *, image: bool = False) -> list[str]:
+    """Keep every disposable resource bound to its run and active agent."""
+    labels = ["--label", f"io.exomem.rehearsal.run={run_id}"]
+    if shutil.which("agent-docker-clean"):
+        label = run(["agent-docker-clean", "--print-image-label" if image else "--print-label"]).stdout.strip()
+        labels += ["--label", label]
+    return labels
+
+
+def data_volume(stack: Stack, suffix: str) -> str:
+    """Track an owned volume before any dependent container starts."""
+    name = f"exo-rehearsal-{stack.run_id}-{suffix}"
+    stack.volumes.append(name)
+    run(["docker", "volume", "create", *docker_labels(stack.run_id), name])
+    return name
 
 
 def _container_ip(name: str, network: str) -> str:
@@ -116,44 +134,51 @@ def _host_port(name: str, port: str) -> int:
 
 def create_stack(run_id: str, workdir: Path, *, tls_storage: bool = False) -> Stack:
     network = f"exo-rehearsal-{run_id}"
-    run(["docker", "network", "create", network])
-    subnet = json.loads(run(["docker", "network", "inspect", network]).stdout)[0]["IPAM"]["Config"][0]["Subnet"]
     stack = Stack(
         run_id=run_id,
         workdir=workdir,
         network=network,
-        subnet=subnet,
+        subnet="",
         k3s=None,  # type: ignore[arg-type]
         postgres=None,  # type: ignore[arg-type]
         object_store=None,  # type: ignore[arg-type]
     )
-    stack.postgres = _start_postgres(stack)
-    if tls_storage:
-        stack.sealed_network = f"{network}-sealed"
-        run(["docker", "network", "create", "--internal", stack.sealed_network])
-        stack.networks.append(stack.sealed_network)
-    stack.object_store = _start_object_store(stack)
-    stack.k3s = _start_k3s(stack)
-    if stack.sealed_network:
-        run(["docker", "network", "connect", stack.sealed_network, stack.k3s.container])
+    try:
+        run(["docker", "network", "create", *docker_labels(run_id), network])
+        stack.subnet = json.loads(run(["docker", "network", "inspect", network]).stdout)[0]["IPAM"]["Config"][0]["Subnet"]
+        stack.postgres = _start_postgres(stack)
+        if tls_storage:
+            stack.sealed_network = f"{network}-sealed"
+            run(["docker", "network", "create", *docker_labels(run_id), "--internal", stack.sealed_network])
+            stack.networks.append(stack.sealed_network)
+        stack.object_store = _start_object_store(stack)
+        stack.k3s = _start_k3s(stack)
+        if stack.sealed_network:
+            run(["docker", "network", "connect", stack.sealed_network, stack.k3s.container])
+    except BaseException:
+        # The caller cannot retain a Stack that setup did not return.
+        teardown(stack, keep=False)
+        raise
     return stack
 
 
 def _start_postgres(stack: Stack) -> Postgres:
     name = f"exo-rehearsal-pg-{stack.run_id}"
     superuser_password = secrets.token_urlsafe(24)
+    volume = data_volume(stack, "postgres")
+    stack.containers.append(name)
     run(
         [
-            "docker", "run", "--detach", "--name", name, "--network", stack.network,
+            "docker", "run", "--detach", *docker_labels(stack.run_id), "--name", name, "--network", stack.network,
             "--publish", "127.0.0.1::5432",
             "--env", "POSTGRES_PASSWORD_FILE=/run/pg-password",
             "--env", f"POSTGRES_DB={images.PG_DATABASE_BOOT}",
+            "--mount", f"type=volume,source={volume},target=/var/lib/postgresql/data",
             "--mount", f"type=bind,source={_write_secret(stack, 'pg-password', superuser_password)},target=/run/pg-password,readonly",
             images.POSTGRES, "postgres",
             "-c", "max_connections=300",
         ]
     )
-    stack.containers.append(name)
     wait_for(
         lambda: run(["docker", "exec", name, "pg_isready", "-U", "postgres"], check=False).returncode == 0,
         timeout=90, description="PostgreSQL to accept connections",
@@ -195,11 +220,8 @@ def _start_object_store(stack: Stack) -> ObjectStore:
     name = f"exo-rehearsal-s3-{stack.run_id}"
     access_key = f"rehearsal{secrets.token_hex(4)}"
     secret_key = secrets.token_urlsafe(24)
-    data = stack.workdir / "s3-data"
-    data.mkdir(parents=True, exist_ok=True)
-    (data / BACKUP_BUCKET).mkdir(exist_ok=True)
-    data.chmod(0o777)
-    (data / BACKUP_BUCKET).chmod(0o777)
+    volume = data_volume(stack, "storage")
+    data_mount = f"type=volume,source={volume},target=/data"
     network = stack.sealed_network or stack.network
     options: list[str] = ["--publish", f"127.0.0.1::{S3_PORT}"]
     arguments = ["--port", f":{S3_PORT}", "posix", "/data"]
@@ -209,25 +231,24 @@ def _start_object_store(stack: Stack) -> ObjectStore:
         certificates.mkdir(mode=0o700)
         bootstrap = tls.make_pki(certificates / "bootstrap", ("127.0.0.1",))
         _write_storage_certificate(certificates, bootstrap.leaves["127.0.0.1"])
-        versions = data / "versions"
-        buckets = data / "buckets"
-        versions.mkdir()
-        buckets.mkdir()
-        (buckets / BACKUP_BUCKET).mkdir()
         options = ["--user", f"{os.getuid()}:{os.getgid()}",
                    "--mount", f"type=bind,source={certificates},target=/certificates,readonly"]
         arguments = ["--port", f":{S3_PORT}", "--cert", "/certificates/cert.pem", "--key", "/certificates/key.pem",
                      "posix", "--versioning-dir", "/data/versions", "/data/buckets"]
+    # The image runs as this user for TLS; initialize writable, owned volume paths.
+    bucket = f"/data/buckets/{BACKUP_BUCKET}" if stack.sealed_network else f"/data/{BACKUP_BUCKET}"
+    run(["docker", "run", "--rm", *docker_labels(stack.run_id), "--mount", data_mount,
+         images.BUSYBOX, "sh", "-ec", 'mkdir -p /data/versions "$1"; chmod -R 777 /data', "_", bucket])
+    stack.containers.append(name)
     run(
         [
-            "docker", "run", "--detach", "--name", name, "--network", network, *options,
+            "docker", "run", "--detach", *docker_labels(stack.run_id), "--name", name, "--network", network, *options,
             "--env", f"ROOT_ACCESS_KEY={access_key}",
             "--env", f"ROOT_SECRET_KEY={secret_key}",
-            "--mount", f"type=bind,source={data},target=/data",
+            "--mount", data_mount,
             images.S3_DOUBLE, *arguments,
         ]
     )
-    stack.containers.append(name)
     address = _container_ip(name, network)
     if bootstrap is not None:
         # A completed handshake means Versity's listener and HUP handler are ready.
@@ -317,17 +338,22 @@ def _start_k3s(stack: Stack) -> K3s:
     name = f"exo-rehearsal-k3s-{stack.run_id}"
     mount = containerd_mount(stack)
     args = ["server", *SERVER_ARGS, *node_args(stack)]
+    declared = json.loads(run(["docker", "image", "inspect", "--format", "{{json .Config.Volumes}}", images.K3S]).stdout)
+    mounts = []
+    for index, path in enumerate(sorted(declared or {})):
+        volume = data_volume(stack, f"node-{index}")
+        mounts += ["--mount", f"type=volume,source={volume},target={path}"]
+    stack.containers.append(name)
     run(
         [
-            "docker", "run", "--privileged", "--detach", "--name", name,
+            "docker", "run", "--privileged", "--detach", *docker_labels(stack.run_id), "--name", name,
             "--network", stack.network,
             "--publish", "127.0.0.1::6443",
             "--publish", "127.0.0.1::30443",
-            "--mount", mount,
+            *mounts, "--mount", mount,
             images.K3S, *args,
         ]
     )
-    stack.containers.append(name)
     wait_api_server(name)
     import_images(name, list(images.K3S_SYSTEM_IMAGES))
     stack.adaptations.append("K3s system images imported from the host Docker store (no registry egress from K3s)")
@@ -377,17 +403,31 @@ def teardown(stack: Stack | None, *, keep: bool) -> None:
     if stack is None or keep:
         return
     for name in reversed(stack.containers):
-        logs = run(["docker", "logs", "--tail", "400", name], check=False)
-        (stack.workdir / f"{name}.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
-        run(["docker", "rm", "--force", "--volumes", name], check=False)
-    for network in [*stack.networks, stack.network]:
-        run(["docker", "network", "rm", network], check=False)
-    s3_data = stack.workdir / "s3-data"
-    if s3_data.exists():
-        # versitygw writes as root inside its container.
-        run(["docker", "run", "--rm", "--mount", f"type=bind,source={stack.workdir},target=/w", images.BUSYBOX, "rm", "-rf", "/w/s3-data"], check=False)
-    if s3_data.exists():
-        shutil.rmtree(s3_data, ignore_errors=True)
+        try:
+            logs = run(["docker", "logs", "--tail", "400", name], check=False, timeout=15)
+            (stack.workdir / f"{name}.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
+        except Exception:  # noqa: BLE001 - diagnostics cannot prevent cleanup
+            pass
+    selector = f"label=io.exomem.rehearsal.run={stack.run_id}"
+
+    def owned(kind: str) -> list[str]:
+        # Docker's container listing excludes stopped containers unless --all is set.
+        return run(["docker", kind, "ls", *(["--all"] if kind == "container" else []),
+                    "--quiet", "--filter", selector]).stdout.split()
+
+    for kind in ("container", "network", "volume"):
+        # Include a transient helper that exited before its caller could retain its name.
+        listed = owned(kind)
+        if listed:
+            command = ["docker", kind, "rm", *(["--force", "--volumes"] if kind == "container" else []), *listed]
+            try:
+                run(command, check=False, timeout=60)
+            except Exception:  # noqa: BLE001 - inspect actual absence after all removals
+                pass
+    for kind in ("container", "network", "volume"):
+        remaining = owned(kind)
+        if remaining:
+            raise RuntimeError(f"owned {kind} resources remain after rehearsal cleanup")
 
 
 def environment_facts() -> dict[str, object]:

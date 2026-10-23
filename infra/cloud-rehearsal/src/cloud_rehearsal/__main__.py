@@ -56,6 +56,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--steps", default=None, help="comma-separated step numbers to run (default: all)")
     run_parser.add_argument("--cloud-import", action="store_true", help="also run the native CLI import journey after provisioning")
+    run_parser.add_argument("--owner-export", action="store_true", help="run the owner export workflow after provisioning (partial proof)")
     run_parser.add_argument("--operator-restore-abort", action="store_true", help="interrupt the shipped in-place restore after provisioning and prove recovery (partial proof; never gates a node)")
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
     run_parser.add_argument(
@@ -118,6 +119,7 @@ async def _run(args: argparse.Namespace) -> int:
         "gateway_image_source": "Dockerfile.exomem-gateway" if args.gateway_build == "dockerfile" else "host-assembled final stage",
         "local_storage_coexistence": args.local_storage_coexistence,
         "native_cloud_import": args.cloud_import,
+        "owner_export": args.owner_export,
         "operator_restore_abort": args.operator_restore_abort,
     }
     if args.cell_image:
@@ -146,25 +148,27 @@ async def _run(args: argparse.Namespace) -> int:
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
             cellctl_tag = build.build_cellctl_image(run_id, workdir, mode=args.cellctl_build)
         with stage(report, "infrastructure"):
-            stack = infra.create_stack(run_id, workdir, tls_storage=args.cloud_import or args.operator_restore_abort)
+            stack = infra.create_stack(run_id, workdir, tls_storage=args.cloud_import or args.operator_restore_abort or args.owner_export)
             report.adaptations.extend(stack.adaptations)
         pki = stack.pki or tls.make_pki(workdir)
-        if args.cloud_import or args.operator_restore_abort:
-            with stage(report, "import_tls" if args.cloud_import else "restore_tls"):
+        tls_stage = "import_tls" if args.cloud_import else "owner_export_tls" if args.owner_export else "restore_tls"
+        if args.cloud_import or args.operator_restore_abort or args.owner_export:
+            with stage(report, tls_stage):
                 source_v1 = v1
-                v1, v2, broken = (build.trust_rehearsal_ca(tag, pki.ca_path, workdir) for tag in (v1, v2, broken))
+                v1, v2, broken = (build.trust_rehearsal_ca(tag, pki.ca_path, workdir, run_id=run_id) for tag in (v1, v2, broken))
                 report.overlays.append("Cloud images: the disposable CA is the sole added trust root")
                 from .native_import import image_payload
 
-                baseline_payload = image_payload(source_v1)
-                trusted_payload = image_payload(v1)
+                baseline_payload = image_payload(source_v1, run_id=run_id)
+                trusted_payload = image_payload(v1, run_id=run_id)
                 if baseline_payload != trusted_payload:
                     raise RuntimeError("the CA layer changed product or model bytes")
-                report.stages["import_tls" if args.cloud_import else "restore_tls"]["product_and_model"] = trusted_payload
-                if args.cloud_import:
+                report.stages[tls_stage]["product_and_model"] = trusted_payload
+                if args.cloud_import or args.owner_export:
                     from .native_import import enable_versioning
 
-                    report.overlays.append("Native CLI container: legacy resource profile")
+                    if args.cloud_import:
+                        report.overlays.append("Native CLI container: legacy resource profile")
                     enable_versioning(stack.object_store)
         if args.operator_restore_abort:
             from .operator_restore_abort import build_writer_image
@@ -193,7 +197,8 @@ async def _run(args: argparse.Namespace) -> int:
             await substrate.bootstrap_database(stack)
             report.stages["control_database"]["migrate_tail"] = substrate.migrate(stack, source)[-800:]
         with stage(report, "substrate"):
-            control = substrate.start(stack, source, pki, build.CELL_REPOSITORY)
+            control = substrate.start(stack, source, pki, build.CELL_REPOSITORY,
+                                      exports_enabled=args.owner_export)
             resolver = Resolver(pki.ca_path, {tls.SUBSTRATE_HOST: control.edge_host_port, tls.MCP_HOST: stack.k3s.ingress_host_port})
             _wait_json(resolver, f"{substrate.PUBLIC_BASE_URL}/.well-known/oauth-authorization-server/api/exomem/oauth", "Substrate")
             report.stages["substrate"]["egress_sealed"] = substrate.sealed_egress_refused(control)
@@ -230,6 +235,7 @@ async def _run(args: argparse.Namespace) -> int:
             _wait_json(resolver, f"https://{tls.MCP_HOST}/.well-known/oauth-protected-resource{substrate.MCP_PATH}", "the gateway through ingress")
         ctx = Context(stack=stack, substrate=control, images=built, resolver=resolver, report=report,
                       cli_image=v1 if args.cloud_import else None,
+                      owner_export_image=v1 if args.owner_export else None,
                       operator_restore_abort=args.operator_restore_abort)
         with stage(report, "release"):
             # The owner's first release: cell_image through Substrate's own route.
@@ -276,15 +282,16 @@ async def _run(args: argparse.Namespace) -> int:
         # or loses the report.
         if stack is not None and not args.keep:
             guarded(report, "diagnostics", lambda: _collect_diagnostics(stack, workdir))
-        if not guarded(report, "report", lambda: report.write(args.report)):
+        if not guarded(report, "teardown", lambda: infra.teardown(stack, keep=args.keep)):
             code = 2
-        guarded(report, "teardown", lambda: infra.teardown(stack, keep=args.keep))
         if not args.keep:
             # This run's own image tags; base images stay cached.
             tags = run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], check=False).stdout.split()
             mine = [tag for tag in tags if tag.endswith(f":{run_id}") or f":{run_id}-" in tag]
             if mine:
                 run(["docker", "rmi", "--force", *mine], check=False)
+        if not guarded(report, "report", lambda: report.write(args.report)):
+            code = 2
         if not args.keep and args.workdir is None:
             shutil.rmtree(workdir, ignore_errors=True)
     _print_summary(report, args.report)
