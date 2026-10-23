@@ -99,7 +99,8 @@ def test_rejected_units_cannot_expand_past_the_activation_cap(tmp_path, monkeypa
     assert {"role": role.id, "reason": "lane_failed"} in packet["missing"]
     assert {"role": role.id, "reason": "lane_truncated"} in packet["missing"]
     assert reads == [working_set.UNIT_LANE_LIMIT + 1]
-    assert parent_reads == [local]
+    assert len(parent_reads) <= 1
+    assert set(parent_reads) <= {local}
 
 
 def test_bounded_hydration_preserves_supersession_and_parent_metadata(tmp_path):

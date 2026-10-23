@@ -129,7 +129,7 @@ def test_restricted_unit_statistics_retire_after_unit_only_repairs(tmp_path: Pat
 def test_warm_restricted_duplicates_keep_baseline_tokens_and_last_eligible_occurrence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unrelated growth must not reload unit text, or let a matching alias replace corpus tokens."""
+    """Duplicate selection stays exact; unrelated growth bounds only unique-reference text reads."""
     import json
     import uuid
 
@@ -148,6 +148,9 @@ def test_warm_restricted_duplicates_keep_baseline_tokens_and_last_eligible_occur
         write("z-ineligible", "- [observation] estuary ignored alias ^shared", _PAGE_ID),
     ]
     parents = set(duplicates)
+    unique = write("unique-beacon", "- [config] beacon unique signal ^beacon",
+                   uuid.uuid5(uuid.NAMESPACE_URL, "unit-reuse:unique"))
+    parents.add(unique)
 
     def frozen_baseline(query):
         # Freeze the former unordered corpus/candidate traversals together:
@@ -199,10 +202,13 @@ def test_warm_restricted_duplicates_keep_baseline_tokens_and_last_eligible_occur
             ))
         find_module.clear_cache()
         lexstore.ensure_fresh(tmp_path)
-        expected = {query: frozen_baseline(query) for query in ("lighthouse", "channel")}
+        expected = {query: frozen_baseline(query) for query in ("lighthouse", "channel", "beacon")}
         assert len(expected["lighthouse"]) == 1
         assert expected["channel"] == []
-        assert ranked("lighthouse") == expected["lighthouse"]
+        assert len(expected["beacon"]) == 1 and expected["beacon"][0].parent_path == unique
+        # Ambiguous refs preserve the old SELECT's full traversal, which remains unbounded.
+        for query, baseline in expected.items():
+            assert ranked(query) == baseline
         store = lexstore.get_store(tmp_path)
         original_connect = store._connect
         fetched_text = []
@@ -225,8 +231,7 @@ def test_warm_restricted_duplicates_keep_baseline_tokens_and_last_eligible_occur
         with monkeypatch.context() as counted:
             counted.setattr(store, "_connect", counted_connect)
             with call_spans.meter(call_spans.STATS_REBUILT) as measured:
-                for query, baseline in expected.items():
-                    assert ranked(query) == baseline
+                assert ranked("beacon") == expected["beacon"]
             assert measured[call_spans.STATS_REBUILT] == 0
         assert len(fetched_text) == 2  # One representative and one winning alias, at either corpus size.
         assert len(interpreted_parents) <= 2

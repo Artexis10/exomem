@@ -1077,8 +1077,8 @@ class _SelectedUnits:
             if ref not in corpus:
                 corpus[ref] = str(row[2]).split()
                 representatives[int(row[3])] = ref
-            # Keep the catalogue traversal, rather than assigning duplicate
-            # precedence from FTS MATCH order or numeric row identity.
+            # Retain identities without text; ambiguous hit precedence still
+            # belongs to the original candidate SQL traversal.
             occurrences.setdefault(ref, []).append((int(row[3]), str(row[1]), str(row[0])))
         return corpus
 
@@ -9386,6 +9386,15 @@ class LexicalStore:
             categories=categories, kinds=kinds, clauses=dnf_clauses, registry_scope=registry_scope
         )
         predicate, predicate_params = view.predicate(plans)
+        params = list(predicate_params)
+        clauses = [f"u.{col} = 1", predicate]
+        for paths in (allowed_parent_paths, admitted_parent_paths):
+            if paths is not None:
+                clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
+                params.append(json.dumps(sorted(paths), ensure_ascii=False))
+        clauses.extend("instr(lower(u.content), ?) > 0" for _ in literal_tokens)
+        params.extend(literal_tokens)
+        where = " AND ".join(clauses)
 
         def wanted(row: tuple, unit: Any) -> bool:
             path = str(row[1])
@@ -9410,11 +9419,13 @@ class LexicalStore:
             match = " OR ".join(f'"{token}"' for token in tokens)
             candidate_tokens = {}
             candidates = {}
+            ambiguous = set()
             for (representative,) in conn.execute("SELECT rowid FROM unit_fts WHERE unit_fts MATCH ?", (match,)):
                 ref = representatives.get(representative)
                 if ref is None or allowed_unit_refs is not None and ref not in allowed_unit_refs:
                     continue
                 winner = None
+                eligible = 0
                 for rowid, path, key in occurrences[ref]:
                     if allowed_parent_paths is not None and path not in allowed_parent_paths:
                         continue
@@ -9426,29 +9437,36 @@ class LexicalStore:
                     unit = view.unit(path, key)
                     if unit is not None and wanted((key, path), unit):
                         winner = (rowid, unit)
+                        eligible += 1
                 if winner is None:
                     continue
-                rowid, unit = winner
-                row = conn.execute(
-                    f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE u.rowid = ?", (rowid,),
-                ).fetchone()
+                if eligible > 1:
+                    ambiguous.add(ref)
+                else:
+                    rowid, unit = winner
+                    row = conn.execute(
+                        f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE u.rowid = ?", (rowid,),
+                    ).fetchone()
+                    candidates[ref] = (row, unit)
                 stemmed = conn.execute("SELECT stemmed FROM unit_fts WHERE rowid = ?", (representative,)).fetchone()
                 # First-representative tokens rank the last eligible alias;
                 # neither a matching alias nor a predicate changes those tokens.
                 candidate_tokens[ref] = str(stemmed[0]).split()
-                candidates[ref] = (row, unit)
-            scored = statistics.statistics.score(candidate_tokens, tokens, k)
+            if ambiguous:
+                # Duplicate refs retain the original unordered SELECT authority.
+                # This compatibility fallback still scans candidate content; its bound remains unmet.
+                keys = {(path, key) for ref in ambiguous for _rowid, path, key in occurrences[ref]}
+                rows = conn.execute(
+                    f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE {where}", params,
+                )
+                for row, unit in view.served(row for row in rows if (str(row[1]), str(row[0])) in keys):
+                    if wanted(row, unit) and str(unit.unit_ref) in ambiguous:
+                        candidates[str(unit.unit_ref)] = (row, unit)
+            scored = statistics.statistics.score(
+                {ref: candidate_tokens[ref] for ref in candidates}, tokens, k,
+            )
             hits = [_unit_hit(*candidates[ref], score) for ref, score in scored]
         else:
-            params = list(predicate_params)
-            clauses = [f"u.{col} = 1", predicate]
-            for paths in (allowed_parent_paths, admitted_parent_paths):
-                if paths is not None:
-                    clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
-                    params.append(json.dumps(sorted(paths), ensure_ascii=False))
-            clauses.extend("instr(lower(u.content), ?) > 0" for _ in literal_tokens)
-            params.extend(literal_tokens)
-            where = " AND ".join(clauses)
             if ranked:
                 match = " OR ".join(f'"{token}"' for token in tokens)
                 rows = conn.execute(

@@ -352,7 +352,7 @@ def test_round7_conversation_footprint_preserves_the_ordinary_budget(cvault: Pat
     _assert_bounded_conversation(carried, "Ottilie Marsh", limit)
     named = _activate(cvault, "which one should we review for Ottilie Marsh", max_chars=limit)
     assert named["generation"].get("carried_by") != "conversation"
-    assert _carry_cost(named) > limit // 3
+    assert _carry_cost(named) > limit // 3, named
     assert named["budget"]["limit_chars"] == limit
 
 
