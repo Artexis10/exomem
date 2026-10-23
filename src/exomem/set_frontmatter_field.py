@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import project_keys, semantic_writes, temporal
+from . import project_keys, semantic_writes, temporal, vocabulary_resolution
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     EXCLUDED_FIELD_CODE,
@@ -194,6 +194,15 @@ def set_frontmatter_field(
         field, value, page_type=_read_yaml_field(fm_text, "type")
     )
 
+    topic_writes: tuple[PlannedWrite, ...] = ()
+    topic_warnings: list[str] = []
+    if field == "topics":
+        try:
+            value, topic_plan, topic_warnings = vocabulary_resolution.plan_topic_registrations(vault_root, value)
+        except vocabulary_resolution.VocabularyResolutionError as error:
+            raise SetFrontmatterError(error.code, error.reason) from error
+        topic_writes = topic_plan.writes
+
     old_value = _read_yaml_field(fm_text, field)
     fm_text = _remove_yaml_key(fm_text, field)
     new_line = _format_yaml_line(field, value)
@@ -237,7 +246,7 @@ def set_frontmatter_field(
             semantic=preflight.as_dict(),
         )
 
-    warnings: list[str] = []
+    warnings: list[str] = list(topic_warnings)
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
     log_body = (
         f"set_frontmatter_field via exomem. {why.strip()} "
@@ -263,7 +272,7 @@ def set_frontmatter_field(
     if log_plan.rotation_note is not None:
         warnings.append(log_plan.rotation_note)
 
-    auxiliaries = [*project_plan, *log_plan.writes]
+    auxiliaries = [*project_plan, *topic_writes, *log_plan.writes]
     try:
         committed = semantic_writes.commit_existing(
             vault_root,

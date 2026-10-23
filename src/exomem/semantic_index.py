@@ -348,19 +348,23 @@ def from_semantic_page_state(state: Any) -> SemanticParentIndexState:
     )
 
 
-def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
-    """Portable parser coverage and inputs for body-free selected interpretation."""
-    if state.candidates is None:
-        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
+def structural_frontmatter(frontmatter: Mapping[str, Any]) -> dict[str, Any]:
+    """The inputs membership and selected interpretation read, without page prose."""
     from .governance.membership import FRONTMATTER_INPUTS
 
     # Membership owns its inputs. Instance selection reads `registry_scope`, and
     # selected interpretation reads `status` and `entity_type`.
     inputs = {*FRONTMATTER_INPUTS, "registry_scope", "status", "entity_type"}  # nosemgrep: ep-word-set -- closed fields
-    frontmatter = {key: value for key, value in state.frontmatter.items() if key in inputs}
+    return {key: value for key, value in frontmatter.items() if key in inputs}
+
+
+def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
+    """Portable parser coverage and inputs for body-free selected interpretation."""
+    if state.candidates is None:
+        raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
     return {
         "structure": semantic_units.structural_summary(state.candidates),
-        "frontmatter_yaml": yaml.safe_dump(dict(frontmatter)),
+        "frontmatter_yaml": yaml.safe_dump(structural_frontmatter(state.frontmatter)),
         "parent_ref": state.parent_ref,
         "parent_generation": state.parent_generation,
         "parent_source_hash": state.parent_source_hash,

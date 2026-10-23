@@ -8,22 +8,22 @@
 
 ## 2. Catalogue and projections
 
-- [ ] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Read the raw-material, schema, governance and archive trees from the product's layout declaration that activation reads: activation walks archive trees and ranks them down, and the catalogue excludes them from notes. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
-- [ ] 2.2 Project the map and the domain maps with bounded output and pagination.
-- [ ] 2.3 Compile anchor and topic profiles through the role lanes, cached by generation.
-- [ ] 2.4 Resolve map, domain-map and profile refs in `read_memory` with missing and stale states, on every surface.
-- [ ] 2.5 Teach the egress guard the new blocks and fields; add counterfactual privacy twins.
+- [x] 2.1 Build the context-catalogue sidecar over the caller's view from index rows, units, memberships and the current-state authority. Parse the project-key `domain` field into the project-key registry and its content hash, and add the catalogue component to derived sync. Read the raw-material, schema, governance and archive trees from the product's layout declaration that activation reads: activation walks archive trees and ranks them down, and the catalogue excludes them from notes. Add the `domain` field to the project-key content hash only when a key sets it, so an upgrade alone does not rebuild the activation index.
+- [x] 2.2 Project the map and the domain maps with bounded output and pagination.
+- [x] 2.3 Compile anchor and topic profiles through the role lanes, per request over the caller's candidate entries (no build cache: a cache key could not cover every input the build reads).
+- [x] 2.4 Resolve map, domain-map and profile refs in `read_memory` with missing and stale states, on every surface.
+- [x] 2.5 Teach the egress guard the new blocks and fields; add counterfactual privacy twins.
 
 ## 3. Write side
 
-- [ ] 3.1 Add `summary` and `topics` parameters to the write tools that create or edit pages, stored in the page's `summary` and `topics` fields; read edits made outside Exomem from the raw frontmatter. Resolve `topics` through the source-capture domain resolver and policy on every write that sets it. Document `summary` and `topics` in the scaffold's frontmatter reference, and the project-key `domain` field in the format comment of `project-keys.yaml`.
-- [ ] 3.2 Add reverse dependencies and generation-bound invalidation to derived sync for the catalogue, projections and profiles.
+- [x] 3.1 Add `summary` and `topics` parameters to the write tools that create or edit pages, stored in the page's `summary` and `topics` fields; read edits made outside Exomem from the raw frontmatter. Resolve `topics` through the source-capture domain resolver and policy on every write that sets it. Document `summary` and `topics` in the scaffold's frontmatter reference, and the project-key `domain` field in the format comment of `project-keys.yaml`.
+- [x] 3.2 Add reverse dependencies and generation-bound invalidation to derived sync for the catalogue, projections and profiles.
 - [ ] 3.3 Report description coverage by origin on the first catalogue build. If a development round shows that lede descriptions lose against authored ones, register the derived-description store as a reserved internal-state path with its own owner, and have a maintenance agent run a resumable model backfill into it, with provenance, cost and coverage reported. The server makes no model call.
 
 ## 4. Activation and clients
 
-- [ ] 4.1 Serve the `maps` packet mode behind the setting, with `anchors` as the default and one packet budget; register its stages under instrumentation and extend the latency gate to `maps` mode.
-- [ ] 4.2 Update the server instructions (within their 900-character bound, keeping the user's words verbatim as `turn`), the `activate_context` description, the skill scaffold, and the retrieve hook's rendering of a map, for map-assisted pulls before the first answer. Regenerate the surface pins, including the write-tool parameters from 3.1: schema fidelity fixture, digests, `docs/capabilities.md`, README table and plugin trees.
+- [x] 4.1 Serve the `maps` packet mode behind the setting, with `anchors` as the default and one packet budget; register its stages under instrumentation and extend the latency gate to `maps` mode.
+- [x] 4.2 Update the server instructions (within their 900-character bound, keeping the user's words verbatim as `turn`), the `activate_context` description, the skill scaffold, and the retrieve hook's rendering of a map, for map-assisted pulls before the first answer. Regenerate the surface pins, including the write-tool parameters from 3.1: schema fidelity fixture, digests, `docs/capabilities.md`, README table and plugin trees.
 
 ## 5. Evaluation and switch
 

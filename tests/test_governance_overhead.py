@@ -272,22 +272,11 @@ def _seed_freshness_live(vault: Path) -> None:
     )
 
 
-def _time_op_find_ms(vault: Path, query: str) -> float:
-    start = time.perf_counter()
-    commands.op_find(vault, query=query, limit=10, mode="keyword", graph=False)
-    return (time.perf_counter() - start) * 1000.0
-
-
 def test_empty_policy_op_find_overhead_under_budget(tmp_path: Path, monkeypatch) -> None:
     """An ungoverned vault must not pay for the release plane.
 
-    Measured as an INTERLEAVED A/B: each round times one gated `op_find` and
-    one with the gate's two entry points stubbed to identity, back to back on
-    the same query, and the gate reads the median of the per-round deltas.
-    `op_find` over a 2k dense corpus drifts by tens of milliseconds between
-    passes, so differencing two sequential medians cannot resolve a
-    sub-millisecond effect — pairing is what makes the measurement mean what
-    the budget says it means.
+    Measure the real admission and annotation stages over actual search hits.
+    Subtracting two whole searches also measures unrelated retrieval drift.
     """
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     vault = tmp_path / "dense"
@@ -299,39 +288,41 @@ def test_empty_policy_op_find_overhead_under_budget(tmp_path: Path, monkeypatch)
     for query in _OVERHEAD_QUERIES:
         commands.op_find(vault, query=query, limit=10, mode="keyword", graph=False)
 
-    real_annotate = egress_module.annotate_hits
-    real_gate_state = egress_module.gate_state
-
-    def _stub() -> None:
-        monkeypatch.setattr(
-            egress_module,
-            "annotate_hits",
-            lambda vault_root, hits, **kw: egress_module.AnnotatedHits(hits=hits),
-        )
-        monkeypatch.setattr(
-            egress_module, "gate_state", lambda vault_root: (governance.EMPTY_POLICY, False)
-        )
-
-    def _restore() -> None:
-        monkeypatch.setattr(egress_module, "annotate_hits", real_annotate)
-        monkeypatch.setattr(egress_module, "gate_state", real_gate_state)
-
-    deltas: list[float] = []
+    samples: list[float] = []
     for _ in range(5):
         for query in _OVERHEAD_QUERIES:
-            _restore()
-            gated = _time_op_find_ms(vault, query)
-            _stub()
-            bare = _time_op_find_ms(vault, query)
-            deltas.append(gated - bare)
-    _restore()
+            result = commands.op_find(
+                vault, query=query, limit=10, mode="keyword", graph=False, include_timings=True
+            )
+            samples.append(result["timings"]["stages"]["release_gate"]["ms"])
 
-    delta = statistics.median(deltas)
-    assert delta < _EMPTY_POLICY_BUDGET_MS, (
-        f"empty-policy release-gate overhead {delta:.2f} ms exceeds the "
-        f"{_EMPTY_POLICY_BUDGET_MS} ms budget (paired deltas: "
-        f"min={min(deltas):.2f} max={max(deltas):.2f})"
+    median = statistics.median(samples)
+    assert median < _EMPTY_POLICY_BUDGET_MS, (
+        f"empty-policy release-gate cost {median:.2f} ms exceeds the "
+        f"{_EMPTY_POLICY_BUDGET_MS} ms budget; stage samples={samples}"
     )
+
+
+def test_release_gate_timing_catches_slow_annotation_without_changing_hits(vault, monkeypatch):
+    """A real annotation delay must remain visible to the release-plane budget."""
+    note = vault / "Knowledge Base/Notes/boundary.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntype: note\n---\n# Boundary\ncache stampede cold start\n")
+    arguments = dict(query="cache stampede cold start", limit=10, mode="keyword", graph=False,
+                     include_timings=True)
+    baseline = commands.op_find(vault, **arguments)
+    assert baseline["hits"]
+    annotate = egress_module.annotate_hits
+
+    def slow_annotation(*args, **kwargs):
+        time.sleep(0.006)
+        return annotate(*args, **kwargs)
+
+    monkeypatch.setattr(egress_module, "annotate_hits", slow_annotation)
+    delayed = commands.op_find(vault, **arguments)
+    assert [hit["path"] for hit in delayed["hits"]] == [hit["path"] for hit in baseline["hits"]]
+    assert delayed["timings"]["stages"]["release_gate"]["ms"] >= 6
+    assert delayed["timings"]["stages"]["release_gate"]["ms"] > _EMPTY_POLICY_BUDGET_MS
 
 
 def test_empty_policy_gate_entry_points_are_constant_time(tmp_path: Path) -> None:

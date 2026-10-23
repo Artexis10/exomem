@@ -778,6 +778,8 @@ def test_v4_sidecar_reads_as_not_current_then_atomic_rebuild_replaces_it(
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
         assert "emitted_parent_path" in cols
+        assert "ranking_json" in cols
+        assert conn.execute("SELECT ranking_json FROM pages WHERE path = ?", ("Knowledge Base/a.md",)).fetchone()[0]
         version = conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()[0]

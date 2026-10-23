@@ -27,15 +27,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Raised from 90,000 for the evaluated correction guidance in the semantic-authoring
 # contract (five authoring tools) and the retained-history read and observe fields,
 # then by 80 for browse_memory's page fields (`limit`, `cursor`), then by 650 for the
-# registry selector enums on six selector tools.
-TOTAL_BUDGET = 92_380
+# registry selector enums on six selector tools, then by 150 for read_memory's derived
+# view refs and `continuation` field, then by 225 for remember's `summary` and `topics` fields.
+TOTAL_BUDGET = 92_755
 
 #: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
 # Registry selector enums (close-mcp-tool-selectors) raise six selector tools' ceilings.
 # The bounded viewer and original recovery use spare per-tool headroom; correction guidance raises the total.
 TOOL_CEILINGS: dict[str, int] = {
     "edit_memory": 6950,
-    "remember": 5425,
+    "remember": 5650,
     "replace_memory": 4825,
     "manage_memory_file": 4650,
     "connect_memory": 4325,
@@ -54,7 +55,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "plan_memory": 2275,
     "preserve_artifacts": 2300,
     "configure_memory": 1400,
-    "read_memory": 1530,
+    "read_memory": 1680,
     "adopt_vault": 1350,
     "preserve_evidence": 1350,
     "review_item_context": 1300,
