@@ -221,8 +221,12 @@ def case_table(
                 (r for r in sessions.values() if r["case_id"] == case.case_id and r["arm"] == arm),
                 key=lambda r: r["repeat"],
             )
-            if not records:
-                continue
+            # A repeat without its final record may be a failure; scoring
+            # without it would lift the arm's score (design, "Actor failures").
+            if len(records) != repeats:
+                raise ChainError(
+                    f"case {case.case_id} arm {arm}: {len(records)} of {repeats} repeats have a final record"
+                )
             key = (arm, case.tree)
             if key not in pages:
                 pages[key] = _vault_pages(layout, arm, case.tree)

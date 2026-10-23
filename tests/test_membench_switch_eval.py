@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,7 @@ from membench.utility.switch_eval.judge import (
     unblind,
     write_items,
 )
-from membench.utility.switch_eval.score import decide, rules
+from membench.utility.switch_eval.score import ChainError, decide, rules, score_run
 from membench.utility.switch_eval.session import (
     ACTOR_FAILURE,
     HARNESS_FAULT,
@@ -108,6 +109,14 @@ def _inputs(case_id: str = "case-1", arm: str = "A") -> SessionInputs:
         files={"instructions.md": "Pull before the answer."},
         state_digests={"vault": "v1", "state": "s1"},
     )
+
+
+def _session(layout: Layout, case_id: str, arm: str, repeat: int, *attempts: AttemptResult) -> dict:
+    """One session's final record through the retry rule, on stand-in attempts."""
+
+    results = iter(attempts)
+    inputs = replace(_inputs(case_id, arm), planned=PlannedSession(f"{case_id}--{arm}--r{repeat}", case_id, arm, repeat, 0))
+    return run_session(inputs, layout.session_dir(case_id, arm, repeat), lambda inputs, attempt_dir: next(results))
 
 
 def _case(case_id: str, *, kind: str = "miss", group: str | None = None, expects_memory: bool = True) -> Case:
@@ -342,6 +351,30 @@ def test_a_case_id_that_climbs_out_of_the_run_directory_still_writes_inside_it(t
 
     (written,) = tmp_path.rglob("session.json")
     assert written.resolve().is_relative_to(layout.sessions.resolve())
+
+
+def test_scoring_refuses_a_run_whose_failed_repeat_lost_its_record(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    sessions = {}
+    for arm in ("A", "M"):
+        for repeat in (1, 2, 3):
+            timed_out = arm == "M" and repeat == 3
+            attempt = AttemptResult(ACTOR_FAILURE, "timeout") if timed_out else AttemptResult(OK, answer="An answer.")
+            record = _session(layout, "case-1", arm, repeat, attempt)
+            sessions[record["session_id"]] = record
+    verdicts = {
+        session_id: {"required": {}, "forbidden": {}, "contaminated": None}
+        for session_id, record in sessions.items()
+        if record["outcome"] == OK
+    }
+    # M's timed-out repeat has no final record: dropping it would lift M's score from 2/3 to 1.
+    del sessions["case-1--M--r3"]
+
+    with pytest.raises(ChainError):
+        score_run(
+            layout, cases=[_case("case-1")], sessions=sessions, verdicts=verdicts, arm_ids=["A", "M"],
+            repeats=3, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0,
+        )  # fmt: skip
 
 
 # The stateless handshake is what the pinned client sends on the 2026-07-28 protocol.

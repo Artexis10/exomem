@@ -590,7 +590,9 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
     except UnblindingError as error:
         raise SystemExit(f"chain check failed after judging: {error}") from error
     hashes = json.loads((layout.run / "arm-hashes.json").read_text(encoding="utf-8"))
-    _problems, sessions = check_sessions(layout, plan=plan, arm_hashes=hashes)
+    session_problems, sessions = check_sessions(layout, plan=plan, arm_hashes=hashes)
+    if session_problems:
+        raise SystemExit("chain check failed after judging:\n  " + "\n  ".join(session_problems))
     verdicts = resolved_verdicts(layout, unblinded)
     return score_run(
         layout,
