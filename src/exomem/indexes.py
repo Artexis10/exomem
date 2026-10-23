@@ -726,6 +726,7 @@ def compute_subindex_writes(
     base_writes: Mapping[Path, PlannedWrite] | None = None,
     pending_paths: list[str] | None = None,
     include_unchanged: bool = False,
+    include_sources_index: bool = True,
 ) -> tuple[list[PlannedWrite], str | None]:
     """Build the planned writes for sub-folder + top-index count refreshes.
 
@@ -737,6 +738,9 @@ def compute_subindex_writes(
     an index into one guarded write instead of scheduling competing replacements.
     Disk reads still bind a guard for indexes with no base write. Otherwise the
     caller is responsible for re-reading the top index from disk later.
+
+    Set `include_sources_index=False` when another planned write supplies that
+    index. The census and guarded read still run; only its rendering is omitted.
 
     `pending_paths` are vault-relative KB paths (with or without `.md`) of
     files the caller is about to write in the same atomic batch. They are
@@ -822,7 +826,7 @@ def compute_subindex_writes(
             current, guard = read_guarded_text(vault_root, sources_index)
         except OSError:
             current = None
-        if current is not None:
+        if current is not None and include_sources_index:
             base_write = planned_bases.get(sources_index.resolve())
             base = base_write.content if base_write is not None else current
             # Keep guarded reading outside the rendering cost: callers may
