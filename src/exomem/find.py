@@ -1159,6 +1159,36 @@ class _OutsideSelection:
     finish: Callable[[set[str] | None], list[Hit]]
     source: str
     paths: tuple[str, ...] = ()
+    select: Callable[[set[str]], list[str] | None] | None = None
+    hydrate: Callable[[list[str]], list[Hit]] | None = None
+    trace: Callable[[list[Hit]], None] | None = None
+
+
+@dataclass
+class _WidenPlan:
+    paths: list[str]
+    strong: list[str]
+    weak: list[str]
+    outside: list[str]
+    reserve: int
+    kb_keep: int
+
+
+def _widen_plan(
+    primary: list[str], outside: list[str], strong_paths: set[str], *, limit: int,
+) -> _WidenPlan:
+    """Keep the original reserve and segment order before canonical proof."""
+    if not outside:
+        return _WidenPlan(primary, [], [], [], 0, limit)
+    strong = [path for path in primary if path in strong_paths]
+    weak = [path for path in primary if path not in strong_paths]
+    reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
+    kb_keep = limit - reserve
+    return _WidenPlan(
+        ((strong + weak)[:kb_keep] + outside)[:limit],
+        strong[:kb_keep], weak[:max(0, kb_keep - len(strong))], outside,
+        reserve, kb_keep,
+    )
 
 
 def _validated_find_limit(
@@ -2118,17 +2148,80 @@ def find(
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
 
+    def select_outside(exclude_paths=None, *, defer_finish=False, stage_name="outside_kb"):
+        return _find_outside_kb(
+            vault_root,
+            query=query,
+            query_norm=query_norm,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+            limit=limit,
+            snapshot=snapshot,
+            admit_path=admit_path,
+            filter_plan=filter_plan if filter_plan.root is not None else None,
+            exclude_paths=exclude_paths,
+            failed_out=failed,
+            retrieval_trace=retrieval_trace,
+            timings=timings,
+            defer_finish=defer_finish,
+            page_memo=page_memo,
+            stage_name=stage_name,
+        )
+
     mixed_plan: _MixedPlan | None = None
+    mixed_widening: _WidenPlan | None = None
+    primary_ranks: dict[str, int] = {}
+    outside_selection = None
+    selected_outside_hits: list[Hit] = []
 
     def select_mixed_pages(paths: list[str]) -> set[str]:
-        nonlocal mixed_plan
-        mixed_plan = _mixed_plan(paths, mixed_unit_hits, limit=limit, config=resolved_config)
-        return {identity for _score, priority, identity, _rank, _lane in mixed_plan.items if priority == 0}
+        nonlocal mixed_plan, mixed_widening, outside_selection
+        page_paths = paths
+        if scope == "kb" and query_norm and widen_outside_kb:
+            stage_name = _nested_name(timings, "outside_kb")
+            with _span(timings, stage_name):
+                outside_selection = select_outside(defer_finish=True, stage_name=stage_name)
+                outside_paths = []
+                if isinstance(outside_selection, _OutsideSelection):
+                    if outside_selection.select is None or outside_selection.hydrate is None:
+                        return set(paths)
+                    try:
+                        outside_paths = outside_selection.select(set(paths))
+                    except RetrievalIndexWarming:
+                        return set(paths)
+                    if outside_paths is None:
+                        return set(paths)
+                strong_paths: set[str] = set()
+                if outside_paths:
+                    try:
+                        metadata = _managed_page_metadata(
+                            vault_root, set(paths), scope="vault",
+                            freshness_key=snapshot.for_scope("vault"), pending=pending,
+                            include_ranking=True,
+                        )
+                    except RetrievalIndexWarming:
+                        return set(paths)
+                    if any(row.view is None or row.ranking is None for row in metadata.values()):
+                        return set(paths)
+                    strong_paths = {
+                        path for path in paths
+                        if _stem_tokens_present(metadata[path].ranking, query_norm)
+                    }
+                mixed_widening = _widen_plan(paths, outside_paths, strong_paths, limit=limit)
+                page_paths = mixed_widening.paths
+        primary_ranks.update({path: rank for rank, path in enumerate(paths, start=1)})
+        mixed_plan = _mixed_plan(page_paths, mixed_unit_hits, limit=limit, config=resolved_config)
+        return {identity for _score, priority, identity, _rank, _lane in mixed_plan.items
+                if priority == 0 and identity in primary_ranks}
 
-    # Typed eligibility already includes shortcut and date filters. Widening
-    # still changes page membership after this boundary and retains its path.
+    # Typed eligibility includes shortcut and date filters. The callback also
+    # freezes the opt-in reserve before either page lane reads canonical text.
     select_pages = (
-        select_mixed_pages if mixed and catalog_view is not None and not widen_outside_kb else None
+        select_mixed_pages if mixed and catalog_view is not None else None
     )
 
     # Primary page semantic recall spans the vault even before widening.
@@ -2240,31 +2333,18 @@ def find(
                 select_pages=select_pages,
             )
 
-    def select_outside(exclude_paths=None, *, defer_finish=False):
-        return _find_outside_kb(
-            vault_root,
-            query=query,
-            query_norm=query_norm,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-            limit=limit,
-            snapshot=snapshot,
-            admit_path=admit_path,
-            filter_plan=filter_plan if filter_plan.root is not None else None,
-            exclude_paths=exclude_paths,
-            failed_out=failed,
-            retrieval_trace=retrieval_trace,
-            timings=timings,
-            defer_finish=defer_finish,
-            page_memo=page_memo,
-        )
-
-    outside_selection = None
-    if (_defer_finish or filter_plan.has_unit_predicate) and scope == "kb" and query_norm and widen_outside_kb:
+    if mixed_widening is not None:
+        source = (outside_selection.source if isinstance(outside_selection, _OutsideSelection)
+                  else find_types.SOURCE_DECLINED)
+        with _span(timings, "outside_kb", source=source):
+            if isinstance(outside_selection, _OutsideSelection):
+                assert outside_selection.hydrate is not None and mixed_plan is not None
+                selected_paths = {identity for _score, priority, identity, _rank, _lane in mixed_plan.items
+                                  if priority == 0}
+                selected_outside_hits = outside_selection.hydrate(
+                    [path for path in mixed_widening.outside if path in selected_paths]
+                )
+    elif outside_selection is None and (_defer_finish or filter_plan.has_unit_predicate) and scope == "kb" and query_norm and widen_outside_kb:
         with _span(timings, "outside_kb"):
             outside_selection = select_outside(defer_finish=True)
 
@@ -2312,8 +2392,7 @@ def find(
             retrieval_trace.record_keyword_hits(
                 hits, filter_only=not query_norm,
                 ranks=(
-                    {identity: rank for _score, priority, identity, rank, _lane in mixed_plan.items
-                     if priority == 0}
+                    primary_ranks
                     if mixed_plan is not None else None
                 ),
             )
@@ -2351,7 +2430,22 @@ def find(
         # such a match surfaces. The KB keeps the majority of slots (strong literal
         # hits first, then weak graph/recency filler); the reserve never starves
         # the KB (capped at limit-1) and is empty when nothing outside matches.
-        if scope == "kb" and query_norm and widen_outside_kb:
+        if mixed_widening is not None:
+            # Primary trace finalization can follow hydration on deferred reads.
+            if isinstance(outside_selection, _OutsideSelection) and outside_selection.trace is not None:
+                outside_selection.trace(selected_outside_hits)
+            available = {hit.path: hit for hit in [*hits, *selected_outside_hits]}
+            hits = [available[path] for path in mixed_widening.paths if path in available]
+            if retrieval_trace is not None and mixed_widening.outside:
+                retrieval_trace.record_auto_widen(
+                    hits,
+                    strong_paths=mixed_widening.strong,
+                    weak_paths=mixed_widening.weak,
+                    outside_paths=mixed_widening.outside,
+                    reserve=mixed_widening.reserve,
+                    kb_keep=mixed_widening.kb_keep,
+                )
+        elif scope == "kb" and query_norm and widen_outside_kb:
             outside_source = (
                 outside_selection.source if isinstance(outside_selection, _OutsideSelection)
                 else find_types.SOURCE_DECLINED if outside_selection is not None
@@ -2370,28 +2464,28 @@ def find(
                     if h.path not in seen
                 ]
                 if outside:
-                    strong: list[Hit] = []
-                    weak: list[Hit] = []
+                    strong_paths: set[str] = set()
                     for h in hits:
                         page = _page_of(h.path)
                         # Word/stem-level, not substring: a bare "x3" query must not
                         # treat files that merely contain "x3" inside a longer token
                         # (a hash, "max3...", a log copy) as strong topical matches.
                         if page is not None and _stem_tokens_present(page, query_norm):
-                            strong.append(h)
-                        else:
-                            weak.append(h)
-                    reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
-                    kb_keep = limit - reserve
-                    hits = ((strong + weak)[:kb_keep] + outside)[:limit]
+                            strong_paths.add(h.path)
+                    widening = _widen_plan(
+                        [hit.path for hit in hits], [hit.path for hit in outside],
+                        strong_paths, limit=limit,
+                    )
+                    available = {hit.path: hit for hit in [*hits, *outside]}
+                    hits = [available[path] for path in widening.paths]
                     if retrieval_trace is not None:
                         retrieval_trace.record_auto_widen(
                             hits,
-                            strong_paths=[hit.path for hit in strong[:kb_keep]],
-                            weak_paths=[hit.path for hit in weak[: max(0, kb_keep - len(strong))]],
-                            outside_paths=[hit.path for hit in outside],
-                            reserve=reserve,
-                            kb_keep=kb_keep,
+                            strong_paths=widening.strong,
+                            weak_paths=widening.weak,
+                            outside_paths=widening.outside,
+                            reserve=widening.reserve,
+                            kb_keep=widening.kb_keep,
                         )
         elif timings is not None:
             # Silence and "ran, found nothing" are the same shape in a stage table,
@@ -6324,6 +6418,7 @@ def _find_outside_kb(
     timings: FindTimings | None = None,
     defer_finish: bool = False,
     page_memo: dict[str, ParsedPage | None] | None = None,
+    stage_name: str = "outside_kb",
 ) -> list[Hit] | _OutsideSelection:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers the requested `scope="kb"` widening.
@@ -6358,7 +6453,7 @@ def _find_outside_kb(
         # Ordinary recall can use its proven pending overlay, but widening has
         # no such overlay and requires the current vault catalogue. Its cache
         # key also distinguishes this state from a previously live reserve.
-        _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+        _mark_source(timings, stage_name, find_types.SOURCE_DECLINED)
         return []
     vault_freshness = snapshot.for_scope("vault") if snapshot is not None else None
     snapshot = snapshot or FreshnessSnapshot(vault_root)
@@ -6381,7 +6476,7 @@ def _find_outside_kb(
             freshness=vault_freshness,
         )
         if allowed_outside is None:
-            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+            _mark_source(timings, stage_name, find_types.SOURCE_DECLINED)
             return []
     else:
         eligible_paths = (
@@ -6437,7 +6532,7 @@ def _find_outside_kb(
             )
             if not catalog_result.readiness.complete:
                 if managed:
-                    _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+                    _mark_source(timings, stage_name, find_types.SOURCE_DECLINED)
                     return []
                 _raise_catalog_outcome(catalog_result.readiness)
             bm25_hits = list(catalog_result.value or [])
@@ -6445,7 +6540,7 @@ def _find_outside_kb(
         elif managed:
             # Only reachable with the sidecar retired outright, which leaves a
             # managed reader no index to widen from.
-            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+            _mark_source(timings, stage_name, find_types.SOURCE_DECLINED)
             return []
         else:
             bm25_hits = lexstore.search_bm25(
@@ -6494,7 +6589,7 @@ def _find_outside_kb(
                 score_by_path[path] = float(_score)
     except RetrievalIndexWarming:
         if managed:
-            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+            _mark_source(timings, stage_name, find_types.SOURCE_DECLINED)
             return []
         raise
     except Exception as e:  # noqa: BLE001 — widening must never break find
@@ -6505,30 +6600,78 @@ def _find_outside_kb(
             # mid-scan DEGRADED, and says so through `failed_out` and the
             # degradation counter; calling that `declined` would report a lane
             # that broke as a lane that politely stood down.
-            _mark_source(timings, "outside_kb", find_types.SOURCE_DECLINED)
+            _mark_source(timings, stage_name, find_types.SOURCE_DECLINED)
         if failed_out is not None:
             failed_out.append("outside_kb_lexical")
         _record_degradation("outside_kb_lexical")
         return []
     if catalog_served:
-        _mark_source(timings, "outside_kb", find_types.SOURCE_INDEX)
+        _mark_source(timings, stage_name, find_types.SOURCE_INDEX)
 
     catalog_view = lexstore._admitted_catalog_view(vault_root)
     if catalog_view is not None:
         catalog_view.capture_page_hashes(candidates)
 
-    def finish(exclude_paths: set[str] | None) -> list[Hit]:
+    selected_ranks: dict[str, int] = {}
+
+    def select(exclude_paths: set[str]) -> list[str] | None:
+        if catalog_view is None or any((types, projects, tags, speakers, file_types, exclude_file_types)):
+            return None
+        metadata = _managed_page_metadata(
+            vault_root, set(candidates), scope="vault", freshness_key=vault_freshness,
+            pending=None, include_ranking=True,
+        )
+        if any(row.view is not None and row.ranking is None for row in metadata.values()):
+            return None
+        from . import access
+
+        paths = []
+        seen = set(exclude_paths)
+        for path in candidates:
+            if path in seen:
+                continue
+            seen.add(path)
+            if path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+                continue
+            row = metadata[path]
+            if row.view is None or not access.is_indexable(vault_root, path):
+                continue
+            if post_eligibility is not None and path not in post_eligibility:
+                continue
+            if row.ranking is None or not _any_stem_present(row.ranking, query_norm):
+                continue
+            paths.append(path)
+            if len(paths) >= limit:
+                break
+        selected_ranks.update({path: rank for rank, path in enumerate(paths, start=1)})
+        return paths
+
+    def record(hits: list[Hit], *, selected: bool = False) -> None:
+        if retrieval_trace is not None:
+            retrieval_trace.record_outside_candidates(
+                hits, scores=score_by_path, backend=lexical_backend,
+                ranks=selected_ranks if selected else None,
+            )
+
+    def finish(
+        exclude_paths: set[str] | None, selected_paths: list[str] | None = None,
+        *, record_trace: bool = True,
+    ) -> list[Hit]:
         hits: list[Hit] = []
         seen: set[str] = set()
-        for rel_path in candidates:
+        paths = candidates if selected_paths is None else selected_paths
+        for rel_path in paths:
             if rel_path in seen or (exclude_paths is not None and rel_path in exclude_paths):
                 continue
             seen.add(rel_path)
             if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
                 continue
-            page = _resolve_page(vault_root, rel_path, catalog_view=catalog_view)
-            if page_memo is not None:
-                page_memo[rel_path] = page
+            if page_memo is not None and rel_path in page_memo:
+                page = page_memo[rel_path]
+            else:
+                page = _resolve_page(vault_root, rel_path, catalog_view=catalog_view)
+                if page_memo is not None:
+                    page_memo[rel_path] = page
             if page is None:
                 continue
             if post_eligibility is not None and rel_path not in post_eligibility:
@@ -6567,23 +6710,22 @@ def _find_outside_kb(
             )
             if len(hits) >= limit:
                 break
-        if retrieval_trace is not None:
-            retrieval_trace.record_outside_candidates(
-                hits,
-                scores=score_by_path,
-                backend=lexical_backend,
-            )
+        if record_trace:
+            record(hits, selected=selected_paths is not None)
         return hits
 
     if defer_finish:
         return _OutsideSelection(
             finish, find_types.SOURCE_INDEX if catalog_served else find_types.SOURCE_COMPUTED,
             tuple(candidates),
+            select if managed and catalog_view is not None else None,
+            lambda paths: finish(None, paths, record_trace=False),
+            lambda hits: record(hits, selected=True),
         )
     return finish(exclude_paths)
 
 
-def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
+def _any_stem_present(page: ParsedPage | find_types.RankingPage, query_norm: str) -> bool:
     """True if at least ONE query stem appears in title+body.
 
     The relaxed counterpart to `_stem_tokens_present` (which requires ALL).

@@ -289,6 +289,7 @@ class RetrievalTrace:
         *,
         scores: dict[str, float],
         backend: str,
+        ranks: dict[str, int] | None = None,
     ) -> None:
         """Record the lexical lane used only by default-scope widening."""
         lane_name = "outside_keyword" if backend == "keyword_fallback" else "outside_bm25"
@@ -304,11 +305,14 @@ class RetrievalTrace:
             }
         )
         self.lane_profiles[lane_name] = {
-            "status": "participated" if hits else "available_nonmatching",
+            # A frozen acquisition prefix participated even if fusion or proof
+            # loss leaves no outside hit to disclose.
+            "status": "participated" if hits or ranks else "available_nonmatching",
             "backend": backend,
             "metric": metric,
         }
         for rank, hit in enumerate(hits, start=1):
+            rank = ranks[hit.path] if ranks is not None else rank
             lane_evidence: dict[str, Any] = {"rank": rank}
             if lane_name == "outside_bm25":
                 lane_evidence["raw_score"] = round(scores[hit.path], 6)

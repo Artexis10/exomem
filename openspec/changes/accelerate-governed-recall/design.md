@@ -541,7 +541,14 @@ it with the current path on the reference corpus.
   with unresolved shortcuts retain their existing path.
   Browse and fallback reuse the same frozen rank plan and page memo. Fallback
   explanations retain the original keyword ranks after selected evidence loss.
-  Widening and possible reranking retain their existing paths.
+  Managed non-reranked widening selects its outside prefix from the same
+  catalogue ranking fields. It excludes every original primary identity,
+  preserves the existing strong/weak segments and reserve formula, and freezes
+  the widened page order before mixed fusion. Primary, outside and mixed ranks
+  remain distinct. A lost outside proof leaves its reserved slot empty.
+  Selected outside hydration finishes inside the admitted catalogue scope;
+  deferred trace finalization retains the original acquisition ranks.
+  Incomplete ranking metadata and possible reranking retain their existing paths.
   Reranking needs canonical passages before fusion, so
   moving it would change the ranking contract. These paths remain unoptimized;
   they receive no read-budget exemption, and task 6.6 stays open.
