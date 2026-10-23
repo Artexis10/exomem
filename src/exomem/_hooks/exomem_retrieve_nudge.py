@@ -3269,7 +3269,15 @@ def main(argv: list[str] | None = None) -> int:
         # the reminder FOLLOWS, and `_block_keeps_the_reminder` is what knows.
         try:
             continuity = _read_activation_token(session_id)
-            max_chars = _read_map_request_max_chars(session_id)
+            try:
+                generation_path = _activation_map_path(session_id)
+                overhead_path = _activation_map_overhead_path(session_id)
+                max_chars = _read_map_request_max_chars(session_id)
+                last_generation = _read_activation_value(generation_path) if continuity else ""
+            except (AttributeError, OSError, ValueError):
+                # A mixed hook pair loses map state, never the working set.
+                generation_path = overhead_path = None
+                max_chars, last_generation = None, ""
             request_budget = {"max_chars": max_chars} if max_chars is not None else {}
             packet, lane = _gather_packet_with_lane(
                 prompt,
@@ -3285,29 +3293,29 @@ def main(argv: list[str] | None = None) -> int:
             packet = packet if isinstance(packet, dict) else {}
             hit_count = len(packet.get("anchors") or ())
             _write_activation_token(session_id, str(packet.get("continuity") or ""))
-            last_generation = _read_activation_value(_activation_map_path(session_id)) if continuity else ""
             if isinstance(packet.get("map"), dict):
-                overhead = _map_render_overhead(packet["map"])
-                budget = packet.get("budget")
-                if isinstance(budget, dict) and isinstance(budget.get("limit_chars"), int):
-                    # Retain the cap the server used, even when that smaller map has fewer prefixes.
-                    overhead = max(overhead, _working_set_max_chars() - budget["limit_chars"])
-                _write_activation_value(_activation_map_overhead_path(session_id), str(overhead))
                 block, complete = _format_map_block(packet["map"], _working_set_max_chars(), last_generation)
-                if block and complete:
-                    _write_activation_value(_activation_map_path(session_id), str(packet["map"].get("generation") or ""))
-                elif not complete:
+                if generation_path is not None and overhead_path is not None:
                     try:
-                        _state_core().unlink_nudge_file(_activation_map_path(session_id))
-                    except (OSError, ValueError):
+                        overhead = _map_render_overhead(packet["map"])
+                        budget = packet.get("budget")
+                        requested = _working_set_max_chars() if max_chars is None else max_chars
+                        if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:
+                            # Only an acknowledged cap can explain a cut; full renders replace old estimates.
+                            overhead = max(overhead, _working_set_max_chars() - requested)
+                        _write_activation_value(overhead_path, str(overhead))
+                        if block and complete:
+                            _write_activation_value(generation_path, str(packet["map"].get("generation") or ""))
+                        elif not complete:
+                            _state_core().unlink_nudge_file(generation_path)
+                    except (AttributeError, OSError, ValueError):
                         pass
             else:
-                generation = packet.get("generation")
-                # Maps retain this wire field while warming; no map alone does not prove a mode change.
-                if packet_available and isinstance(generation, dict) and "map_generation" not in generation:
+                # Only a ready anchors packet proves a mode change; abstentions keep the hint.
+                if overhead_path is not None and isinstance(packet.get("anchors"), list) and not packet.get("abstained"):
                     try:
-                        _state_core().unlink_nudge_file(_activation_map_overhead_path(session_id))
-                    except (OSError, ValueError):
+                        _state_core().unlink_nudge_file(overhead_path)
+                    except (AttributeError, OSError, ValueError):
                         pass
                 block = _format_working_set_block(packet, _working_set_max_chars())
             keep_reminder = _block_keeps_the_reminder(packet)

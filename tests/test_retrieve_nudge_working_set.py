@@ -2460,7 +2460,7 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
     working_set_mode,
 ) -> None:
-    """Later turns must neither repeat an unchanged map nor hide a changed one."""
+    """Cut maps must render again; older helpers must not hide the anchors working set."""
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
     monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
     monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
@@ -2496,6 +2496,20 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
     assert "Long entry" in whole and "map unchanged" not in whole
     assert "map unchanged" in _context(_run(monkeypatch, capsys, _event(), tmp_path))
 
+    generation_path = hook._activation_map_path(SESSION)
+    overhead_path = hook._activation_map_overhead_path(SESSION)
+    before = (generation_path.read_bytes(), overhead_path.read_bytes())
+    # An older helper has the file primitives but neither map-state suffix.
+    monkeypatch.delattr(hook._state_core(), "ACTIVATION_MAP_GENERATION_SUFFIX")
+    monkeypatch.delattr(hook._state_core(), "ACTIVATION_MAP_OVERHEAD_SUFFIX")
+    anchors = _packet()
+    _serve(monkeypatch, anchors)
+    assert _context(_run(monkeypatch, capsys, _event(), tmp_path)) == hook._format_working_set_block(anchors, 4000)
+    _serve(monkeypatch, packet)
+    without_state = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    assert "Long entry" in without_state and "map unchanged" not in without_state
+    assert (generation_path.read_bytes(), overhead_path.read_bytes()) == before
+
 
 
 
@@ -2522,7 +2536,7 @@ def test_map_readiness_is_visible_and_a_malformed_item_does_not_lose_the_map() -
 def test_maps_use_one_reduced_call_after_discovery_and_mode_changes_restore_the_original_cap(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, working_set_mode,
 ) -> None:
-    """Remembered maps must avoid a second call; a mode change must not keep shrinking anchors."""
+    """Clamps must not pin caps; abstentions must not forget maps; ready anchors must restore the original cap."""
     from types import SimpleNamespace
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
@@ -2540,11 +2554,12 @@ def test_maps_use_one_reduced_call_after_discovery_and_mode_changes_restore_the_
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs["timeout"]))
-        packet["budget"] = {"limit_chars": int(argv[argv.index("--max-chars") + 1])}
+        packet["budget"] = {"limit_chars": min(8000, int(argv[argv.index("--max-chars") + 1]))}
         return SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "data": packet}))
 
     monkeypatch.setattr(hook.shutil, "which", lambda _name: "exomem")
     monkeypatch.setattr(hook.subprocess, "run", run)
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "12000")
     first = _context(_run(monkeypatch, capsys, _event(), tmp_path))
     assert "Depot Ledger" in first
     assert len(calls) == 2
@@ -2552,24 +2567,33 @@ def test_maps_use_one_reduced_call_after_discovery_and_mode_changes_restore_the_
     assert caps[1] < caps[0] == hook._working_set_max_chars()
     assert calls[1][1] <= calls[0][1]
     assert calls[1][0][-1] == PROMPT
+    assert packet["budget"]["limit_chars"] == 8000
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "4000")
+    normal_cap = hook._map_request_max_chars(hook._map_render_overhead(packet["map"]))
     second = _context(_run(monkeypatch, capsys, _event(), tmp_path))
     assert "map unchanged" in second
     assert len(calls) == 3, "The second maps turn must make only one call."
-    assert int(calls[2][0][calls[2][0].index("--max-chars") + 1]) == caps[1]
+    assert int(calls[2][0][calls[2][0].index("--max-chars") + 1]) == normal_cap
+    assert normal_cap > 500
     assert calls[2][0][calls[2][0].index("--continuity") + 1] == "opaque-token"
 
+    maps = dict(packet)
     packet.clear()
-    packet.update({"generation": {"map_generation": None}, "abstained": True, "abstention": {"reason": "index_warming"}})
+    packet.update(_packet(abstained=True, reason="disabled"))
     _run(monkeypatch, capsys, _event(), tmp_path)
     assert len(calls) == 4
     assert hook._activation_map_overhead_path(SESSION).exists()
+    packet.clear()
+    packet.update(maps)
+    _run(monkeypatch, capsys, _event(), tmp_path)
+    assert len(calls) == 5, "A transient abstention must not bring discovery's extra call back."
 
     packet.clear()
     packet.update(_packet())
     changed = _context(_run(monkeypatch, capsys, _event(), tmp_path))
     assert changed == hook._format_working_set_block(packet, 4000)
-    assert len(calls) == 5
+    assert len(calls) == 6
     assert not hook._activation_map_overhead_path(SESSION).exists()
     _run(monkeypatch, capsys, _event(), tmp_path)
-    assert len(calls) == 6, "Unmarked anchors must make only one call."
-    assert int(calls[5][0][calls[5][0].index("--max-chars") + 1]) == 4000
+    assert len(calls) == 7, "Unmarked anchors must make only one call."
+    assert int(calls[6][0][calls[6][0].index("--max-chars") + 1]) == 4000
