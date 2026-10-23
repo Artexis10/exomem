@@ -409,10 +409,44 @@ def test_requested_operator_abort_failure_cannot_be_a_known_finding(monkeypatch)
     monkeypatch.setattr(operator_restore_abort, "run_abort", abort)
     args = _parser().parse_args(["run", "--operator-restore-abort", "--harness-check"])
     ctx = SimpleNamespace(report=report.Report("abort"), cli_image=None,
-                          operator_restore_abort=args.operator_restore_abort)
+                          operator_restore_abort=args.operator_restore_abort, owner_export_image=None)
     with pytest.raises(report.StageFailed):
         asyncio.run(scenarios.run_steps(ctx))
     assert ctx.report.stages["operator_restore_abort"]["status"] == "failed"
+
+
+def test_owner_export_cannot_qualify_a_node() -> None:
+    """The bounded C6 journey must not replace the full node acceptance workflow."""
+    run = _passing_report()
+    run.inputs["owner_export"] = True
+    assert run.to_json()["outcome"]["gates_node"] is False
+
+
+@pytest.mark.parametrize("provisioned", [False, True])
+def test_requested_owner_export_must_run_and_pass(monkeypatch, provisioned) -> None:
+    """Neither skipped provisioning nor a failed export may pass harness-check."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import owner_export, scenarios
+    from cloud_rehearsal.__main__ import _parser
+
+    async def provision(_ctx, _record):
+        pass
+
+    async def export(_ctx, _image):
+        raise report.StepFailure("the export did not finish")
+
+    monkeypatch.setattr(scenarios, "STEPS", [(2, "provision", provision, ())])
+    monkeypatch.setattr(scenarios, "snapshot_logs", lambda _ctx: None)
+    monkeypatch.setattr(owner_export, "run_export", export)
+    args = _parser().parse_args(["run", "--owner-export", "--harness-check"])
+    ctx = SimpleNamespace(report=report.Report("export"), cli_image=None,
+                          operator_restore_abort=False,
+                          owner_export_image="fixture-cloud" if args.owner_export else None)
+    with pytest.raises(report.StageFailed):
+        asyncio.run(scenarios.run_steps(ctx, only={2} if provisioned else set()))
+    assert ctx.report.stages["owner_export"]["status"] == "failed"
 
 
 def test_operator_image_build_reads_the_node_roles_x86_pin(monkeypatch, tmp_path) -> None:

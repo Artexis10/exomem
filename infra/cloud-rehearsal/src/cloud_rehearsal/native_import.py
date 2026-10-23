@@ -16,7 +16,7 @@ from botocore.config import Config
 from cellctl.imports import ImportRow
 from cellctl.manifests import JOB_KIND_LABEL, namespace_name
 
-from .infra import BACKUP_BUCKET, ObjectStore
+from .infra import BACKUP_BUCKET, ObjectStore, docker_labels
 from .report import StepFailure, guarded
 from .shell import run, wait_for
 from .substrate import MCP_URL, PUBLIC_BASE_URL
@@ -82,8 +82,9 @@ print(json.dumps({'files': files, 'receipt': json.loads(receipt.read_text()),
 """
 
 
-def image_payload(image: str) -> dict:
-    return json.loads(run(["docker", "run", "--rm", "--network=none", "--entrypoint=python3",
+def image_payload(image: str, *, run_id: str | None = None) -> dict:
+    labels = docker_labels(run_id) if run_id else []
+    return json.loads(run(["docker", "run", "--rm", *labels, "--network=none", "--tmpfs", "/data", "--entrypoint=python3",
                            image, "-c", PAYLOAD_SCRIPT]).stdout)
 
 

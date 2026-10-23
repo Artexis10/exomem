@@ -71,7 +71,9 @@ class RetrievalTrace:
             self.intent = "filter_only"
             self.effective_mode = "filter_only"
 
-    def record_keyword_hits(self, hits: list[Any], *, filter_only: bool) -> None:
+    def record_keyword_hits(
+        self, hits: list[Any], *, filter_only: bool, ranks: dict[str, int] | None = None,
+    ) -> None:
         lane = "filtered_most_recent" if filter_only else "keyword"
         reason = "empty_query" if filter_only else "requested_mode_keyword"
         self.effective_mode = "filter_only" if filter_only else "keyword"
@@ -104,6 +106,8 @@ class RetrievalTrace:
             "reason": "empty_query" if filter_only else "requested_mode_keyword",
         }
         for rank, hit in enumerate(hits, start=1):
+            if ranks is not None:
+                rank = ranks[hit.path]
             self.evidence_by_id[hit.path] = {
                 "lanes": {lane: {"rank": rank}},
                 "ordering_path": [{"stage": lane, "rank": rank}],

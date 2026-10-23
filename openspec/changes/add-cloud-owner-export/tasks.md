@@ -17,5 +17,5 @@
 ## 4. Rollout
 
 - [ ] 4.1 Substrate's change ships migration 0066, the grants, the export API, Home, email 08 and the privacy page copy. Verify: Substrate's own tests and a tenant-isolation test against real roles.
-- [ ] 4.2 Check against B2 itself, on a disposable prefix, before the export API goes on: `ServerSideEncryption=AES256` on a multipart export, `response-content-disposition` on a versioned link, and deletion of every version. Also check that an unfinished multipart upload under `cells/<id>/` is listed and removed by the deleted-cell prefix deletion, with the controller key's capabilities. Verify: a short evidence note in this change.
+- [x] 4.2 Check against B2 itself, on a disposable prefix, before the export API goes on: `ServerSideEncryption=AES256` on a multipart export, `response-content-disposition` on a versioned link, and deletion of every version. Also check that an unfinished multipart upload under `cells/<id>/` is listed and removed by the deleted-cell prefix deletion, with the controller key's capabilities. Verify: a short evidence note in this change.
 - [ ] 4.3 Rehearse the whole export on the shared rehearsal environment, then run the dedicated security review of the C6 delivery path. Verify: the review's verdict and the rehearsal evidence are recorded.

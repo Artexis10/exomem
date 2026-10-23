@@ -18,7 +18,7 @@ import yaml
 from cellctl.manifests import BACKUP_PATHS, JOB_KIND_LABEL, JOB_KIND_RESTORE, namespace_name
 
 from . import build, images
-from .infra import Stack
+from .infra import Stack, docker_labels
 from .mcp_client import ToolResult
 from .platform import CLOUD_NAMESPACE, wait_rollout
 from .report import StepFailure
@@ -124,11 +124,7 @@ print(json.dumps({"roots": {str(p): {"uid": p.stat().st_uid, "mode": stat.S_IMOD
 
 
 def _labels(stack: Stack, *, image: bool = False) -> list[str]:
-    labels = ["--label", f"io.exomem.rehearsal.run={stack.run_id}"]
-    if shutil.which("agent-docker-clean"):
-        label = run(["agent-docker-clean", "--print-image-label" if image else "--print-label"]).stdout.strip()
-        labels += ["--label", label]
-    return labels
+    return docker_labels(stack.run_id, image=image)
 
 
 def build_writer_image(stack: Stack, base: str) -> str:
