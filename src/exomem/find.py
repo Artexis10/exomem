@@ -5140,6 +5140,7 @@ def _find_managed_keyword(
     pending_paths: frozenset[str] | None, types: list[str] | None, projects: list[str] | None,
     tags: list[str] | None, speakers: list[str] | None, file_types: list[str] | None,
     exclude_file_types: list[str] | None,
+    page_memo: dict[str, ParsedPage | None] | None = None,
 ) -> list[Hit]:
     """Fix emitted groups in SQL, then verify only the selected canonical evidence."""
     from . import lexstore
@@ -5176,7 +5177,7 @@ def _find_managed_keyword(
     if not result.readiness.complete:
         _raise_catalog_outcome(result.readiness)
     view = lexstore._admitted_catalog_view(vault_root)
-    pages: dict[str, ParsedPage | None] = {}
+    pages: dict[str, ParsedPage | None] = page_memo if page_memo is not None else {}
 
     def resolve(path: str, expected: str) -> ParsedPage | None:
         if path not in pages:
@@ -5265,6 +5266,7 @@ def _find_keyword(
                 freshness_key=freshness_key, pending=pending, pending_paths=pending_paths,
                 types=types, projects=projects, tags=tags, speakers=speakers,
                 file_types=file_types, exclude_file_types=exclude_file_types,
+                page_memo=page_memo,
             )
     if not query_norm and _managed_browse_reader():
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
