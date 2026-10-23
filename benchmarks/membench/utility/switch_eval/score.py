@@ -197,13 +197,16 @@ def _vault_pages(layout: Layout, arm: str, tree: str) -> list[str]:
     return sorted(p.relative_to(vault).as_posix() for p in vault.rglob("*.md") if p.is_file())
 
 
-def _attempts(layout: Layout, record: Mapping) -> list[dict]:
-    """Every attempt the session logged, retried harness faults included."""
+def _attempts(layout: Layout, record: Mapping) -> list[dict] | None:
+    """Every attempt the session logged, retried harness faults included, or
+    ``None`` when the log is missing or does not hold the attempts its final
+    record counts: then what those attempts used is unknown, not zero."""
 
     path = layout.session_dir(record["case_id"], record["arm"], record["repeat"]) / "attempts.jsonl"
     if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        return None
+    logged = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    return logged if len(logged) == record["attempts"] else None
 
 
 def case_table(
@@ -259,6 +262,7 @@ def case_table(
                 return sum(present) / len(present) if present else None
 
             turns = [t for r in records for t in r["turns"]]
+            logged = [_attempts(layout, record) for record in records]
             row[arm] = {
                 "repeats": [o["score"] for o in outcomes],
                 "score": sum(o["score"] for o in outcomes) / len(outcomes),
@@ -268,10 +272,12 @@ def case_table(
                 if case.no_memory
                 else None,
                 "failures": [o["failure"] for o in outcomes if o["failure"]],
-                "harness_faults": [
+                "harness_faults": None
+                if any(attempts is None for attempts in logged)
+                else [
                     attempt["kind"]
-                    for record in records
-                    for attempt in _attempts(layout, record)
+                    for attempts in logged
+                    for attempt in attempts
                     if attempt["outcome"] == HARNESS_FAULT
                 ],
                 "calls": sum(t["calls"] for t in turns) / len(records),
@@ -555,11 +561,12 @@ def secondary(*, cases: Sequence[Case], table: Mapping, arm_ids: Sequence[str]) 
                 "with_activation": activated,
                 "share": activated / user_turns if user_turns else None,
             },
-            # Final outcomes that score 0, and every retried attempt's fault.
+            # Final outcomes that score 0, and every retried attempt's fault;
+            # unknown while any session's attempt log is missing.
             "failures_by_kind": _counts(kind for _, row in rows for kind in row["failures"]),
-            "harness_faults_by_kind": _counts(
-                kind for _, row in rows for kind in row["harness_faults"]
-            ),
+            "harness_faults_by_kind": None
+            if any(row["harness_faults"] is None for _, row in rows)
+            else _counts(kind for _, row in rows for kind in row["harness_faults"]),
         }
     return out
 
@@ -583,7 +590,16 @@ def usage(layout: Layout, sessions: Mapping[str, Mapping], *, project_sessions: 
     records = list(sessions.values())
     if not records:
         return {"sessions": 0}
-    attempts = [attempt for record in records for attempt in _attempts(layout, record)]
+    logged = [_attempts(layout, record) for record in records]
+    unlogged = sum(1 for attempts in logged if attempts is None)
+    if unlogged:
+        return {
+            "sessions": len(records),
+            "state": f"unavailable: {unlogged} sessions lack the attempt log their record counts",
+            "totals": None,
+            "per_session": None,
+        }
+    attempts = [attempt for attempts in logged for attempt in attempts]
     turns = [turn for attempt in attempts for turn in attempt["turns"]]
     totals = {
         "input_tokens": sum(t["input_tokens"] for t in turns),
@@ -592,7 +608,12 @@ def usage(layout: Layout, sessions: Mapping[str, Mapping], *, project_sessions: 
         "attempts": len(attempts),
     }
     per_session = {key: value / len(records) for key, value in totals.items()}
-    out = {"sessions": len(records), "totals": totals, "per_session": per_session}
+    out = {
+        "sessions": len(records),
+        "state": "complete",
+        "totals": totals,
+        "per_session": per_session,
+    }
     if project_sessions:
         out["projected"] = {
             "sessions": project_sessions,

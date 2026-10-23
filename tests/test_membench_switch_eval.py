@@ -477,6 +477,25 @@ def test_usage_and_the_failure_report_read_every_attempt_not_only_the_last(tmp_p
     assert scored["secondary"]["A"]["harness_faults_by_kind"] == {"rate_limit": 1, "transport": 1}
 
 
+def test_usage_and_retried_faults_read_as_unavailable_when_an_attempt_log_is_missing(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    turn = {"calls": 1, "activation_calls": 0, "input_tokens": 100, "output_tokens": 10, "push_bytes": 0,
+            "wall_seconds": 1.0, "hook_responses": []}  # fmt: skip
+    record = _session(layout, "case-1", "A", 1, AttemptResult(HARNESS_FAULT, "rate_limit", turns=[turn]),
+                      AttemptResult(OK, answer="An answer.", turns=[turn]))  # fmt: skip
+    (layout.session_dir("case-1", "A", 1) / "attempts.jsonl").unlink()
+    verdict = {"required": {}, "forbidden": {}, "contaminated": None}
+
+    scored = score_run(
+        layout, cases=[_case("case-1")], sessions={record["session_id"]: record}, verdicts={record["session_id"]: verdict},
+        arm_ids=["A"], repeats=1, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0,
+    )  # fmt: skip
+
+    # The final record still names two attempts; zero would understate the run.
+    assert scored["usage"]["totals"] is None
+    assert scored["secondary"]["A"]["harness_faults_by_kind"] is None
+
+
 def test_the_activation_share_counts_user_turns_with_an_activate_context_call_not_calls(tmp_path: Path) -> None:
     layout = Layout(tmp_path / "run")
     def turn(calls: int, activation_calls: int) -> dict:
