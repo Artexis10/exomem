@@ -16,11 +16,12 @@ from pathlib import Path
 import pytest
 from membench.utility.switch_eval import protocol, stats
 from membench.utility.switch_eval.arms import arm_specs
-from membench.utility.switch_eval.audit import run_guesses
+from membench.utility.switch_eval.audit import load_guesses, rejudge_set, run_guesses
 from membench.utility.switch_eval.cases import Case, Required, load_cases
 from membench.utility.switch_eval.judge import (
     ITEM_FIELDS,
     JudgeError,
+    Unblinded,
     UnblindingError,
     _refuse_tool_use,
     build_items,
@@ -665,6 +666,38 @@ def test_the_arm_guess_audit_shows_its_lane_exactly_the_judge_view_of_each_origi
     originals = [item for item in item_set.items if not item_set.arm_key[item["item_id"]]["rejudge_of"]]
     # No arm, session, verdict or re-judged copy: each original item's judge view, once.
     assert sorted(shown, key=lambda i: i["item_id"]) == sorted(originals, key=lambda i: i["item_id"])
+
+
+def _judged_run_whose_answers_describe_the_map(tmp_path: Path) -> tuple[Layout, Unblinded]:
+    layout = Layout(tmp_path / "run")
+    case = _case("case-1", required=(Required("release-freeze", "The release is frozen."),))
+    sessions = [_session(layout, "case-1", arm, 1, AttemptResult(OK, answer="I read the map. The release is frozen."))
+                for arm in protocol.ARM_IDS]  # fmt: skip
+    item_set = build_items([case], sessions, seed=7, inputs_digest="inputs", tool_names=())
+    write_items(layout, item_set)
+    for item_id in item_set.arm_key:
+        _write_verdict(layout, "codex", item_id, {"r1": "used"})
+    return layout, unblind(layout, routes=["codex"], expected=item_set.arm_key)
+
+
+def _guess_every_arm_right_from(layout: Layout, unblinded: Unblinded, span: str) -> None:
+    (layout.audit / "guesses").mkdir(parents=True, exist_ok=True)
+    for item_id, entry in unblinded.arm_key.items():
+        if not entry["rejudge_of"]:
+            guess = {"item_id": item_id, "arm_guess": entry["arm"], "confidence": 0.9, "evidence_span": span,
+                     "evidence_kind": "describes_tools_or_retrieval"}  # fmt: skip
+            (layout.audit / "guesses" / f"{item_id}.json").write_text(json.dumps(guess), encoding="utf-8")
+
+
+def test_the_audit_draws_its_controls_even_when_every_item_is_flagged(tmp_path: Path) -> None:
+    layout, unblinded = _judged_run_whose_answers_describe_the_map(tmp_path)
+    _guess_every_arm_right_from(layout, unblinded, "I read the map.")
+
+    _items, key = rejudge_set(layout, unblinded, load_guesses(layout, unblinded), seed=7, inputs_digest="inputs")
+
+    # The controls are unchanged copies, so a run with every item flagged still has its noise baseline.
+    roles = [entry["role"] for entry in key.values()]
+    assert roles.count("flagged") == roles.count("control") == len(protocol.ARM_IDS)
 
 
 def test_a_rule_whose_verdict_flips_without_the_flagged_spans_reads_as_inconclusive(tmp_path: Path) -> None:

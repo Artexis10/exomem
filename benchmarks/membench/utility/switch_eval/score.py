@@ -683,8 +683,13 @@ def arm_guess_audit(
         moved = sum(_verdict_core(v) != _verdict_core(verdicts[s]) for s, v in rejudged.items())
         return {"items": len(rejudged), "changed_verdicts": moved}
 
+    flagged, controls = changed(audit["flagged"]), changed(audit["controls"])
+    # The controls are the noise baseline that the flagged items' changes are read against.
+    baseline = "complete" if controls["items"] >= flagged["items"] else "incomplete"
     return {
-        "state": "complete",
+        "state": "complete"
+        if baseline == "complete"
+        else f"incomplete: {controls['items']} controls for {flagged['items']} flagged items",
         "items": len(guesses),
         "groups": len(labels),
         "accuracy": float(hits.sum() / sizes.sum()) if labels else None,
@@ -693,8 +698,8 @@ def arm_guess_audit(
         "bootstrap": {"draws": BOOTSTRAP_DRAWS, "seed": seed, "clustered_by": "group"},
         "confusion": confusion,
         "evidence_kinds": _counts(guess["evidence_kind"] for guess in guesses.values()),
-        "flagged": changed(audit["flagged"]),
-        "controls": changed(audit["controls"]),
+        "flagged": flagged,
+        "controls": {**controls, "baseline": baseline},
         "rules_rejudged": {n: redone[n]["holds"] for n in ("1", "2", "3", "4", "5")},
         "flips": [
             n for n in ("1", "2", "3", "4", "5") if decided[n]["holds"] != redone[n]["holds"]

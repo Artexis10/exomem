@@ -5,8 +5,8 @@ tie-break, a separate Opus lane reads exactly the judge view of every
 original item, and never a verdict, a key or the arm key, and guesses the arm
 through a structured-output schema. Every item guessed right on evidence that
 describes tools or the retrieval process is re-judged with that span removed,
-mixed in with as many control items re-judged unchanged, by every standing
-judge route with the judge it judged with. Scoring then recomputes each rule
+mixed in with as many controls, unchanged copies of original items drawn from
+all of them, by every standing judge route with the judge it judged with. Scoring then recomputes each rule
 with the re-judged verdicts on the flagged items (``score.score_run``).
 """
 
@@ -154,7 +154,9 @@ def rejudge_set(
     inputs_digest: str,
 ) -> tuple[list[dict], dict[str, dict]]:
     """The flagged items with their span removed and as many controls as they
-    are, unchanged, shuffled together under fresh ids, with their key."""
+    are, shuffled together under fresh ids, with their key. Controls are
+    unchanged copies drawn from every original item, flagged ones included, so
+    a run whose every item is flagged still has its noise baseline."""
 
     secret = _secret(seed, inputs_digest)
     originals = {item["item_id"]: item for item in original_items(layout, unblinded)}
@@ -164,9 +166,9 @@ def rejudge_set(
         if guess["evidence_kind"] == protocol.AUDIT_FLAGGED_KIND
         and guess["arm_guess"] == unblinded.arm_key[item_id]["arm"]
     )
-    rest = sorted(set(originals) - set(flagged))
-    chosen = deterministic_permutation(len(rest), f"{secret}:audit-controls")[: len(flagged)]
-    controls = [rest[index] for index in chosen]
+    pool = sorted(originals)
+    chosen = deterministic_permutation(len(pool), f"{secret}:audit-controls")[: len(flagged)]
+    controls = [pool[index] for index in chosen]
     items: list[dict] = []
     key: dict[str, dict] = {}
     for role, item_ids in ((FLAGGED, flagged), (CONTROL, controls)):
