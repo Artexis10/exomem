@@ -860,13 +860,18 @@ def test_a_slow_publication_copy_leaves_file_and_store_writes_acknowledging(abc,
         resolve = replica._Publisher.resolve
 
         if phase in {"cold-ready", "cold-intent-copy"}:
+            interrupted = threading.Event()
+
             def leave_ready(publisher, pending, **kwargs):
                 if pending["phase"] == "ready":
+                    interrupted.set()
                     raise replica._Retry("interrupted after ready")
                 return resolve(publisher, pending, **kwargs)
 
             monkeypatch.setattr(replica._Publisher, "resolve", leave_ready)
             abc.write_c(str(uuid.uuid4()), "Ready copy awaiting recovery")
+            # A committed ready row can precede the active publisher's interruption.
+            assert interrupted.wait(10), "ready publication was not interrupted"
             _until(lambda: (raw := abc.meta().get(schema.META_PENDING_REPLICA_PUBLICATION))
                    is not None and json.loads(raw)["phase"] == "ready")
 

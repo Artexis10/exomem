@@ -1072,6 +1072,9 @@ def publish_replica_concurrently(vault_root, *, step, deadline, cancelled=None, 
                     return _outcome(None, lambda: publisher.swap(pending, artifact, staging.close),
                                     metadata=lambda: publisher.metadata)
     except connection.CollectionStoreError as error:
+        # Before publisher construction, no publication effect occurred; preserve the caller's busy retry.
+        if error.code == "COLLECTION_STORE_BUSY" and publisher is None:
+            raise
         if error.code not in {"COLLECTION_STORE_BUSY", "COLLECTION_STORE_LEASE_REQUIRED",
                               "COLLECTION_STORE_CUSTODY_UNVERIFIED", "COLLECTION_SNAPSHOT_CANCELLED"}:
             raise
