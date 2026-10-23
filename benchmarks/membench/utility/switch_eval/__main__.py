@@ -531,6 +531,20 @@ def _chain_before_judging(layout, inputs, cases, plan, specs):
     return sessions
 
 
+def _item_inputs(layout, inputs, cases) -> dict:
+    """What the judge items are built from beyond the cases and sessions, the
+    same at every stage that builds or rebuilds them."""
+
+    from .judge import exomem_tool_names
+
+    trees = sorted({case.tree for case in cases})
+    return {
+        "seed": inputs["seed"],
+        "inputs_digest": _inputs_digest(inputs),
+        "tool_names": exomem_tool_names(layout, arms=inputs["arms"], trees=trees),
+    }
+
+
 def cmd_judge(args: argparse.Namespace) -> int:
     from .judge import JudgeError, build_items, judge_agreement, run_judge, write_items
     from .score import check_judge_inputs
@@ -538,18 +552,11 @@ def cmd_judge(args: argparse.Namespace) -> int:
     layout, inputs, cases, plan, specs = _context(Path(args.run))
     _stage(layout, inputs, None if args.items_only else "judge")
     sessions = _chain_before_judging(layout, inputs, cases, plan, specs)
-    digest = _inputs_digest(inputs)
+    built_from = _item_inputs(layout, inputs, cases)
     if not (layout.judge / "items.jsonl").exists():
-        write_items(
-            layout,
-            build_items(cases, list(sessions.values()), seed=inputs["seed"], inputs_digest=digest),
-        )
+        write_items(layout, build_items(cases, list(sessions.values()), **built_from))
     problems = check_judge_inputs(
-        layout,
-        cases=cases,
-        sessions=list(sessions.values()),
-        seed=inputs["seed"],
-        inputs_digest=digest,
+        layout, cases=cases, sessions=list(sessions.values()), **built_from
     )
     if problems:
         raise SystemExit("chain check failed: " + "; ".join(problems))
@@ -586,14 +593,12 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
     hashes = json.loads((layout.run / "arm-hashes.json").read_text(encoding="utf-8"))
     session_problems, sessions = check_sessions(layout, plan=plan, arm_hashes=hashes)
     problems += session_problems
-    digest = _inputs_digest(inputs)
+    built_from = _item_inputs(layout, inputs, cases)
     answered = list(sessions.values())
-    problems += check_judge_inputs(
-        layout, cases=cases, sessions=answered, seed=inputs["seed"], inputs_digest=digest
-    )
+    problems += check_judge_inputs(layout, cases=cases, sessions=answered, **built_from)
     if problems:
         raise SystemExit("chain check failed after judging:\n  " + "\n  ".join(problems))
-    rebuilt = build_items(cases, answered, seed=inputs["seed"], inputs_digest=digest)
+    rebuilt = build_items(cases, answered, **built_from)
     try:
         unblinded = unblind(layout, routes=routes, expected=rebuilt.arm_key)
     except UnblindingError as error:

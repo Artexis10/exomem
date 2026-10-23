@@ -107,13 +107,14 @@ def check_judge_inputs(
     sessions: Sequence[Mapping],
     seed: int,
     inputs_digest: str,
+    tool_names: Sequence[str],
 ) -> list[str]:
     """The written judge items against items rebuilt from the captured answers."""
 
-    rebuilt = {
-        item["item_id"]: item
-        for item in build_items(cases, sessions, seed=seed, inputs_digest=inputs_digest).items
-    }
+    built = build_items(
+        cases, sessions, seed=seed, inputs_digest=inputs_digest, tool_names=tool_names
+    )
+    rebuilt = {item["item_id"]: item for item in built.items}
     written = {item["item_id"]: item for item in read_items(layout)}
     if rebuilt != written:
         differing = sum(

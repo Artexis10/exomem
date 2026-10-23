@@ -3,7 +3,8 @@
 Design, "Measures and judging": one item per (case, arm, repeat) under an
 opaque shuffled id; every arm's item shows the same view (the user turns, the
 key's required items, forbidden claims and successors, and the answer) with
-``exomem://`` refs replaced by opaque tokens; the arm key lives apart, under
+``exomem://`` refs replaced by opaque tokens and every arm's Exomem tool
+names by one neutral token; the arm key lives apart, under
 ``unblinding/``, and no judge lane reads it. The judge answers through a
 structured-output schema. A random fifth is judged twice under fresh ids,
 mixed in. The tie-break between two judges runs here, in a script, only after
@@ -16,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -152,13 +154,54 @@ def case_labels(case: Case) -> dict[str, str]:
     return labels
 
 
-def item_payload(case: Case, answer: str, item_id: str) -> dict:
+#: The one neutral token that stands for every Exomem tool name in the judge view.
+TOOL_TOKEN = "[tool]"
+
+
+def exomem_tool_names(
+    layout: Layout, *, arms: Sequence[str], trees: Sequence[str]
+) -> tuple[str, ...]:
+    """Every tool name any arm's actor was shown, bare and client-prefixed.
+
+    The union of the tool lists the state stage captured from the server for
+    every arm and tree, each also in the client's ``mcp__<server>__<tool>``
+    form for every server in the arm's MCP config. A per-arm list would leave
+    P's mention of a tool only A and M have in the judge view.
+    """
+
+    names: set[str] = set()
+    for arm in arms:
+        config = layout.arm_dir(arm) / "session-inputs" / "mcp.json"
+        servers = json.loads(config.read_text(encoding="utf-8"))["mcpServers"]
+        for tree in trees:
+            surface = json.loads(
+                (layout.arm_tree(arm, tree) / "surface.json").read_text(encoding="utf-8")
+            )
+            for shown in surface["shown"].values():
+                for tool in shown["tools"]:
+                    names.add(tool["name"])
+                    names.update(f"mcp__{server}__{tool['name']}" for server in servers)
+    return tuple(sorted(names))
+
+
+def mask_tool_names(text: str, names: Sequence[str]) -> str:
+    """``text`` with each of ``names`` replaced by :data:`TOOL_TOKEN`."""
+
+    if not names:
+        return text
+    # Identifier boundaries, so a longer identifier that contains a name stays
+    # whole; the names are the captured tool lists, not a word list.
+    alternatives = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+    return re.sub(rf"(?<![A-Za-z0-9_])(?:{alternatives})(?![A-Za-z0-9_])", TOOL_TOKEN, text)
+
+
+def item_payload(case: Case, answer: str, item_id: str, *, tool_names: Sequence[str]) -> dict:
     """One judge item. One numbering per item, so a token carries nothing across items."""
 
     numbering = SourceNumbering()
 
     def blind(text: str) -> str:
-        return tokenize_exomem_refs(text, numbering)
+        return mask_tool_names(tokenize_exomem_refs(text, numbering), tool_names)
 
     return {
         "item_id": item_id,
@@ -191,7 +234,12 @@ class ItemSet:
 
 
 def build_items(
-    cases: Sequence[Case], sessions: Sequence[Mapping], *, seed: int, inputs_digest: str
+    cases: Sequence[Case],
+    sessions: Sequence[Mapping],
+    *,
+    seed: int,
+    inputs_digest: str,
+    tool_names: Sequence[str],
 ) -> ItemSet:
     """Every judged item, the re-judged fifth under fresh ids, shuffled together.
 
@@ -206,7 +254,11 @@ def build_items(
     arm_key: dict[str, dict] = {}
     for session in answered:
         item_id = _opaque(secret, session["session_id"])
-        originals.append(item_payload(by_case[session["case_id"]], session["answer"], item_id))
+        originals.append(
+            item_payload(
+                by_case[session["case_id"]], session["answer"], item_id, tool_names=tool_names
+            )
+        )
         arm_key[item_id] = {
             "session_id": session["session_id"],
             "case_id": session["case_id"],

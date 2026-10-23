@@ -6,7 +6,7 @@ The key lists:
 - forbidden claims: statements the answer must not assert as current;
 - whether the case expects memory at all.
 
-Judge only the scored answer, against the key's statements. Tokens such as [ctx:1] stand for references that were removed; treat them as citations, nothing more.
+Judge only the scored answer, against the key's statements. Tokens such as [ctx:1] stand for references that were removed, and [tool] stands for a tool name that was removed; treat them as citations, nothing more.
 
 For each required item, answer:
 

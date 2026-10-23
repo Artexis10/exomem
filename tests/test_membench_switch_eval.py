@@ -23,6 +23,8 @@ from membench.utility.switch_eval.judge import (
     UnblindingError,
     _refuse_tool_use,
     build_items,
+    exomem_tool_names,
+    item_payload,
     tie_break,
     unblind,
     write_items,
@@ -284,7 +286,7 @@ def test_judge_items_carry_no_arm_marker_and_no_raw_exomem_ref(tmp_path: Path) -
         for arm in protocol.ARM_IDS
     ]
     layout = Layout(tmp_path / "run")
-    write_items(layout, build_items([case], sessions, seed=7, inputs_digest="inputs"))
+    write_items(layout, build_items([case], sessions, seed=7, inputs_digest="inputs", tool_names=()))
 
     items = [json.loads(line) for line in (layout.judge / "items.jsonl").read_text(encoding="utf-8").splitlines()]
     originals = [item for item in items if item["item_id"] in json.loads((layout.unblinding / "arm-key.json").read_text())]
@@ -296,6 +298,23 @@ def test_judge_items_carry_no_arm_marker_and_no_raw_exomem_ref(tmp_path: Path) -
     assert "exomem://" not in judge_text
     assert not any(s["session_id"] in judge_text for s in sessions)
     assert not list(layout.judge.rglob("arm-key*"))
+
+
+def test_the_judge_view_masks_every_arms_tool_names_in_an_answer_from_any_arm(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    # What the state stage captured from the server for each arm: P's list lacks activate_context.
+    for arm, tools in (("A", ["activate_context", "read_memory"]), ("P", ["read_memory"])):
+        surface = {"shown": {"initialize": {"tools": [{"name": name} for name in tools]}}}
+        layout.arm_tree(arm, "snapshot").mkdir(parents=True)
+        (layout.arm_tree(arm, "snapshot") / "surface.json").write_text(json.dumps(surface), encoding="utf-8")
+        (layout.arm_dir(arm) / "session-inputs").mkdir(parents=True)
+        (layout.arm_dir(arm) / "session-inputs" / "mcp.json").write_text(json.dumps({"mcpServers": {"exomem": {}}}), encoding="utf-8")
+    p_answer = "I had no activate_context, so mcp__exomem__read_memory and read_memory did it. The release is frozen."
+
+    names = exomem_tool_names(layout, arms=["A", "P"], trees=["snapshot"])
+    item = item_payload(_case("case-1"), p_answer, "item-1", tool_names=names)
+
+    assert item["answer"] == "I had no [tool], so [tool] and [tool] did it. The release is frozen."
 
 
 # -- the pull budget ----------------------------------------------------------
@@ -478,7 +497,7 @@ def test_scoring_on_one_judge_is_refused_when_its_agreement_calls_for_recovery(t
     layout = Layout(tmp_path / "run")
     case = _case("case-1", required=(Required("release-freeze", "The release is frozen."),))
     sessions = [_session(layout, "case-1", arm, 1, AttemptResult(OK, answer="The release is frozen.")) for arm in protocol.ARM_IDS]
-    item_set = build_items([case], sessions, seed=7, inputs_digest="inputs")
+    item_set = build_items([case], sessions, seed=7, inputs_digest="inputs", tool_names=())
     write_items(layout, item_set)
     # The judge contradicts itself on every re-judged copy: required-item agreement is 0.
     for item_id, entry in item_set.arm_key.items():
@@ -491,7 +510,7 @@ def test_scoring_on_one_judge_is_refused_when_its_agreement_calls_for_recovery(t
 def test_unblinding_refuses_an_arm_key_that_names_another_arm_for_a_session(tmp_path: Path) -> None:
     layout = Layout(tmp_path / "run")
     sessions = [_session(layout, "case-1", arm, 1, AttemptResult(OK, answer="An answer.")) for arm in protocol.ARM_IDS]
-    item_set = build_items([_case("case-1")], sessions, seed=7, inputs_digest="inputs")
+    item_set = build_items([_case("case-1")], sessions, seed=7, inputs_digest="inputs", tool_names=())
     write_items(layout, item_set)
     for item_id in item_set.arm_key:
         _write_verdict(layout, "codex", item_id, {})
