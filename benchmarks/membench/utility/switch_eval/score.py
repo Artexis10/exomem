@@ -371,12 +371,18 @@ def rules(
         score = stats.compare(
             _differences(table, pooled, "M", "P"), groups, seed=seed, delta=deltas[3]
         )
-        # Fewer calls is better: the difference is P's calls minus M's.
+        # Fewer calls is better: the difference is P's calls minus M's. M's
+        # calls include the activate_context call that fetches its map.
         calls = stats.compare(_differences(table, pooled, "P", "M", "calls"), groups, seed=seed)
-        pays = score["superiority"]["passes"] or score["non_inferiority"]["passes"]
+        # M beats P, or M is non-inferior and makes fewer calls (amendment 3).
+        beats = score["superiority"]["passes"]
+        cheaper = score["non_inferiority"]["passes"] and calls["superiority"]["passes"]
         out["3"] = {
             "evaluable": True,
-            "holds": bool(pays and calls["superiority"]["passes"]),
+            "holds": bool(beats or cheaper),
+            "path": "superiority"
+            if beats
+            else ("non-inferior with fewer calls" if cheaper else None),
             "cases": len(pooled),
             "M_minus_P": score,
             "P_calls_minus_M_calls": calls,

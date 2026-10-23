@@ -193,6 +193,17 @@ def test_rule_1_pools_the_memory_expecting_miss_cases_with_the_memory_expecting_
     }
 
 
+def test_rule_3_holds_when_m_beats_p_on_quality_though_it_makes_more_calls() -> None:
+    cases = [_case(f"turn-{n}", kind="ordinary") for n in range(6)]
+    # M pays the activation call that fetches its map; P never makes it.
+    table = {c.case_id: {"M": {"score": 1.0, "calls": 3.0}, "P": {"score": 0.0, "calls": 2.0}} for c in cases}
+
+    rule = rules(cases=cases, table=table, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["M", "P"])["3"]
+
+    assert rule["M_minus_P"]["superiority"]["passes"] and not rule["P_calls_minus_M_calls"]["superiority"]["passes"]
+    assert rule["holds"]
+
+
 # -- the judge's view ---------------------------------------------------------
 
 
