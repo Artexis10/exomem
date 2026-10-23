@@ -94,15 +94,15 @@ The slices follow the gate, so each one reports a before and an after on the sam
   - the keep or serial decision and its figures, recorded under `verification/`;
   - one row per stage in the timing table, with wall time, `cpu_ms` and the share of requests on the critical path, no row counting `vector.wait`, and the attribution bounds holding with the branches overlapped;
   - a before and an after of every series on the pinned profile, with each hybrid series' p95 judged against the 200 ms ceiling and reported against the 100 ms target.
-- [ ] 6.14 Keyword recall's page reads (design decision 8): `_find_keyword` calls `_keyword_match_paths` with no `k` (`find.py:4115`), so keyword recall reads, parses and builds a hit for every matching page before `limit` cuts the list (`find.py:4244-4245`). Order and limit in SQL before any page read:
-  - group the matched rows by emitted identity, the frame child's `emitted_parent_path` when the parent's catalogue row exists, else the row's own path;
-  - order the groups by the hit list's own key, the emitted page's `updated or "0000-00-00"` then its path, both descending, and return the first `limit` groups;
-  - return each group's first matched row and first matched frame child in today's walk order (`updated` then path, descending), which supply the excerpt and the frame annotation;
-  - apply the eligible and admitted sets and the structured filters on the emitted page in the same query, from the page-metadata index (design decision 1);
-  - keep pending rows ahead of the catalogue rows, as today, as the fixed overfetch;
-  - when a returned row fails `is_recall_candidate` or no longer parses, drop it as today, and when a parent no longer parses, give its frame children their own keys as today; then read the next group in order, so a drop costs one read and never shortens or reorders the list.
+- [ ] 6.14 Keyword recall's page reads (design decision 8): order and limit emitted groups in SQL before reading Markdown. Reuse 6.4's catalogue session and the existing pending snapshots:
+  - merge all frozen pending parent metadata before grouping, including creates, edits and tombstones;
+  - determine grouping from admitted parseable metadata, preserving existing raw-candidate and referenced-parent authorization;
+  - apply emitted-page filters before the group cap and order by the emitted page's catalogue date and path, descending;
+  - retain the excerpt and annotation sources needed for the latency contract's existing frame precedence;
+  - hydrate only selected groups, validate all disclosed source hashes, and preserve incomplete-result cache exclusion after canonical drift;
+  - carry private source hashes through the existing cache and validate selected child evidence on cache hits.
 
-  Run the query on 6.4's catalogue session. Verify, against the unbounded path on the reference corpus and in the parity suite: identical hits, order, excerpts and frame annotations, frame children included; Markdown reads within the returned hits' pages, their frame pages and the pending rows; and the 6.2 keyword-recall read count within its bound. If an identity case shows that today's order depends on data that only the page holds, record the difference as a contract change in this change's `recall-latency-contract` delta, with a scenario, before the slice lands.
+  Verify unchanged-evidence parity against the exhaustive path for hits, order, excerpts and frame annotations. Cover pending parent changes before the cap, invalid and out-of-scope parents, denied referenced parents, separate excerpt and annotation sources, and selected drift without promotion or refill. Verify the amended selected-source read bound and corpus-growth ratios through the existing structural gate. The latency-contract delta records the canonical-drift difference; this task stays open until its implementation and proof complete.
 
 ### Task 6.1: source-loaded bar reconciliation
 
