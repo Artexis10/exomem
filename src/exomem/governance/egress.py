@@ -3835,7 +3835,7 @@ def guard_working_set(
 #: under every existing reading, and withholding its item if none exists.
 #: `_is_page_shaped` plays no part here; that classifier is for `ref` alone,
 #: and only on an item that ALSO carries one of these (T2).
-_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via", "corrects")
+_WORKING_SET_STRICT_PATH_FIELDS = ("path", "anchor", "via", "corrects")  # nosemgrep: ep-word-set -- Fixed packet path fields.
 #: Packet fields carrying authored PROSE that may name a page in wikilink syntax.
 #: Harvested so a page mentioned only inside a sentence still gets a release
 #: decision: `release.withheld_paths` carries what hit projection happened to
