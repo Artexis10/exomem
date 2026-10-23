@@ -546,6 +546,7 @@ class FreshnessSnapshot:
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
+        self._pending_recall_paths: frozenset[str] | None = None
         self._admitted: dict[tuple[str, Callable[[str], bool]], frozenset[str]] = {}
 
     @property
@@ -682,11 +683,14 @@ class FreshnessSnapshot:
         pending = self._pending
         if pending is None or pending.empty:
             return projected
-        admitted = {
-            rel_path
-            for rel_path in pending.current_paths()
-            if recall_policy.is_recall_candidate(self._root, self._root / rel_path)
-        }
+        admitted = self._pending_recall_paths
+        if admitted is None:
+            # All scopes share admission membership; selected hydration checks later drift.
+            admitted = self._pending_recall_paths = frozenset(
+                rel_path
+                for rel_path in pending.current_paths()
+                if recall_policy.is_recall_candidate(self._root, self._root / rel_path)
+            )
         return frozenset(pending.shadow(projected)) | admitted
 
     def _load_recall_projection(self, scope: str) -> None:
@@ -927,7 +931,19 @@ def _cached_selection_hits(vault_root: Path, hits: list[Any], pending: Any) -> l
     if view is None:
         return hits
     selected = []
+    pages: dict[str, ParsedPage | None] = {}
     for hit in hits:
+        sources = getattr(hit, "keyword_sources", {})
+        if sources:
+            for path in sources:
+                if path not in pages:
+                    pages[path] = _resolve_page(vault_root, path, pending, catalog_view=view)
+            if all(pages[path] is not None and pages[path].snapshot_hash == expected
+                   for path, expected in sources.items()):
+                selected.append(hit)
+            else:
+                view.incomplete = True
+            continue
         path = getattr(hit, "parent_path", None) or hit.path
         page = _resolve_page(vault_root, path, pending)
         if page is not None and hit.snapshot_hash == page.snapshot_hash:
@@ -2084,6 +2100,11 @@ def find(
     admitted_paths = _admitted(
         "vault" if scope == "kb" and mode != "keyword" and query_norm else walk_scope
     )
+    keyword_pending_paths = None
+    if query_norm and not pending.empty:
+        # The projection includes ordinary pending parents outside the raw scope.
+        projected = snapshot.recall_paths(walk_scope)
+        keyword_pending_paths = frozenset(pending.current_paths() & projected)
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -2133,6 +2154,7 @@ def find(
                 freshness_key=snapshot.for_scope(walk_scope),
                 failed_out=failed,
                 pending=pending,
+                pending_paths=keyword_pending_paths,
                 timings=timings,
             )
     else:
@@ -2174,6 +2196,7 @@ def find(
                 retrieval_trace=retrieval_trace,
                 query_vector_provider=_query_vector if mixed else None,
                 pending=pending,
+                pending_paths=keyword_pending_paths,
                 prepared_queries=_prepared_queries,
                 defer_finish=_defer_finish,
             )
@@ -4669,6 +4692,120 @@ def _find_managed_browse(
     return hits
 
 
+def _keyword_hit(
+    vault_root: Path, page: ParsedPage, query_norm: str, excerpt: str,
+    *, scene_frame: str | None = None, scene_frame_ts: float | None = None,
+) -> Hit:
+    """The keyword result projection, including its parent-first frame fallback."""
+    hit = Hit(
+        path=page.rel_path, type=page.page_type, scope=page.scope, title=page.title,
+        updated=page.updated, excerpt=excerpt, media_type=page.media_type, media_file=page.media_file,
+        status=page.status, superseded_by=page.superseded_by,
+        scene_frame=scene_frame, scene_frame_ts=scene_frame_ts if scene_frame else None,
+        snapshot_hash=page.snapshot_hash,
+    )
+    hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
+    # The persisted video handler defines this media family and its frame fallback.
+    if (hit.scene_frame is None and page.media_type == "video"
+            and page.media_file and hit.transcript_ts is not None):
+        from . import scene_frames
+
+        nearest = scene_frames.nearest_frame(vault_root, page.media_file, hit.transcript_ts)
+        if nearest is not None:
+            hit.scene_frame, hit.scene_frame_ts = nearest
+    return hit
+
+
+def _find_managed_keyword(
+    vault_root: Path, *, query_norm: str, scope: str, limit: int,
+    allowed_paths: set[str] | None, freshness_key: tuple | None, pending: Any | None,
+    pending_paths: frozenset[str] | None, types: list[str] | None, projects: list[str] | None,
+    tags: list[str] | None, speakers: list[str] | None, file_types: list[str] | None,
+    exclude_file_types: list[str] | None,
+) -> list[Hit]:
+    """Fix emitted groups in SQL, then verify only the selected canonical evidence."""
+    from . import lexstore
+
+    pending_rows = []
+    if pending is not None:
+        order = {row.rel_path: index for index, row in enumerate(pending.current_pages())}
+        for path in pending.paths:
+            page = pending.page(path)
+            # These keys transport held parser facts, not caller-configured vocabulary.
+            pending_rows.append({
+                "path": path,
+                "parent": page.parent_media + ".md" if page is not None and page.parent_media else None,
+                "updated": page.updated if page is not None else None,
+                "hash": page.snapshot_hash if page is not None else None,
+                "media_file": page.media_file if page is not None else None,
+                "ordinal": order.get(path, 0),
+                "parseable": bool(
+                    page is not None and page.snapshot_hash is not None
+                    and path in (pending_paths or ())
+                ),
+                "matches": bool(
+                    page is not None and path in (pending_paths or ())
+                    and (scope == "vault" or path.startswith(kb_prefix()))
+                    and path.rsplit("/", 1)[-1].lower() not in _NAVIGATION_BASENAMES
+                    and (allowed_paths is None or path in allowed_paths)
+                    and _make_excerpt(page, query_norm) is not None
+                ),
+            })
+    result = lexstore.search_keyword_groups_result(
+        vault_root, query_norm, scope=scope, freshness=freshness_key, limit=limit,
+        allowed_paths=allowed_paths, pending_rows=pending_rows,
+    )
+    if not result.readiness.complete:
+        _raise_catalog_outcome(result.readiness)
+    view = lexstore._admitted_catalog_view(vault_root)
+    pages: dict[str, ParsedPage | None] = {}
+
+    def resolve(path: str, expected: str) -> ParsedPage | None:
+        if path not in pages:
+            pages[path] = _resolve_page(vault_root, path, pending, catalog_view=view)
+        page = pages[path]
+        if page is None or page.snapshot_hash != expected:
+            if view is not None:
+                view.incomplete = True
+            return None
+        return page
+
+    hits = []
+    for group in result.value or ():
+        if view is not None:
+            view.page_hashes.update(group.hashes)
+        page = resolve(group.path, group.hashes[group.path])
+        if page is None:
+            continue
+        source = resolve(group.source_path, group.hashes[group.source_path])
+        if source is None:
+            continue
+        excerpt = _make_excerpt(source, query_norm)
+        if excerpt is None or not _passes_filters(
+            page, vault_root=vault_root, types=types, projects=projects, tags=tags,
+            speakers=speakers, file_types=file_types, exclude_file_types=exclude_file_types,
+        ):
+            if view is not None:
+                view.incomplete = True
+            continue
+        child = source.rel_path != page.rel_path
+        hit = _keyword_hit(
+            vault_root, page, query_norm, excerpt,
+            scene_frame=source.media_file if child else None,
+            scene_frame_ts=source.frame_ts if child else None,
+        )
+        sources = {page.rel_path: group.hashes[page.rel_path], source.rel_path: group.hashes[source.rel_path]}
+        if hit.scene_frame is None and group.frame_path is not None:
+            frame = resolve(group.frame_path, group.hashes[group.frame_path])
+            if frame is None:
+                continue
+            hit.scene_frame, hit.scene_frame_ts = frame.media_file, frame.frame_ts
+            sources[frame.rel_path] = group.hashes[frame.rel_path]
+        hit.keyword_sources = sources
+        hits.append(hit)
+    return hits
+
+
 def _find_keyword(
     vault_root: Path,
     *,
@@ -4686,6 +4823,7 @@ def _find_keyword(
     freshness_key: tuple[int, int, str] | None = None,
     failed_out: list[str] | None = None,
     pending: Any | None = None,
+    pending_paths: frozenset[str] | None = None,
     timings: FindTimings | None = None,
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches.
@@ -4696,6 +4834,19 @@ def _find_keyword(
     decide its label from what it actually did. `index` when it consumed a
     resolved path set, `computed` when it enumerated.
     """
+    if query_norm and _managed_browse_reader():
+        from . import lexstore
+
+        # The documented Python backend retains its exhaustive rollback path.
+        if lexstore.backend() != "python":
+            _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
+            return _find_managed_keyword(
+                vault_root, query_norm=query_norm, scope=scope, limit=limit,
+                allowed_paths=eligible_paths if eligible_paths is not None else admitted_paths,
+                freshness_key=freshness_key, pending=pending, pending_paths=pending_paths,
+                types=types, projects=projects, tags=tags, speakers=speakers,
+                file_types=file_types, exclude_file_types=exclude_file_types,
+            )
     if not query_norm and _managed_browse_reader():
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
         return _find_managed_browse(
@@ -4813,33 +4964,10 @@ def _find_keyword(
             exclude_file_types=exclude_file_types,
         ):
             continue
-        hit = Hit(
-            path=page.rel_path,
-            type=page.page_type,
-            scope=page.scope,
-            title=page.title,
-            updated=page.updated,
-            excerpt=excerpt or "",
-            media_type=page.media_type,
-            media_file=page.media_file,
-            status=page.status,
-            superseded_by=page.superseded_by,
-            scene_frame=scene_frame,
-            scene_frame_ts=scene_frame_ts,
-            snapshot_hash=page.snapshot_hash,
+        hit = _keyword_hit(
+            vault_root, page, query_norm, excerpt or "",
+            scene_frame=scene_frame, scene_frame_ts=scene_frame_ts,
         )
-        hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
-        if (
-            hit.scene_frame is None
-            and page.media_type == "video"
-            and page.media_file
-            and hit.transcript_ts is not None
-        ):
-            from . import scene_frames  # lazy: keyword mode stays import-light
-
-            nf = scene_frames.nearest_frame(vault_root, page.media_file, hit.transcript_ts)
-            if nf is not None:
-                hit.scene_frame, hit.scene_frame_ts = nf
         by_path[page.rel_path] = hit
         hits.append((page.updated or "0000-00-00", hit))
 
@@ -4883,6 +5011,7 @@ def _find_semantic(
     retrieval_trace: Any | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
     pending: Any | None = None,
+    pending_paths: frozenset[str] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
     prepared_queries: find_candidates.PreparedQueryInputs | None = None,
@@ -4905,6 +5034,8 @@ def _find_semantic(
 
         if snapshot is None:
             snapshot = FreshnessSnapshot(vault_root)
+        if pending_paths is None and pending is not None and not pending.empty:
+            pending_paths = frozenset(pending.current_paths() & snapshot.recall_paths(scope))
         if page_memo is None:
             page_memo = {}
 
@@ -5035,6 +5166,7 @@ def _find_semantic(
                 freshness_key=snapshot.for_scope(scope),
                 failed_out=failed_out,
                 pending=pending,
+                pending_paths=pending_paths,
                 timings=timings,
             )
         if retrieval_trace is not None:
