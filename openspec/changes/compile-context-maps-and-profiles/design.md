@@ -184,7 +184,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
   - each forbidden claim: asserted as current, mentioned as past, or absent;
   - on a no-memory case: whether the answer asserts user-specific facts that the turns do not supply, with the span.
 - **Judge noise.** The judge re-judges a random fifth of the items. The report gives agreement per verdict kind. Agreement below 0.8 on required-item verdicts triggers the recovery path: a second judge from the other model family re-judges every item blind, with the re-judged items mixed in. An item's verdict stands where both judges agree. Where they disagree, the verdict that weighs against the switch stands. A script applies this tie-break after unblinding; no judge lane does it.
-- **Arm-guess audit.** After judging, a separate Opus lane reads exactly the judge view of every item and never sees verdicts, keys or the arm key. Through a structured-output schema it gives an arm guess (A, M or P), its confidence, the evidence span and the evidence kind: the answer describes tools or the retrieval process, the answer's content, or no basis. The report gives guess accuracy against 1/3 with a bootstrap interval clustered by group, and a per-arm confusion table; raw accuracy decides nothing, because real treatment effects also change an answer. Every item guessed right on evidence that describes tools or the retrieval process is re-judged blind with the flagged span removed, mixed in with re-judged control items. If any rule's verdict flips on the re-judged items, that rule reads as inconclusive and the default stays `anchors`.
+- **Arm-guess audit.** After judging, the judge-noise recovery path and the tie-break, a separate Opus lane reads exactly the judge view of every item and never sees verdicts, keys or the arm key. Through a structured-output schema it gives an arm guess (A, M or P), its confidence, the evidence span and the evidence kind: the answer describes tools or the retrieval process, the answer's content, or no basis. The report gives guess accuracy against 1/3 with a bootstrap interval clustered by group, and a per-arm confusion table; raw accuracy decides nothing, because real treatment effects also change an answer. Every item guessed right on evidence that describes tools or the retrieval process is re-judged blind with the flagged span removed, mixed in with re-judged control items. The same judge route re-judges both sets. Each rule is then recomputed with the re-judged verdicts in place of the originals on the flagged items, and the control items give the noise baseline. If any rule's verdict flips, that rule reads as inconclusive and the default stays `anchors`.
 
 ### Runs and failures
 
@@ -203,7 +203,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 - **Rule.** Switch only when all of these hold:
   1. On held-out cases that expect memory (miss cases and ordinary turns), M beats A.
   2. On held-out ordinary turns, M is non-inferior to A within rule 2's δ, as the power step sets it.
-  3. M pays over P on held-out miss cases and ordinary turns together. Either M beats P on the primary measure, or M is non-inferior to P within rule 3's δ, as the power step sets it, and M beats P on Exomem calls per case under the same test. M's calls include the `activate_context` call that fetches its map.
+  3. M pays over P on held-out miss cases and ordinary turns together. Either M beats P on the primary measure, or both of these hold: M is non-inferior to P within rule 3's δ, as the power step sets it, and M beats P on Exomem calls per case under the same test. M's calls include the `activate_context` call that fetches its map.
   4. On no-memory cases, M contaminates no more cases than A does, plus at most one.
   5. M loses no synthetic positive case that A passes in a majority of its repeats. M loses a case when it fails that case in a majority of its own repeats.
 - **Expected outcome.** Because M pays one `activate_context` call per user turn that P does not, rule 3 most likely passes, if at all, through the primary measure. If P beats A and M does not pay over P, the default stays `anchors`, and the report proposes a follow-up change for pull-first instructions without the map.
@@ -239,7 +239,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 3. The snapshot, removals, sweep and state builds done, with digests recorded.
 4. The held-out key written, the groups fixed, and the held-out ids hashed.
 5. The harness implementing A, M and P, with a dry run passed.
-6. A judge route with quota.
+6. A judge route with quota, and an Opus route for the arm-guess audit.
 7. A freeze commit that records the protocol, each arm's hashes, the hashed held-out ids, the groups and the power step's figures, made before the first held-out session.
 8. The power step's figures for rules 1, 2 and 3, and the held-out read-intersection recorded as zero.
 
