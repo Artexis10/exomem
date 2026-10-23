@@ -123,8 +123,8 @@ from pathlib import Path
 REMINDER = (
     "[Exomem retrieval check] If this prompt may touch prior knowledge and recent context "
     "lacks it, run a quiet `search_memory` and cite hits; the KB is the source of truth for "
-    "prior conclusions, a miss is not found in that scope. Don't repeat a search as this "
-    "reminder recurs; reuse fresh KB context. Chit-chat, control, fresh task: skip."
+    "prior conclusions, a miss is not found in that scope. Don't repeat a search when "
+    "reminded; reuse fresh KB context. Chit-chat, control, fresh task: skip."
 )
 #: What `maximal` gets on every prompt after the session's first: its contract is recall
 #: before every substantive turn, so it is never silent, but it need not repeat the

@@ -1710,14 +1710,14 @@ def op_bootstrap(
             "page_status": semantic_authoring_module.STATUS_CLASSIFICATION_RULE,
             "requested": requested_workflow,
             "loop": [
-                "reuse current bootstrap policy; load it only when missing or stale",
+                "reuse bootstrap policy; load only if missing or stale",
                 "adopt_vault or browse_memory when first seeing an existing vault",
                 *([
-                    "when recall is warranted and context is not already injected, "
+                    "when recall is needed and context is not injected, "
                     "recall_context with the user's turn before extra recall"
                 ] if "recall_context" in active_product_names else []),
-                "search_memory only for evidence gaps in the current context",
-                "read_memory to open selected result refs",
+                "search_memory only for gaps in current evidence",
+                "read_memory for selected result refs",
                 MEMORY_CITATION_GUIDANCE,
                 "reason in the agent",
                 (
@@ -1769,10 +1769,10 @@ def op_bootstrap(
         "workflow_skills": workflow_skills_module.bootstrap_entries(),
         "authoring_contract": {
             "canonical_loop": [
-                "search_memory for relevant prior notes and sources",
-                "read_memory enough context; use search_memory(deep=true) for synthesis",
+                "search_memory for prior notes and sources",
+                "read_memory for context; search_memory(deep=true) for synthesis",
                 "draft the smallest durable compiled conclusion",
-                "identify the Sources/ or Evidence/ pages this conclusion draws from; they become `sources:` and each receives an `ingested_into:` back-reference",
+                "identify supporting Sources/ or Evidence/ pages for `sources:`; each receives an `ingested_into:` back-reference",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
                 (
                     "write accepted note-level edges under `## Relations`, for example "
@@ -1781,9 +1781,8 @@ def op_bootstrap(
                 ),
                 "write with create_note, observe_memory, edit_note, supersede_note, capture_source, preserve_evidence, or connect_memory as appropriate",
                 (
-                    "inspect the warnings on the write result; add "
-                    "response_detail='full' to see write_feedback, and "
-                    "create_note(suggestions=true) as well to see suggestions"
+                    "inspect write warnings; response_detail='full' reveals write_feedback; "
+                    "create_note(suggestions=true) also reveals suggestions"
                 ),
                 "apply any accepted links through edit_note",
                 "report the written path",
@@ -1792,7 +1791,7 @@ def op_bootstrap(
                 "raw_material": "capture_source",
                 "raw_evidence_or_artifact": "preserve_evidence, preserve_artifacts, or transfer_artifact",
                 "new_durable_conclusion": "create_note",
-                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) naming those pages, which links the conclusion to its provenance and marks the source processed",
+                "conclusion_drawn_from_captured_material": "create_note(sources=[...]) links provenance and marks each source processed",
                 "small_correction": "edit_note",
                 "semantic_unit_mutation": "observe_memory",
                 "substantial_rewrite": "supersede_note",
@@ -1803,8 +1802,8 @@ def op_bootstrap(
                 "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page; a write advisory carries a review ref and fingerprint so an exact dismissed or unexpired snoozed signal stays quiet until the counterpart changes or the written page changes the detected signal class",
             },
             "post_write": {
-                "remember_suggestions": "non-binding related pages returned by create_note(suggestions=true); reachable via response_detail='full'",
-                "write_feedback": "structural feedback from create_note(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
+                "remember_suggestions": "non-binding related pages: create_note(suggestions=true), response_detail='full'",
+                "write_feedback": "create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with response_detail='full'",
                 "structure_suggestion": (
                     "The committed response's advisory carries kind, strength (strong|moderate) and ordered reasons. scope_divergence means material exceeds declared scope; source_classification_debt counts sources without a chosen kind and their Sources/ folders."
                     if profile == "compact"

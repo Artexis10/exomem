@@ -7,7 +7,7 @@
 ## 2. Verify
 
 - [x] 2.1 Prove discovery, both-spelling dispatch, guarded behavior, exclusions, and cross-spelling replay in isolated state.
-- [x] 2.2 Measure complete wire bytes before and after; pass schema budgets, generators, privacy, and affected suites.
+- [ ] 2.2 Measure complete wire bytes before and after; pass schema budgets, generators, privacy, and affected suites.
 - [x] 2.3 Exercise installed public workflows and preserve the context compiler contracts.
 - [ ] 2.4 Complete the independent integrated review and required full-corpus checks.
 
@@ -19,3 +19,5 @@
 Local verification: 15 compatibility cases, 342 boundary cases, and 68 correction cases pass. Schema budgets, generators, repository privacy, and wheel privacy pass. Local hook failures match the exact base revision; remote full-corpus checks remain open.
 
 Installed acceptance reaches all eight source-truth outcomes across an initial pass and a guided CLI syntax correction. The correction also validates on the exact base. Context compiler inputs, view references, continuation, and maps guidance remain covered.
+
+The first full CI run exposed stale public-name assertions, two existing text ceilings, and benchmark admission that dropped preferred names. Verification remains open until the grouped corrections and full CI pass.

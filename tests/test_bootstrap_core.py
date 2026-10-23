@@ -120,7 +120,7 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
         lambda core: "recall_context" not in core["active_capabilities"]["available_product_tools"]
         or any(
             "recall_context" in step
-            for step in core["workflow"]["loop"][:core["workflow"]["loop"].index("search_memory only for evidence gaps in the current context")]
+            for step in core["workflow"]["loop"][:core["workflow"]["loop"].index("search_memory only for gaps in current evidence")]
         ),
     ),
     "capture-at-every-stepping-stone": (

@@ -18,10 +18,13 @@ from lme.native_agent import (
     WRITER_TOOLS,
     NativeBroker,
     RunEnvelope,
+    _available_tool_name,
     _denied,
+    _memory_catalogue,
     _remote_arguments,
     run_agent_phase,
 )
+
 from membench.utility.action_world import ActionWorld
 from membench.utility.schema import PhaseView
 
@@ -92,7 +95,7 @@ class UtilityBroker(NativeBroker):
         del phase
         tools = dict(self.world.tool_schemas())
         if self.arm == "memory":
-            tools.update({name: schema for name, schema in self.cell.schemas.items() if name in MEMORY_TOOLS})
+            tools.update(_memory_catalogue(self.cell.schemas, MEMORY_TOOLS))
             tools.update({name: HARNESS_TOOLS[name] for name in ("discover_tools", "read_file")})
         return tools
 
@@ -100,16 +103,20 @@ class UtilityBroker(NativeBroker):
         self.last_raw_tool_result = None
         self.envelope.take("tool")
         available = self.available(phase)
-        if name not in available or not isinstance(arguments, dict):
+        if _available_tool_name(name, available) is None or not isinstance(arguments, dict):
             return _denied("Tool unavailable in this configuration."), []
         if _remote_arguments(arguments):
             return _denied("Remote files and credentials are unavailable in this diagnostic."), []
         if name == "discover_tools":
             names = arguments.get("names")
             if set(arguments) != {"names"} or not isinstance(names, list) or len(names) > 20 or any(
-                not isinstance(n, str) or n not in available for n in names
+                not isinstance(n, str) for n in names
             ):
                 return _denied("Unknown tool requested."), []
+            names = [_available_tool_name(n, available) for n in names]
+            if None in names:
+                return _denied("Unknown tool requested."), []
+            names = list(dict.fromkeys(names))
             return {"loaded": names}, names
         if name == "read_file":
             path = arguments.get("path")
@@ -167,8 +174,11 @@ def phase_messages(broker: UtilityBroker, view: PhaseView) -> list[dict]:
 def initial_tools(broker: UtilityBroker) -> list[str]:
     available = broker.available("")
     world_names = set(broker.world.tool_schemas())
-    memory_names = {"bootstrap", "ask_memory", "read_memory", "discover_tools", "read_file"} & available.keys()
-    return sorted(world_names | memory_names)
+    memory_names = {
+        _available_tool_name(name, available)
+        for name in _MEMORY_HARNESS_TOOLS | {"discover_tools", "read_file"}
+    }
+    return sorted(world_names | (memory_names - {None}))
 
 
 async def run_phase(broker: UtilityBroker, *, view: PhaseView, out: Path) -> dict:
