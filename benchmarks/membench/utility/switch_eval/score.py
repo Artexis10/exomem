@@ -273,6 +273,7 @@ def case_table(
                     if attempt["outcome"] == HARNESS_FAULT
                 ],
                 "calls": sum(t["calls"] for t in turns) / len(records),
+                "repeat_calls": [sum(t["calls"] for t in r["turns"]) for r in records],
                 "user_turns": len(turns),
                 "turns_with_activation": sum(1 for t in turns if t["activation_calls"]),
                 "input_tokens": sum(t["input_tokens"] for t in turns) / len(records),

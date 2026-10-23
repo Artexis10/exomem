@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import protocol
+from .cases import KIND_MISS, KIND_ORDINARY
 
 #: Harness knob, not a protocol value: up to this many groups the test
 #: enumerates every sign pattern (2^20 patterns, in chunks).
@@ -214,97 +215,259 @@ def compare(
 
 
 # --------------------------------------------------------------------------
-# Power.
+# Power (design, "Power").
 # --------------------------------------------------------------------------
 
+#: Harness knob, not a protocol value: the step by which δ rises from the floor.
+DELTA_STEP = 0.01
+#: Harness knob: sign patterns per simulated test. Up to this many the test
+#: enumerates every pattern; past it, a seeded draw of this many. At a p-value
+#: near 0.025 the draw error is about 0.0025.
+POWER_FLIPS = 4096
+_SIMULATION_CHUNK = 256
 
-def repeat_spread(repeat_scores: Mapping[str, Mapping[str, Sequence[float]]]) -> float:
-    """Mean over cases of the per-arm standard deviation between repeats."""
+
+@dataclass(frozen=True)
+class DesignCase:
+    """One held-out case as the frozen key fixes it."""
+
+    kind: str
+    group: str
+    expects_memory: bool
+
+
+@dataclass(frozen=True)
+class DevCase:
+    """One development case as measured: per arm, each repeat's score and Exomem calls."""
+
+    kind: str
+    expects_memory: bool
+    repeats: Mapping[str, Sequence[float]]
+    calls: Mapping[str, Sequence[float]]
+
+
+def repeat_spread(dev: Sequence[DevCase]) -> float:
+    """Mean over cases and arms of the standard deviation between repeats."""
 
     spreads = [
         float(np.std(np.asarray(scores, dtype=float)))
-        for arms in repeat_scores.values()
-        for scores in arms.values()
+        for case in dev
+        for scores in case.repeats.values()
         if len(scores) > 1
     ]
     return float(np.mean(spreads)) if spreads else float("nan")
 
 
-def simulate_pass_rate(
-    case_rates: Sequence[float],
-    *,
-    size: int,
-    delta: float,
-    seed: int,
-    repeats: int = protocol.REPEATS,
-    simulations: int = 2000,
-    flips: int = 4000,
-    alpha: float = protocol.ALPHA_ONE_SIDED,
-) -> float:
-    """How often the non-inferiority test passes for two equal arms.
+def _passes(sums: np.ndarray, *, rng: np.random.Generator, alpha: float) -> np.ndarray:
+    """Per simulation (a row of group sums), whether the one-sided sign-flip test passes.
 
-    Each simulated case draws a development case's pass rate (its mean over all
-    arms and repeats, so the arms are equal by construction), both arms draw
-    ``repeats`` pass-or-fail repeats from it, and each case is its own group.
+    The p-value is computed as ``SignFlip.p_value`` computes it, with fewer draws.
     """
 
-    rates = np.asarray(case_rates, dtype=float)
-    if rates.size == 0 or size < 1:
-        return float("nan")
+    count = sums.shape[1]
+    exact = 2**count <= POWER_FLIPS
+    if exact:
+        index = np.arange(2**count, dtype=np.int64)[:, None]
+        signs = 1.0 - 2.0 * ((index >> np.arange(count, dtype=np.int64)[None, :]) & 1)
+    else:
+        signs = rng.integers(0, 2, size=(POWER_FLIPS, count)).astype(float) * 2.0 - 1.0
+    result = np.empty(len(sums), dtype=bool)
+    for start in range(0, len(sums), _SIMULATION_CHUNK):
+        chunk = sums[start : start + _SIMULATION_CHUNK]
+        observed = chunk.sum(axis=1, keepdims=True)
+        hits = np.count_nonzero(chunk @ signs.T >= observed - _EPS, axis=1)
+        p = hits / len(signs) if exact else (1 + hits) / (len(signs) + 1)
+        result[start : start + _SIMULATION_CHUNK] = p <= alpha
+    return result
+
+
+def _resampled_means(vectors: np.ndarray, rows: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """For each chosen row of ``vectors``, the mean of a fresh set of repeats drawn from it."""
+
+    draws = rng.integers(0, vectors.shape[1], size=(*rows.shape, protocol.REPEATS))
+    return vectors[rows[..., None], draws].mean(axis=-1)
+
+
+def _simulate(
+    slots: Sequence[DesignCase],
+    pools: Mapping[str, Sequence[DevCase]],
+    *,
+    compared: tuple[str, str],
+    effects: Mapping[str, float],
+    delta: float,
+    seed: int,
+    simulations: int,
+    alpha: float,
+    calls: bool = False,
+) -> dict:
+    """One simulated held-out experiment, repeated ``simulations`` times.
+
+    Each slot draws a development case of its kind and one of that case's arms;
+    both simulated arms then draw fresh repeats from that arm's measured
+    repeats, so the arms are equal and each case keeps its own spread. The
+    slot's effect for its kind is added to the difference, and the differences
+    sum within the frozen groups. With ``calls``, the same development case
+    also gives each compared arm its measured calls, and the calls test runs on
+    the second arm's calls minus the first's.
+    """
+
     rng = np.random.default_rng(seed)
-    passes = 0
-    for _ in range(simulations):
-        chosen = rng.choice(rates, size=size, replace=True)
-        first = rng.binomial(repeats, chosen) / repeats
-        second = rng.binomial(repeats, chosen) / repeats
-        values = first - second + delta
-        signs = rng.integers(0, 2, size=(flips, size)).astype(float) * 2.0 - 1.0
-        hits = int(np.count_nonzero(signs @ values >= values.sum() - _EPS))
-        passes += (1 + hits) / (flips + 1) <= alpha
-    return passes / simulations
+    labels = sorted({slot.group for slot in slots})
+    membership = np.zeros((len(slots), len(labels)))
+    for index, slot in enumerate(slots):
+        membership[index, labels.index(slot.group)] = 1.0
+    quality = np.zeros((simulations, len(slots)))
+    saved = np.zeros((simulations, len(slots)))
+    for kind in sorted({slot.kind for slot in slots}):
+        where = [index for index, slot in enumerate(slots) if slot.kind == kind]
+        pool = pools[kind]
+        arms = sorted(pool[0].repeats)
+        scores = np.array([[case.repeats[arm] for arm in arms] for case in pool], dtype=float)
+        sources = rng.integers(0, len(pool), size=(simulations, len(where)))
+        vectors = scores.reshape(len(pool) * len(arms), -1)
+        rows = sources * len(arms) + rng.integers(0, len(arms), size=sources.shape)
+        quality[:, where] = (
+            _resampled_means(vectors, rows, rng)
+            - _resampled_means(vectors, rows, rng)
+            + effects.get(kind, 0.0)
+        )
+        if calls:
+            first, second = (
+                np.array([case.calls[arm] for case in pool], dtype=float) for arm in compared
+            )
+            saved[:, where] = _resampled_means(second, sources, rng) - _resampled_means(
+                first, sources, rng
+            )
+    sizes = membership.sum(axis=0)
+    passed = _passes(quality @ membership + delta * sizes, rng=rng, alpha=alpha)
+    result = {
+        "cases": len(slots),
+        "groups": len(labels),
+        "delta": delta or None,
+        "pass_rate": float(passed.mean()),
+    }
+    if calls:
+        cheaper = _passes(saved @ membership, rng=rng, alpha=alpha)
+        result["calls_pass_rate"] = float(cheaper.mean())
+        result["joint_pass_rate"] = float((passed & cheaper).mean())
+    return result
 
 
 def power_step(
-    case_rates: Sequence[float],
+    design: Sequence[DesignCase],
+    dev: Sequence[DevCase],
     *,
-    sizes: Sequence[int],
-    available: int,
+    reserve: int,
     seed: int,
     simulations: int = 2000,
+    alpha: float = protocol.ALPHA_ONE_SIDED,
 ) -> dict:
-    """The protocol's power step for one rule (design, "Power", rules 2 and 3).
+    """The protocol's power step for rules 1 to 3, on the frozen held-out design.
 
-    Raise the held-out size first, at δ = 0.10; only when every available turn
-    still misses the 80% pass rate, raise δ in steps of 0.01 up to 0.15.
+    ``design`` is the held-out key's structure; ``dev`` the development cases'
+    measured repeats. Rule 1 simulates M beating A, each stratum at its own
+    development M - A capped at +0.5; rules 2 and 3 simulate equal arms within
+    δ. Reserve turns are ordinary turns, each its own group (their groups are
+    unknown until they are keyed), and they enter every rule, so the size the
+    rules reach is the largest any rule needs. A share of them expects memory,
+    the held-out ordinary turns' share. At that size rules 2 and 3 raise δ from
+    the floor to the cap; a rule below the target with every reserve turn and
+    at the cap is short.
     """
 
-    table = []
-    chosen = None
-    for size in sorted({*sizes, available}):
-        if size > available:
-            continue
-        rate = simulate_pass_rate(
-            case_rates, size=size, delta=protocol.DELTA_FLOOR, seed=seed, simulations=simulations
-        )
-        table.append({"size": size, "delta": protocol.DELTA_FLOOR, "pass_rate": rate})
-        if chosen is None and rate >= protocol.POWER_TARGET:
-            chosen = {"size": size, "delta": protocol.DELTA_FLOOR, "pass_rate": rate}
-    if chosen is None:
-        steps = round((protocol.DELTA_CAP - protocol.DELTA_FLOOR) / 0.01)
-        for step in range(1, steps + 1):
-            delta = round(protocol.DELTA_FLOOR + 0.01 * step, 2)
-            rate = simulate_pass_rate(
-                case_rates, size=available, delta=delta, seed=seed, simulations=simulations
+    design = [c for c in design if c.kind in (KIND_MISS, KIND_ORDINARY)]
+    pools = {kind: [c for c in dev if c.kind == kind] for kind in (KIND_MISS, KIND_ORDINARY)}
+    ordinary = [c for c in design if c.kind == KIND_ORDINARY]
+    share = sum(c.expects_memory for c in ordinary) / len(ordinary) if ordinary else 0.0
+    effects = {}
+    for kind, pool in pools.items():
+        stratum = [c for c in pool if c.expects_memory]
+        if stratum:
+            measured = float(
+                np.mean([np.mean(c.repeats["M"]) - np.mean(c.repeats["A"]) for c in stratum])
             )
-            table.append({"size": available, "delta": delta, "pass_rate": rate})
-            if rate >= protocol.POWER_TARGET:
-                chosen = {"size": available, "delta": delta, "pass_rate": rate}
+            effects[kind] = {
+                "measured": measured,
+                "simulated": min(measured, protocol.RULE1_EFFECT_CAP),
+            }
+
+    def slots(rule: str, additions: int) -> list[DesignCase]:
+        remembered = round(additions * share)
+        added = [
+            DesignCase(KIND_ORDINARY, f"reserve-{n}", n < remembered) for n in range(additions)
+        ]
+        held = [*design, *added]
+        if rule == "1":
+            return [c for c in held if c.expects_memory]
+        if rule == "2":
+            return [c for c in held if c.kind == KIND_ORDINARY]
+        return held
+
+    def evaluate(rule: str, additions: int, delta: float) -> dict:
+        chosen = slots(rule, additions)
+        for kind in {c.kind for c in chosen}:
+            if not pools[kind] or (rule == "1" and kind not in effects):
+                raise ValueError(f"rule {rule}: no development {kind} cases to simulate from")
+        result = _simulate(
+            chosen,
+            pools,
+            compared=("A", "M") if rule != "3" else ("M", "P"),
+            effects={k: v["simulated"] for k, v in effects.items()} if rule == "1" else {},
+            delta=delta,
+            seed=seed,
+            simulations=simulations,
+            alpha=alpha,
+            calls=rule == "3",
+        )
+        return {"additions": additions, **result}
+
+    floors = {"1": 0.0, "2": protocol.DELTA_FLOOR, "3": protocol.DELTA_FLOOR}
+    tables: dict[str, list[dict]] = {rule: [] for rule in floors}
+    needed = {}
+    for rule, floor in floors.items():
+        for additions in range(reserve + 1):
+            tables[rule].append(evaluate(rule, additions, floor))
+            if tables[rule][-1]["pass_rate"] >= protocol.POWER_TARGET:
+                needed[rule] = additions
                 break
+    additions = max(needed.get(rule, reserve) for rule in floors)
+    rules = {}
+    for rule, floor in floors.items():
+        row = next((r for r in tables[rule] if r["additions"] == additions), None)
+        if row is None:
+            row = evaluate(rule, additions, floor)
+            tables[rule].append(row)
+        steps = round((protocol.DELTA_CAP - protocol.DELTA_FLOOR) / DELTA_STEP) if floor else 0
+        for step in range(1, steps + 1):
+            if row["pass_rate"] >= protocol.POWER_TARGET:
+                break
+            row = evaluate(rule, additions, round(floor + DELTA_STEP * step, 2))
+            tables[rule].append(row)
+        rules[rule] = {
+            **row,
+            "compares": "M - P" if rule == "3" else "M - A",
+            "test": "superiority" if rule == "1" else "non-inferiority",
+            "short": row["pass_rate"] < protocol.POWER_TARGET,
+            "table": tables[rule],
+        }
+    rules["1"]["effects"] = effects
     return {
-        "development_cases": len(case_rates),
-        "table": table,
-        "chosen": chosen,
-        "short_at_cap": chosen is None,
+        "rules": rules,
+        "additions": additions,
+        "reserve": reserve,
+        "spread": repeat_spread(dev),
+        "development_cases": {kind: len(pool) for kind, pool in pools.items()},
+        "held_out": {
+            kind: sum(1 for c in design if c.kind == kind) for kind in (KIND_MISS, KIND_ORDINARY)
+        },
+        "reserve_memory_share": share,
+        "model": (
+            "each slot draws a development case of its kind and one of its arms; both arms "
+            "resample that arm's repeats; rule 1 adds its stratum's development M - A capped at "
+            f"+{protocol.RULE1_EFFECT_CAP}; reserve turns are ordinary singleton groups, the held-out "
+            "ordinary share of them expecting memory"
+        ),
         "simulations": simulations,
         "seed": seed,
+        "flips": POWER_FLIPS,
     }

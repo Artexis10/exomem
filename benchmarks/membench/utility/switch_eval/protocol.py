@@ -67,6 +67,9 @@ DELTA_FLOOR = 0.10
 DELTA_CAP = 0.15
 POWER_TARGET = 0.80
 
+#: "Power", rule 1: each stratum is simulated at its development M - A, capped at +0.5.
+RULE1_EFFECT_CAP = 0.5
+
 #: "Cases and key", "Groups": a rule with fewer than 6 groups reads as inconclusive.
 MIN_GROUPS = 6
 

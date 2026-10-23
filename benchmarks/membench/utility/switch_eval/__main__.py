@@ -604,7 +604,8 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
     except UnblindingError as error:
         raise SystemExit(f"chain check failed after judging: {error}") from error
     verdicts = resolved_verdicts(layout, unblinded)
-    return score_run(
+    deltas, short, power_digest = _power_settings(args)
+    result = score_run(
         layout,
         cases=cases,
         sessions=sessions,
@@ -612,10 +613,12 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
         arm_ids=inputs["arms"],
         repeats=inputs["repeats"],
         split=args.split,
-        deltas={2: args.delta_rule2, 3: args.delta_rule3},
+        deltas=deltas,
         seed=inputs["seed"],
         project_sessions=args.project_sessions,
+        short=short,
     )
+    return {**result, "power_step": power_digest}
 
 
 def cmd_score(args: argparse.Namespace) -> int:
@@ -659,42 +662,67 @@ def cmd_score(args: argparse.Namespace) -> int:
 
 
 def cmd_power(args: argparse.Namespace) -> int:
-    from .cases import KIND_MISS, KIND_ORDINARY, Case
+    from .cases import Case, key_structure
     from .state import Layout
-    from .stats import power_step, repeat_spread
+    from .stats import DesignCase, DevCase, power_step
 
     layout = Layout.at(Path(args.run))
-    scored = _load(layout.score, "score.json")
-    cases = [Case.from_dict(c) for c in _load(layout.run, "cases.json")]
-    kinds = {KIND_ORDINARY} if args.rule == 2 else {KIND_MISS, KIND_ORDINARY}
-    chosen = [
-        c.case_id
-        for c in cases
-        if c.split == args.split and c.kind in kinds and c.case_id in scored["cases"]
-    ]
-    if not chosen:
-        raise SystemExit("no scored development cases of this rule's kinds")
-    repeat_scores = {
-        c: {arm: row["repeats"] for arm, row in scored["cases"][c].items()} for c in chosen
-    }
-    rates = [
-        sum(sum(scores) for scores in arms.values()) / sum(len(scores) for scores in arms.values())
-        for arms in repeat_scores.values()
-    ]
-    sizes = [int(s) for s in args.sizes.split(",")] if args.sizes else []
-    result = {
-        "rule": args.rule,
-        "repeat_spread": repeat_spread(repeat_scores),
-        **power_step(
-            rates,
-            sizes=sizes,
-            available=args.available,
-            seed=args.seed,
-            simulations=args.simulations,
-        ),
-    }
-    print(json.dumps(result, indent=2))
+    scored = _load(layout.score, "score.json")["cases"]
+    dev = []
+    for case in (Case.from_dict(c) for c in _load(layout.run, "cases.json")):
+        if case.split != args.split or case.case_id not in scored:
+            continue
+        row = scored[case.case_id]
+        if any("repeat_calls" not in arm for arm in row.values()):
+            raise SystemExit(
+                f"{layout.score / 'score.json'} has no per-repeat calls: score it again"
+            )
+        dev.append(
+            DevCase(
+                kind=case.kind,
+                expects_memory=case.expects_memory,
+                repeats={arm: tuple(values["repeats"]) for arm, values in row.items()},
+                calls={arm: tuple(values["repeat_calls"]) for arm, values in row.items()},
+            )
+        )
+    design = [DesignCase(**row) for row in key_structure(Path(args.heldout_key))]
+    try:
+        result = power_step(
+            design, dev, reserve=args.reserve, seed=args.seed, simulations=args.simulations
+        )
+    except ValueError as error:
+        raise SystemExit(f"power step refused: {error}") from error
+    target = layout.run / "power.json"
+    target.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"reserve turns added: {result['additions']} of {result['reserve']}")
+    for number, rule in sorted(result["rules"].items()):
+        delta = f", delta {rule['delta']}" if rule["delta"] else ""
+        state = "short" if rule["short"] else "reaches the target"
+        print(
+            f"rule {number}: {rule['cases']} cases in {rule['groups']} groups{delta}, "
+            f"pass rate {rule['pass_rate']:.3f}, {state}"
+        )
+    print(f"written to {target}")
     return 0
+
+
+def _power_settings(args: argparse.Namespace) -> tuple[dict[int, float], list[int], str | None]:
+    """Each rule's δ and the rules short at the cap, from ``--power`` when given."""
+
+    explicit = {2: args.delta_rule2, 3: args.delta_rule3}
+    if not args.power:
+        deltas = {rule: protocol.DELTA_FLOOR if d is None else d for rule, d in explicit.items()}
+        return deltas, [], None
+    text = Path(args.power).read_text(encoding="utf-8")
+    recorded = json.loads(text)["rules"]
+    deltas = {rule: recorded[str(rule)]["delta"] for rule in explicit}
+    for rule, value in explicit.items():
+        if value is not None and value != deltas[rule]:
+            raise SystemExit(
+                f"--delta-rule{rule} {value} conflicts with the power step's delta {deltas[rule]}"
+            )
+    short = [int(rule) for rule, values in sorted(recorded.items()) if values["short"]]
+    return deltas, short, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -791,8 +819,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=protocol.SPLIT_HELDOUT,
         help="the split the rules read; only the held-out split decides",
     )
-    p.add_argument("--delta-rule2", type=float, default=protocol.DELTA_FLOOR)
-    p.add_argument("--delta-rule3", type=float, default=protocol.DELTA_FLOOR)
+    p.add_argument(
+        "--power",
+        help="the power step's power.json: each rule's delta and the rules it found short",
+    )
+    p.add_argument("--delta-rule2", type=float, help="default: the power step's, else the floor")
+    p.add_argument("--delta-rule3", type=float, help="default: the power step's, else the floor")
     p.add_argument("--project-sessions", type=int)
     p.add_argument(
         "--check", action="store_true", help="recompute and compare with the stored score"
@@ -800,15 +832,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.set_defaults(func=cmd_score)
 
     p = sub.add_parser("power", help="the power step on a scored development run")
-    p.add_argument("--run", required=True)
-    p.add_argument("--rule", type=int, choices=(2, 3), required=True)
+    p.add_argument("--run", required=True, help="the scored development run")
     p.add_argument(
-        "--available", type=int, required=True, help="held-out cases available for the rule"
+        "--heldout-key",
+        required=True,
+        help="the held-out key; only each case's kind, group and memory flag are read",
+    )
+    p.add_argument(
+        "--reserve", type=int, required=True, help="reserve turns available to grow the split"
     )
     p.add_argument(
         "--split", default=protocol.SPLIT_DEV, help="the split whose repeats give the spread"
     )
-    p.add_argument("--sizes", help="comma-separated held-out sizes to try")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--simulations", type=int, default=2000)
     p.set_defaults(func=cmd_power)

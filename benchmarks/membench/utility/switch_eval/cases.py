@@ -225,6 +225,24 @@ def load_cases(
     return tuple(cases), tuple(struck)
 
 
+def key_structure(key_path: Path) -> list[dict]:
+    """Each kept case's kind, group and memory flag, and nothing else.
+
+    The power step reads the held-out key through this reader, so it learns
+    the frozen design without a case id, a turn or a keyed item.
+    """
+
+    return [
+        {
+            "kind": str(row["kind"]),
+            "group": str(row.get("group") or row["case_id"]),
+            "expects_memory": bool(row["expects_memory"]),
+        }
+        for row in _read_jsonl(key_path)
+        if not row.get("struck")
+    ]
+
+
 # --------------------------------------------------------------------------
 # The synthetic producer.
 # --------------------------------------------------------------------------

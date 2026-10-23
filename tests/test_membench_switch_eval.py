@@ -185,6 +185,46 @@ def test_case_differences_sum_within_their_group() -> None:
     assert grouped["mean_difference"] == pytest.approx(1.0)
 
 
+def _dev(kind: str, repeats: dict[str, tuple[float, ...]], calls: dict[str, tuple[float, ...]] | None = None) -> stats.DevCase:
+    return stats.DevCase(kind=kind, expects_memory=True, repeats=repeats, calls=calls or {arm: (2.0, 2.0, 2.0) for arm in repeats})
+
+
+def test_the_power_step_simulates_the_frozen_groups_not_one_group_per_case() -> None:
+    # Twelve held-out ordinary turns in two frozen groups: two groups never reach 0.025.
+    design = [stats.DesignCase("ordinary", f"g{n % 2}", True) for n in range(12)]
+    # Repeats that never vary: equal arms then differ by exactly 0, so each case alone would pass.
+    dev = [_dev("ordinary", {arm: (1.0, 1.0, 1.0) for arm in "AMP"})] * 4
+
+    rule = stats.power_step(design, dev, reserve=0, seed=0, simulations=200)["rules"]["2"]
+
+    assert rule["groups"] == 2
+    assert rule["pass_rate"] == 0.0 and rule["short"]
+
+
+def test_the_power_step_keeps_each_cases_repeat_spread_instead_of_a_pooled_rate() -> None:
+    design = [stats.DesignCase("ordinary", f"turn-{n}", True) for n in range(12)]
+    # Both pools pass one repeat in three; only the second varies between repeats.
+    stable = [_dev("ordinary", {"A": (0.0, 0.0, 0.0), "M": (1.0, 1.0, 1.0), "P": (0.0, 0.0, 0.0)})] * 4
+    variable = [_dev("ordinary", {arm: (1.0, 0.0, 0.0) for arm in "AMP"})] * 4
+
+    def first_rate(dev: list[stats.DevCase]) -> float:
+        return stats.power_step(design, dev, reserve=0, seed=0, simulations=200)["rules"]["2"]["table"][0]["pass_rate"]
+
+    assert first_rate(stable) == 1.0
+    assert first_rate(variable) < 0.8
+
+
+def test_the_power_step_simulates_rule_3s_calls_test_from_the_development_call_counts() -> None:
+    design = [stats.DesignCase("ordinary", f"turn-{n}", True) for n in range(12)]
+    scores = {arm: (1.0, 1.0, 1.0) for arm in "AMP"}
+    # In development M makes one call where P makes three: M wins the calls test.
+    dev = [_dev("ordinary", scores, calls={"A": (2.0,) * 3, "M": (1.0,) * 3, "P": (3.0,) * 3})] * 4
+
+    rule = stats.power_step(design, dev, reserve=0, seed=0, simulations=200)["rules"]["3"]
+
+    assert rule["calls_pass_rate"] == 1.0
+
+
 def test_a_run_whose_rules_are_not_evaluable_decides_nothing() -> None:
     # Arms A and P only: every rule needs M, so no rule is evaluable.
     decided = rules(cases=[], table={}, split=protocol.SPLIT_HELDOUT, deltas={2: 0.1, 3: 0.1}, seed=0, arm_ids=["A", "P"])
