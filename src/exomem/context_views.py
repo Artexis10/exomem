@@ -339,6 +339,8 @@ class Row:
         }
         if self.anchor_kind:
             item["anchor_kind"] = self.anchor_kind
+        if self.kind == KIND_ANCHOR:
+            item["profile"] = anchor_profile_ref(self.ref)
         if self.path:
             item["path"] = self.path
         return item
@@ -819,7 +821,8 @@ def map_item_line(item: Mapping[str, Any]) -> str:
         details = [f"{key}: {state[key]}" for key in STATE_FIELDS[1:] if state.get(key)]
         if details:
             text += " (" + "; ".join(details) + ")"
-    return f"{text} [{item['ref']}]"
+    ref = item.get("profile") if item["kind"] == KIND_ANCHOR and not item.get("path") else item["ref"]
+    return f"{text} [{ref or item['ref']}]"
 
 
 def _map_item(view: View, row: Row) -> dict[str, Any]:

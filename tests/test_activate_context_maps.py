@@ -15,6 +15,7 @@ from test_context_views import (
     SECRET,
     THREAD_W,
     TIDE,
+    _ask,
     _cold,
     _second_vault,
     _world,
@@ -23,7 +24,14 @@ from test_governance_egress import _external
 from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
-from exomem import commands, context_catalogue, context_views, project_keys, working_set_runtime
+from exomem import (
+    commands,
+    context_catalogue,
+    context_views,
+    lexstore,
+    project_keys,
+    working_set_runtime,
+)
 from exomem.governance import egress, principal
 from exomem.writer_lease import invoke_command
 
@@ -132,6 +140,31 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
     assert before == {str(path.relative_to(vault)): path.read_bytes() for path in vault.rglob("*") if path.is_file()}
 
 
+@pytest.mark.parametrize("restricted", [False, True])
+def test_a_pathless_map_anchor_opens_its_profile(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, restricted: bool,
+) -> None:
+    """A project in either map must lead to readable context instead of a dead-end identity ref."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=False)
+    _page(vault, "tide-work", "project: harbour-ops\n", body="- [decision] Work at slack tide ^slack\n")
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    caller = _external() if restricted else OWNER
+    packet = _activate(vault, caller, max_chars=8000)
+    anchor = next(item for item in packet["map"]["items"] if item["ref"] == "project:harbour-ops")
+    assert not anchor.get("path")
+    assert anchor["profile"] == context_views.anchor_profile_ref(anchor["ref"])
+    for ref in (context_views.MAP_REF, context_views.topic_ref("harbour")):
+        items = _ask(vault, ref, caller)["items"]
+        assert next(item for item in items if item["ref"] == anchor["ref"])["profile"] == anchor["profile"]
+        assert all(item["profile"] == context_views.anchor_profile_ref(item["ref"])
+                   for item in items if item["kind"] == "anchor")
+    profile = _ask(vault, anchor["profile"], caller)
+    assert profile["state"] == "ready"
+    assert any("Work at slack tide" in item.get("text", "") for item in profile["items"])
+
+
 def test_conversation_does_not_change_the_map(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _world(vault, with_w=True)
@@ -166,7 +199,7 @@ def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_pa
 
 @pytest.mark.parametrize("forgery", [
     "path", "description", "state", "anchor", "activity", "lifecycle_class", "state.source",
-    "topics", "superseded_by", "extra.path", "links[].path", "evidence",
+    "topics", "superseded_by", "extra.path", "links[].path", "evidence", "profile",
 ])
 def test_the_guard_drops_a_forged_map_item(vault: Path, monkeypatch: pytest.MonkeyPatch, forgery: str) -> None:
     """The map restores its caller's pinned items before the shared strict path and state decisions."""
@@ -182,13 +215,15 @@ def test_the_guard_drops_a_forged_map_item(vault: Path, monkeypatch: pytest.Monk
             forged = {"kind": "note", "path": SECRET, "ref": SECRET, "title": "Restricted fixture", "description": "Hidden."}
             packet["map"]["items"].append(forged)
         else:
-            forged = next(item for item in packet["map"]["items"] if item.get("path"))
+            forged = next(item for item in packet["map"]["items"] if item.get("profile" if forgery == "profile" else "path"))
             if forgery == "description":
                 forged["description"] = "Forged [[secret-cluster]] prose."
             elif forgery == "state":
                 forged["state"] = {"statement": "Forged", "path": SECRET, "as_of": "2026-10-01"}
             elif forgery == "state.source":
                 forged["state"] = {**(forged.get("state") or {}), "source": SECRET}
+            elif forgery == "profile":
+                forged["profile"] = context_views.anchor_profile_ref(SECRET)
             elif forgery == "extra.path":
                 forged["extra"] = {"path": SECRET}
             elif forgery == "links[].path":

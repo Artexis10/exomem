@@ -222,7 +222,7 @@ def test_map_within_returns_whole_lines_that_fit_and_name_the_domain_maps(vault:
     _built(vault)
     with principal.request_scope(OWNER):
         view = cv.compile_view(vault, cv.MAP_REF)
-    order = [row.ref for row in view.rows]
+    order = [row.item().get("profile", row.ref) if not row.path else row.ref for row in view.rows]
 
     for budget in (400, 700, 1500, 100_000):
         indices, overflow = cv.map_within(view, budget)
@@ -376,7 +376,8 @@ def test_a_forged_description_leaves_the_guard_as_the_entrys_own(vault: Path) ->
         forged = {
             **page,
             "items": [
-                {**item, "title": "Secret cluster", "description": f"Read {SECRET}, the Secret cluster page."}
+                {**item, "title": "Secret cluster", "description": f"Read {SECRET}, the Secret cluster page.",
+                 "profile": cv.anchor_profile_ref(SECRET)}
                 if item.get("path") == MOORING
                 else item
                 for item in page["items"]
