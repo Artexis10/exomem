@@ -182,7 +182,7 @@ def test_the_part_digest_matches_the_cell_commands_vector():
 
 
 def test_the_export_job_carries_part_urls_but_no_storage_credential():
-    """Defect: the Job could reach other objects, or it fills the node's disk unbounded."""
+    """Defect: the Job could reach other objects, or stages an archive without reserving node storage."""
     spec = CellManifestSpec(cell_id=CELL, image=IMAGE, replicas=0, read_only=False, storage_gib=20,
                             hold_kind="export", hold_started_at=NOW.isoformat())
     size = ExportSize(max_bytes=20 * GIB, part_bytes=64 * MIB, parts=327)
@@ -195,6 +195,8 @@ def test_the_export_job_carries_part_urls_but_no_storage_credential():
     assert {env["name"]: set(env) for env in container["env"]} == {
         name: {"name", "value"} for name in ("EXOMEM_CLOUD_CELL", "EXOMEM_CLOUD_CELL_ID", "TMPDIR", "EXOMEM_LOG_DIR")}
     assert "envFrom" not in container
+    assert container["resources"]["requests"]["ephemeral-storage"] == str(327 * 64 * MIB)
+    assert container["resources"]["limits"]["ephemeral-storage"] == str(327 * 64 * MIB)
     assert {"name": "staging", "emptyDir": {"sizeLimit": str(327 * 64 * MIB)}} in pod["volumes"]
     assert job["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] == "export"
 
