@@ -480,6 +480,44 @@ def test_manifest_refuses_malformed_saved_views(tmp_path: Path, replacement: str
     assert raised.value.code == "INVALID_SAVED_VIEW"
 
 
+@pytest.mark.parametrize("internal_first", [True, False])
+def test_canonical_manifest_cache_preserves_caller_vocabulary_admission(tmp_path: Path, internal_first: bool) -> None:
+    """A cached internal view cannot disclose a withheld vocabulary to a caller, in either cache order."""
+    from test_collection_store_writer import manifest_text
+    from test_vocabulary_registries import _govern, _reset_governance
+
+    from exomem.governance.principal import RequestPrincipal, request_scope
+    from exomem.planning_values import PlanningValues, registry_path
+
+    root = tmp_path / "vault"
+    overlay = registry_path(root)
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text("schema_version: 1\nentries:\n  horizon.release-cycle: {}\n")
+    _govern(root, scope_path="_Schema/planning-values.yaml")
+    _reset_governance()
+    path = "Knowledge Base/Planning/Work/_collection.md"
+    data = manifest_text("planning").replace(
+        "\n---\n",
+        "\nviews:\n  next-cycle:\n    query:\n      filters: [{column: horizon, op: eq, value: release-cycle}]\n---\n",
+    ).encode()
+
+    # Each path parses the same bytes, so the opposite admission must replace the cached result.
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        for internal in (internal_first, not internal_first, internal_first):
+            if internal:
+                parsed = collections.parse_manifest_bytes(
+                    root, path, data, planning_values=PlanningValues(root, server_side=True)
+                )
+                assert collections.resolve_saved_view(parsed, "next-cycle").definition["query"]["filters"][0]["value"] == "release-cycle"
+                assert parsed.view_diagnostics == ()
+            else:
+                parsed = collections.parse_manifest_bytes(root, path, data)
+                with pytest.raises(collections.CollectionError) as refused:
+                    collections.resolve_saved_view(parsed, "next-cycle")
+                assert refused.value.code == "INVALID_SAVED_VIEW"
+                assert parsed.view_diagnostics[0].location == "views.next-cycle"
+
+
 @pytest.mark.parametrize(
     "view",
     (

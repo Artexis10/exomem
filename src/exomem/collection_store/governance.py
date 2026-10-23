@@ -35,6 +35,7 @@ from ..governance import (
 )
 from ..governance.decisions import Decision, decide
 from ..governance.principal import RequestPrincipal, effective_principal
+from ..planning_values import PlanningValues
 from . import tokens, types
 
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
@@ -894,7 +895,10 @@ class OperationAuthorization:
         if row is None:
             self.refuse()
         path, text, digest = row
-        manifest = collections.parse_manifest_bytes(self.root, path, text.encode())
+        # Build authorization inputs without re-entering it; field_plan still decides disclosure.
+        manifest = collections.parse_manifest_bytes(
+            self.root, path, text.encode(), planning_values=PlanningValues(self.root, server_side=True)
+        )
         if manifest.collection_id != cid or manifest.manifest_version.hash != digest:
             self.refuse()
         return manifest
