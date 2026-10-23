@@ -34,6 +34,7 @@ from membench.utility.switch_eval.judge import (
     exomem_tool_names,
     item_payload,
     record_first_route,
+    run_judge,
     tie_break,
     unblind,
     validate_verdict,
@@ -143,12 +144,12 @@ def _case(
 
 
 def _write_verdict(layout: Layout, route: str, item_id: str, required: dict[str, str]) -> None:
-    """A stand-in for ``route`` judging ``item_id``; as in a judge run, the first route to judge is recorded."""
-    record_first_route(layout, route)
+    """A stand-in for ``route`` judging ``item_id``; as in a judge run, the first route to give a verdict is recorded."""
     folder = layout.judge / "verdicts" / route
     folder.mkdir(parents=True, exist_ok=True)
     verdict = {"item_id": item_id, "required": required, "forbidden": {}, "contaminated": None, "span": None}
     (folder / f"{item_id}.json").write_text(json.dumps(verdict), encoding="utf-8")
+    record_first_route(layout, route)
 
 
 # -- the statistic ------------------------------------------------------------
@@ -675,6 +676,33 @@ def test_scoring_on_the_recovery_route_alone_is_refused_once_recovery_was_requir
     # Dropping the noisy first judge would skip the tie-break that recovery prescribes.
     with pytest.raises(UnblindingError):
         unblind(layout, routes=["claude"], expected=item_set.arm_key)
+
+
+# A stand-in for a judge client whose quota is spent before it gives a verdict.
+SPENT_JUDGE = """#!{python}
+import sys
+sys.stderr.write("usage limit reached\\n")
+sys.exit(1)
+"""
+
+
+def test_a_judge_route_spent_before_its_first_verdict_leaves_the_fallback_route_to_stand_alone(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    sessions = [_session(layout, "case-1", arm, 1, AttemptResult(OK, answer="An answer.")) for arm in protocol.ARM_IDS]
+    item_set = build_items([_case("case-1")], sessions, seed=7, inputs_digest="inputs", tool_names=())
+    write_items(layout, item_set)
+    spent = tmp_path / "client" / "judge"
+    spent.parent.mkdir()
+    spent.write_text(SPENT_JUDGE.format(python=sys.executable), encoding="utf-8")
+    spent.chmod(0o755)
+
+    # The Claude route gives no verdict; the Codex route then judges every item.
+    with pytest.raises(JudgeError):
+        run_judge(layout, route="claude", model="stand-in", effort=None, claude=str(spent), launcher=())
+    for item_id in item_set.arm_key:
+        _write_verdict(layout, "codex", item_id, {})
+
+    assert unblind(layout, routes=["codex"], expected=item_set.arm_key).routes == ("codex",)
 
 
 def test_unblinding_refuses_an_arm_key_that_names_another_arm_for_a_session(tmp_path: Path) -> None:

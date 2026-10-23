@@ -473,13 +473,16 @@ def run_structured(
     sandbox: Path,
     claude: str = "claude",
     launcher: Sequence[str] = (),
+    on_answer: Callable[[], None] = lambda: None,
 ) -> int:
     """Answer every item not yet answered in ``out_dir``, one headless call per
     item through ``route``'s structured output; resumable item by item.
 
     A failed item is retried, then the stage stops with the item named: a
     spent quota and a broken route look alike from here, and both resume
-    by running the stage again. Returns the items answered now.
+    by running the stage again. ``on_answer`` runs once an item has its
+    stored answer, from this run or an earlier one. Returns the items
+    answered now.
     """
 
     if route not in ROUTES:
@@ -498,6 +501,7 @@ def run_structured(
     for item in items:
         target = out_dir / f"{item['item_id']}.json"
         if target.exists():
+            on_answer()
             continue
         prompt = prompt_for(item)
         if len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES:
@@ -563,6 +567,7 @@ def run_structured(
                 continue
             target.write_text(json.dumps(answer, indent=2, sort_keys=True), encoding="utf-8")
             answered += 1
+            on_answer()
             break
         else:
             raise JudgeError(
@@ -588,8 +593,7 @@ def run_judge(
 
     if route not in ROUTES:
         raise JudgeError(f"unknown judge route {route!r}")
-    if out_dir is None:
-        record_first_route(layout, route)
+    first_pass = out_dir is None
     items = read_items(layout) if items is None else list(items)
     out_dir = out_dir or layout.judge / "verdicts" / route
     out_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -617,13 +621,17 @@ def run_judge(
         sandbox=layout.judge / "sandbox",
         claude=claude,
         launcher=launcher,
+        # A route spent before its first verdict leaves no record, so the
+        # fallback route becomes the route that judged first.
+        on_answer=(lambda: record_first_route(layout, route)) if first_pass else lambda: None,
     )
     return {"route": route, "judged_now": judged, "items": len(items)}
 
 
 def record_first_route(layout: Layout, route: str) -> None:
-    """Record the route that started judging the run's items, once: its
-    agreement decides whether the recovery route must stand with it."""
+    """Record the first route to give a verdict on the run's items, once: it
+    stands in every scoring, and its agreement decides whether the recovery
+    route must stand with it."""
 
     path = layout.judge / "first-route.json"
     if not path.exists():
