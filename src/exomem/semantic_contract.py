@@ -38,7 +38,7 @@ from . import (
     vault,
 )
 from . import find as find_module
-from .cli_ops import OpError
+from .cli_ops import RELATION_REVIEW_STABLE_ID_REMEDIATION, OpError
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
@@ -5105,7 +5105,9 @@ def _disposition_finding(
         # test_disposition_remediation_is_route_neutral is the ceiling to
         # respect when editing it.
         remediation=(
-            (
+            ("Fix: add a qualifying typed relation. " + RELATION_REVIEW_STABLE_ID_REMEDIATION)
+            if existing and page.identity_kind == "path"
+            else (
                 "Fix: add a qualifying typed relation. Retriggers: "
                 "validate_only=true; re-issue the same edit with "
                 "transition_token=<returned>, "

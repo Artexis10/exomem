@@ -43,6 +43,7 @@ def _remediation(*, existing: bool = True) -> str:
         SimpleNamespace(
             eligible_compiled=True,
             path="Knowledge Base/Notes/Insights/example.md",
+            identity_kind="exomem_id",
         ),
         SimpleNamespace(satisfied=False, kind="stale"),
         existing=existing,

@@ -772,6 +772,31 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> 
     assert "relation_review_reason" in finding.remediation
 
 
+def test_legacy_edit_reports_identity_backfill_before_review_replay(tmp_path: Path) -> None:
+    after = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/legacy.md",
+        _source(body="## Decision\n\nKeep the complete protocol together.\n"),
+    )
+    corpus = _corpus(tmp_path, after)
+    result = _evaluate(
+        before=after,
+        after=after,
+        before_corpus=corpus,
+        after_corpus=corpus,
+    )
+
+    finding = next(
+        item for item in result.blocking_findings if item.code == "RELATION_DISPOSITION_MISSING"
+    )
+    assert 'maintain_memory(mode="backfill-ids")' in finding.remediation
+    assert "confirmation" in finding.remediation
+    assert "CLI" in finding.remediation
+    assert "re-read and validate" in finding.remediation
+    assert "transition_token" not in finding.remediation
+    assert len(finding.remediation.encode("utf-8")) <= 224
+
+
 def test_posthoc_existing_page_uses_edit_remediation(tmp_path: Path) -> None:
     after = _state(
         tmp_path,
