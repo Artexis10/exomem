@@ -606,12 +606,23 @@ def unblind(layout: Layout, *, routes: Sequence[str]) -> Unblinded:
         raise UnblindingError(
             f"the arm key names {len(set(arm_key) - ids)} ids no item has and misses {len(ids - set(arm_key))} item ids"
         )
+    if not routes or len(set(routes)) != len(routes) or set(routes) - set(ROUTES):
+        raise UnblindingError(f"the standing routes must be distinct routes of {ROUTES}")
     for route in routes:
         missing = ids - set(load_verdicts(layout, route))
         if missing:
             raise UnblindingError(
                 f"route {route} has not judged {len(missing)} items; judging is not complete"
             )
+    # Design, "Judge noise": low required-item agreement on the first route
+    # makes the other family's judge part of every standing verdict.
+    first = agreement(load_verdicts(layout, routes[0]), rejudge_pairs(arm_key))
+    if first["recovery_required"] and len(routes) < 2:
+        raise UnblindingError(
+            f"route {routes[0]}'s required-item agreement is {first['required']['rate']:.2f}, "
+            f"below {protocol.REQUIRED_AGREEMENT_FLOOR}: the recovery route must judge every item "
+            "and stand with it"
+        )
     unblinded = Unblinded(arm_key=arm_key, routes=tuple(routes))
     (layout.unblinding / "unblinded.json").write_text(
         json.dumps({"routes": list(routes), "items": len(ids)}, indent=2), encoding="utf-8"

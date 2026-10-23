@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from membench.utility.switch_eval import protocol, stats
 from membench.utility.switch_eval.arms import arm_specs
-from membench.utility.switch_eval.cases import Case, load_cases
+from membench.utility.switch_eval.cases import Case, Required, load_cases
 from membench.utility.switch_eval.judge import (
     ITEM_FIELDS,
     JudgeError,
@@ -119,12 +119,22 @@ def _session(layout: Layout, case_id: str, arm: str, repeat: int, *attempts: Att
     return run_session(inputs, layout.session_dir(case_id, arm, repeat), lambda inputs, attempt_dir: next(results))
 
 
-def _case(case_id: str, *, kind: str = "miss", group: str | None = None, expects_memory: bool = True) -> Case:
+def _case(
+    case_id: str, *, kind: str = "miss", group: str | None = None, expects_memory: bool = True,
+    required: tuple[Required, ...] = (),
+) -> Case:
     return Case(
         case_id=case_id, split=protocol.SPLIT_HELDOUT, kind=kind, group=group or case_id, tree="snapshot",
         turns=("What did we decide about the release?",), scored_turn=0, turn_completeness="complete",
-        expects_memory=expects_memory,
+        expects_memory=expects_memory, required=required,
     )  # fmt: skip
+
+
+def _write_verdict(layout: Layout, route: str, item_id: str, required: dict[str, str]) -> None:
+    folder = layout.judge / "verdicts" / route
+    folder.mkdir(parents=True, exist_ok=True)
+    verdict = {"item_id": item_id, "required": required, "forbidden": {}, "contaminated": None, "span": None}
+    (folder / f"{item_id}.json").write_text(json.dumps(verdict), encoding="utf-8")
 
 
 # -- the statistic ------------------------------------------------------------
@@ -462,6 +472,20 @@ def test_a_judge_that_ran_a_tool_gives_no_verdict() -> None:
 
 
 # -- unblinding and the tie-break ---------------------------------------------
+
+
+def test_scoring_on_one_judge_is_refused_when_its_agreement_calls_for_recovery(tmp_path: Path) -> None:
+    layout = Layout(tmp_path / "run")
+    case = _case("case-1", required=(Required("release-freeze", "The release is frozen."),))
+    sessions = [_session(layout, "case-1", arm, 1, AttemptResult(OK, answer="The release is frozen.")) for arm in protocol.ARM_IDS]
+    item_set = build_items([case], sessions, seed=7, inputs_digest="inputs")
+    write_items(layout, item_set)
+    # The judge contradicts itself on every re-judged copy: required-item agreement is 0.
+    for item_id, entry in item_set.arm_key.items():
+        _write_verdict(layout, "codex", item_id, {"r1": "missing" if entry["rejudge_of"] else "used"})
+
+    with pytest.raises(UnblindingError, match="recovery"):
+        unblind(layout, routes=["codex"])
 
 
 def test_the_tie_break_needs_the_arm_key_and_runs_only_after_unblinding(tmp_path: Path) -> None:
