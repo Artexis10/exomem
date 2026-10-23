@@ -115,10 +115,10 @@ This protocol is frozen before any held-out generation. A later change is a numb
   | Arm | Server mode | Pushed at each user turn | Tools | Client instruction lines |
   |---|---|---|---|---|
   | A | `anchors` | what the deployed retrieve hook pushes | Exomem read tools | the current client instructions |
-  | M | `maps` | what the `maps` retrieve hook pushes | Exomem read tools | read the map and pull before the answer |
+  | M | `maps` | what the deployed retrieve hook pushes | Exomem read tools | read the map and pull before the answer |
   | P | `anchors` | nothing | Exomem read tools without `activate_context` | pull before the answer |
 
-  The Exomem read tools are `activate_context`, `ask_memory`, `read_memory` and `browse_memory`. A is the deployed configuration, so M − A changes both the packet and the instructions. P isolates the map: it shares M's instructions and has no push. P lacks `activate_context` through a client-side tool filter while the shared server instructions still mention it; the report names both differences as confounds. The turn slice is not an arm here; it needs its own frozen evaluation.
+  The Exomem read tools are `activate_context`, `ask_memory`, `read_memory` and `browse_memory`. The deployed retrieve hook runs in `mcp` mode for A and M: at each user turn it pushes a reminder to activate, and the actor fetches its packet with its own `activate_context` call. That call counts against the pull budget and in Exomem calls, in A and M alike. A is the deployed configuration, so M − A changes both the packet and the instructions. P isolates the map: it shares M's instructions and has no push. P lacks `activate_context` through a client-side tool filter while the shared server instructions still mention it; the report names both differences as confounds. The turn slice is not an arm here; it needs its own frozen evaluation.
 - **Actor.** One pinned Claude Sonnet model ID and one pinned client version, headless, on the subscription with no API key in the environment. It has no web, file or shell tools. Its instructions tell it not to name its tools in the answer.
 - **Session.** The actor plays a case's quoted user turns in order in one fresh session. The scored answer is the answer to the turn that the key marks; for a single-turn case it is the first answer. No arm receives refs, `focus` or state from outside the session. The push at each user turn does not count against the pull budget.
 - **Pull budget.** At most 8 Exomem calls per user turn. A call over the budget is refused, and the actor answers.
@@ -177,7 +177,7 @@ This protocol is frozen before any held-out generation. A later change is a numb
 ### Measures and judging
 
 - **Primary measure.** The scored answer uses every required fact and constraint, and asserts no forbidden claim as current. A newer fact passes for a required item only when the key lists it as an accepted successor. A different page that states the same required fact counts. A case's score is the mean over its repeats.
-- **Secondary measures.** Expected material reached before the answer; off-target share of pushed and pulled refs; Exomem calls, total input tokens including pushed bytes, and wall time per case; failures by kind. The report names the tilt in call counts: M's map arrives by push, which costs no call. Complete-turn and partially quoted cases are reported separately.
+- **Secondary measures.** Expected material reached before the answer; off-target share of pushed and pulled refs; Exomem calls, total input tokens including pushed bytes, and wall time per case; failures by kind. The report names the tilt in call counts: M's count includes the `activate_context` call that fetches its map, and P has no such call. Complete-turn and partially quoted cases are reported separately.
 - **Contamination.** On no-memory cases, the answer asserts user-specific facts that the turns do not supply. An arm contaminates a case when the judge finds contamination in a majority of the case's repeats.
 - **Judge.** The newest Codex `-sol` model at its highest effort, on the Codex subscription, because the actor is a Claude model. The judge is chosen before judging starts, and one judge judges every item. If that route has no quota, a fresh Opus lane judges, and the report names the same-family limitation. For every arm the judge sees the same view: the user turns, the key's required items, forbidden claims and successors, and the answer under an opaque shuffled id, with `exomem://` refs replaced by opaque tokens. It never sees the arm key. The judge is told that the key is current at the snapshot, so an answer that corrects the user's framing with snapshot-current facts is not penalised. It answers through a structured-output schema:
   - each required item: used, missing or contradicted;
@@ -226,6 +226,9 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - The capture hook's key matched few Codex sessions, so provenance also reads the key from the session's own transcript.
    - A linked session's edit moved a page's `updated` field, which orders the map. The copy builder now restores it from the newest unlinked revision, the newest remaining unit or the value before the first linked edit, and falls back to `created` only when none exists.
    - Two links grouped cases without a written rule: a handoff between the cases' sessions, and an incident record that cites another case's record. Both now group cases, and a struck case's linked writes are still removed.
+3. **Amendment 3 (2026-10-23, before any held-out generation).** The harness review exposed these faults, and this amendment fixes them:
+   - The protocol said M's map arrives by push at no call. The deployed retrieve hook runs in `mcp` mode, which pushes only a reminder; A and M both fetch their packet with a counted `activate_context` call. The arms table and the call-count tilt now say so. Rule 3's call comparison therefore charges M for that call, which P never makes.
+   - Answers can name tools or describe their calls despite the actor's instruction, which tells the judge the arm. The judge view now replaces every tool name that the server under test served in the session's own tool list with a neutral token. Any other description of a call is a named limitation.
 
 ### Ready before held-out generation
 
