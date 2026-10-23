@@ -56,7 +56,7 @@ def _seed_profile(vault: Path, *, with_w: bool = True, live: bool = False) -> No
         body="- [decision] Work at slack tide ^slack\n",
     )
     if live:
-        # Runtime startup seeds both recall scopes before verifying the derived catalogues.
+        # Runtime startup seeds both recall scopes before verifying the lexical retrieval catalogue.
         _seed_freshness_live(vault)
     _built(vault)
     lexstore.ensure_fresh(vault)
@@ -252,32 +252,12 @@ def test_a_build_started_before_a_write_never_replaces_the_newer_profile(
 
 @pytest.mark.parametrize("live", [True, False], ids=["event-maintained", "non-live-warming"])
 def test_a_captured_decision_reaches_the_anchor_profile_after_derived_sync(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live: bool, caplog: pytest.LogCaptureFixture,
-    request: pytest.FixtureRequest,
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A completed catalogue receipt must invalidate a warmed anchor profile and retain the decision's own date."""
     monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
     pending_recall.reset()
-    if live:
-        # Hold this named worker so background repair cannot rescue invalid startup checkpoints.
-        start = threading.Thread.start
-        held: list[threading.Thread] = []
-
-        def defer_repair(thread: threading.Thread) -> None:
-            if thread.name == "exomem-lexical-repair":
-                held.append(thread)
-            else:
-                start(thread)
-
-        def release_repairs() -> None:
-            monkeypatch.setattr(threading.Thread, "start", start)
-            for thread in held:
-                start(thread)
-            _drain_background_threads()
-
-        request.addfinalizer(release_repairs)
-        monkeypatch.setattr(threading.Thread, "start", defer_repair)
     _seed_profile(vault, with_w=False, live=live)
     assert freshness.recall_is_live(vault, "kb") is live
     ref = cv.anchor_profile_ref(HUB)
@@ -297,6 +277,9 @@ def test_a_captured_decision_reaches_the_anchor_profile_after_derived_sync(
     )
     assert batches
     _settle(vault, batches)
+    if live:
+        # A pass that needed a background lexical repair would race the read below.
+        assert lexstore.repair_progress(vault) is None
     if not live:
         caplog.set_level(logging.DEBUG, logger=working_set.__name__)
         # Hold the existing background repair until both callers observe the same pending state.
