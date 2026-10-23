@@ -31,7 +31,8 @@ from test_governance_egress import _external, write_rule
 from test_latency_gate import _seed_freshness_live
 from test_working_set_withheld_twins import _withhold
 
-from exomem import commands, freshness, lexstore, pending_recall, working_set
+from exomem import commands, file_watcher, freshness, lexstore, pending_recall, readiness, working_set
+from exomem import vault as vault_module
 from exomem import context_catalogue as cc
 from exomem import context_views as cv
 from exomem.activation_result import INDEX_WARMING
@@ -64,6 +65,51 @@ def _seed_profile(vault: Path, *, with_w: bool = True, live: bool = False) -> No
 
 def _items(pages: list[dict]) -> list[dict]:
     return [item for page in pages for item in page["items"]]
+
+
+@pytest.mark.parametrize("reseed", ["rebaseline", "watcher-resume"])
+def test_a_reseed_keeps_current_profile_rows_usable_after_a_governed_write(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reseed: str
+) -> None:
+    """A new registry baseline must not strand already-current lexical rows."""
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    _seed_profile(vault, with_w=False, live=True)
+    ref = cv.anchor_profile_ref(HUB)
+    assert _ask(vault, ref)["items"]
+    before = freshness.recall_checkpoint(vault, "kb")
+    readiness.manage_runtime()
+    watcher = file_watcher.FileWatcher(vault)
+    try:
+        if reseed == "rebaseline":
+            assert all(freshness.rebaseline(vault).values())
+        else:
+            assert watcher.start()
+            assert watcher.wait_until_seeded(15)
+            watcher.stop()
+            assert watcher.start()
+            assert watcher.wait_until_seeded(15)
+        after = freshness.recall_checkpoint(vault, "kb")
+        assert after.instance_id == before.instance_id and after.generation != before.generation
+
+        page = vault / HUB
+        content = page.read_text(encoding="utf-8").replace("Reserve the inner quay", "Reserve the outer quay")
+        batches = _command(
+            tmp_path, vault, "edit", lambda root: vault_module.batch_atomic_write(
+                [vault_module.PlannedWrite(page, content)], vault_root=root
+            ), 1,
+        )
+        assert batches
+        _settle(vault, batches)
+        assert lexstore.await_repairs_idle(vault)
+        assert lexstore.repair_progress(vault) is None, "the unchanged baseline needed no full repair"
+        profile = _ask(vault, ref)
+        assert "Reserve the outer quay" in json.dumps(profile)
+        assert "Reserve the inner quay" not in json.dumps(profile)
+    finally:
+        watcher.stop()
+        lexstore.await_repairs_idle(vault)
+        readiness.reset()
 
 
 @pytest.mark.parametrize("mention", ["plain", "unit", "state"] )

@@ -126,6 +126,31 @@ def test_first_write_after_restart_keeps_retrieval_admitted(inherited_catalog: P
     assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
 
 
+def test_a_rebaseline_with_unindexed_rows_still_needs_full_repair(
+    inherited_catalog: Path,
+) -> None:
+    """A fresh registry cannot attest rows that the catalogue never indexed."""
+    root = inherited_catalog
+    _start_managed_process(root)
+    store = lexstore.get_store(root)
+    before = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
+    outside = root / "Knowledge Base/Notes/Insights/outside-editor.md"
+    outside.write_text(NOTE_TEXT.replace("quokkarestartmarker", "unindexedmarker"), encoding="utf-8")
+
+    assert all(freshness.rebaseline(root).values())
+    for scope in freshness.SCOPES:
+        assert store.published_recall_checkpoint(scope) == before[scope]
+        assert freshness.recall_checkpoint(root, scope).triple != before[scope].triple
+
+    _governed_write(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert (lexstore.repair_progress(root) or {}).get("last_result") == "published"
+    assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
+    assert lexstore.search_bm25(root, "unindexedmarker", k=3, scope="kb")
+    assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
+
+
 def test_a_write_that_cannot_bless_a_scope_hands_it_to_the_repair_owner(
     inherited_catalog: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
