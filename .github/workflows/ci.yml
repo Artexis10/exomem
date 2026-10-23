@@ -187,6 +187,7 @@ jobs:
           echo "EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON=$RUNNER_TEMP/previous-schema/bin/python" >> "$GITHUB_ENV"
       - *prepare-duration-snapshot
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
+        if: &run-scoped-tests ${{ steps.scope.outputs.docs_only != 'true' || matrix.shard == 1 }}
         env: *core-test-env
         # Full runs replace the scratch snapshot with measured cases and upload it.
         # Refreshing the baseline stays a reviewed change through scripts/refresh_test_durations.py.
@@ -216,7 +217,7 @@ jobs:
           ${{ steps.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
       - name: Upload test timing evidence
-        if: always()
+        if: &upload-scoped-results ${{ always() && (steps.scope.outputs.docs_only != 'true' || matrix.shard == 1) }}
         uses: actions/upload-artifact@v4
         with:
           name: core-py${{ matrix.python-version }}-shard-${{ matrix.shard }}-junit
@@ -286,6 +287,7 @@ jobs:
           python -m compileall -q src/exomem
       - *prepare-duration-snapshot
       - name: Run tests (harness tier — benchmark-importing modules)
+        if: *run-scoped-tests
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
@@ -313,7 +315,7 @@ jobs:
           ${{ steps.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
       - name: Upload test timing evidence
-        if: always()
+        if: *upload-scoped-results
         uses: actions/upload-artifact@v4
         with:
           name: harness-py${{ matrix.python-version }}-shard-${{ matrix.shard }}-junit
@@ -1012,19 +1014,18 @@ jobs:
     steps:
       - name: Require the selected CI tier to succeed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          RESULTS: ${{ toJSON(needs) }}
           FULL_CI: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
-          for result in $RESULTS; do
-            if test "$result" = success; then
-              continue
-            fi
-            if test "$FULL_CI" != true && test "$result" = skipped; then
-              continue
-            fi
-            echo "unexpected CI result for full_ci=$FULL_CI: $result" >&2
+          failures=$(jq -r --argjson full_ci "$FULL_CI" '
+            to_entries[]
+            | select(.value.result != "success" and ($full_ci or .value.result != "skipped"))
+            | "CI dependency \(.key) returned \(.value.result)"
+          ' <<< "$RESULTS")
+          if test -n "$failures"; then
+            printf '%s\n' "$failures" >&2
             exit 1
-          done
+          fi
 
   # A full run that release-evidence-automation.yml dispatched with
   # GITHUB_TOKEN raises no workflow_run event when it completes, so the full

@@ -6,6 +6,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +16,7 @@ import pytest
 from exomem import deferred_index, epistemic_graph, freshness, graph_drain, graph_sync, index_sync
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.cli_ops import OpError
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 
@@ -152,6 +154,118 @@ def test_a_slow_availability_proof_does_not_block_a_canonical_write(
         ).fetchone() == (vault_module.content_hash(_page("A", "Changed.")),)
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("phase", ["source_bytes", "resolver_membership", "indexed_membership"])
+def test_availability_sealing_steps_aside_for_a_waiting_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
+) -> None:
+    """A writer must not time out behind the final whole-corpus seal."""
+    root = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(root)
+    index.withdraw_availability()
+    coordinator = index._mutation_coordinator
+    entered = threading.Event()
+    writer_queued = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    outcomes: list[bool | None] = []
+    failures: list[Exception] = []
+    units = 0
+
+    def slow_unit() -> None:
+        nonlocal units
+        if threading.current_thread() is not republication \
+                or not coordinator.current_thread_holds_boundary():
+            return
+        units += 1
+        if units == 1:
+            entered.set()
+            assert writer_queued.wait(5), "writer never queued"
+        else:
+            assert release.wait(5), "remaining seal was never released"
+
+    if phase == "source_bytes":
+        real_recheck = vault_module.PathGuard.recheck
+
+        def slow_recheck(self, *args, **kwargs):
+            if self.target in {
+                "Knowledge Base/Notes/Insights/a.md", "Knowledge Base/Notes/Insights/b.md",
+            }:
+                slow_unit()
+            return real_recheck(self, *args, **kwargs)
+
+        monkeypatch.setattr(vault_module.PathGuard, "recheck", slow_recheck)
+    else:
+        owner, name = (
+            (vault_module, "walk_vault_md") if phase == "resolver_membership"
+            else (find_module, "_walk_md")
+        )
+        real_walk = getattr(owner, name)
+
+        def slow_walk(*args, **kwargs):
+            for path in real_walk(*args, **kwargs):
+                slow_unit()
+                yield path
+
+        monkeypatch.setattr(owner, name, slow_walk)
+
+    path = root / "Knowledge Base/Notes/Insights/a.md"
+    replacement = _page("A", "Changed while availability was being sealed.")
+
+    def write() -> None:
+        try:
+            with coordinator.hold(
+                operation="test_canonical_write", holder_kind="writer", timeout_seconds=1,
+            ):
+                with closing(index._connect_existing(readonly=True)) as conn:
+                    assert conn.execute(
+                        "SELECT 1 FROM graph_meta WHERE key = ?",
+                        (epistemic_graph._AVAILABILITY_FRESHNESS_KEY,),
+                    ).fetchone() is None, "an interrupted seal published availability"
+                vault_module.batch_atomic_write(
+                    [vault_module.PlannedWrite(path=path, content=replacement)], vault_root=root,
+                )
+        except OpError as error:
+            failures.append(error)
+        finally:
+            finished.set()
+
+    republication = threading.Thread(
+        target=lambda: outcomes.append(index.republish_availability_if_current())
+    )
+    writer = threading.Thread(target=write)
+    republication.start()
+    try:
+        assert entered.wait(5), "final availability seal never started"
+        writer.start()
+        assert _wait_for(lambda: coordinator.waiter_count() > 0), "no real boundary waiter"
+        writer_queued.set()
+        assert finished.wait(3), "writer stayed behind the remaining corpus seal"
+    finally:
+        writer_queued.set()
+        release.set()
+        republication.join(5)
+        if writer.ident is not None:
+            writer.join(5)
+    assert not republication.is_alive() and not writer.is_alive()
+    assert not failures, f"canonical writer was refused: {failures!r}"
+    assert path.read_text(encoding="utf-8") == replacement
+    assert outcomes == [None], "interrupted republication must defer its old proof"
+
+
+def test_a_deferred_availability_seal_does_not_request_a_full_rebuild(tmp_path, monkeypatch):
+    """Foreground contention leaves the existing availability debt for the next tick."""
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_availability_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_cover_unacknowledged_checkpoint", lambda _root: False)
+    monkeypatch.setattr(graph_drain, "_republish_once", lambda _root: None)
+
+    def unexpected_rebuild(_root):
+        pytest.fail("foreground deferral created full-rebuild debt")
+
+    monkeypatch.setattr(graph_drain, "_request_full_rebuild", unexpected_rebuild)
+    assert graph_drain._work_once(tmp_path) == 0
 
 
 @pytest.mark.parametrize("change", ["source", "policy", "sidecar"])

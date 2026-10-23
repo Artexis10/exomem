@@ -1850,6 +1850,21 @@ class _SnapshotSourceSeal:
     policy_identity: tuple[str, str]
 
 
+class _RepublicationDeferred(Exception):
+    """Release an uncommitted seal for foreground work without declaring graph damage."""
+
+
+def _interruptible_source_paths(
+    paths: Iterable[Path], interrupt: Callable[[], None] | None,
+) -> Iterator[Path]:
+    if interrupt is None:
+        yield from paths
+        return
+    for path in paths:
+        interrupt()
+        yield path
+
+
 @dataclass(frozen=True)
 class _GraphPublicationTicket:
     """Private work proven before the short canonical replacement hold."""
@@ -2743,8 +2758,11 @@ class EpistemicGraphIndex:
         graph_drain.note_graph_debt()
         return True
 
-    def republish_availability_if_current(self) -> bool:
+    def republish_availability_if_current(self) -> bool | None:
         """Restore a withdrawn availability marker once nothing is queued against it.
+
+        True restores availability, False declines the proof, and None defers for
+        foreground work. Deferral must not turn an intact graph into rebuild debt.
 
         Every route that withdraws -- the path-scoped fence, the cold-resolver
         defer, an adopted residue -- pairs the withdrawal with durable repair,
@@ -2850,6 +2868,12 @@ class EpistemicGraphIndex:
 
             if not still_current():
                 return False
+
+            def defer_to_foreground() -> None:
+                # End uncommitted corpus work before another writer waits out the whole seal.
+                if self.boundary_waiters():
+                    raise _RepublicationDeferred
+
             with self._mutation_coordinator.hold(
                 operation="epistemic_graph_republish_availability", holder_kind="graph"
             ):
@@ -2863,12 +2887,17 @@ class EpistemicGraphIndex:
                         return False
                 finally:
                     current.close()
-                if not self._snapshot_source_seal_matches_disk(seals[0]) or not still_current():
+                if not self._snapshot_source_seal_matches_disk(
+                    seals[0], interrupt=defer_to_foreground,
+                ) or not still_current():
                     return False
+                defer_to_foreground()
                 self._publish_available_marker(
                     (recall.triple, recall.policy_version, recall.access_policy_fingerprint),
                     checkpoint=stored_checkpoint,
                 )
+        except _RepublicationDeferred:
+            return None
         except (
             OSError,
             ValueError,
@@ -3191,17 +3220,21 @@ class EpistemicGraphIndex:
             log.debug("cold snapshot proof raised", exc_info=True)
             return declined("proof_raised")
 
-    def _snapshot_source_seal_matches_disk(self, seal: _SnapshotSourceSeal) -> bool:
+    def _snapshot_source_seal_matches_disk(
+        self, seal: _SnapshotSourceSeal, *, interrupt: Callable[[], None] | None = None,
+    ) -> bool:
         """Replay byte/membership checks without page parsing or topology work.
 
         This is O(source bytes + paths); it preserves the direct-edit proof,
         including same-sized content changes with restored timestamps.
         """
         for guard in seal.guards:
+            if interrupt is not None:
+                interrupt()
             guard.recheck(self.vault_root)
         return (
-            self._recall_membership() == seal.resolver_membership
-            and self._indexed_recall_membership() == seal.indexed_membership
+            self._recall_membership(interrupt=interrupt) == seal.resolver_membership
+            and self._indexed_recall_membership(interrupt=interrupt) == seal.indexed_membership
             and recall_policy.recall_policy_identity(self.vault_root) == seal.policy_identity
         )
 
@@ -5329,23 +5362,31 @@ class EpistemicGraphIndex:
                 return False
         return True
 
-    def _recall_membership(self) -> frozenset[str] | None:
+    def _recall_membership(
+        self, *, interrupt: Callable[[], None] | None = None,
+    ) -> frozenset[str] | None:
         """Capture on-disk membership of the vault-wide recall resolver."""
         try:
             return frozenset(
                 rel
                 for path in recall_policy.iter_recall_markdown(
                     self.vault_root,
-                    foreground_priority.yielding_in_bulk(
-                        vault_module.walk_vault_md(self.vault_root)
+                    _interruptible_source_paths(
+                        foreground_priority.yielding_in_bulk(
+                            vault_module.walk_vault_md(self.vault_root)
+                        ), interrupt,
                     ),
                 )
                 if (rel := _vault_rel(self.vault_root, path)) is not None
             )
+        except _RepublicationDeferred:
+            raise
         except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
             return None
 
-    def _indexed_recall_membership(self) -> frozenset[str] | None:
+    def _indexed_recall_membership(
+        self, *, interrupt: Callable[[], None] | None = None,
+    ) -> frozenset[str] | None:
         """Capture the exact admitted KB paths represented by graph file rows."""
         kb = self.vault_root / kb_dirname()
         try:
@@ -5353,12 +5394,16 @@ class EpistemicGraphIndex:
                 rel
                 for path in recall_policy.iter_recall_markdown(
                     self.vault_root,
-                    foreground_priority.yielding_in_bulk(
-                        find_module._walk_md(kb) if kb.is_dir() else ()
+                    _interruptible_source_paths(
+                        foreground_priority.yielding_in_bulk(
+                            find_module._walk_md(kb) if kb.is_dir() else ()
+                        ), interrupt,
                     ),
                 )
                 if (rel := _vault_rel(self.vault_root, path)) is not None
             )
+        except _RepublicationDeferred:
+            raise
         except Exception:  # noqa: BLE001 - an incomplete proof must fail closed
             return None
 
