@@ -435,10 +435,6 @@ _DOT_RELATIVE = r"\.\.?[\\/]"
 _REFERENCE_START = r"(?:(?P<rooted>" + _ROOTED + r")|(?P<relative>" + _DOT_RELATIVE + r"))"
 _REFERENCE = re.compile(_STARTS_A_REFERENCE + _REFERENCE_START + _REFERENCE_CHAR + "*")
 _QUOTED_REFERENCE = re.compile(_REFERENCE_START)
-#: A quoted or backticked span, which may hold a path with spaces in it.
-_QUOTED = re.compile(
-    r"`([^`\n]+)`|\"([^\"\n]+)\"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019"
-)
 _SEPARATORS = re.compile(r"[\\/]")
 #: One path segment with no space, separator, quote, bracket or comma in it.
 _SEGMENT = r"""[^\s"'`<>()\[\]{},\\/\u2018\u2019\u201c\u201d]+"""
@@ -481,6 +477,33 @@ def _kept_words(reference: str, *, relative: bool) -> str:
     return _final_segment(reference) if relative else ""
 
 
+def _quoted_spans(text: str) -> Iterable[tuple[int, int]]:
+    """Read nonempty quoted path spans without rescanning a missing closer."""
+    # These delimiters define path quoting; dialogue and code spans have other rules.
+    pairs = {"`": "`", '"': '"', "“": "”", "‘": "’"}
+    unclosed: set[str] = set()
+    line_end = text.find("\n")
+    if line_end < 0:
+        line_end = len(text)
+    index = 0
+    while index < len(text):
+        if index == line_end:
+            unclosed.clear()
+            line_end = text.find("\n", index + 1)
+            if line_end < 0:
+                line_end = len(text)
+        closer = pairs.get(text[index])
+        if closer is not None and closer not in unclosed:
+            end = text.find(closer, index + 1, line_end)
+            if end > index + 1:
+                yield index, end + 1
+                index = end + 1
+                continue
+            if end < 0:
+                unclosed.add(closer)
+        index += 1
+
+
 def subject_text(turn: str) -> str:
     """The turn with each quoted path or URL removed from its words.
 
@@ -505,14 +528,14 @@ def subject_text(turn: str) -> str:
 
     text = _URL.sub(lambda match: " " + trailing(match.group(0)), str(turn or ""))
 
-    def quoted(match: re.Match[str]) -> str:
-        content = next(group for group in match.groups() if group is not None).strip()
+    def quoted(span: str) -> str:
+        content = span[1:-1].strip()
         found = _QUOTED_REFERENCE.match(content)
         if found is not None:
             return f" {_kept_words(content, relative=found.group('relative') is not None)} "
         if _SEPARATORS.search(content) and _names_a_file(content):
             return f" {_final_segment(content)} "
-        return match.group(0)
+        return span
 
     def reference(match: re.Match[str]) -> str:
         whole = match.group(0)
@@ -527,7 +550,13 @@ def subject_text(turn: str) -> str:
         core = whole[: len(whole) - len(tail)]
         return f"{_final_segment(core)}{tail}" if _names_a_file(core) else whole
 
-    text = _QUOTED.sub(quoted, text)
+    parts: list[str] = []
+    cursor = 0
+    for start, end in _quoted_spans(text):
+        parts.extend((text[cursor:start], quoted(text[start:end])))
+        cursor = end
+    parts.append(text[cursor:])
+    text = "".join(parts)
     text = _vault_path(kb_dirname()).sub(lambda match: _final_segment(match.group(0)), text)
     return _SLASH_RUN.sub(slash_run, _REFERENCE.sub(reference, text))
 
