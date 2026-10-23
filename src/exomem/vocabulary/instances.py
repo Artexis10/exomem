@@ -81,6 +81,10 @@ class DefinitionsSelection:
         """The one snapshot of `subject` this selection reads for an instance."""
         return self._select(subject, scope)[1]
 
+    def binding_revision(self, subject: str, scope: str | None = None) -> str | None:
+        """The binding that selected this operation's subject snapshot."""
+        return self._select(subject, scope)[0].binding_revision
+
     def page_definitions(self, path: str, frontmatter: dict) -> PageDefinitions:
         """Select once from canonical membership, then admit only the requested subjects."""
         scope = page_scope(self._root, path, frontmatter)

@@ -1284,7 +1284,20 @@ class EmbeddingIndex:
             stored = conn.execute(
                 "SELECT value FROM meta WHERE key = ?", (COVERAGE_PREFIX + state.path,),
             ).fetchone()
-            if stored is None or stored[0] != coverage_record(state):
+            if stored is None:
+                return None
+            try:
+                actual_coverage = json.loads(stored[0])
+                expected_coverage = json.loads(coverage_record(state))
+                # Additive carrier positions do not affect encoded occurrences.
+                # Ignoring this namespace grants no carrier coverage authority.
+                actual_coverage.pop("prose_carriers", None)
+                expected_coverage.pop("prose_carriers", None)
+            except (ValueError, TypeError, AttributeError):
+                return None
+            if json.dumps(actual_coverage, sort_keys=True, separators=(",", ":")) != json.dumps(
+                expected_coverage, sort_keys=True, separators=(",", ":"),
+            ):
                 return None
             return self._build_token(conn)
         finally:

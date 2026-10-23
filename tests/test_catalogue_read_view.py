@@ -556,13 +556,13 @@ def test_main_unit_annotations_keep_the_selected_bytes_through_reranking(
 def test_selected_pending_annotations_survive_global_retirement(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Retirement cannot replace the exact pending page already held by a request."""
+    """Retirement must preserve the held pending page, including its leading blank line."""
     from exomem import embeddings, pending_recall
     from exomem import find as find_module
 
     parent = vault / "Knowledge Base/Notes/pending-annotation.md"
     authored = (
-        "---\ntype: insight\nexomem_id: 74e7c051-bfba-4781-b47f-c5eb59ab3ae2\n---\n\n"
+        "---\ntype: insight\nexomem_id: 74e7c051-bfba-4781-b47f-c5eb59ab3ae2\n---\n\n\n"
         "# Pending annotation\n\n- [config] BEFORE ^pending-annotation\n"
     )
     parent.write_text(authored, encoding="utf-8")
@@ -571,6 +571,7 @@ def test_selected_pending_annotations_survive_global_retirement(
     before = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
     parent.write_text(authored.replace("BEFORE", "pendingannotationmarker HELD"), encoding="utf-8")
     page = find_module._CACHE.get(parent, vault)
+    assert page.body.startswith("\n")
     overlay = pending_recall.PendingOverlay(
         "ready",
         None,

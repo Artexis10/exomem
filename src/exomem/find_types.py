@@ -233,6 +233,8 @@ class RankingPage:
     stem_set: frozenset[str]
     letter_script: str | None
     outbound_targets: tuple[str, ...]
+    title: str = ""
+    superseded_by: tuple[str, ...] = ()
 
     @classmethod
     def from_page(cls, page: ParsedPage) -> RankingPage:
@@ -251,6 +253,8 @@ class RankingPage:
             stem_set=page.stem_set,
             letter_script=page.letter_script,
             outbound_targets=find_results.wikilink_targets(page.body),
+            title=page.title,
+            superseded_by=tuple(page.superseded_by),
         )
 
 

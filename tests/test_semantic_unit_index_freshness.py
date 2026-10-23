@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    call_spans,
     epistemic_graph,
     freshness,
     index_sync,
@@ -85,6 +86,151 @@ def test_parent_validation_accepts_a_symlink_to_the_vault_root(tmp_path: Path) -
 
     assert validated.current, validated.code
     assert validated.current_parent_source_hash == expected
+
+
+def test_restricted_unit_statistics_retire_after_unit_only_repairs(tmp_path: Path) -> None:
+    """Warm ranking must observe unit repairs even when page rows and checkpoints stay fixed."""
+    _write(tmp_path, "- [fact] harbor gauges ^gauges\n- [fact] harbor tides ^tides\n")
+    lexstore.ensure_fresh(tmp_path)
+
+    def ranked():
+        with call_spans.meter(call_spans.STATS_REBUILT) as measured:
+            hits = lexstore.search_semantic_units(
+                tmp_path, "harbor", 5, scope="kb", admitted_parent_paths={_REL},
+                _validate_current=False, repair=False,
+            )
+        assert hits is not None
+        return hits, int(measured[call_spans.STATS_REBUILT])
+
+    before, rebuilt = ranked()
+    assert len(before) == 2 and rebuilt == 1
+    assert ranked() == (before, 0)
+    connection = lexstore.get_store(tmp_path)._connect()
+    try:
+        with connection:
+            rowid = connection.execute(
+                "SELECT rowid FROM semantic_units WHERE parent_path = ? AND anchor = ?",
+                (_REL, "gauges"),
+            ).fetchone()[0]
+            connection.execute("UPDATE unit_fts SET stemmed = 'unrelated' WHERE rowid = ?", (rowid,))
+        corrected, rebuilt = ranked()
+        assert [hit.anchor for hit in corrected] == ["tides"] and rebuilt == 1
+        assert ranked() == (corrected, 0)
+        with connection:
+            connection.execute(
+                "DELETE FROM semantic_units WHERE parent_path = ? AND anchor = ?", (_REL, "tides"),
+            )
+        assert ranked() == ([], 1)
+        assert ranked() == ([], 0)
+    finally:
+        connection.close()
+
+
+def test_warm_restricted_duplicates_keep_baseline_tokens_and_last_eligible_occurrence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated growth must not reload unit text, or let a matching alias replace corpus tokens."""
+    import json
+    import uuid
+
+    from exomem import bm25, working_set_runtime
+
+    def write(name, content, page_id):
+        path = tmp_path / "Knowledge Base/Notes" / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\nexomem_id: {page_id}\n---\n# Units\n\n{content}\n", encoding="utf-8")
+        return path.relative_to(tmp_path).as_posix()
+
+    duplicates = [
+        write("a-first", "- [observation] lighthouse first tokens ^shared", _PAGE_ID),
+        write("m-first-eligible", "- [config] channel earlier alias ^shared", _PAGE_ID),
+        write("m-last-eligible", "- [config] channel later alias ^shared", _PAGE_ID),
+        write("z-ineligible", "- [observation] estuary ignored alias ^shared", _PAGE_ID),
+    ]
+    parents = set(duplicates)
+
+    def frozen_baseline(query):
+        # Freeze the former unordered corpus/candidate traversals together:
+        # duplicate precedence is not a rowid maximum or the MATCH order.
+        connection = lexstore.get_store(tmp_path)._connect()
+        try:
+            connection.execute("BEGIN")
+            view = lexstore._SelectedUnits(tmp_path, connection, admitted=parents)
+            corpus = {}
+            for row, unit in view.served(connection.execute(
+                "SELECT u.unit_ref, u.parent_path, unit_fts.stemmed FROM semantic_units u "
+                "JOIN unit_fts ON unit_fts.rowid = u.rowid "
+                "WHERE u.in_kb = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
+                (json.dumps(sorted(parents)),),
+            )):
+                corpus.setdefault(str(unit.unit_ref), str(row[2]).split())
+            plans = view.plans(categories=("config",), kinds=(), clauses=None, registry_scope=None)
+            predicate, params = view.predicate(plans)
+            candidates = {
+                str(unit.unit_ref): (row, unit)
+                for row, unit in view.served(connection.execute(
+                    f"SELECT {lexstore._OCCURRENCE_COLUMNS} FROM semantic_units u "
+                    f"WHERE u.in_kb = 1 AND {predicate} "
+                    "AND u.parent_path IN (SELECT value FROM json_each(?))",
+                    [*params, json.dumps(sorted(parents))],
+                )) if view.matches(plans, str(row[1]), unit) and str(unit.unit_ref) in corpus
+            }
+            view.require_complete()
+            return [lexstore._unit_hit(*candidates[ref], score) for ref, score in bm25.score_token_corpus(
+                corpus, bm25.tokenize(query, query=True), 5, allowed_paths=set(candidates),
+            )]
+        finally:
+            connection.close()
+
+    def ranked(query):
+        result = lexstore.get_store(tmp_path).search_semantic_units_result(
+            [], 5, ("config",), (), "kb", None, admitted_parent_paths=parents,
+            query_units=bm25.token_units(query, query=True),
+            term_budget=working_set_runtime.material_term_budget(),
+        )
+        assert result.readiness.complete
+        return list(result.value or ())
+
+    for filler_count in (8, 32):
+        for index in range(filler_count):
+            parents.add(write(
+                f"filler-{index:02d}", f"- [config] unrelated gauges {index} ^gauge",
+                uuid.uuid5(uuid.NAMESPACE_URL, f"unit-reuse:{index}"),
+            ))
+        find_module.clear_cache()
+        lexstore.ensure_fresh(tmp_path)
+        expected = {query: frozen_baseline(query) for query in ("lighthouse", "channel")}
+        assert len(expected["lighthouse"]) == 1
+        assert expected["lighthouse"][0].parent_path == duplicates[2]
+        assert expected["channel"] == []
+        assert ranked("lighthouse") == expected["lighthouse"]
+        store = lexstore.get_store(tmp_path)
+        original_connect = store._connect
+        fetched_text = []
+        interpreted_parents = []
+
+        def counted_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+
+            def row_factory(cursor, row):
+                names = {column[0] for column in cursor.description}
+                if names & {"content", "stemmed"}:
+                    fetched_text.append(row)
+                if "structure_json" in names:
+                    interpreted_parents.append(row)
+                return row
+
+            connection.row_factory = row_factory
+            return connection
+
+        with monkeypatch.context() as counted:
+            counted.setattr(store, "_connect", counted_connect)
+            with call_spans.meter(call_spans.STATS_REBUILT) as measured:
+                for query, baseline in expected.items():
+                    assert ranked(query) == baseline
+            assert measured[call_spans.STATS_REBUILT] == 0
+        assert len(fetched_text) == 2  # One representative and one winning alias, at either corpus size.
+        assert len(interpreted_parents) <= 2
 
 
 def test_index_sync_parses_each_changed_parent_once_for_all_unit_sidecars(
