@@ -10,6 +10,7 @@ the vault-wide flag.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +21,9 @@ from test_working_set_index import _seed_planning, _seed_structure
 
 from exomem import (
     commands,
+    context_catalogue,
     context_pack,
+    context_views,
     freshness,
     lexstore,
     readiness,
@@ -225,11 +228,48 @@ def _stamp(vault: Path) -> str:
 
 
 @pytest.fixture
-def activation(vault: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+def withheld_path(request: pytest.FixtureRequest) -> str | None:
+    """A page, besides the hidden hub, that the external reader may not see (`indirect` parameter)."""
+    return getattr(request, "param", None)
+
+
+RESTRICTED_TAG = "coverage-restricted"
+
+
+@pytest.fixture
+def withheld_tag(request: pytest.FixtureRequest) -> str | None:
+    """A tag that withholds the pages carrying it from the external reader (`indirect` parameter).
+
+    The scope exists from the start, so tagging a page later moves no policy.
+    """
+    return getattr(request, "param", None)
+
+
+def _withhold_from_external(vault: Path, selector: str) -> None:
+    scope, rule = "01ARZ3NDEKTSV4RRFFQ69G5FB2", "01ARZ3NDEKTSV4RRFFQ69G5FB3"
+    governance = vault / "Knowledge Base/_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes/extra.yaml").write_text(
+        f"governance_version: 1\nid: {scope}\nname: Extra\n{selector}\n", encoding="utf-8"
+    )
+    (governance / "rules/extra-external.yaml").write_text(
+        f'governance_version: 1\nid: {rule}\nscope_ids: ["{scope}"]\naudience: external\nceiling: 0\n',
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def activation(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    withheld_path: str | None,
+    withheld_tag: str | None,
+) -> SimpleNamespace:
     """A managed runtime whose activation catalogue was built at the current stamp.
 
-    A scheduled build never runs, so the catalogue stays behind until a test
-    publishes it: the request reports what it can prove about that lag.
+    A scheduled build or lexical repair never runs, so each catalogue stays behind
+    until a test publishes it: the request reports what it can prove about that lag.
     """
     _seed_structure(vault)
     _seed_planning(vault)
@@ -238,6 +278,10 @@ def activation(vault: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     hidden.write_text(HUB_BODY.format("First."), encoding="utf-8")
     write_scope(vault)
     write_rule(vault, ceiling=0)
+    if withheld_path is not None:
+        _withhold_from_external(vault, f'paths: ["{withheld_path}"]')
+    if withheld_tag is not None:
+        _withhold_from_external(vault, f'tags: ["{withheld_tag}"]')
     _seed_live_recall(vault)
     lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
@@ -250,6 +294,7 @@ def activation(vault: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         "_schedule_build",
         lambda root, freshness_stamp="": scheduled.append(freshness_stamp),
     )
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: False)
     return SimpleNamespace(vault=vault, scheduled=scheduled)
 
 
@@ -299,6 +344,105 @@ def test_a_withheld_write_marks_the_owner_activation_packet_stale(
     _write_hidden_hub(activation.vault, "Second.")
 
     assert _activate(activation.vault, restricted=False)["generation"]["index_stale"] is True
+
+
+def _lexical_flag(vault: Path, *, restricted: bool = True) -> str:
+    return _activate(vault, restricted=restricted)["generation"]["lexical_evidence"]
+
+
+SLED = "Knowledge Base/Products/Cargo Sled.md"
+
+
+def _lexical(vault: Path, *, restricted: bool = True) -> tuple[list[str], str]:
+    """The activation lexical lane as the request runs it: `(hit paths, state)`."""
+    with _caller(restricted):
+        hits, state = working_set_runtime.lexical_evidence(
+            vault, TURN, working_set_index.WorkingSetIndex(vault).anchors(),
+            limit=10, visible=egress.visible_page_filter(vault),
+        )
+    return [hit.path for hit in hits], state
+
+
+def _append_to_sled(vault: Path, line: str = "An added line.") -> None:
+    page = vault / SLED
+    _write_as_the_service_does(vault, SLED, page.read_text(encoding="utf-8") + f"\n{line}\n")
+
+
+def test_a_withheld_write_leaves_the_restricted_lexical_lane_as_it_was(
+    activation: SimpleNamespace,
+) -> None:
+    """The lexical catalogue lags the registry here; the lane is served from it all the same."""
+    assert _lexical_flag(activation.vault) == "available"
+    before = _lexical(activation.vault)
+    assert before == ([SLED], "available")
+
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert _lexical(activation.vault) == before
+    assert _lexical_flag(activation.vault) == "available"
+
+
+def test_a_visible_write_serves_no_lexical_hits_to_the_restricted_reader(
+    activation: SimpleNamespace,
+) -> None:
+    _append_to_sled(activation.vault)
+
+    assert _lexical(activation.vault) == ([], "stale")
+    assert _lexical_flag(activation.vault) == "stale"
+
+
+def test_a_withheld_write_serves_no_lexical_hits_to_the_owner(
+    activation: SimpleNamespace,
+) -> None:
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert _lexical(activation.vault, restricted=False) == ([], "stale")
+    assert _lexical_flag(activation.vault, restricted=False) == "stale"
+
+
+def test_the_dependence_check_reads_the_catalogue_the_lexical_lane_was_served(
+    activation: SimpleNamespace,
+) -> None:
+    """Which pages the turn still reaches without a word; the same catalogue, the same reader."""
+    def reached() -> frozenset[str]:
+        with _caller(True):
+            return working_set_runtime.lexical_hits_without(
+                activation.vault, TURN, frozenset({SLED}), frozenset({"north"}),
+                visible=egress.visible_page_filter(activation.vault),
+            )
+
+    before = reached()
+    assert before == {SLED}
+
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert reached() == before
+
+
+@pytest.mark.parametrize("withheld_tag", [RESTRICTED_TAG], indirect=True)
+def test_a_page_retagged_as_withheld_is_not_released_from_the_lagging_catalogue(
+    activation: SimpleNamespace,
+) -> None:
+    """The lagging catalogue still ranks the page by its old text; the release decision, made
+    on the live file for each request, drops it."""
+    assert _lexical(activation.vault) == ([SLED], "available")
+    page = activation.vault / SLED
+    _write_as_the_service_does(
+        activation.vault, SLED,
+        page.read_text(encoding="utf-8").replace("type: note\n", f"type: note\ntags: [{RESTRICTED_TAG}]\n"),
+    )
+
+    with _caller(True):
+        assert not egress.visible_page_filter(activation.vault)(SLED)
+        hits, state = working_set_runtime.lexical_evidence(
+            activation.vault, TURN, working_set_index.WorkingSetIndex(activation.vault).anchors(),
+            limit=10, visible=egress.visible_page_filter(activation.vault),
+        )
+        released = egress.annotate_hits(activation.vault, hits, limit=10).hits
+
+    assert (state, [hit.path for hit in hits]) == ("available", [SLED])
+    assert released == []
+    assert SLED not in json.dumps(_activate(activation.vault))
 
 
 def test_a_lag_with_no_remembered_stamp_is_reported_to_the_restricted_reader(
@@ -368,3 +512,95 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
 
     assert published == [True]
     assert served.get("abstention") == {"reason": "unavailable"}
+
+
+# ---- activation map ------------------------------------------------------
+
+
+@pytest.fixture
+def mapped(activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The activation fixture, plus a context catalogue folded at the current stamp.
+
+    The catalogue's own fold is warm, so the only lag a hidden write leaves is
+    the activation index's: `unlisted` follows that lag alone.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    stamp = _stamp(activation.vault)
+    catalogue = context_catalogue.ContextCatalogue(activation.vault)
+    catalogue.rebuild()
+    catalogue.update(freshness_stamp=stamp)
+    catalogue.close()
+    context_catalogue._CHECKPOINTS[activation.vault.absolute()] = freshness.consumer_checkpoint(
+        activation.vault, "kb"
+    )
+    yield activation
+    context_catalogue._CHECKPOINTS.clear()
+
+
+def _map_activation(vault: Path, *, restricted: bool = True) -> dict:
+    with _caller(restricted):
+        return commands.op_activate_context(vault, turn="")
+
+
+def test_a_withheld_write_leaves_the_restricted_map_served(mapped: SimpleNamespace) -> None:
+    before = _map_activation(mapped.vault)
+    assert before["abstained"] is False, before.get("abstention")
+
+    _write_as_the_service_does(mapped.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    after = _map_activation(mapped.vault)
+    assert after["abstained"] is False
+    assert after["map"]["items"] == before["map"]["items"]
+
+
+def test_a_visible_write_holds_the_restricted_map_back_as_warming(mapped: SimpleNamespace) -> None:
+    _map_activation(mapped.vault)
+    page = mapped.vault / "Knowledge Base/Products/Cargo Sled.md"
+    _write_as_the_service_does(
+        mapped.vault, "Knowledge Base/Products/Cargo Sled.md",
+        page.read_text(encoding="utf-8") + "\nAn added line.\n",
+    )
+
+    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+
+
+def test_a_withheld_write_marks_the_owner_map_stale(mapped: SimpleNamespace) -> None:
+    _map_activation(mapped.vault, restricted=False)
+    _write_as_the_service_does(mapped.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert _map_activation(mapped.vault, restricted=False)["map"]["stale"] is True
+
+
+REGISTRY = "Knowledge Base/_Schema/project-keys.yaml"
+EDIT = "  maritime-route:\n    folder: Maritime Route\n    category: logistics\n"
+
+
+def _edit_registry(vault: Path) -> None:
+    registry = vault / REGISTRY
+    _write_as_the_service_does(vault, REGISTRY, registry.read_text(encoding="utf-8") + EDIT)
+
+
+@pytest.mark.parametrize("withheld_path", [REGISTRY], indirect=True)
+def test_a_withheld_registry_edit_leaves_the_restricted_map_served(mapped: SimpleNamespace) -> None:
+    with _caller(True):
+        assert not context_views.CallerView.current(mapped.vault).projects_admitted
+    before = _map_activation(mapped.vault)
+    assert before["abstained"] is False, before.get("abstention")
+
+    _edit_registry(mapped.vault)
+
+    after = _map_activation(mapped.vault)
+    assert after["abstained"] is False
+    assert after["map"]["items"] == before["map"]["items"]
+
+
+def test_a_released_registry_edit_holds_the_restricted_map_back_as_warming(
+    mapped: SimpleNamespace,
+) -> None:
+    with _caller(True):
+        assert context_views.CallerView.current(mapped.vault).projects_admitted
+    _map_activation(mapped.vault)
+
+    _edit_registry(mapped.vault)
+
+    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}

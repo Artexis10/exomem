@@ -60,6 +60,7 @@ from .. import (
 from ..collection_store.preview import bound_writer, canonical_read, projection_decision
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
+from ..published_admission import Admission, AdmittedPredicate, admission_of
 from . import (
     artifact_census,
     authorization_custody,
@@ -1978,6 +1979,73 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
     """
     boundary = connector_boundary.permits_filter(vault_root, who)
     return lambda path: boundary(path) and raw_protection.permits(vault_root, path, who)
+
+
+def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool:
+    """Whether a verdict for this path can depend on the page's own bytes alone.
+
+    Markdown only: a binary is classified from companions, which are other pages.
+    A RAW-marked path reads a live authorization session and its companion. A
+    bound collection writer decides from its own operation. A path in a
+    collection's placement layer is decided from the store's database while a
+    store owns it and is withheld outright while the store is down, and a file
+    page there can become store-owned without one byte changing, so no verdict
+    there is the page's own; `ownership.relevant` reads the path alone. A
+    withheld verdict also needs a readable page: the content floors refuse a
+    read error the same way they refuse a restricted page, and a refusal that a
+    retry could lift must not outlast the retry.
+    """
+    from ..collection_store import ownership
+
+    if (not _is_markdown_path(rel_path) or raw_protection.marked(rel_path)
+            or bound_writer(vault_root) is not None or ownership.relevant(rel_path)):
+        return False
+    if withheld:
+        try:
+            with open(Path(vault_root) / rel_path, "rb"):
+                pass
+        except OSError:
+            return False
+    return True
+
+
+def _decision_is_page_local(decision: Decision) -> bool:
+    """Whether a decision read nothing beyond the page, the policy and the caller.
+
+    A bridge is approved against the pages it summarises, so a decision that
+    carries bridge state also depends on other pages. Every other level comes
+    from the page's scope membership and the standing rules alone.
+    """
+    return (decision.level != LEVEL_EXCERPT_REDACTED and decision.bridge is None
+            and decision.release_reason is None and decision.release_grant_id is None
+            and decision.release_dependency_digest is None and not decision.release_strip)
+
+
+def content_admission(vault_root: Path, who: RequestPrincipal) -> AdmittedPredicate:
+    """`content_permits` for one caller, offered to the catalogue for publication.
+
+    The verdict of a markdown page that is not RAW-marked is a function of the
+    policy, the connector boundary and the page, so `Admission` names exactly
+    those and the catalogue reuses it until the page row, the policy or the
+    boundary changes.
+    """
+    root = Path(vault_root)
+    compiled = policy_module.load(root)
+
+    def identity() -> tuple | None:
+        if compiled.blocked or compiled.conflicted or bound_writer(root) is not None:
+            return None
+        try:
+            boundary = connector_boundary.admission_identity(root, who)
+        except connector_boundary.BoundaryUnavailable:
+            return None
+        return ("content-floor", str(root), compiled.fingerprint, boundary)
+
+    def decide(rel_path: str, publish: bool) -> tuple[bool, bool]:
+        allowed = content_permits(root, rel_path, who)
+        return allowed, publish and _page_local_path(root, rel_path, withheld=not allowed)
+
+    return AdmittedPredicate(Admission(identity, decide))
 
 
 def name_lookup_required(vault_root: Path) -> bool:
@@ -7194,18 +7262,19 @@ def release_walk_filter(
     content_ok = content_permits_filter(vault_root, who)
     grants_hash = "" if fail_closed else _grants_hash(policy)
     declared_purpose = _declared_purpose(vault_root, who, purpose)
-    verdicts: dict[tuple, bool] = {}
+    verdicts: dict[tuple, tuple[bool, bool]] = {}
 
-    def keep(rel_path: str) -> bool:
+    def verdict(rel_path: str) -> tuple[bool, bool]:
+        """`(allowed, decided from the page, the policy and the caller alone)`."""
         # The set read above, like `policy`: the plane does not move while one
         # walk runs, and re-proving it per path stats every tombstone and event file.
         if lifecycle.is_tombstoned_in(tombstones, rel_path):
-            return False
+            return False, True
         if fail_closed:
             _record_blocked_outcome(who.audience_id)
-            return False
+            return False, False
         if not content_ok(rel_path):
-            return False
+            return False, True
         boundary_key = connector_boundary.cache_identity(vault_root, who)
         cached = verdicts.get((rel_path, boundary_key))
         if cached is not None:
@@ -7231,8 +7300,35 @@ def release_walk_filter(
             outcome="released" if allowed else "withheld",
             purpose=declared_purpose,
         )
-        verdicts[(rel_path, boundary_key)] = allowed
-        return allowed
+        decided = (allowed, decision is not None and _decision_is_page_local(decision))
+        verdicts[(rel_path, boundary_key)] = decided
+        return decided
+
+    def judge(rel_path: str, publish: bool) -> tuple[bool, bool]:
+        """`(allowed, page_local)`, as `published_admission.Admission.decide`."""
+        allowed, local = verdict(rel_path)
+        # The path proof opens a withheld page, so only a walk that publishes pays it.
+        return allowed, publish and local and _page_local_path(
+            vault_root, rel_path, withheld=not allowed
+        )
+
+    def identity() -> tuple | None:
+        # A session decides from live grants and time, a bound writer from its own
+        # operation, a blocked policy decides nothing, and without a policy the
+        # decision reads collection ownership, which is not the page: none has a
+        # stable identity.
+        if (policy.empty or fail_closed or who.authorization_session_id is not None
+                or who.verified_authorization_session is not None
+                or bound_writer(vault_root) is not None):
+            return None
+        try:
+            boundary = connector_boundary.admission_identity(vault_root, who)
+        except connector_boundary.BoundaryUnavailable:
+            return None
+        return ("release", str(vault_root), policy.fingerprint, grants_hash, who.audience_id,
+                declared_purpose, boundary, tombstones)
+
+    keep = AdmittedPredicate(Admission(identity, judge))
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
     if owned is not None:
@@ -7412,20 +7508,27 @@ def visible_page_filter(
     if keep is None:
         return None
     root = Path(vault_root)
+    offered = admission_of(keep)
 
-    def visible(rel_path: str) -> bool:
+    def decide(rel_path: str, publish: bool = False) -> tuple[bool, bool]:
         rel = str(rel_path or "").strip()
         if not rel:
-            return True
+            return True, False
         if not lifecycle.is_tombstoned(root, rel):
             try:
                 if not (root / rel).is_file():
-                    return True
+                    return True, False
             except OSError:
-                return False
-        return keep(rel)
+                return False, False
+        if offered is not None:
+            return offered.decide(rel, publish)
+        return keep(rel), False
 
-    return visible
+    if offered is None:
+        return lambda rel_path: decide(rel_path)[0]
+    # A non-page reference is kept whatever the page verdicts say, so the
+    # catalogue publishes only the pages `decide` hands on to the release verdict.
+    return AdmittedPredicate(Admission(offered.identity, decide))
 
 
 class ReaderViewUnavailable(RuntimeError):
@@ -7469,6 +7572,11 @@ class ReaderView:
 
     def __call__(self, rel_path: str) -> bool:
         return self._pages(rel_path)
+
+    @property
+    def admission(self) -> Admission | None:
+        """The page predicate's `Admission`, for the catalogue to publish."""
+        return admission_of(self._pages)
 
     def project_pack(self, bundle: Mapping[str, Any]) -> dict[str, Any]:
         """Project one actual clipped bundle before it spends a compiler slot."""

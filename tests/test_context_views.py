@@ -144,7 +144,7 @@ def _leave_pending(vault: Path, rel: str, monkeypatch: pytest.MonkeyPatch) -> No
 
 def _warm_catalogue(monkeypatch: pytest.MonkeyPatch, *, unlisted: bool = False) -> None:
     """The catalogue answers as a warm managed runtime does, without folding what is pending."""
-    monkeypatch.setattr(cc, "ensure_unlisted", lambda root, freshness_stamp="": (cc.READY, cc.ContextCatalogue(root), unlisted))
+    monkeypatch.setattr(cc, "ensure_unlisted", lambda root, freshness_stamp="", **_reader: (cc.READY, cc.ContextCatalogue(root), unlisted))
 
 
 # --------------------------------------------------------------------------- #
@@ -482,7 +482,7 @@ def test_a_caller_who_may_not_read_the_domain_registry_learns_nothing_from_it(
     registered, unknown = cv.topic_ref("harbour"), cv.topic_ref("no-such-domain")
 
     with monkeypatch.context() as patch:
-        patch.setattr(cc, "ensure_unlisted", lambda root, freshness_stamp="": (cc.WARMING, None, False))
+        patch.setattr(cc, "ensure_unlisted", lambda root, freshness_stamp="", **_reader: (cc.WARMING, None, False))
         assert _outcome(vault, registered, _external()) == _outcome(vault, unknown, _external())  # while warming
     assert _outcome(vault, registered, _external()) == _outcome(vault, unknown, _external())  # and when ready
     pages = _pages(vault, cv.MAP_REF, _external())

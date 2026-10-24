@@ -16,5 +16,10 @@
 
 ## 4. Substrate and rollout
 
-- [ ] 4.1 Substrate's change ships the gateway intercept for `observe_transfer` and `transfer_memory` behind `EXOMEM_CLOUD_TRANSFER_TOOLS_ENABLED`, and adds `archive_sha256` to the export display. Verify: Substrate's own tests, and a check that the tool names, actions and inputs equal `tests/fixtures/mcp_cloud_only_tool_schemas.json`.
+- [x] 4.1 Substrate's change ships the gateway intercept for `observe_transfer` and `transfer_memory` behind `EXOMEM_CLOUD_TRANSFER_TOOLS_ENABLED`, and adds `archive_sha256` to the export display. Verify: Substrate's own tests, and a check that the tool names, actions and inputs equal `tests/fixtures/mcp_cloud_only_tool_schemas.json`.
 - [ ] 4.2 Release acceptance in rehearsal: gateway image + transferTools.enabled + EXOMEM_CLOUD_EXPORTS_ENABLED, then handoff → CLI import → status during hold → adoption → export unconfirmed/confirmed → CLI download (owners: Cloud programme / deployment). The rehearsal values must first add every private range to `cells.jobEgressExcept`. Verify: the rehearsal evidence is recorded in this change.
+
+Task 4.1 shipped in Substrate's `serve-cloud-transfer-tools` change, merged on 2026-10-24 as `f6381532` with its `test`, `quality` and onboarding checks passing.
+Its generated gateway table pins this repository's commit `c55bb5dbd`.
+On 2026-10-24, its names, actions, input properties, required lists and defaults equalled `tests/fixtures/mcp_cloud_only_tool_schemas.json` for both tools.
+Task 4.2 needs a rehearsal cell and stays open.

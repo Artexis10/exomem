@@ -2637,10 +2637,12 @@ def _lexical_hits_without(
     words: frozenset[str],
     *,
     freshness_snapshot: Any = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
     """`working_set_resolve.candidates_for`'s dependence check, read on the
-    snapshot the request's first lexical pass read. Empty when that snapshot
-    is unreadable: the anchors then stay leads."""
+    snapshot the request's first lexical pass read, for the reader that pass
+    served (`visible`). Empty when that snapshot is unreadable: the anchors
+    then stay leads."""
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -2653,7 +2655,8 @@ def _lexical_hits_without(
     from . import working_set_runtime
 
     return working_set_runtime.lexical_hits_without(
-        vault_root, turn, pages, words, freshness=freshness, recall_checkpoint=recall_checkpoint
+        vault_root, turn, pages, words,
+        freshness=freshness, recall_checkpoint=recall_checkpoint, visible=visible,
     )
 
 
@@ -4042,7 +4045,8 @@ def _compile_packet(
         unchecked = pages - checked.keys()
         if unchecked:
             independent = _lexical_hits_without(
-                root, turn, frozenset(unchecked), words, freshness_snapshot=freshness_snapshot
+                root, turn, frozenset(unchecked), words,
+                freshness_snapshot=freshness_snapshot, visible=visible,
             )
             checked.update((path, path in independent) for path in unchecked)
         return frozenset(path for path in pages if checked[path])

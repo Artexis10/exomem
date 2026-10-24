@@ -551,6 +551,9 @@ class FreshnessSnapshot:
         self._visible_recall_paths: dict[str, frozenset[str]] = {}
         self._pending_recall_paths: frozenset[str] | None = None
         self._admitted: dict[tuple[str, Callable[[str], bool]], frozenset[str]] = {}
+        # Scopes whose paths came from the admitted catalogue, the only source a
+        # published verdict set can be proved against.
+        self._catalogue_scopes: set[str] = set()
 
     @property
     def requires_live_recall(self) -> bool:
@@ -624,6 +627,17 @@ class FreshnessSnapshot:
             visible = self._visible_recall_paths[scope] = self._with_pending(cached)
         return visible
 
+    def proven_recall_paths(self, scope: str) -> frozenset[str]:
+        """Recall paths the catalogue's checkpoint-proved projection admitted, else none.
+
+        The checkpoint binds the policy version and access fingerprint that
+        admitted each row, so a member needs no per-request symlink and access
+        re-proof to be ranked or counted. Hydrating a hit still re-proves it
+        (`_resolve_page`). A scope that came from the live registry proves nothing here.
+        """
+        projected = self.recall_paths(scope)
+        return projected if scope in self._catalogue_scopes else frozenset()
+
     def admitted_paths(
         self, scope: str, admit_path: Callable[[str], bool],
         *, page_of: Callable[[str], ParsedPage | None] | None = None,
@@ -632,8 +646,10 @@ class FreshnessSnapshot:
 
         Decided once per request and scope. The lanes, the lexical corpus
         statistics, the unit lanes and the outside-KB reserve all read this one
-        set. The set is never kept across requests: a decision can read a live
-        authorization session, so no static key could prove it still holds.
+        set. The set is kept across requests only through the catalogue's
+        published verdicts, and only for a predicate that offers an `Admission`
+        (`published_admission`): it decides the pages whose row changed, and one
+        that reads a live authorization session offers none.
         """
         key = (scope, admit_path)
         admitted = self._admitted.get(key)
@@ -649,12 +665,15 @@ class FreshnessSnapshot:
     ) -> set[str]:
         from . import readiness
 
-        paths = {
+        candidates = {
             path for path in self.recall_paths(scope)
-            if (scope == "vault" or path.startswith(kb_prefix())) and admit_path(path)
+            if scope == "vault" or path.startswith(kb_prefix())
         }
+        paths = self._published_admitted_paths(scope, admit_path, candidates)
+        if paths is None:
+            paths = {path for path in candidates if admit_path(path)}
         if not paths:
-            return paths
+            return set()
         try:
             metadata = _managed_page_metadata(
                 self._root, paths, scope=scope, freshness_key=self.for_scope(scope),
@@ -679,6 +698,24 @@ class FreshnessSnapshot:
             path for path in paths if path in parents
             and ((parent := parents[path]) is None or admit_path(parent))
         }
+
+    def _published_admitted_paths(
+        self, scope: str, admit_path: Callable[[str], bool], candidates: set[str],
+    ) -> set[str] | None:
+        """The candidates the catalogue's published verdicts admit, or None to decide each."""
+        from . import lexstore
+        from .published_admission import admission_of
+
+        admission = admission_of(admit_path)
+        checkpoint = self._expected_recall_checkpoints.get(scope)
+        if admission is None or checkpoint is None or scope not in self._catalogue_scopes:
+            return None
+        # A pending page is newer than its catalogue row, so it is decided here.
+        live = self._pending.paths if self._pending is not None else frozenset()
+        admitted = lexstore.get_store(self._root).published_admitted_paths(
+            scope, checkpoint, admission, candidates, live=live
+        )
+        return None if admitted is None else set(admitted)
 
     def _with_pending(self, projected: frozenset[str]) -> frozenset[str]:
         """Admit committed pending identities and withdraw committed tombstones.
@@ -737,6 +774,7 @@ class FreshnessSnapshot:
                         )
                     self._recall[scope] = expected
                     self._recall_paths[scope] = published_paths
+                    self._catalogue_scopes.add(scope)
                     _set_recall_projection_timing_outcome(self._timings, "admitted")
                     return
                 require_live = self._require_live_recall and not stale
@@ -1359,7 +1397,7 @@ def caller_admission(vault_root: Path) -> Callable[[str], bool] | None:
     who = effective_principal()
     if egress.unrestricted_content_access(vault_root, who):
         return None
-    return lambda path: egress.content_permits(vault_root, path, who)
+    return egress.content_admission(vault_root, who)
 
 
 @governance_policy.request_policy_snapshot()
@@ -2295,6 +2333,7 @@ def find(
                 timings=timings,
                 page_memo=page_memo,
                 select_pages=select_pages,
+                proven=snapshot.proven_recall_paths(walk_scope),
             )
     else:
         with _span(timings, "semantic.search", elapsed_ms_field="entry_ms"):
@@ -4689,6 +4728,7 @@ def _managed_eligible_filter_paths(
         plan=plan,
         candidate_parent_paths=candidate_parents,
         metadata=metadata,
+        proven=snapshot.proven_recall_paths(scope),
     )
 
 
@@ -4820,8 +4860,13 @@ def _metadata_eligible_filter_paths(
     plan: structured_filters.FilterPlan,
     candidate_parent_paths: set[str],
     metadata: dict[str, Any],
+    proven: AbstractSet[str] = frozenset(),
 ) -> set[str]:
-    """Canonical filter evaluation over index views, including parent collapse."""
+    """Canonical filter evaluation over index views, including parent collapse.
+
+    `proven` holds the paths the catalogue's projection already admitted for
+    recall; the symlink and access walk runs only for the others.
+    """
     from . import access
 
     def visible(rel: str) -> bool:
@@ -4829,8 +4874,13 @@ def _metadata_eligible_filter_paths(
         return (
             row is not None
             and row.view is not None
-            and recall_policy.is_recall_candidate(vault_root, vault_root / rel)
-            and access.is_indexable(vault_root, rel)
+            and (
+                rel in proven
+                or (
+                    recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+                    and access.is_indexable(vault_root, rel)
+                )
+            )
         )
 
     eligible: set[str] = set()
@@ -4844,7 +4894,10 @@ def _metadata_eligible_filter_paths(
             row.parent
             if parent is not None
             and parent.view is not None
-            and recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
+            and (
+                row.parent in proven
+                or recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
+            )
             else rel
         )
         if not visible(emitted):
@@ -5119,6 +5172,7 @@ def _find_managed_browse(
     exclude_file_types: list[str] | None,
     page_memo: dict[str, ParsedPage | None] | None = None,
     select_pages: Callable[[list[str]], set[str]] | None = None,
+    proven: AbstractSet[str] = frozenset(),
 ) -> list[Hit]:
     """Order emitted identities before hydrating a bounded answer.
 
@@ -5175,8 +5229,13 @@ def _find_managed_browse(
             visible[rel] = bool(
                 value is not None
                 and value.view is not None
-                and recall_policy.is_recall_candidate(vault_root, vault_root / rel)
-                and access.is_indexable(vault_root, rel)
+                and (
+                    rel in proven
+                    or (
+                        recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+                        and access.is_indexable(vault_root, rel)
+                    )
+                )
             )
         return visible[rel]
 
@@ -5191,7 +5250,10 @@ def _find_managed_browse(
             row.parent
             if parent is not None
             and parent.view is not None
-            and recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
+            and (
+                row.parent in proven
+                or recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
+            )
             else rel
         )
         if not admitted(emitted):
@@ -5417,6 +5479,7 @@ def _find_keyword(
     timings: FindTimings | None = None,
     page_memo: dict[str, ParsedPage | None] | None = None,
     select_pages: Callable[[list[str]], set[str]] | None = None,
+    proven: AbstractSet[str] = frozenset(),
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches.
 
@@ -5458,6 +5521,7 @@ def _find_keyword(
             exclude_file_types=exclude_file_types,
             page_memo=page_memo,
             select_pages=select_pages,
+            proven=proven,
         )
     lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
     if query_norm:
