@@ -271,9 +271,18 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "plan_memory",
         "episode_memory",
         "adoption_studio",
+        # Discards staged originals and pauses assistants: both are irreversible
+        # for the owner, so a client must prompt before it runs the tool.
+        "transfer_memory",
         *({"govern_memory"} if governance_tool_is_destructive() else set()),
     }
 )
+
+#: Who executes a command's work. `cell` is every command that runs in the vault's
+#: own process. `control_plane` marks a command the Cloud gateway serves from the
+#: control plane: a cell lists it so one registry feeds schemas, annotations and
+#: budgets, and refuses a call that reaches it. A closed protocol set, not vocabulary.
+EXECUTORS: tuple[str, ...] = ("cell", "control_plane")
 
 # These operations fetch caller-supplied temporary HTTPS artifact handles.
 # A URL recorded only as source provenance does not make a tool open-world.
@@ -338,6 +347,20 @@ class Command:
     )
     preferred_name: str | None = None
     public_title: str | None = None
+    executor: str = "cell"
+
+    def __post_init__(self) -> None:
+        if self.executor not in EXECUTORS:
+            raise ValueError(f"unknown command executor {self.executor!r}: {self.name}")
+
+    @property
+    def cloud_only(self) -> bool:
+        """True when only a Cloud surface lists the command.
+
+        A control-plane command has no meaning where no control plane serves it, so the
+        executor alone declares the Cloud-only listing; there is no second flag to drift.
+        """
+        return self.executor == "control_plane"
 
     @property
     def public_name(self) -> str:
@@ -372,6 +395,22 @@ class Command:
             self.name, read_only=self.read_only, open_world=self.name in OPEN_WORLD_OPS,
             public_title=self.public_title or self.public_name.replace("_", " ").title(),
         )
+
+
+def gateway_required_error(name: str):
+    """The refusal for a control-plane command that reached a cell.
+
+    Shared by the wrapper and the leaf, so the direct-call envelope has one text.
+    """
+    from .cli_ops import OpError
+
+    return OpError(
+        "CLOUD_GATEWAY_REQUIRED",
+        f"`{name}` runs on the Exomem Cloud control plane, and this call did not pass "
+        "through a gateway that serves it. Nothing was read or changed.",
+        "Call it through your Exomem Cloud connector; if the error persists, the "
+        "operator has not enabled transfer tools, so use Home to import or export.",
+    )
 
 
 def resolve_command(name: str, commands: Iterable[Command]) -> Command | None:
@@ -503,6 +542,23 @@ def bind_vault(
         with context, principal_module.request_scope(principal), principal_module.invocation_scope():
             if command is None:
                 return leaf(*injected, **kwargs)
+            if command.executor == "control_plane":
+                # The gateway answers these before the cell sees them. A call that
+                # arrives anyway is refused here, ahead of the read-only
+                # classifier, the call ledger, the writer lease and any vault
+                # access, so a read-only or paused cell answers the same way.
+                started = time.perf_counter()
+                refusal = gateway_required_error(command.name).as_public_dict()
+                _log_tool_failure(
+                    tool=command.name,
+                    request_id=mcp_request_id(),
+                    code=str(refusal["code"]),
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    message=str(refusal["message"]),
+                )
+                from . import cli_ops
+
+                return cli_ops.envelope(False, error=refusal)
             from .commands import invocation_is_read_only
             from .governance.egress import SelectorCoverageError
             from .writer_lease import invoke_command

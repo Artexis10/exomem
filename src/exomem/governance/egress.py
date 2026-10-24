@@ -5931,6 +5931,10 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "query_dataset",
         "read_media",
         "list_trash",
+        # Control-plane commands: the cell reads no vault for them and only ever
+        # answers CLOUD_GATEWAY_REQUIRED, so there is no vault content to project.
+        "observe_transfer",
+        "transfer_memory",
     }
 )
 

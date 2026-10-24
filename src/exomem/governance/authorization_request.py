@@ -94,6 +94,7 @@ _OPTIONAL_COMMANDS = frozenset(
         "move_file",
         "note",
         "observe_memory",
+        "observe_transfer",  # With transfer_memory: the gateway authorizes these; a cell only refuses them.
         "overview",
         "plan_memory",
         "preserve",
@@ -119,6 +120,7 @@ _OPTIONAL_COMMANDS = frozenset(
         "suggest_links",
         "suggest_relations",
         "transfer_artifact",
+        "transfer_memory",
         "triage_memory",
         "viewer_map",  # The registered graph read uses graph_context's credential rule.
     }
