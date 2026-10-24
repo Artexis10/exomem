@@ -8,25 +8,27 @@ is not here; tuning knobs of the harness itself live next to their use.
 
 from __future__ import annotations
 
+import json
+
 DESIGN = "openspec/changes/compile-context-maps-and-profiles/design.md"
 
 #: "Decision and arms": three arms.
 ARM_IDS: tuple[str, ...] = ("A", "M", "P")
 
 
-def _read_tools() -> tuple[str, ...]:
+def _read_commands() -> tuple:
     from exomem.commands import product_commands_for
 
     commands = {command.name: command for command in product_commands_for("mcp")}
     # The protocol fixes these execution identities; the registry owns discovery names.
     return tuple(
-        commands[name].public_name
+        commands[name]
         for name in ("activate_context", "ask_memory", "read_memory", "browse_memory")
     )
 
 
 #: "Decision and arms": the four read commands, in protocol order.
-READ_TOOLS: tuple[str, ...] = _read_tools()
+READ_TOOLS: tuple[str, ...] = tuple(command.public_name for command in _read_commands())
 
 #: "Decision and arms": the tool that fetches an arm's packet. The hook's
 #: reminder is not a call; this call is, against the pull budget.
@@ -99,3 +101,44 @@ AUDIT_NO_BASIS = AUDIT_EVIDENCE_KINDS[2]
 #: "Measures and judging": the verdict schema's closed values.
 REQUIRED_VERDICTS: tuple[str, ...] = ("used", "missing", "contradicted")
 FORBIDDEN_VERDICTS: tuple[str, ...] = ("asserted_as_current", "mentioned_as_past", "absent")
+
+
+def snapshot() -> dict:
+    """The current protocol values in their recorded JSON representation."""
+    return json.loads(json.dumps({
+        name: value for name, value in globals().items()
+        if name.isupper() and isinstance(value, (int, float, str, tuple))
+    }))
+
+
+def rebind_discovery(recorded: dict) -> tuple[dict, dict]:
+    """Rebind registry spellings only when their ordered execution identities match."""
+    from exomem.commands import product_commands_for, resolve_command
+
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("READ_TOOLS"), list):
+        raise ValueError("the recorded read tools are missing")
+    registered = product_commands_for("mcp")
+    read = _read_commands()
+    resolved = tuple(
+        resolve_command(name, registered) if isinstance(name, str) else None
+        for name in recorded["READ_TOOLS"]
+    )
+    identities = tuple(command.name for command in read)
+    if tuple(command.name if command is not None else None for command in resolved) != identities:
+        raise ValueError("the recorded read tools have different execution identities or order")
+    # The protocol fixes these two adapter fields to its first read command.
+    for field in ("ACTIVATION_TOOL", "P_FILTERED_TOOL"):
+        name = recorded.get(field)
+        command = resolve_command(name, registered) if isinstance(name, str) else None
+        if command is None or command.name != identities[0]:
+            raise ValueError("the recorded activation filter has a different execution identity")
+    projection = {
+        "READ_TOOLS": [command.public_name for command in read],
+        "ACTIVATION_TOOL": read[0].public_name,
+        "P_FILTERED_TOOL": read[0].public_name,
+    }
+    return {**recorded, **projection}, {
+        "surface": "mcp", "execution_names": list(identities),
+        "predecessor": {field: recorded[field] for field in projection},
+        "current": projection,
+    }

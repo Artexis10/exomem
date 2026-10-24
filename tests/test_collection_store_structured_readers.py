@@ -174,6 +174,32 @@ def test_routing_read_cannot_reuse_a_snapshot_for_an_explicit_different_principa
             assert len(record_governance.inventory_collections(store.root)["collections"]) == 1
 
 
+def test_shared_index_cannot_replace_an_active_remote_canonical_snapshot(store):
+    """Maintenance must preserve both the active authority and its previous sidecar."""
+    from exomem import planning
+    from exomem.governance.principal import current_principal
+
+    create(store, "planning")
+    store.append_record(CID, item={"title": "One"}, item_key=KEY, why="plan")
+    write_scope(store.root, paths="Planning/**")
+    write_rule(store.root, ceiling=0)
+    index = working_set_index.WorkingSetIndex(store.root)
+    try:
+        with preview_store(store.root, store.handle) as writer:
+            index.rebuild()
+            before = tuple(index._connect().iterdump())
+            with request_scope(_external()), writer.read_snapshot():
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    index.update()
+                assert current_principal() == _external()
+                assert not collections.discover_collections(store.root)
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    planning.query(store.root, CID)
+            assert tuple(index._connect().iterdump()) == before
+    finally:
+        index.close()
+
+
 @pytest.mark.parametrize("canonical", [False, True])
 def test_bound_resolution_keeps_file_only_and_canonical_authority_distinct(store, canonical):
     if canonical:

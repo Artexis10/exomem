@@ -72,6 +72,9 @@ Missing, withheld, corrupt and unreadable history SHALL remain indistinguishable
 A history read SHALL open entries newest first and stop after one page plus one further admitted entry, without opening older entries.
 A unit-scoped read SHALL also examine no more than a page-derived number of admitted entries per call, so its page MAY be short or empty while `truncated` is true and the caller continues from the continuation.
 A continuation SHALL be the version of the last admitted entry the read examined, never the version of an unavailable entry.
+When admission resolves prose names and the vault-wide name lookup was not current at the start or end of the read, the result SHALL carry `lookup: stale` or `lookup: unavailable`, independent of the page and its entries, and SHALL omit `lookup` when the lookup was current throughout.
+A `stale` read SHALL request the stamped lookup build in the background without walking the vault on the reader's thread.
+A caller that can have content withheld SHALL NOT receive `lookup`, because it changes on every write.
 
 #### Scenario: Two refinements do not create three visible pages
 
@@ -109,6 +112,14 @@ A continuation SHALL be the version of the last admitted entry the read examined
 - **AND** the result never reports `status: unavailable`, because older admitted entries remain unexamined
 - **AND** the caller continues from the `continuation` until a page returns a revision or is not truncated
 - **AND** the continuation names only an admitted entry, so unavailable entries stay indistinguishable from absent ones
+
+#### Scenario: A write leaves name lookup stale
+
+- **WHEN** an unrestricted caller reads history right after any knowledge-base write, and a retained revision's text links a page by name
+- **THEN** the result reports `lookup: stale`, whether or not this page has retained history, and the read schedules the stamped lookup build
+- **AND** the caller repeats the same call rather than paging on, because the continuation skips entries refused for lookup currency
+- **AND** once the build lands, the same call admits the revision and omits `lookup`
+- **AND** a restricted caller receives the same result without `lookup`
 
 ### Requirement: Ordinary agents correct individual claims in their canonical home
 
