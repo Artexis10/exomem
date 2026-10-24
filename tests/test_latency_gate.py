@@ -715,6 +715,10 @@ def _measure_working_set(vault: Path) -> tuple[float, dict]:
 
     call()  # startup warmup is outside the measured steady-state samples
     packets = [call() for _ in range(3)]
+    # Retain the existing measurements after timing, so a failed gate names its cost.
+    for sample, packet in enumerate(packets, 1):
+        measured = {"corpus": vault.name, "sample": sample, "timings": packet["timings"]}
+        print(json.dumps(measured, sort_keys=True))
     return statistics.median(_compiler_ms(packet["timings"]) for packet in packets), packets[-1]
 
 
