@@ -39,12 +39,38 @@ def validate_identity(value: object) -> SourceIdentity:
 
 
 def require_authority(root: Path) -> None:
-    from .governance import egress, principal
+    from .governance import (
+        authorization_session_lifecycle,
+        decisions,
+        egress,
+        policy,
+        principal,
+    )
 
     # Existence and conflict responses would otherwise reveal hidden captures.
     # Restricted callers retain ordinary capture without durable identity.
-    if not egress.unrestricted_content_access(root, principal.effective_principal()):
-        raise SourceCaptureError("SOURCE_IDENTITY_FORBIDDEN: whole-namespace content authority is required")
+    forbidden = "SOURCE_IDENTITY_FORBIDDEN: whole-namespace content authority is required"
+    who = principal.effective_principal()
+    context = who.verified_authorization_session
+    if context is not None and not isinstance(
+        context, authorization_session_lifecycle.AuthorizationSessionContext
+    ):
+        raise SourceCaptureError(forbidden)
+    if not egress.unrestricted_content_access(root, who):
+        raise SourceCaptureError(forbidden)
+    compiled = policy.load(root)
+    if compiled.blocked:
+        raise SourceCaptureError(forbidden)
+    if compiled.empty:
+        return
+    try:
+        purpose = egress._declared_purpose(root, who, None)
+    except egress.AuthorizationSessionDecisionUnavailable:
+        raise SourceCaptureError(forbidden) from None
+    # All scopes conservatively prove namespace authority without selector analysis.
+    if decisions.decide(tuple(compiled.scopes), audience=who.audience_id, purpose=purpose,
+                        policy=compiled, active_grants=compiled.grants).level < egress.LEVEL_FULL:
+        raise SourceCaptureError(forbidden)
 
 
 def capture_digest(root: Path, *, content: str, title: str, source_type: str, url: str | None,

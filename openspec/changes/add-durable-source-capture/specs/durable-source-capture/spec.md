@@ -75,6 +75,11 @@ Legacy Sources MUST NOT be backfilled or deduplicated implicitly.
 ### Requirement: Identity lookup requires whole-namespace content authority
 
 Before identity lookup, callers MUST satisfy existing whole-namespace content authority and the existing creation boundary.
+The authority proof MUST include current RAW authority, connector ceiling and local disclosure policy.
+For a nonempty local policy, all declared scopes MUST permit full disclosure for the current audience and purpose, with standing grants applied.
+This conservative proof MUST refuse even when a restricting scope covers material outside Sources and Evidence.
+Exact-item session grants MUST NOT establish whole-namespace authority.
+Blocked policy, unavailable purpose authority and malformed verified authorization-session context MUST return the same forbidden outcome.
 The system MUST recheck authority before committing.
 The same restriction MUST precede saved invocation replay and invocation-key mismatch checks.
 Restricted callers MUST receive `SOURCE_IDENTITY_FORBIDDEN` without learning whether the identity exists.
@@ -88,6 +93,11 @@ Ordinary capture authority SHALL remain unchanged.
 #### Scenario: Authority changes before commit
 - **WHEN** whole-namespace authority is revoked after lookup and before commit
 - **THEN** capture refuses without writing
+
+#### Scenario: An unrelated namespace is restricted
+- **WHEN** a local policy restricts an unrelated Notes scope for the caller
+- **THEN** identity-enabled capture returns `SOURCE_IDENTITY_FORBIDDEN` even if the capture lanes have no restriction
+- **AND** ordinary capture retains its existing authority rules
 
 #### Scenario: Authority narrows after an earlier capture
 - **WHEN** a restricted caller repeats an existing invocation key with identical or changed capture inputs

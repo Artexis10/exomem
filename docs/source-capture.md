@@ -52,6 +52,12 @@ The scan checks canonical pages in Sources and Evidence. Verified companion bind
 An original's frontmatter cannot supply a capture receipt or classify another page.
 
 Identity-enabled capture requires existing whole-namespace content authority and the existing creation boundary.
+The proof checks RAW authority, the connector ceiling and the current local policy.
+A nonempty local policy must permit full disclosure across all declared scopes for the current audience and purpose, including standing grants.
+This conservative proof also forbids identity reconciliation when an unrelated Notes restriction applies.
+Exact-item session grants cannot prove whole-namespace access.
+
+The server returns the same forbidden outcome for blocked policy, unavailable purpose authority or malformed verified session context.
 The server rechecks authority before commit and returns `SOURCE_IDENTITY_FORBIDDEN` to restricted callers without disclosing existence.
 The same authority check precedes cached replay and invocation-key mismatch checks.
 Restricted callers can continue ordinary capture under its existing authority rules.

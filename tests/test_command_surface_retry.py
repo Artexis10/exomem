@@ -938,9 +938,33 @@ def test_programmatic_mcp_context_has_no_explicit_metadata(monkeypatch):
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_identity_authority_precedes_saved_terminal_and_key_mismatch(vault, source_schema, monkeypatch, explicit):
+@pytest.mark.parametrize("standing_grant", [False, True])
+def test_identity_authority_precedes_saved_terminal_and_key_mismatch(vault, source_schema, monkeypatch, explicit, standing_grant):
     from exomem.commands import product_commands_for
-    from exomem.governance import egress
+    from exomem.governance import policy
+
+    governance = policy.governance_root(vault)
+    scope = governance / "scopes" / "capture.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(json.dumps({
+        "governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "name": "Capture policy", "paths": ["Sources/**"],
+    }))
+    rule = governance / "rules" / "capture.yaml"
+    rule.parent.mkdir(parents=True, exist_ok=True)
+    document = {"governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+                "scope_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+                "audience": principal_module.OWNER_AUDIENCE, "ceiling": 0 if standing_grant else 6}
+    rule.write_text(json.dumps(document))
+    if standing_grant:
+        grant = governance / "grants" / "capture.yaml"
+        grant.parent.mkdir(parents=True, exist_ok=True)
+        grant.write_text(json.dumps({
+            "governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FB1", "kind": "standing",
+            "scope_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+            "audience": principal_module.OWNER_AUDIENCE, "ceiling": 6,
+        }))
+    assert not policy.load(vault).blocked
 
     metadata = {command_surface.MCP_IDEMPOTENCY_META_KEY: "identity-attempt"} if explicit else {}
     monkeypatch.setattr("fastmcp.server.dependencies.get_context", lambda: SimpleNamespace(
@@ -950,12 +974,22 @@ def test_identity_authority_precedes_saved_terminal_and_key_mismatch(vault, sour
     inputs = dict(title="A saved capture", content="Captured text", source_kind="session",
                   source_identity={"system": "archive", "record_id": "new-record", "revision": "r1"})
     assert bound(**inputs)["capture_outcome"] == "created"
-    monkeypatch.setattr(egress, "unrestricted_content_access", lambda *_: False)
+    before = {p: p.read_bytes() for p in (vault / "Knowledge Base/Sources").rglob("*.md")}
+    if standing_grant:
+        grant.unlink()
+    else:
+        document["ceiling"] = 0
+        rule.write_text(json.dumps(document))
+    assert not policy.load(vault).blocked
     repeated = bound(**inputs)
     changed = bound(**{**inputs, "content": "Changed text"})
+    if explicit:
+        metadata[command_surface.MCP_IDEMPOTENCY_META_KEY] = "absent-attempt"
+    absent = bound(**{**inputs, "source_identity": {"system": "archive", "record_id": "absent", "revision": "r1"}})
     assert repeated["error"]["code"] == "SOURCE_IDENTITY_FORBIDDEN"
-    assert changed["error"]["code"] == "SOURCE_IDENTITY_FORBIDDEN"
-    assert "source" not in repeated and "source" not in changed
+    assert changed["error"] == absent["error"] == repeated["error"]
+    assert all("source" not in response for response in (repeated, changed, absent))
+    assert {p: p.read_bytes() for p in (vault / "Knowledge Base/Sources").rglob("*.md")} == before
 
 
 def test_explicit_mcp_keys_are_isolated_by_verified_principal_and_vault(tmp_path, monkeypatch):

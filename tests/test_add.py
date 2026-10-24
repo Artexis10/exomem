@@ -378,6 +378,25 @@ def capture_owner():
         yield
 
 
+def _capture_policy(vault: Path, *, path: str = "Sources/**", ceiling: int = 0) -> None:
+    from exomem.governance import policy, principal
+
+    root = policy.governance_root(vault)
+    scope = root / "scopes" / "capture.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(yaml.safe_dump({
+        "governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "name": "Capture policy", "paths": [path],
+    }))
+    rule = root / "rules" / "capture.yaml"
+    rule.parent.mkdir(parents=True, exist_ok=True)
+    rule.write_text(yaml.safe_dump({
+        "governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "scope_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+        "audience": principal.OWNER_AUDIENCE, "ceiling": ceiling,
+    }))
+
+
 def test_capture_identity_reuses_original_after_metadata_update(vault, source_schema, capture_owner):
     from exomem.commands import op_capture_source
 
@@ -448,16 +467,96 @@ def test_capture_identity_cannot_claim_absence_after_incomplete_scan(vault, sour
     assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
 
 
-def test_capture_identity_restriction_precedes_lookup(vault, source_schema, monkeypatch):
-    from exomem import source_capture
+@pytest.mark.parametrize("restricted_path", ["Sources/**", "Evidence/Nested/**", "Notes/**"])
+def test_capture_identity_policy_hides_matches_conflicts_and_absence(vault, source_schema, capture_owner, restricted_path):
+    from exomem.commands import op_capture_source
+    from exomem.governance import policy
+
+    inputs = dict(title="A captured record", content="Original text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "saved", "revision": "r1"})
+    op_capture_source(vault, source_schema, **inputs)
+    _capture_policy(vault, path=restricted_path)
+    assert not policy.load(vault).blocked
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    errors = []
+    for probe in (inputs, {**inputs, "content": "Changed text"},
+                  {**inputs, "source_identity": {"system": "archive", "record_id": "absent", "revision": "r1"}}):
+        with pytest.raises(ValueError, match="SOURCE_IDENTITY_FORBIDDEN") as refused:
+            op_capture_source(vault, source_schema, **probe)
+        errors.append(str(refused.value))
+    assert len(set(errors)) == 1
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+    ordinary = op_capture_source(vault, source_schema, title="Ordinary capture", content="Text", source_kind="session")
+    assert (vault / ordinary["source"]["path"]).is_file()
+
+
+@pytest.mark.parametrize("standing_grant", [False, True])
+def test_capture_identity_allows_full_policy_and_standing_grants(vault, source_schema, capture_owner, standing_grant):
+    from exomem.commands import op_capture_source
+    from exomem.governance import policy, principal
+
+    _capture_policy(vault, ceiling=0 if standing_grant else 6)
+    if standing_grant:
+        grant = policy.governance_root(vault) / "grants" / "capture.yaml"
+        grant.parent.mkdir(parents=True, exist_ok=True)
+        grant.write_text(yaml.safe_dump({
+            "governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FB1", "kind": "standing",
+            "scope_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+            "audience": principal.OWNER_AUDIENCE, "ceiling": 6,
+        }))
+    compiled = policy.load(vault)
+    assert not compiled.empty and not compiled.blocked
+    inputs = dict(title="Allowed record", content="Text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+    first = op_capture_source(vault, source_schema, **inputs)
+    repeated = op_capture_source(vault, source_schema, **inputs)
+    assert first["capture_outcome"] == "created"
+    assert repeated["capture_outcome"] == "reused"
+    assert repeated["source"]["ref"] == first["source"]["ref"]
+
+
+def test_capture_identity_refuses_a_cold_blocked_policy(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+    from exomem.governance import policy
+
+    _capture_policy(vault, ceiling=9)
+    assert policy.load(vault).blocked
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    with pytest.raises(ValueError, match="SOURCE_IDENTITY_FORBIDDEN"):
+        op_capture_source(vault, source_schema, title="Blocked record", content="Text", source_kind="session",
+                          source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_capture_identity_refuses_malformed_verified_session_context(vault, source_schema):
+    from dataclasses import replace
+
+    from exomem.commands import op_capture_source
+    from exomem.governance import principal
+
+    who = replace(principal.owner_principal(surface="mcp"), verified_authorization_session=object())
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    with principal.request_scope(who), pytest.raises(ValueError, match="SOURCE_IDENTITY_FORBIDDEN"):
+        op_capture_source(vault, source_schema, title="Invalid context", content="Text", source_kind="session",
+                          source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_capture_identity_refuses_unavailable_purpose_authority(vault, source_schema, capture_owner, monkeypatch):
     from exomem.commands import op_capture_source
     from exomem.governance import egress
 
-    monkeypatch.setattr(egress, "unrestricted_content_access", lambda *_: False)
-    monkeypatch.setattr(source_capture, "find_capture", lambda *_: pytest.fail("restricted lookup"))
+    _capture_policy(vault, ceiling=6)
+
+    def unavailable(*_args):
+        raise egress.AuthorizationSessionDecisionUnavailable
+
+    monkeypatch.setattr(egress, "_declared_purpose", unavailable)
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
     with pytest.raises(ValueError, match="SOURCE_IDENTITY_FORBIDDEN"):
-        op_capture_source(vault, source_schema, title="New record", content="Body", source_kind="session",
+        op_capture_source(vault, source_schema, title="Unavailable purpose", content="Text", source_kind="session",
                           source_identity={"system": "archive", "record_id": "new", "revision": "r1"})
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
 
 
 def test_capture_identity_refuses_attachments_before_fetch(vault, source_schema, monkeypatch):
@@ -501,12 +600,12 @@ def test_raw_capture_identity_keeps_the_original_text_digest(vault, source_schem
 
 def test_capture_identity_rechecks_authority_before_commit(vault, source_schema, capture_owner, monkeypatch):
     from exomem.commands import op_capture_source
-    from exomem.governance import egress
 
+    _capture_policy(vault, ceiling=6)
     original = add_module.batch_atomic_write
 
     def revoked(*args, **kwargs):
-        monkeypatch.setattr(egress, "unrestricted_content_access", lambda *_: False)
+        _capture_policy(vault, ceiling=0)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(add_module, "batch_atomic_write", revoked)
