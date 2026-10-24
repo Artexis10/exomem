@@ -802,6 +802,28 @@ Removed from the acknowledgement path:
 - `log.md` read-rewrite;
 - synchronous view index sync (≈ 50–133 ms), which moves to the derived drain.
 
+**Global inventory reuse measurement, 2026-10-24.** Source `714568d8d` already contains the batch implementation and its serving-service regression. The existing regression and the synthetic measurement pass together: two pytest cases in 36.98 s. A dedicated canonical-reflector regression passes separately in 4.56 s. The cell uses a real loopback coordinator, mixed file/store collections, Linux/WSL2 ext4, Python 3.14.6 and SQLite 3.53.1. No product change was needed.
+
+The same public `record_memory(action="inspect")` command runs at three collection counts. The baseline reintroduces one projection parse and routing closure per collection. The parser-only arm shares parsed projection bytes but retains one routing closure per collection. The batch arm uses the shipped implementation. All arms retain the current outer canonical authorization scope, so this ablation does not measure the older scope change. Every answer has equal committed, held and unreflected counts.
+
+Each arm records one projection/parser-cold call, three warm calls and one untimed traced-allocation call. Cold clears those two caches; the service and SQLite remain running. The arms run sequentially in one cell without independent repetition. These are descriptive observations, not an installed or causal gain.
+
+| Visible Records collections | Arm | Cache-cold latency, ms | Warm median, ms | Python traced peak per call, KiB |
+| ---: | --- | ---: | ---: | ---: |
+| 3 | Per-collection parse | 142.26 | 49.44 | 752.9 |
+| 3 | Parser reuse only | 53.32 | 46.92 | 734.7 |
+| 3 | Batch reuse | 55.10 | 44.34 | 1,373.9 |
+| 6 | Per-collection parse | 151.60 | 114.13 | 773.7 |
+| 6 | Parser reuse only | 122.28 | 120.00 | 743.8 |
+| 6 | Batch reuse | 93.92 | 80.70 | 745.7 |
+| 14 | Per-collection parse | 554.88 | 432.28 | 848.0 |
+| 14 | Parser reuse only | 474.39 | 439.45 | 765.9 |
+| 14 | Batch reuse | 184.05 | 162.41 | 774.3 |
+
+At 3, 6 and 14 collections, the paired warm median differences for batch minus parser-only are −1.42, −28.49 and −282.86 ms. Their descriptive 95% bootstrap intervals are [−3.66, −0.11], [−43.53, −26.67] and [−287.15, −256.39] ms. The intervals resample only three paired positions and do not remove arm-order or host-load effects. Parser reuse alone has no established warm gain: its corresponding intervals all include zero.
+
+At 14 visible collections, batching reduces the measured canonical claims censuses from 12 to one per public inventory. The projection parses once on the cache-cold call and zero times on warm calls. The pytest process lifetime peak RSS reaches 240.1 MiB; that is not per-arm memory. The traced peaks are Python allocation evidence, not family RSS. Existing latency targets remain optimization targets. Raw samples, counters, memory labels and limitations are in `docs/verification/collection-inventory-read-reuse.json`.
+
 **Non-uniform collections and fsyncs.** The release-decision cache and the in-transaction `pending_sha256` (§16 A7) keep the budget for non-uniform collections and avoid a second fsync. The P1a.15 gate includes a 10% ref-withheld 10,000-row collection and a Windows/NTFS run. Measure that audience's `COLLECTION_NOT_FOUND` refusal separately from successful appends by an audience authorized for the complete collection; both paths retain the stage and p95 budgets. Partial visibility never authorizes a mutation (§7).
 
 **Coordinated acknowledgement trace, 2026-10-20.** One guarded append ran through the service dispatcher and a real in-process SQLite coordinator on Linux/WSL. The isolated fixture kept views disabled. SQLite trace callbacks observed one store COMMIT and five coordinator COMMIT statements during the acknowledged operation. Four coordinator transactions changed no rows; one changed one row. Python `os.fsync` and `os.fdatasync` recorded no calls. The trace does not measure physical SQLite fsync calls or establish a latency distribution. The report SHA-256 is `3cc0c6a68483719a1490fc8f52dce998c0b8cbc4b60bbc5deedd4e890b023bec`.

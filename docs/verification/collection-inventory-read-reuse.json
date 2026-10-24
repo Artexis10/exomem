@@ -1,0 +1,402 @@
+{
+  "source": "714568d8d3ef1ebeef7300d979c8356b9197ede3",
+  "rows": [
+    {
+      "seeded_claiming_collections": 1,
+      "visible_records_collections": 3,
+      "mode": "per_collection_parse",
+      "projection_cold_ms": 142.2552989970427,
+      "warm_ms": [
+        49.54458700376563,
+        49.43553599878214,
+        44.02033299993491
+      ],
+      "warm_median_ms": 49.43553599878214,
+      "costs": [
+        {
+          "projection_loads": 3,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 3,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 3,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 3,
+          "claims_censuses": 1
+        }
+      ],
+      "python_traced_current_bytes": 46086,
+      "python_traced_peak_bytes": 771008,
+      "process_lifetime_peak_rss_kib": 237352
+    },
+    {
+      "seeded_claiming_collections": 1,
+      "visible_records_collections": 3,
+      "mode": "parser_reuse",
+      "projection_cold_ms": 53.31943800410954,
+      "warm_ms": [
+        47.134293999988586,
+        46.92130599869415,
+        44.445414998335764
+      ],
+      "warm_median_ms": 46.92130599869415,
+      "costs": [
+        {
+          "projection_loads": 1,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        }
+      ],
+      "python_traced_current_bytes": 53952,
+      "python_traced_peak_bytes": 752375,
+      "process_lifetime_peak_rss_kib": 237512
+    },
+    {
+      "seeded_claiming_collections": 1,
+      "visible_records_collections": 3,
+      "mode": "batch_reuse",
+      "projection_cold_ms": 55.103919999965,
+      "warm_ms": [
+        43.47394600335974,
+        45.50260399992112,
+        44.33966400392819
+      ],
+      "warm_median_ms": 44.33966400392819,
+      "costs": [
+        {
+          "projection_loads": 1,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        }
+      ],
+      "python_traced_current_bytes": 91292,
+      "python_traced_peak_bytes": 1406896,
+      "process_lifetime_peak_rss_kib": 238152
+    },
+    {
+      "seeded_claiming_collections": 4,
+      "visible_records_collections": 6,
+      "mode": "per_collection_parse",
+      "projection_cold_ms": 151.599056996929,
+      "warm_ms": [
+        114.1260410004179,
+        120.72235300001921,
+        108.00748700421536
+      ],
+      "warm_median_ms": 114.1260410004179,
+      "costs": [
+        {
+          "projection_loads": 6,
+          "claims_censuses": 4
+        },
+        {
+          "projection_loads": 6,
+          "claims_censuses": 4
+        },
+        {
+          "projection_loads": 6,
+          "claims_censuses": 4
+        },
+        {
+          "projection_loads": 6,
+          "claims_censuses": 4
+        }
+      ],
+      "python_traced_current_bytes": 52406,
+      "python_traced_peak_bytes": 792220,
+      "process_lifetime_peak_rss_kib": 241992
+    },
+    {
+      "seeded_claiming_collections": 4,
+      "visible_records_collections": 6,
+      "mode": "parser_reuse",
+      "projection_cold_ms": 122.28167199646123,
+      "warm_ms": [
+        107.3735640020459,
+        120.00412900670199,
+        125.30135999986669
+      ],
+      "warm_median_ms": 120.00412900670199,
+      "costs": [
+        {
+          "projection_loads": 1,
+          "claims_censuses": 4
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 4
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 4
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 4
+        }
+      ],
+      "python_traced_current_bytes": 55453,
+      "python_traced_peak_bytes": 761678,
+      "process_lifetime_peak_rss_kib": 242152
+    },
+    {
+      "seeded_claiming_collections": 4,
+      "visible_records_collections": 6,
+      "mode": "batch_reuse",
+      "projection_cold_ms": 93.92338400357403,
+      "warm_ms": [
+        80.70203600073,
+        76.47230899601709,
+        96.80790299898945
+      ],
+      "warm_median_ms": 80.70203600073,
+      "costs": [
+        {
+          "projection_loads": 1,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        }
+      ],
+      "python_traced_current_bytes": 43172,
+      "python_traced_peak_bytes": 763596,
+      "process_lifetime_peak_rss_kib": 242152
+    },
+    {
+      "seeded_claiming_collections": 12,
+      "visible_records_collections": 14,
+      "mode": "per_collection_parse",
+      "projection_cold_ms": 554.8815750007634,
+      "warm_ms": [
+        446.7744439971284,
+        432.2810239973478,
+        426.9994640053483
+      ],
+      "warm_median_ms": 432.2810239973478,
+      "costs": [
+        {
+          "projection_loads": 14,
+          "claims_censuses": 12
+        },
+        {
+          "projection_loads": 14,
+          "claims_censuses": 12
+        },
+        {
+          "projection_loads": 14,
+          "claims_censuses": 12
+        },
+        {
+          "projection_loads": 14,
+          "claims_censuses": 12
+        }
+      ],
+      "python_traced_current_bytes": 71879,
+      "python_traced_peak_bytes": 868356,
+      "process_lifetime_peak_rss_kib": 245672
+    },
+    {
+      "seeded_claiming_collections": 12,
+      "visible_records_collections": 14,
+      "mode": "parser_reuse",
+      "projection_cold_ms": 474.38774799957173,
+      "warm_ms": [
+        450.9602000034647,
+        418.7967500038212,
+        439.4474149958114
+      ],
+      "warm_median_ms": 439.4474149958114,
+      "costs": [
+        {
+          "projection_loads": 1,
+          "claims_censuses": 12
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 12
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 12
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 12
+        }
+      ],
+      "python_traced_current_bytes": 63251,
+      "python_traced_peak_bytes": 784267,
+      "process_lifetime_peak_rss_kib": 245832
+    },
+    {
+      "seeded_claiming_collections": 12,
+      "visible_records_collections": 14,
+      "mode": "batch_reuse",
+      "projection_cold_ms": 184.05196799722034,
+      "warm_ms": [
+        168.09914599434705,
+        162.40778100473108,
+        152.30132199940272
+      ],
+      "warm_median_ms": 162.40778100473108,
+      "costs": [
+        {
+          "projection_loads": 1,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        },
+        {
+          "projection_loads": 0,
+          "claims_censuses": 1
+        }
+      ],
+      "python_traced_current_bytes": 59549,
+      "python_traced_peak_bytes": 792876,
+      "process_lifetime_peak_rss_kib": 245832
+    }
+  ],
+  "limits": [
+    "Same current source with per-collection coverage ablations; does not reproduce historical source or remove its outer canonical authorization scope.",
+    "Cold clears projection and manifest parser caches; service and SQLite remain running.",
+    "One sequential workload; three warm samples per arm. Memory is Python tracemalloc per call plus process-lifetime RSS, not per-arm RSS.",
+    "The cell contains one file Records collection, one file Planning collection and an admitted store; the measured Records inventory sees one canonical fixture collection plus each added claiming collection.",
+    "No current private vault, installed release or live service was read. No installed speed or causal gain is established.",
+    "The unit-reported memory peak was 256 KiB and did not credibly cover the Python process; it is excluded. The RSS values come from resource.getrusage(RUSAGE_SELF) and cover this pytest process lifetime."
+  ],
+  "runtime": {
+    "platform": "Linux/WSL2 x86_64, ext4",
+    "python": "3.14.6",
+    "sqlite": "3.53.1"
+  },
+  "execution": {
+    "date": "2026-10-24",
+    "service_test": "tests/test_collection_store_service.py::test_global_inspection_rechecks_canonical_support_and_permissions_without_a_projection_refresh",
+    "pytest": "2 passed in 36.98s",
+    "scope_result": "success",
+    "scope_runtime_seconds": 39.586,
+    "scope_cpu_seconds": 36.085,
+    "memory_limit_mib": 960,
+    "swap_limit_bytes": 0,
+    "reflector_regression": "tests/test_collection_inventory_read_reuse.py::test_inventory_rechecks_withheld_canonical_reflectors",
+    "reflector_pytest": "1 passed in 4.56s",
+    "fixture_correction": "The first new-reflector fixture appended after a reconcile while its due-state carrier was disabled. It failed at the unsupported unchanged-projection expectation; the final fixture commits the reflector before reconcile and verifies fresh row authority without refreshing projection bytes."
+  },
+  "sampling": {
+    "arms_order": [
+      "per_collection_parse",
+      "parser_reuse",
+      "batch_reuse"
+    ],
+    "cache_cold_calls_per_arm": 1,
+    "warm_calls_per_arm": 3,
+    "untimed_tracemalloc_calls_per_arm": 1,
+    "independent_repetitions": 1,
+    "paired_interval": "Descriptive percentile bootstrap over paired warm positions; 27 resamples. Sequential arms share a cell and are not independent replications."
+  },
+  "paired_warm_differences_ms": [
+    {
+      "seeded_claiming_collections": 1,
+      "before": "per_collection_parse",
+      "after": "parser_reuse",
+      "median_after_minus_before": -2.410293003777042,
+      "descriptive_95_interval": [
+        -2.5142300000879914,
+        0.4250819984008558
+      ]
+    },
+    {
+      "seeded_claiming_collections": 1,
+      "before": "parser_reuse",
+      "after": "batch_reuse",
+      "median_after_minus_before": -1.418701998773031,
+      "descriptive_95_interval": [
+        -3.6603479966288432,
+        -0.10575099440757185
+      ]
+    },
+    {
+      "seeded_claiming_collections": 4,
+      "before": "per_collection_parse",
+      "after": "parser_reuse",
+      "median_after_minus_before": -0.7182239933172241,
+      "descriptive_95_interval": [
+        -6.752476998372003,
+        17.293872995651327
+      ]
+    },
+    {
+      "seeded_claiming_collections": 4,
+      "before": "parser_reuse",
+      "after": "batch_reuse",
+      "median_after_minus_before": -28.493457000877243,
+      "descriptive_95_interval": [
+        -43.531820010684896,
+        -26.67152800131589
+      ]
+    },
+    {
+      "seeded_claiming_collections": 12,
+      "before": "per_collection_parse",
+      "after": "parser_reuse",
+      "median_after_minus_before": 4.185756006336305,
+      "descriptive_95_interval": [
+        -13.484273993526585,
+        12.447950990463141
+      ]
+    },
+    {
+      "seeded_claiming_collections": 12,
+      "before": "parser_reuse",
+      "after": "batch_reuse",
+      "median_after_minus_before": -282.86105400911765,
+      "descriptive_95_interval": [
+        -287.1460929964087,
+        -256.38896899909014
+      ]
+    }
+  ]
+}
