@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import add as add_module
 from exomem import audit as audit_module
@@ -13,6 +14,7 @@ from exomem import edit as edit_module
 from exomem import note as note_module
 from exomem import schema as schema_module
 from exomem import set_frontmatter_field as set_frontmatter_module
+from exomem import vault as vault_module
 
 
 def _compiled(*sources: str, include_field: bool = True) -> str:
@@ -33,6 +35,7 @@ def _captured(
     *,
     page_type: str = "source",
     identity: str | None = None,
+    ingested_into: str = "ingested_into: []",
 ) -> str:
     target = root / rel
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -43,7 +46,7 @@ def _captured(
                 "---",
                 f"type: {page_type}",
                 f"exomem_id: {identity}",
-                "ingested_into: []",
+                ingested_into,
                 "---",
                 "",
                 "# Captured original",
@@ -215,6 +218,56 @@ def test_capture_then_cite_updates_both_sides(vault: Path) -> None:
     assert (vault / result.path).is_file()
     source_text = (vault / source_rel).read_text(encoding="utf-8")
     assert "[[Knowledge Base/Notes/Insights/capture-then-cite]]" in source_text
+
+
+def test_backref_keeps_a_default_style_ingested_into_list_readable(vault: Path) -> None:
+    """PyYAML writes block lists unindented and folds long items; a source in that
+    style used to come back unparseable, which broke every later write that cites it."""
+    source_rel = "Knowledge Base/Sources/Articles/default-yaml-style.md"
+    short = "[[Knowledge Base/Notes/Insights/earlier-short]]"
+    long = (
+        "[[Knowledge Base/Notes/Insights/"
+        + "an earlier conclusion with a long title " * 3
+        + "end]]"
+    )
+    _captured(
+        vault,
+        source_rel,
+        ingested_into=yaml.safe_dump({"ingested_into": [short, long]}).rstrip("\n"),
+    )
+    written = (vault / source_rel).read_text(encoding="utf-8")
+    assert "\n- " in written  # unindented items
+    assert any(line.startswith("  ") for line in written.splitlines())  # folded item
+
+    created = _remember(
+        vault, title="Cites a default style source", sources=[source_rel.removesuffix(".md")]
+    )
+
+    new_link = f"[[{created.path.removesuffix('.md')}]]"
+    frontmatter, _body, _raw = vault_module.parse_frontmatter(
+        (vault / source_rel).read_text(encoding="utf-8"), strict=True
+    )
+    assert frontmatter["ingested_into"] == [short, long, new_link]
+    edit_module.edit(
+        vault,
+        path=created.path,
+        why="a later governed write re-reads the cited source",
+        old_string="A compiled conclusion.",
+        new_string="A clearer compiled conclusion.",
+    )
+
+
+def test_backref_leaves_a_source_it_cannot_extend_byte_identical(vault: Path) -> None:
+    source_rel = "Knowledge Base/Sources/Articles/unextendable.md"
+    _captured(vault, source_rel, ingested_into="ingested_into: legacy-pointer")
+    before = (vault / source_rel).read_bytes()
+
+    created = _remember(
+        vault, title="Cites an unextendable source", sources=[source_rel.removesuffix(".md")]
+    )
+
+    assert (vault / created.path).is_file()
+    assert (vault / source_rel).read_bytes() == before
 
 
 def test_writer_preserves_external_value_in_shared_public_refusal(vault: Path) -> None:

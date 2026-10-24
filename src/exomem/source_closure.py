@@ -220,30 +220,6 @@ def inspect_source_closure(
     return SourceClosureInspection(values, tuple(resolved), tuple(unresolved))
 
 
-def _append_backref(source: str, wikilink: str) -> str:
-    """Surgically add one governed derived-page link to `ingested_into`."""
-    if wikilink in source:
-        return source
-    inline = re.search(r"(?m)^(ingested_into:\s*)\[([^\n]*)\]\s*$", source)
-    if inline is not None:
-        existing = inline.group(2).strip()
-        value = f'"{wikilink}"'
-        replacement = (
-            inline.group(1) + f"[{existing}, {value}]"
-            if existing
-            else inline.group(1) + f"[{value}]"
-        )
-        return source[: inline.start()] + replacement + source[inline.end() :]
-    block = re.search(r"(?m)^ingested_into:\s*$", source)
-    if block is None:
-        return source
-    line_end = source.find("\n", block.end())
-    insertion = f'\n  - "{wikilink}"'
-    if line_end == -1:
-        return source + insertion
-    return source[:line_end] + insertion + source[line_end:]
-
-
 def _remove_backref(source: str, wikilink: str) -> str:
     escaped = re.escape(wikilink)
     updated = re.sub(
@@ -279,7 +255,7 @@ def _backref_writes(
         item = final_by_path.get(path) or prior_by_path[path]
         updated = item.source
         if path in final_by_path and item.supports_backref:
-            updated = _append_backref(updated, wikilink)
+            updated = vault.append_frontmatter_list_item(updated, "ingested_into", wikilink)
         elif path not in final_by_path and item.supports_backref:
             updated = _remove_backref(updated, wikilink)
         # A no-op guarded write is intentional for captured material without a

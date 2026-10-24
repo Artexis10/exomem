@@ -63,6 +63,7 @@ from .vault import (
     InvalidSlugError,
     PlannedWrite,
     WikilinkResolver,
+    append_frontmatter_list_item,
     batch_atomic_write,
     canonical_vault_rel,
     content_hash,
@@ -778,12 +779,12 @@ def _legacy_note(
             warnings.append(f"source not found, ingested_into back-ref skipped: {src}")
             continue
         original = src_path.read_text(encoding="utf-8")
-        updated = _append_to_ingested_into(original, new_note_wikilink)
+        updated = append_frontmatter_list_item(original, "ingested_into", new_note_wikilink)
         if updated != original:
             writes.append(PlannedWrite(path=src_path, content=updated))
             backrefs_planned += 1
         else:
-            warnings.append(f"could not locate ingested_into: field in {src}, back-ref skipped")
+            warnings.append(f"could not safely append to ingested_into: in {src}, back-ref skipped")
 
     # Top index.md Recent activity + log.md entry.
     top_index = kb / "index.md"
@@ -1258,64 +1259,6 @@ def _render_note(
     lines.append(ensure_canonical_h1(content, title))
     lines.append("")
     return "\n".join(lines)
-
-
-# ---------------- ingested_into back-ref ----------------
-
-
-_INGESTED_FLOW_PATTERN = re.compile(r"^(ingested_into:\s*)(\[\s*\]|\[[^\]\n]*\])\s*$", re.MULTILINE)
-_INGESTED_BLOCK_HEADER_PATTERN = re.compile(r"^(ingested_into:)\s*$", re.MULTILINE)
-
-
-def _append_to_ingested_into(text: str, new_wikilink: str) -> str:
-    """Append `new_wikilink` (e.g. "[[Knowledge Base/Notes/...]]") to the
-    ingested_into: list in a source file's frontmatter. Idempotent.
-
-    Handles two YAML shapes:
-    - Flow:  `ingested_into: []`  or  `ingested_into: ["[[A]]"]`
-    - Block: `ingested_into:\n  - "[[A]]"\n  - "[[B]]"`
-
-    Empty flow `[]` is converted to block form on first append. Returns the
-    text unchanged if no match is found (caller surfaces this as a warning).
-    """
-    if new_wikilink in text:
-        return text  # already linked; idempotent
-
-    flow_match = _INGESTED_FLOW_PATTERN.search(text)
-    if flow_match:
-        prefix, current = flow_match.group(1), flow_match.group(2).strip()
-        inner = current.strip("[]").strip()
-        items: list[str]
-        if not inner:
-            items = []
-        else:
-            items = [s.strip().strip('"').strip("'") for s in inner.split(",")]
-        items.append(new_wikilink)
-        # Convert to block form for readability (and to keep wikilink quoting clean).
-        block_lines = [prefix.rstrip().rstrip(":") + ":"] + [f'  - "{item}"' for item in items]
-        replacement = "\n".join(block_lines)
-        return text[: flow_match.start()] + replacement + text[flow_match.end() :]
-
-    block_match = _INGESTED_BLOCK_HEADER_PATTERN.search(text)
-    if block_match:
-        # Find the end of the block list (first non-`  - ...` line or blank).
-        body_start = block_match.end()
-        # Walk forward line-by-line to find where the block ends.
-        cursor = body_start
-        while cursor < len(text):
-            line_end = text.find("\n", cursor + 1)
-            if line_end == -1:
-                line_end = len(text)
-            line = text[cursor + 1 : line_end] if text[cursor] == "\n" else text[cursor:line_end]
-            stripped = line.lstrip()
-            if stripped.startswith("- "):
-                cursor = line_end
-            else:
-                break
-        insertion = f'\n  - "{new_wikilink}"'
-        return text[:cursor] + insertion + text[cursor:]
-
-    return text  # no match, signal caller
 
 
 # ---------------- sources normalization & resolution ----------------

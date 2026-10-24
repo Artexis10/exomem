@@ -34,6 +34,13 @@ This adds documentation and a small example to maintain, rather than a new persi
 Collection creation and guarded edits retain their existing authority rules.
 `add-governed-curation-lane` supplies multi-step execution when a repair needs it; a single edit uses its existing writer directly.
 
+### Engagement owns incident filing
+
+The source-backed correction is always the agent's behaviour. Filing the miss in an incident collection follows the active engagement: a user request, a workflow skill, or a policy that delegates filing observed outcomes.
+An unrequested incident write would exceed the engagement contract, and at a balanced policy the product already asks before filing a strong incident route.
+The correction's reason, history record and receipt stay available, so an engaged session can link them later.
+A write-time carrier would need the server to decide that an edit is a miss correction, which this change forbids, and the tool and instruction budgets have no room for passive prose that agents ignored in practice.
+
 ### Diagnose before selecting the correction
 
 The agent records the observed request, actual available context, source-backed expectation, and missing evidence at the permitted disclosure level.

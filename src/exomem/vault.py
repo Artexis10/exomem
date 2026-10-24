@@ -7636,6 +7636,87 @@ def render_frontmatter_document(
     return f"---{newline}{block}{newline}---{newline}{lead}{body}"
 
 
+def append_frontmatter_list_item(text: str, key: str, value: str) -> str:
+    """Append `value` to the frontmatter list `key` of a page, or return `text` unchanged.
+
+    The page changes only by the appended item: a captured source is immutable
+    to every governed tool, so a YAML round trip that reflowed it would be a
+    wider write than the one the caller asked for. The YAML parser therefore
+    reports where the list ends, and the edit inserts one item there. A block
+    list gains a line at its existing items' indent, a flow list keeps its
+    flow form, and an empty `key:` becomes a block list.
+
+    The result is accepted only when the strict frontmatter parser reads it as
+    the old mapping with exactly `value` added at the end of `key`. Otherwise
+    (no frontmatter, unreadable YAML, `key` absent or not a list, a layout the
+    insert cannot extend, or `value` already listed) the input comes back as
+    is, so a caller never writes a page that no longer parses.
+    """
+    match = _FM_PATTERN.match(text)
+    if match is None:
+        return text
+    try:
+        before, _body, _raw = parse_frontmatter(text, strict=True)
+    except FrontmatterError:
+        return text
+    if key not in before:
+        return text
+    current = before[key]
+    if current is None:
+        items: list[Any] = []
+    elif isinstance(current, list):
+        items = current
+    else:
+        return text
+    if value in items:
+        return text
+
+    block = match.group(1)
+    try:
+        root = yaml.compose(block)
+    except yaml.YAMLError:
+        return text
+    if not isinstance(root, yaml.MappingNode):
+        return text
+    node = next((val for name, val in root.value if name.value == key), None)
+    newline = document_newline(block)
+    quoted = json.dumps(value, ensure_ascii=False)
+    if isinstance(node, yaml.SequenceNode) and node.flow_style:
+        if node.value:
+            at, insertion = node.value[-1].end_mark.index, f", {quoted}"
+        else:
+            at, insertion = node.start_mark.index + 1, quoted
+    elif isinstance(node, yaml.SequenceNode):
+        dash = " " * node.start_mark.column
+        at = node.end_mark.index
+        if at > 0 and block[at - 1] == "\n":
+            insertion = f"{dash}- {quoted}{newline}"
+        elif (line_end := block.find("\n", at)) == -1:
+            at, insertion = len(block), f"{newline}{dash}- {quoted}"
+        else:
+            at, insertion = line_end + 1, f"{dash}- {quoted}{newline}"
+    elif isinstance(node, yaml.ScalarNode):
+        # Only a None value reaches here: an empty value or a null spelling (`~`,
+        # `null`). Drop the spelling so the new block list is the key's only value.
+        block = block[: node.start_mark.index] + block[node.end_mark.index :]
+        at = block.find("\n", node.start_mark.index)
+        if at == -1:
+            at = len(block)
+        elif block[at - 1] == "\r":
+            at -= 1
+        insertion = f"{newline}  - {quoted}"
+    else:
+        return text
+
+    patched = block[:at] + insertion + block[at:]
+    candidate = text[: match.start(1)] + patched + text[match.end(1) :]
+    try:
+        after, _body, _raw = parse_frontmatter(candidate, strict=True)
+    except FrontmatterError:
+        return text
+    return candidate if after == {**before, key: [*items, value]} else text
+
+
 def _find_log_separator(log_text: str) -> tuple[int, str]:
     """Locate the log's header separator whatever line endings the file carries.
 
