@@ -226,19 +226,24 @@ def _eligible_page(index: int, project: str = "open-project") -> str:
     )
 
 
-def _limited_client(login: OriginSessionBinding | None = None) -> RequestPrincipal:
+def _limited_client(
+    login: OriginSessionBinding | None = None, client_id: str = "limited"
+) -> RequestPrincipal:
     return RequestPrincipal(
         audience_id="owner", surface="mcp", resolved=True, issuer_family="oauth",
-        remote_owner=True, client_binding=ClientBinding(ISSUER, "limited"),
+        remote_owner=True, client_binding=ClientBinding(ISSUER, client_id),
         origin_session=login or OriginSessionBinding("login-1", "1", "audience"),
     )
 
 
-def _write_boundary(config: Path, *, denied: list[str]) -> None:
+def _write_boundary(config: Path, *, denied: list[str], open_client: bool = False) -> None:
+    clients = [{"issuer": ISSUER, "client_id": "limited", "denied_scope_ids": denied}]
+    if open_client:
+        clients.append({"issuer": ISSUER, "client_id": "open", "denied_scope_ids": []})
     config.write_text(json.dumps({
         "version": 1, "default_denied_scope_ids": [DENIED_SCOPE],
         "capture_paths": ["Knowledge Base/Capture"],
-        "clients": [{"issuer": ISSUER, "client_id": "limited", "denied_scope_ids": denied}],
+        "clients": clients,
     }), encoding="utf-8")
 
 
@@ -310,11 +315,14 @@ def _edit_and_republish(vault: Path, warm_managed_cell, rel: str, text: str) -> 
     warm_managed_cell(vault)
 
 
-def _published(vault: Path, checkpoint=None, *, live: frozenset[str] = frozenset()):
-    """The pages the limited client's published verdicts admit, as ranking receives them."""
+def _published(
+    vault: Path, checkpoint=None, *, live: frozenset[str] = frozenset(),
+    who: RequestPrincipal | None = None,
+):
+    """The pages a client's published verdicts admit, as ranking receives them."""
     store = lexstore.get_store(vault)
     current = store.published_recall_checkpoint("kb")
-    who = _limited_client()
+    who = who or _limited_client()
     with request_scope(who):
         admission = egress.content_admission(vault, who).admission
         candidates = store.recall_admitted_paths("kb", current)
@@ -372,6 +380,15 @@ def test_two_logins_of_one_client_share_the_published_verdicts(
     _insights(vault, _limited_client(OriginSessionBinding("login-2", "7", "audience")))
 
     assert floors == [], "the floors read the denied scopes, not which login asked"
+
+
+def test_a_less_restricted_client_never_lends_its_verdicts_to_a_restricted_one(
+    vault: Path, boundary: Path
+) -> None:
+    _write_boundary(boundary, denied=[DENIED_SCOPE], open_client=True)
+    assert PRIVATE_PAGE in _published(vault, who=_limited_client(client_id="open"))
+
+    assert PRIVATE_PAGE not in _published(vault), "the open client's verdict reached a denied one"
 
 
 def test_a_boundary_change_decides_afresh_in_both_directions(vault: Path, boundary: Path) -> None:
