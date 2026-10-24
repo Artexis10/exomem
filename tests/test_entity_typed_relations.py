@@ -144,3 +144,102 @@ def test_cli_passes_relations_as_json_objects(
     assert code == 0, out
     page = vault / json.loads(out)["data"]["path"]
     assert _relations_section(page) == [f"- part_of [[{target}]]"]
+
+
+def test_bare_title_target_resolves_and_collapses_like_connections(vault: Path) -> None:
+    target = _create_target(vault)
+
+    created = commands.op_connect_memory(
+        vault,
+        operation="create-entity",
+        entity_type="concept",
+        name="Mooring Census",
+        summary="A synthetic count that supports the tidal ledger.",
+        relations=[
+            {"kind": "supports", "target": "Tidal Ledger"},
+            {"kind": "supports", "target": target},
+        ],
+    )
+
+    assert _relations_section(vault / created["path"]) == [f"- supports [[{target}]]"]
+
+
+def test_an_unclosed_fence_in_the_summary_cannot_hide_authored_edges(vault: Path) -> None:
+    target = _create_target(vault)
+
+    with pytest.raises(ValueError, match="INVALID_LINK: .*close every code fence"):
+        commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="concept",
+            name="Slipway Notes",
+            summary="A synthetic concept whose summary opens a fence:\n```text\nnever closed",
+            relations=[{"kind": "part_of", "target": target}],
+        )
+
+    assert not (vault / ENTITIES / "Slipway Notes.md").exists()
+
+
+def test_relations_must_be_a_list(vault: Path) -> None:
+    with pytest.raises(ValueError, match=r"INVALID_LINK: relations must be a list"):
+        commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="concept",
+            name="Anchor Register",
+            summary="A synthetic concept sent the REST object shape by mistake.",
+            relations={},
+        )
+
+
+def test_read_operation_refuses_relations_unless_empty(vault: Path) -> None:
+    with pytest.raises(ValueError, match="INVALID_SCHEMA_ARGUMENT: relations requires create-entity"):
+        commands.op_connect_memory(vault, operation="context", query="tidal ledger", relations={})
+    # An empty list is the unset value, so a read operation still accepts it.
+    commands.op_connect_memory(vault, operation="context", query="tidal ledger", relations=[])
+
+
+def test_malformed_connection_keeps_the_relation_finding(vault: Path) -> None:
+    with pytest.raises(ValueError, match="malformed_relation"):
+        commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="concept",
+            name="Dock Ledger",
+            summary="A synthetic concept whose connection packs two links into one value.",
+            connections=["[[Tidal Ledger]], [[Quay Inventory]]"],
+        )
+
+
+def test_curation_plan_authors_typed_relations_through_the_entity_leaf(vault: Path) -> None:
+    from exomem import curation
+
+    target = _create_target(vault)
+    proposed = curation.propose(
+        vault,
+        {
+            "version": 1,
+            "title": "Typed entity curation",
+            "steps": [
+                {
+                    "step_id": "entity",
+                    "kind": "create-entity",
+                    "args": {
+                        "entity_type": "concept",
+                        "name": "Ballast Review",
+                        "summary": "A synthetic review that belongs to the tidal ledger.",
+                        "relations": [{"kind": "part_of", "target": target}],
+                    },
+                }
+            ],
+        },
+    )
+    result = curation.apply(
+        vault,
+        run_id=proposed["run_id"],
+        plan_id=proposed["plan_id"],
+        expected_plan_fingerprint=proposed["plan_fingerprint"],
+        why="Approved exact plan.",
+    )
+
+    assert _relations_section(vault / result["step"]["path"]) == [f"- part_of [[{target}]]"]

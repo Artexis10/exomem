@@ -71,7 +71,7 @@ def test_open_world_hint_matches_external_download_capability(
 
 def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     ann = _live_annotations(_build_server(monkeypatch, tmp_path))
-    for cmd in commands_module.PRODUCT_COMMANDS:
+    for cmd in commands_module.product_commands_for("mcp"):
         if "mcp" not in cmd.surfaces:
             continue  # note: hand-registered for MCP, checked below
         assert ann[cmd.public_name]["readOnlyHint"] is cmd.read_only, (
@@ -87,7 +87,7 @@ def test_destructive_hint_only_for_overwrite_ops(
     # Composite workflows can execute replacement/supersession, not only append.
     assert ann["episode_memory"]["destructiveHint"] is True
     assert ann["adoption_studio"]["destructiveHint"] is True
-    for cmd in commands_module.PRODUCT_COMMANDS:
+    for cmd in commands_module.product_commands_for("mcp"):
         if "mcp" not in cmd.surfaces or cmd.read_only:
             continue
         expected = cmd.name in commands_module.DESTRUCTIVE_OPS
@@ -133,7 +133,7 @@ def test_product_titles_reach_both_mcp_title_fields(
 ) -> None:
     tools = asyncio.run(_build_server(monkeypatch, tmp_path).list_tools())
     wire = {tool.name: tool.to_mcp_tool() for tool in tools}
-    for command in commands_module.PRODUCT_COMMANDS:
+    for command in commands_module.product_commands_for("mcp"):
         if "mcp" not in command.surfaces:
             continue
         assert command.public_title

@@ -35,6 +35,7 @@ import scratch_root  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
+CLOUD_ONLY_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_cloud_only_tool_schemas.json"
 TOOL_SURFACE_CONTRACT_PATH = REPO_ROOT / "src" / "exomem" / "tool_surface_contract.json"
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 SRC_PATH = REPO_ROOT / "src"
@@ -44,7 +45,7 @@ if str(SRC_PATH) not in sys.path:
 from exomem import tool_surface  # noqa: E402 - src path is inserted above
 
 
-def _build_server(vault_root: Path, state_root: Path):
+def _build_server(vault_root: Path, state_root: Path, *, cloud: bool = False):
     """Build the server exactly as the fidelity test does (deterministic env)."""
     from exomem import server as server_module
 
@@ -61,6 +62,12 @@ def _build_server(vault_root: Path, state_root: Path):
     os.environ.pop("EXOMEM_DISABLE_TIER2", None)  # tier-2 ON
     os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(state_root)
     os.environ["EXOMEM_VAULT_PATH"] = str(vault_root)
+    if cloud:
+        os.environ["EXOMEM_CLOUD_CELL"] = "1"
+        os.environ["EXOMEM_CLOUD_CELL_ID"] = "schema-fixture"
+        os.environ["EXOMEM_CLOUD_CELL_TOKEN"] = "x" * 40
+    else:
+        os.environ.pop("EXOMEM_CLOUD_CELL", None)
     return server_module.build_server(require_auth=False)
 
 
@@ -72,6 +79,27 @@ def _live_schemas(mcp) -> dict[str, dict]:
         mt = t.to_mcp_tool().model_dump(mode="json", by_alias=True)
         out[t.name] = {"description": mt["description"], "inputSchema": mt["inputSchema"]}
     return out
+
+
+def _cloud_only_schemas(mcp) -> dict[str, dict]:
+    """The Cloud-only control-plane tools, with the annotations a client reads.
+
+    These tools are absent from every other surface, so the baseline above cannot hold
+    them; the Cloud gateway lane syncs its tool names and action enums from this file.
+    """
+    from exomem import commands as commands_module
+
+    names = {c.public_name for c in commands_module.PRODUCT_COMMANDS if c.cloud_only}
+    out: dict[str, dict] = {}
+    for tool in asyncio.run(mcp.list_tools()):
+        if tool.name in names:
+            wire = tool.to_mcp_tool().model_dump(mode="json", by_alias=True, exclude_none=True)
+            out[tool.name] = {
+                "description": wire["description"],
+                "inputSchema": wire["inputSchema"],
+                "annotations": wire["annotations"],
+            }
+    return dict(sorted(out.items()))
 
 
 def _discovery_contract(mcp) -> dict[str, object]:
@@ -95,6 +123,12 @@ def main() -> None:
             mcp = _build_server(vault_root, temp_root / "writer-lease")
             schemas = _live_schemas(mcp)
             discovery_contract = _discovery_contract(mcp)
+            from exomem import writer_lease
+
+            writer_lease.reset_managers_for_tests()
+            cloud_only = _cloud_only_schemas(
+                _build_server(vault_root, temp_root / "cloud-writer-lease", cloud=True)
+            )
         finally:
             # Building discovery starts the normal lease lifecycle. Close its
             # SQLite handle before TemporaryDirectory removes the fixture on
@@ -115,12 +149,18 @@ def main() -> None:
         encoding="utf-8",
         newline="\n",  # keep the committed fixture LF even when run on Windows
     )
+    CLOUD_ONLY_FIXTURE_PATH.write_text(
+        json.dumps(cloud_only, ensure_ascii=False, indent=2, sort_keys=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     TOOL_SURFACE_CONTRACT_PATH.write_text(
         json.dumps(discovery_contract, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
         newline="\n",
     )
     print(f"wrote {len(schemas)} tool schemas to {FIXTURE_PATH.relative_to(REPO_ROOT)}")
+    print(f"wrote {len(cloud_only)} Cloud-only tool schemas to {CLOUD_ONLY_FIXTURE_PATH.relative_to(REPO_ROOT)}")
     print(
         "wrote MCP discovery fingerprint "
         f"{discovery_contract['sha256']} to "

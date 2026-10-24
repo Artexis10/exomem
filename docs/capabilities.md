@@ -8,8 +8,8 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 33
-- Tier 1 commands: 29
+- Product commands: 35
+- Tier 1 commands: 31
 - Tier 2 commands: 4
 - Registry-generated MCP commands: 33
 - REST commands: 32
@@ -70,6 +70,8 @@ See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the
 | plan_memory | 1 | MCP, REST, CLI | write | yes | - | plan_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, lifecycle, hierarchy_mode, hierarchy_depth, hierarchy_limit, continuation, include_agent_history, output_format, item, plan_id, expected_manifest_hash, expected_container_hash, acknowledged_gap_codes, body, changes, transition, expected_item_version, response_detail | Manage intent; record_memory holds outcomes. |
 | query_dataset | 2 | MCP, REST, CLI | read | no | path | query_data | path*, record_path, filters, columns, sort_by, descending, limit, offset, aggregate, date_from, date_to, date_column | Query a vault CSV, TSV or JSON dataset. |
 | read_media | 2 | MCP | read | no | path | get_video_frames | path*, max_frames, start_sec, end_sec | Read sampled video images inline (MCP only). |
+| observe_transfer | 1 | MCP (Cloud only) | read | no | - | - | action, import_id | Check or start moving material into or out of this Exomem Cloud memory. |
+| transfer_memory | 1 | MCP (Cloud only) | write | yes | - | - | action*, import_id, export_id, confirm | Cancel or discard an import, or request an export of this Exomem Cloud memory. |
 
 ## Semantic Authoring Command Contract
 

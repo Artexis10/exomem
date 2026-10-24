@@ -51,7 +51,7 @@ The cell SHALL register only the MCP endpoint, `GET /health` and `GET /health/re
 
 ### Requirement: A cloud cell publishes the product surface minus technical exclusions
 
-A cloud cell SHALL publish the standard product tool surface, minus the members of `CLOUD_SURFACE_EXCLUSIONS`. Every exclusion SHALL record the command, the technical reason it cannot work in a cell, and the condition that lifts it. An exclusion MUST NOT exist only because some profile pins its membership.
+A cloud cell SHALL publish the standard product tool surface, minus the members of `CLOUD_SURFACE_EXCLUSIONS`. *Amended 2026-10-24 by `add-cloud-transfer-tools`:* it SHALL also publish the Cloud-only commands whose registry `executor` is `control_plane` (`observe_transfer` and `transfer_memory`), which the Cloud gateway serves; a call that reaches the cell is refused with `CLOUD_GATEWAY_REQUIRED` before any cell work. Every exclusion SHALL record the command, the technical reason it cannot work in a cell, and the condition that lifts it. An exclusion MUST NOT exist only because some profile pins its membership.
 
 #### Scenario: Excluded command
 
@@ -60,6 +60,7 @@ A cloud cell SHALL publish the standard product tool surface, minus the members 
 - **AND** `adopt_vault` is present for staged import adoption
 - **AND** `process_media` is present for the cell's documents and OCR jobs
 - **AND** every other product tool, including `configure_memory` and `activate_context`, is present
+- **AND** `observe_transfer` and `transfer_memory` are present
 
 ### Requirement: A cloud cell can serve read-only
 

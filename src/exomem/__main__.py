@@ -292,6 +292,9 @@ def _dispatch_main(raw: list[str]) -> int:
     if raw and raw[0] == "collections":
         return _collections_main(raw[1:])
     if raw and raw[0] == "cloud":
+        if raw[1:2] == ["export"]:
+            from .cloud_export_client import main as cloud_export_main
+            return cloud_export_main(raw[2:])
         from .cloud_import_client import main as cloud_main
         return cloud_main(raw[1:])
     if raw and raw[0] == "cell-import":
