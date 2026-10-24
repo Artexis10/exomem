@@ -124,6 +124,22 @@ def _portability_code(error: vault_portability.PortabilityError) -> str:
     return EXPORT_FAILED
 
 
+def _failure_diagnostic(error: Exception) -> dict:
+    """Keep code identifiers for operators, never exception text or file paths."""
+    detail = {"type": type(error).__name__}
+    frame = error.__traceback__
+    while frame is not None:
+        detail["function"] = frame.tb_frame.f_code.co_name
+        frame = frame.tb_next
+    if isinstance(error, vault_portability.PortabilityError):
+        detail["code"] = error.code
+        if error.limit is not None:
+            detail["limit"] = error.limit
+    if isinstance(error, OSError) and error.errno is not None:
+        detail["errno"] = error.errno
+    return detail
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="exomem cell-export")
     parser.add_argument("--export-id", required=True)
@@ -150,10 +166,10 @@ def main(argv: list[str] | None = None) -> int:
                                part_urls=args.part_urls, part_bytes=args.part_bytes,
                                max_bytes=args.max_bytes), **usage}
     except ExportRefused as error:
-        result = {"error": error.code, **usage}
+        result = {"error": error.code, "diagnostic": _failure_diagnostic(error), **usage}
     except vault_portability.PortabilityError as error:
-        result = {"error": _portability_code(error), **usage}
-    except Exception:  # noqa: BLE001 -- messages may carry member names or signed URLs
-        result = {"error": EXPORT_FAILED, **usage}
+        result = {"error": _portability_code(error), "diagnostic": _failure_diagnostic(error), **usage}
+    except Exception as error:  # noqa: BLE001 -- only code identifiers leave the Job
+        result = {"error": EXPORT_FAILED, "diagnostic": _failure_diagnostic(error), **usage}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")
     return 1 if "error" in result else 0

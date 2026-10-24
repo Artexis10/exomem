@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import errno
 import hashlib
 import ipaddress
 import json
@@ -123,6 +124,8 @@ def test_the_cells_size_bounds_the_export_in_place_of_the_default_limit(vault, t
     status, report = _cell_export(vault, tmp_path, storage, part_bytes=64 * 1024, max_bytes=100,
                                   urls=[f"{storage['base']}/cells/{CELL}/exports/archive.zip?partNumber=1"])
     assert status == 1 and report["error"] == "EXPORT_FAILED"
+    assert report["diagnostic"]["code"] == "RESOURCE_LIMIT_EXCEEDED"
+    assert report["diagnostic"]["limit"] == "max_total_bytes"
     assert storage["parts"] == {}
 
 
@@ -148,3 +151,23 @@ def test_the_part_digest_matches_cellctls_vector():
     """Defect: the cell and cellctl disagree on the digest, so every export fails."""
     assert cloud_export.etag_digest(['"0cc175b9c0f1b6a831c399e269772661"',
                                      '"92eb5ffee6ae2fec3ad71c777531578f"']) == DIGEST_VECTOR
+
+
+def test_a_job_failure_reports_its_cause_without_source_paths_or_urls(vault, tmp_path, monkeypatch):
+    """Defect: operators lose a packing failure's cause or receive private exception text."""
+    private_message = "private-record https://storage.example/part?signature=do-not-log"
+
+    def denied(*_args, **_kwargs):
+        raise PermissionError(errno.EACCES, private_message, str(vault / "private-record.md"))
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.setattr(cloud_export, "run_export", denied)
+    log = tmp_path / "termination-log"
+    status = cloud_export.main(["--export-id", str(uuid.uuid4()), "--part-url", "https://unused.example/part",
+                                "--part-bytes", "65536", "--max-bytes", "1048576", "--vault", str(vault),
+                                "--termination-log", str(log)])
+    report = json.loads(log.read_text())
+    assert status == 1 and report["error"] == "EXPORT_FAILED"
+    assert report["diagnostic"] == {"type": "PermissionError", "function": "denied", "errno": errno.EACCES}
+    assert "private-record" not in log.read_text() and "signature" not in log.read_text()

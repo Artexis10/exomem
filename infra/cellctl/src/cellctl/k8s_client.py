@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import re
 from datetime import datetime
 
@@ -62,6 +63,7 @@ FIELD_MANAGER = "cellctl"
 SNAPSHOT_GROUP = "snapshot.storage.k8s.io"
 CELL_LABEL = "exomem.io/cloud-cell"
 REVISION_LABEL = "controller-revision-hash"
+logger = logging.getLogger(__name__)
 
 
 # D4: every Kubernetes call is bounded (connect, read seconds). A half-open
@@ -276,6 +278,20 @@ class ClusterClient:
             except ValueError:
                 parsed = {}
             report = parsed if isinstance(parsed, dict) else {}
+        if failed:
+            detail = report.get("diagnostic")
+            safe = {}
+            if isinstance(detail, dict):
+                # The closed diagnostic wire fields carry code identifiers, never free-form error text.
+                for key in ("type", "function", "code", "limit"):
+                    value = detail.get(key)
+                    if isinstance(value, str) and len(value) <= 80 and value.isascii() and value.isidentifier():
+                        safe[key] = value
+                errno = detail.get("errno")
+                if type(errno) is int and errno > 0:
+                    safe["errno"] = errno
+            # The controller removes terminal Jobs; retain the private-safe reason before it does.
+            logger.warning("cellctl: export %s failed: %s", export_id, json.dumps(safe, sort_keys=True))
         finished_at = _parse_timestamp(job.status.completion_time) if succeeded else None
         return ExportJob(job is not None, active, succeeded, failed, report, bool(pods), finished_at)
 
