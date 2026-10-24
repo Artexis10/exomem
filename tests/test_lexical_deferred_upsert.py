@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import freshness, lexstore
+from exomem import freshness, index_sync, lexstore
 
 
 @pytest.fixture
@@ -42,6 +42,23 @@ def live_catalogue(tmp_path: Path):
     yield store, changed, removed
     freshness.clear()
     lexstore.clear_stores()
+
+
+def test_declined_lexical_publication_is_incomplete_after_committed_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue,
+) -> None:
+    """A declined row publication must not become a completed sync report."""
+    store, changed, _removed = live_catalogue
+    content = "# After\n\nCurrent canonical content.\n"
+    changed.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(store, "upsert_paths", lambda _paths: False)
+
+    report = index_sync.upsert_after_write(tmp_path, [changed])
+
+    lexical = next(component for component in report.components if component.component == "lexstore")
+    assert (lexical.outcome, lexical.code) == ("degraded", "reported_incomplete")
+    assert report.reconcile_required is True
+    assert changed.read_text(encoding="utf-8") == content
 
 
 def _contend_once(monkeypatch: pytest.MonkeyPatch, store) -> None:

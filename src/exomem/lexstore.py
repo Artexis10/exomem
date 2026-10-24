@@ -3613,6 +3613,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     never fail a write; sync-on-first-use heals whatever a miss leaves behind.
     No-ops (beyond its own gates) when the sidecar doesn't exist yet — the
     first search builds it whole.
+    A declined publication reports incomplete without failing the committed write.
     """
     if not _catalog_usable():
         return True
@@ -3620,11 +3621,10 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     if not md or not lexical_path(vault_root).exists():
         return True
     try:
-        get_store(vault_root).upsert_paths(md)
+        return get_store(vault_root).upsert_paths(md)
     except Exception as e:  # noqa: BLE001
         log.warning("lexical sidecar upsert skipped (%s)", e)
         return False
-    return True
 
 
 def apply_watcher_batch(
