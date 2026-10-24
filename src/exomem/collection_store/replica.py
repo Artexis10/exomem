@@ -88,9 +88,14 @@ def _intent_digest(metadata: Mapping[str, str | None]) -> str | None:
     return None if raw is None else hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _published_metadata_current(metadata, *, copied_raw=None, raw_marker=None):
-    """Completed local intent cleanup leaves the authentic replica bookkeeping intact."""
-    if metadata.get(_EPOCH) != metadata.get(schema.META_LEASE_EPOCH):
+def _published_metadata_current(metadata, *, copied_raw=None, raw_marker=None, require_epoch=True):
+    """Completed local intent cleanup leaves the authentic replica bookkeeping intact.
+
+    The lease epoch decides republication for an adopting host; the file-writer fence
+    proves only that the replica is the current publication, so it passes `require_epoch=False`.
+    A publication made before the epoch was recorded carries no epoch at all.
+    """
+    if require_epoch and metadata.get(_EPOCH) != metadata.get(schema.META_LEASE_EPOCH):
         return False
     if _intent_digest(metadata) == metadata.get(_INTENT):
         return True
@@ -191,12 +196,13 @@ def file_writer_marker(root, acquired=None):
                     if snapshot._file_sha256(file.descriptor) != digest or file.version() != version:
                         return None
                     copied_raw = None
-                    if not _published_metadata_current(metadata):
+                    if not _published_metadata_current(metadata, require_epoch=False):
                         copied_raw = _read_copied_intent(
                             filesystem, _Verification(file, parent, relative.name, version),
                             digest=digest, head=_head(metadata), epoch=metadata.get(_EPOCH),
                         )
-                    if not _published_metadata_current(metadata, copied_raw=copied_raw, raw_marker=raw):
+                    if not _published_metadata_current(metadata, copied_raw=copied_raw, raw_marker=raw,
+                                                       require_epoch=False):
                         return None
                     filesystem.validate_directory(parent).require()
                     with filesystem.file(parent, relative.name).require() as current:

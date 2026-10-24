@@ -119,6 +119,35 @@ def test_completed_admission_keeps_its_published_intent_and_file_authority(produ
     assert replica.file_writer_marker(session.root) == authority.read_marker(session.root)
 
 
+def test_publication_without_a_recorded_epoch_keeps_file_writer_authority(producer):
+    """A store last published before the epoch was recorded still proves its file-writer marker.
+
+    Without it a worker that cannot serve the store never offers the store capability,
+    and the coordinator grants no writer at all.
+    """
+    from exomem.collection_store import replica, schema
+
+    session, manager, _ = producer
+    assert create(producer)["status"] == "marker_admitted"
+
+    @contextmanager
+    def step(_patience, _cancelled):
+        with manager.mutation_guard(session.root), manager._collection_store.checkout() as writer:
+            yield writer.handle, lambda: True
+
+    with step(0, None) as (handle, check):
+        result = replica.publish_replica(session.root, handle, authority_check=check, deadline=time.monotonic() + 5)
+    assert result.status == "published", result
+    with step(0, None) as (handle, _check), handle.transaction() as conn:
+        conn.execute("DELETE FROM store_meta WHERE key IN (?,?)",
+                     (schema.META_PUBLISHED_REPLICA_EPOCH, schema.META_PUBLISHED_INTENT_SHA256))
+    with closing(connection.open_reader(session.path)) as reader:
+        legacy = dict(reader.execute("SELECT key,value FROM store_meta"))
+    assert schema.META_LEASE_EPOCH in legacy and authority.PENDING_CREATE not in legacy
+
+    assert replica.file_writer_marker(session.root) == authority.read_marker(session.root)
+
+
 def test_new_intent_during_completed_intent_verification_does_not_borrow_its_proof(producer, monkeypatch):
     """A concurrent export remains pending even when the installed copy holds a completed create."""
     from exomem.collection_store import replica
