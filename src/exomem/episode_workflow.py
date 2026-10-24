@@ -743,7 +743,9 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
     if len(commands) + len(unsealed) > transitions or needed > room:
         raise _error("EPISODE_TOO_LARGE", "the episode journal has no room for this preparation")
     # Every leaf passes its preparation before any plan is sealed, so a refused
-    # leaf leaves no sealed plan behind for its siblings.
+    # preparation leaves no sealed plan behind for its siblings. A seal can still
+    # refuse a binding that changed after preparation; an earlier sibling's plan
+    # then stays unbound, and a retry seals fresh runs instead of reusing it.
     ready = [
         (
             leaf,

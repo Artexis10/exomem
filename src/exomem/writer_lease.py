@@ -5022,6 +5022,12 @@ class LeaseManager:
                 self._require_store_admitted()
                 lease = self._reusable_operation_grant() if reuse_operation_grant else None
                 if lease is None:
+                    inherited = _ACTIVE_WRITE_FENCE.get()
+                    # A narrowed command whose own grant was lost during unguarded
+                    # preparation is fenced; acquiring would misreport it as unheld.
+                    if (inherited is not None and inherited[0] is self
+                            and self._fencing_token != inherited[1]):
+                        self._raise_fenced(inherited[1])
                     lease = self._acquire_writer()
                 if self.config.enabled:
                     fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))

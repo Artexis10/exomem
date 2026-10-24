@@ -1643,9 +1643,6 @@ def seal_proposal(
         "binding_manifest": prepared.binding_manifest,
         "registry_ids": prepared.registry_ids,
     }
-    # A lease lost during preparation is this invocation's fence, not a new
-    # writer's absence: answer WRITER_FENCED before the guard re-acquires.
-    writer_lease.validate_active_write_fence()
     manager = writer_lease.active_manager()
     with (
         nullcontext()
