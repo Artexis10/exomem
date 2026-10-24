@@ -9875,7 +9875,7 @@ def op_connect_memory(
     """
     if registry_scope is not None and operation != "create-entity":
         raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
-    if relations and operation != "create-entity":
+    if relations not in (None, []) and operation != "create-entity":
         raise ValueError("INVALID_SCHEMA_ARGUMENT: relations requires create-entity")
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,

@@ -13,6 +13,8 @@ Resolve entity candidates against the active entity registry and selected knowle
   relation workflow for a new connection. If none matches, use
   `connect_memory(operation="create-entity")` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
+  Pass known meaning as `relations=[{"kind": ..., "target": ...}]`;
+  `connections` always writes the generic `relates_to`.
   An unregistered-type finding supplies `proposal` and `expected_hash`; save
   those exact values through the governed
   `schema_memory(operation="save-entity-types")` leaf with `why`, never by
