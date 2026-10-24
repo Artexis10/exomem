@@ -36,6 +36,21 @@ class CloudImportClientConfig:
                 raise ValueError("Cloud URLs must use HTTPS")
 
 
+def authorized_api_client(config: CloudImportClientConfig) -> httpx2.AsyncClient:
+    """The Cloud API client that signs in through a local browser; the one OAuth setup for every `exomem cloud` command."""
+    oauth = OAuth(mcp_url=config.mcp_url, client_id=config.oauth_client_id,
+                  client_name="Exomem CLI", scopes=["exomem.read", "exomem.write", "offline_access"],
+                  callback_host="127.0.0.1", callback_port=None)
+    return httpx2.AsyncClient(auth=oauth, timeout=60)
+
+
+def add_endpoint_arguments(command: argparse.ArgumentParser) -> None:
+    """The Cloud endpoint options that every `exomem cloud` command shares."""
+    command.add_argument("--mcp-url", default=os.environ.get("EXOMEM_CLOUD_MCP_URL"), required=not os.environ.get("EXOMEM_CLOUD_MCP_URL"))
+    command.add_argument("--api-base-url", default=os.environ.get("EXOMEM_CLOUD_API_BASE_URL"), required=not os.environ.get("EXOMEM_CLOUD_API_BASE_URL"))
+    command.add_argument("--oauth-client-id", default="exomem-cloud-cli")
+
+
 def _ciphertext(source: Path, target: Path, recipient: str, envelope) -> None:
     pending = target.with_suffix(".pending")
     pending.unlink(missing_ok=True)
@@ -107,10 +122,7 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
         _private_json(record, state)
     own_api, own_uploads = api is None, uploads is None
     if api is None:
-        oauth = OAuth(mcp_url=config.mcp_url, client_id=config.oauth_client_id,
-                      client_name="Exomem CLI", scopes=["exomem.read", "exomem.write", "offline_access"],
-                      callback_host="127.0.0.1", callback_port=None)
-        api = httpx2.AsyncClient(auth=oauth, timeout=60)
+        api = authorized_api_client(config)
     if uploads is None:
         # Presigned storage URLs never receive the API's OAuth bearer.
         uploads = httpx2.AsyncClient(timeout=120)
@@ -194,13 +206,12 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="exomem cloud")
+    parser = argparse.ArgumentParser(
+        prog="exomem cloud", epilog="To download an owner export, run: exomem cloud export --help")
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("import")
     command.add_argument("source", type=Path)
-    command.add_argument("--mcp-url", default=os.environ.get("EXOMEM_CLOUD_MCP_URL"), required=not os.environ.get("EXOMEM_CLOUD_MCP_URL"))
-    command.add_argument("--api-base-url", default=os.environ.get("EXOMEM_CLOUD_API_BASE_URL"), required=not os.environ.get("EXOMEM_CLOUD_API_BASE_URL"))
-    command.add_argument("--oauth-client-id", default="exomem-cloud-cli")
+    add_endpoint_arguments(command)
     command.add_argument("--scope")
     command.add_argument("--category")
     command.add_argument("--checkpoint", type=Path)
