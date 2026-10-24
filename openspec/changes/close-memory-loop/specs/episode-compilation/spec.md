@@ -379,7 +379,7 @@ Origin authoring and projection check a retained input's prose names against the
 A refusal for a stale lookup SHALL request the stamped lookup build in the background, without walking the vault on the caller's thread.
 The name gate SHALL report why it refused, and only a refusal caused by the stale lookup is retryable.
 An unrestricted writer so refused, on a runtime that schedules that build, SHALL receive the retryable `ORIGIN_INPUT_LOOKUP_STALE`, and the same write SHALL commit once the build lands.
-Every other refusal SHALL keep `ORIGIN_INPUT_UNAVAILABLE`: a scrubbed credential, a withheld or missing target, a restricted caller, a runtime with no build owner and a lookup that no build can settle.
+Every other refusal SHALL keep `ORIGIN_INPUT_UNAVAILABLE`: a restricted caller, a runtime with no build owner and a lookup that no build can settle, and, once the lookup is current, a scrubbed credential or a withheld or missing target. Text that also carries a prose name can first receive one retryable refusal while that name is unchecked.
 A caller that can have content withheld gets no retry signal, because the lookup state changes on every write.
 A projected read SHALL still remove the whole payload of an input so refused, and SHALL restore it once the build lands.
 

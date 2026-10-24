@@ -1120,20 +1120,6 @@ def direct_text_references_verdict(
     return TEXT_RELEASED
 
 
-def direct_text_references_visible(
-    vault_root: Path,
-    text: str,
-    *,
-    principal: RequestPrincipal | None = None,
-    purpose: str | None = None,
-) -> bool:
-    """Whether every wikilink in returned direct-read text remains releasable."""
-    return (
-        direct_text_references_verdict(vault_root, text, principal=principal, purpose=purpose)
-        == TEXT_RELEASED
-    )
-
-
 def _is_plain_reference(raw: str, *, is_wikilink_target: bool) -> bool:
     """True when `raw` is a PLAIN reference whose `#`/`|` is genuinely
     ambiguous (R3) — not a bracket-wrapped wikilink form, not an
@@ -1995,7 +1981,7 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
 
 
 def name_lookup_required(vault_root: Path) -> bool:
-    """Whether `direct_text_references_visible` resolves prose names through the lookup index."""
+    """Whether `direct_text_references_verdict` resolves prose names through the lookup index."""
     root = Path(vault_root)
     return not _file_policy_empty(root, policy_module.load(root))
 

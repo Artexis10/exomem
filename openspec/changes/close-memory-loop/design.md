@@ -412,7 +412,7 @@ rules and canonical drift guards. Source capture text is still raw evidence,
 not a designated managed origin block.
 
 A retained input whose text links a page by name is released only against current name lookup evidence, and any knowledge-base write leaves that evidence stale until a stamped build lands.
-A refused check asks for that build itself: `egress.direct_text_references_visible` calls `working_set_runtime.request_lookup_refresh`, which is managed-only, single-flight and never builds on the caller's thread.
+A refused check asks for that build itself: `egress.direct_text_references_verdict` calls `working_set_runtime.request_lookup_refresh`, which is managed-only, single-flight and never builds on the caller's thread.
 That schedules a build; it does not rebuild an index inside recovery.
 The gate reports its reason as one of three closed verdicts (`egress.direct_text_references_verdict`: released, refused, `lookup_stale`), and `retained_inputs.exact_text_verdict` adds its own redaction and scrub refusals as `refused`.
 Origin authoring reads that verdict and infers nothing from lookup readings: other causes of refusal are permanent while the lookup is stale.
