@@ -187,5 +187,26 @@ def test_a_portability_refusal_names_its_check_and_keeps_the_os_error_number(vau
                                 "--termination-log", str(log)])
     report = json.loads(log.read_text())
     assert status == 1
-    assert report["diagnostic"] == {"type": "PortabilityError", "function": "_safe_lstat",
-                                    "code": "SOURCE_CHANGED_DURING_EXPORT", "errno": errno.ENOENT}
+    assert report["diagnostic"] == {"type": "PortabilityError", "function": vault_portability._safe_lstat.__name__,
+                                    "code": "SOURCE_CHANGED_DURING_EXPORT", "cause": "FileNotFoundError",
+                                    "errno": errno.ENOENT}
+
+
+def test_a_refusal_that_suppresses_its_context_reports_no_errno(vault, tmp_path, monkeypatch):
+    """Defect: an SSL error's library code, raised `from None`, is logged as if it were an errno."""
+    def upload_refused(*_args, **_kwargs):
+        try:
+            raise OSError(8, "private TLS detail")
+        except OSError:
+            raise cloud_export.ExportRefused(cloud_export.EXPORT_FAILED) from None
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.setattr(cloud_export, "run_export", upload_refused)
+    log = tmp_path / "termination-log"
+    status = cloud_export.main(["--export-id", str(uuid.uuid4()), "--part-url", "https://unused.example/part",
+                                "--part-bytes", "65536", "--max-bytes", "1048576", "--vault", str(vault),
+                                "--termination-log", str(log)])
+    report = json.loads(log.read_text())
+    assert status == 1
+    assert report["diagnostic"] == {"type": "ExportRefused", "function": "upload_refused"}

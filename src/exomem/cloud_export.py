@@ -137,9 +137,16 @@ def _failure_diagnostic(error: Exception) -> dict:
         detail["code"] = error.code
         if error.limit is not None:
             detail["limit"] = error.limit
-    # A refusal raised while handling an OSError keeps that OSError's number.
-    cause = error if isinstance(error, OSError) else error.__cause__ or error.__context__
-    if isinstance(cause, OSError) and cause.errno is not None:
+    cause = error
+    if not isinstance(error, OSError):
+        # A refusal raised from or while handling an OSError keeps that error's class and number,
+        # unless the raise suppressed its context (`from None`).
+        cause = error.__cause__ if error.__cause__ is not None else (
+            None if error.__suppress_context__ else error.__context__)
+        if isinstance(cause, OSError):
+            detail["cause"] = type(cause).__name__
+    # OSError accepts any first argument; only an integer is an error number, never a path.
+    if isinstance(cause, OSError) and isinstance(cause.errno, int):
         detail["errno"] = cause.errno
     return detail
 
