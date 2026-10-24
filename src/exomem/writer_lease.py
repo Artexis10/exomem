@@ -5022,7 +5022,21 @@ class LeaseManager:
                 self._require_store_admitted()
                 lease = self._reusable_operation_grant() if reuse_operation_grant else None
                 if lease is None:
-                    lease = self._acquire_writer()
+                    inherited = _ACTIVE_WRITE_FENCE.get()
+                    # A narrowed command whose own grant was lost during unguarded
+                    # preparation is fenced, whether this replica or only the
+                    # coordinator has noticed; it never commits under a new grant.
+                    held = inherited[1] if inherited is not None and inherited[0] is self else None
+                    if held is not None and self._fencing_token != held:
+                        self._raise_fenced(held)
+                    try:
+                        lease = self._acquire_writer()
+                    except OpError as error:
+                        if held is not None and error.code == "WRITER_LEASE_REQUIRED":
+                            self.validate_fencing_token(held)
+                        raise
+                    if held is not None and lease.fencing_token != held:
+                        self._raise_fenced(held)
                 if self.config.enabled:
                     fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
                 if self._serves_collection_store and self._collection_store is None:
