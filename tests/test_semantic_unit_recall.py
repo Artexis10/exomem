@@ -167,10 +167,17 @@ def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_read
             assert hidden.relative_to(tmp_path).as_posix() not in parents
 
 
-@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+@pytest.mark.parametrize(("mode", "query", "updated_after"), [
+    pytest.param("keyword", "emberlamp", None, id="keyword"),
+    pytest.param("hybrid", "emberlamp", None, id="hybrid"),
+    pytest.param("vector", "emberlamp", None, id="keyword-fallback"),
+    pytest.param("keyword", "", None, id="browse"),
+    pytest.param("keyword", "emberlamp", "2026-05-01", id="typed-date"),
+])
 @pytest.mark.parametrize("drop_first", [False, True])
 def test_managed_mixed_recall_bounds_reads_for_disjoint_page_and_unit_parents(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell, mode: str, drop_first: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell,
+    mode: str, query: str, updated_after: str | None, drop_first: bool,
 ) -> None:
     """Older matching units must not add reads beyond the frozen mixed hit pool."""
     from test_governance_egress import _reset_caches, write_rule, write_scope
@@ -212,7 +219,8 @@ def test_managed_mixed_recall_bounds_reads_for_disjoint_page_and_unit_parents(
     monkeypatch.setattr(find_module._CACHE, "get", counted_get)
     with request_scope(owner_principal()):
         response = commands.op_find(
-            tmp_path, query="emberlamp", mode=mode, scope="kb-only",
+            tmp_path, query=query, mode=mode, scope="kb-only",
+            filters={"page.updated": {"$gte": updated_after}} if updated_after else None,
             graph=False, rerank=False, result_level="mixed", limit=3, explain=True,
         )
     hits = response["hits"] if isinstance(response, dict) else response
@@ -222,7 +230,7 @@ def test_managed_mixed_recall_bounds_reads_for_disjoint_page_and_unit_parents(
         for hit in hits
     ), (response, reads)
     assert len(reads) <= egress.pool_limit(3), reads
-    if mode == "keyword":
+    if mode != "hybrid":
         # Three page slots and three units share four canonical parents. A
         # missing selected page must not bring a fourth page into those slots.
         assert set(reads) == {
@@ -233,11 +241,126 @@ def test_managed_mixed_recall_bounds_reads_for_disjoint_page_and_unit_parents(
         for hit in hits:
             if hit.get("result_type") == "page":
                 explanation = hit["ranking_explanation"]
-                assert explanation["lanes"]["keyword"]["rank"] == ranks[hit["path"]]
-                assert {"stage": "keyword", "rank": ranks[hit["path"]]} in explanation["ordering_path"]
+                lane = "keyword" if query else "filtered_most_recent"
+                assert explanation["lanes"][lane]["rank"] == ranks[hit["path"]]
+                assert {"stage": lane, "rank": ranks[hit["path"]]} in explanation["ordering_path"]
     if drop_first:
         assert len(dropped) == 1
         assert all(hit.get("path") != dropped[0] for hit in hits)
+
+
+@pytest.mark.parametrize("inside_count", [0, 8], ids=["outside-selected", "outside-reserved-only"])
+@pytest.mark.parametrize("drift", [False, True], ids=["unchanged", "selected-drift"])
+def test_managed_mixed_widening_reads_only_frozen_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell,
+    inside_count: int, drift: bool,
+) -> None:
+    """An outside reserve must not hydrate pages discarded by mixed fusion."""
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal, request_scope
+
+    pages = [_write_page(tmp_path, f"emberlamp-{n}", body="Routine calibration.")
+             for n in range(inside_count)]
+    older = _write_page(
+        tmp_path, "older-decisions", updated="2026-06-01",
+        body="\n".join(_rich(
+            kind="decision", category="config", anchor=f"calibration-{n}",
+            content=f"Emberlamp calibration keeps the reading stable {n}.",
+        ) for n in range(3)),
+    )
+    outside = []
+    for n in range(6):
+        path = tmp_path / "Reference" / f"emberlamp-{n}.md"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(f"# Emberlamp {n}\n\nEmberlamp calibration.\n", encoding="utf-8")
+        outside.append(path)
+    write_scope(tmp_path)
+    write_rule(tmp_path, ceiling=0)
+    _reset_caches()
+    warm_managed_cell(tmp_path)
+    find_module.reset_page_and_result_caches()
+    raw_get = find_module._CACHE.get
+    reads: list[str] = []
+    dropped = pages[-1] if pages else outside[0]
+
+    def counted_get(path, root):
+        reads.append(path.relative_to(root).as_posix())
+        if drift and path == dropped and path.exists():
+            path.unlink()
+        return raw_get(path, root)
+
+    monkeypatch.setattr(find_module._CACHE, "get", counted_get)
+    with request_scope(owner_principal()):
+        response = commands.op_find(
+            tmp_path, query="emberlamp", mode="keyword", scope="kb", limit=4,
+            result_level="mixed", widen_outside_kb=True, graph=False, rerank=False,
+            explain=True, include_timings=True,
+        )
+    hits = response["hits"]
+    expected = [*pages[-5:], older] if pages else [older, *outside[:4]]
+    assert set(reads) == {path.relative_to(tmp_path).as_posix() for path in expected}
+    assert len(reads) <= egress.pool_limit(4)
+    assert any(hit.get("result_type") == "semantic_unit" for hit in hits)
+    assert response["retrieval_profile"]["lanes"]["outside_bm25"]["status"] == "participated"
+    if drift:
+        assert all(hit.get("path") != dropped.relative_to(tmp_path).as_posix() for hit in hits)
+    if pages:
+        assert not any(hit.get("outside_kb") for hit in hits)
+    else:
+        hit = next(hit for hit in hits if hit.get("outside_kb"))
+        expected_rank = 2 if drift else 1
+        assert hit["path"] == outside[expected_rank - 1].relative_to(tmp_path).as_posix()
+        assert hit["ranking_explanation"]["lanes"]["outside_bm25"]["rank"] == expected_rank
+
+
+def test_managed_mixed_widening_keeps_primary_duplicates_and_stable_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell,
+) -> None:
+    """The reserve excludes all primary identities and keeps their vector evidence."""
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    from exomem.governance.principal import owner_principal, request_scope
+
+    weak = _write_page(tmp_path, "weak", body="Routine documentation.")
+    strong = _write_page(tmp_path, "emberlamp", body="Emberlamp calibration.")
+    duplicate = tmp_path / "Reference" / "emberlamp-0.md"
+    duplicate.parent.mkdir()
+    duplicate.write_text("# Emberlamp\n\nEmberlamp calibration.\n", encoding="utf-8")
+    sibling = duplicate.with_name("emberlamp-1.md")
+    sibling.write_text("# Emberlamp\n\nEmberlamp calibration.\n", encoding="utf-8")
+    write_scope(tmp_path)
+    write_rule(tmp_path, ceiling=0)
+    _reset_caches()
+    warm_managed_cell(tmp_path)
+    paths = [path.relative_to(tmp_path).as_posix() for path in (weak, duplicate, strong)]
+
+    class FakeIndex:
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            return [(path, 0, "", 0.99 - n / 10)
+                    for n, path in enumerate(paths) if allowed_paths is None or path in allowed_paths][:k]
+
+        def search_semantic_units(self, _query_vector, **_options):
+            # This fixture has pages but no rich semantic units.
+            return []
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: FakeIndex())
+    monkeypatch.setattr(embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]])
+    with request_scope(owner_principal()):
+        response = commands.op_find(
+            tmp_path, query="emberlamp", mode="vector", scope="kb", limit=3,
+            result_level="mixed", widen_outside_kb=True, graph=False, rerank=False, explain=True,
+            include_timings=True, prefer_compiled=False, prefer_active=False,
+        )
+    hits = response["hits"]
+    assert [hit["path"] for hit in hits] == [paths[1], paths[2], paths[0]], response
+    primary = hits[0]
+    assert not primary.get("outside_kb")
+    assert primary["ranking_explanation"]["lanes"]["vector"]["rank"] == 2
+    assert "outside_bm25" not in primary["ranking_explanation"]["lanes"]
 
 
 @pytest.mark.parametrize("coverage", [

@@ -2939,7 +2939,7 @@ def _orchestrate(args: argparse.Namespace) -> int:
                     cwd=s1,
                     timeout=max(180.0, args.request_timeout * 14),
                 )
-                print(s1_journey.stdout.strip().splitlines()[-1])
+                print(s1_journey.stdout.strip())
             finally:
                 print(
                     f"product-e2e: S1 branch wall seconds={time.monotonic() - branch_started:.1f}",
