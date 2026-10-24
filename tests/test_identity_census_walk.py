@@ -349,6 +349,34 @@ def test_a_well_formed_trash_page_is_absent_from_the_census_either_way(tmp_path:
     assert TRASH_GOOD_REL not in paths
 
 
+def test_a_trash_page_owns_a_reference_without_joining_identity_uniqueness(
+    tmp_path: Path,
+) -> None:
+    """`trash/` owners resolve a reference but never take part in uniqueness.
+
+    The reference scan reads `Knowledge Base/trash/`, so its owners are kept in
+    a table of their own. A well-formed id there must not make a live page's
+    identity ambiguous, and a malformed trash page must not block the build.
+    """
+    _seed(tmp_path)
+    trashed_id = "5f3c2b1a-9d4e-4f6a-8b7c-1e2d3c4b5a69"
+    owner_rel = f"{KB}/trash/owner.md"
+    _write(
+        tmp_path,
+        owner_rel,
+        f"---\ntitle: Owner\ntype: insight\nexomem_id: {trashed_id}\n---\n\nProse.\n",
+    )
+    _write(tmp_path, f"{KB}/trash/bad.md", _MALFORMED_FRONTMATTER)
+
+    census = semantic_contract.build_stable_identity_census(tmp_path)
+
+    assert {entry.path: entry.page_identity for entry in census.reference_only_entries} == {
+        owner_rel: trashed_id
+    }
+    assert owner_rel not in {entry.path for entry in census.entries}
+    assert trashed_id not in census.paths_by_identity
+
+
 def test_reserved_kb_dirs_prune_trash_at_the_kb_root_only(tmp_path: Path) -> None:
     """Unit-level pin on `_IDENTITY_CENSUS_RESERVED_KB_DIRS`: both spellings
     from the semantic-authoring contract's exempt-content list are reserved,

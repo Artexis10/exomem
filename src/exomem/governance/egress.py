@@ -2194,6 +2194,7 @@ def resolve_visible_identifier(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    serve_stale: bool = False,
 ) -> str:
     """Resolve a memory ref after removing candidates invisible to the caller.
 
@@ -2201,6 +2202,10 @@ def resolve_visible_identifier(
     leaks both the presence and count of L0 pages and lets one hidden duplicate
     shadow an otherwise unique visible page. A governed content route must
     instead behave as if those candidates were physically absent.
+
+    `serve_stale` is for a read: it lets the owner lookup answer from the
+    identity projection while the watcher publishes an outside edit. The release
+    decision over the candidates stays live either way.
     """
 
     vault_root = Path(vault_root)
@@ -2220,6 +2225,7 @@ def resolve_visible_identifier(
             admit_pending_paths=functools.partial(
                 pending_identity_candidates, vault_root, principal=principal, purpose=purpose,
             ),
+            serve_stale=serve_stale,
         ).get(memory_id, ()),
         principal=principal,
         purpose=purpose,
@@ -2232,6 +2238,13 @@ def resolve_visible_identifier(
     if not visible:
         raise memory_refs.ReferenceError(
             "REFERENCE_NOT_FOUND", f"memory id not found: {memory_id}"
+        )
+    if serve_stale and memory_refs.read_reference_owner(vault_root, vault_root / visible[0]) != memory_id:
+        # An outside edit moved the id off this page and the projection lags it.
+        # The page is one this caller may see, so the strict lookup that follows
+        # runs for a fact the caller can already observe, never for a hidden page.
+        return resolve_visible_identifier(
+            vault_root, value, principal=principal, purpose=purpose
         )
     return visible[0]
 

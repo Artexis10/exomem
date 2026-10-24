@@ -3157,7 +3157,9 @@ def _move_state_map(
         for entry in before_corpus.identity_census.entries
         if entry.path not in {old_path, *changed}
     )
-    identity_census = semantic_contract.StableIdentityCensus(entries)
+    identity_census = semantic_contract.StableIdentityCensus(
+        entries, before_corpus.identity_census.reference_only_entries
+    )
     casefold_paths = vault.vault_casefolds(root)
     for state in changed.values():
         identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
@@ -3707,7 +3709,8 @@ def _corpus_with_recovery_states(
 ) -> semantic_contract.SemanticCorpusContext:
     pages = dict(base.pages)
     identity_census = semantic_contract.StableIdentityCensus(
-        tuple(entry for entry in base.identity_census.entries if entry.path not in removed_paths)
+        tuple(entry for entry in base.identity_census.entries if entry.path not in removed_paths),
+        base.identity_census.reference_only_entries,
     )
     casefold_paths = vault.vault_casefolds(root)
     for state in states:

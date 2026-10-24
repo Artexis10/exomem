@@ -3121,9 +3121,20 @@ def _citation_url(_path: str) -> str:
     return ""
 
 
-def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
+def _resolve_memory_identifier(
+    vault_root: Path, value: str, *, serve_stale: bool = False
+) -> str:
+    """Resolve a path or memory reference to the page a caller may see.
+
+    A command that goes on to write from the answer keeps the default. A read
+    passes `serve_stale`, so the lookup answers from the identity projection
+    even while the watcher publishes an outside edit, rather than scanning
+    the vault.
+    """
     try:
-        resolved = egress_module.resolve_visible_identifier(vault_root, value)
+        resolved = egress_module.resolve_visible_identifier(
+            vault_root, value, serve_stale=serve_stale
+        )
     except memory_refs_module.ReferenceError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     if reserved_paths_module.classify_logical(resolved).blocked:
@@ -4312,7 +4323,7 @@ def op_get(
         ) as resolution_counts,
         call_spans_module.span("read.resolve_identifier", resolution_counts),
     ):
-        path = _resolve_memory_identifier(vault_root, path)
+        path = _resolve_memory_identifier(vault_root, path, serve_stale=True)
     try:
         with call_spans_module.span("read.prepare"):
             prepared = get_page_module.prepare_page_read(vault_root, path=path)
@@ -7449,7 +7460,7 @@ def op_read_memory(
                 "INVALID_UNIT_READ_OPTIONS: unit_ref cannot be combined with "
                 "frontmatter_only, links, or include_raw"
             )
-        resolved_path = _resolve_memory_identifier(vault_root, path)
+        resolved_path = _resolve_memory_identifier(vault_root, path, serve_stale=True)
         try:
             prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:
