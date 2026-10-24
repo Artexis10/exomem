@@ -32,7 +32,7 @@ from epistemic.journeys.f27_replay import REPO_ROOT, refuse_unsafe_out_dir
 from exomem.runtime_resources import CPU_THREADS_ENV, effective_online_cpus
 
 from . import protocol
-from .arms import ArmSpec, canonical_json, profile_settings, sha256_text
+from .arms import ArmSpec, arm_specs, canonical_json, profile_settings, sha256_text
 from .tap import HANDSHAKE_METHODS
 from .tap import __file__ as TAP_SCRIPT
 
@@ -290,12 +290,21 @@ def build_state(vault: Path) -> dict:
     not in what the vault holds.
     """
 
-    from exomem import index_paths, recall_migration, state_migration
+    from exomem import (
+        embeddings,
+        freshness,
+        index_paths,
+        recall_migration,
+        recall_policy,
+        state_migration,
+    )
     from exomem.context_catalogue import ContextCatalogue
     from membench.utility.context_activation_product import publish
 
     started = time.monotonic()
     state_migration.require_vault_state_ready(vault)
+    convergence = converge_media(vault)
+    final_content = tree_digest(vault)
     publication = publish(vault)
     vector_started = time.monotonic()
     vector_state = recall_migration.run(vault, threading.Event())
@@ -309,15 +318,46 @@ def build_state(vault: Path) -> dict:
     vector_status = recall_migration.status(vault)
     # The product counter includes copied vectors as well as new encodes.
     processed = vector_status.pop("chunks_encoded", None)
+    # Census and pruning precede proofs: mtime slack alone cannot certify current text.
+    incremental = embeddings.index_incremental(vault)
+    parents = recall_policy.partition_markdown_paths(
+        vault, (path for path in index_paths.iter_index_markdown(vault)
+                if index_paths.is_embeddable_path(path))
+    )
+    if parents.invalid_paths or parents.missing_paths:
+        raise StateError("final vector census contains unavailable parents")
+    proofs = []
+    freshly_published = 0
+    for parent in parents.admitted_paths:
+        proof = embeddings.reconstruct_publication(vault, parent.path)
+        if proof is None:
+            status = embeddings.upsert_after_write_status(vault, [parent.path], defer_during_warm=False)
+            if status.status != "completed" or status.eligible_count != 1:
+                raise StateError(f"final vector publication did not complete: {status.code}")
+            # Completed writes publish both projections; local writers need no volatile proof.
+            parent.guard.recheck(vault)
+            if freshness.stat_signature(parent.path) != parent.signature:
+                raise StateError("final vector source changed during publication")
+            freshly_published += 1
+        elif not proof.current(vault):
+            raise StateError("final parent lacks exact vector coverage")
+        else:
+            proofs.append(proof)
     vectors = {
         **vector_status,
         "chunks_processed": processed,
+        "incremental": incremental,
+        "coverage": {
+            "final_parents": len(parents.admitted_paths),
+            "reconstructed_parents": len(proofs),
+            "freshly_published_parents": freshly_published,
+        },
         "seconds": round(time.monotonic() - vector_started, 3),
     }
-    convergence = converge_media(vault)
     context_catalogue = ContextCatalogue(vault)
     catalogue = context_catalogue.rebuild()
-    return {
+    result = {
+        "vault_digest": final_content,
         "convergence": convergence,
         "vectors": vectors,
         "anchors": len(publication.anchors),
@@ -326,8 +366,22 @@ def build_state(vault: Path) -> dict:
             key: value for key, value in catalogue.items() if isinstance(value, (int, str))
         },
         "owner_coverage": context_catalogue.owner_coverage(),
-        "seconds": round(time.monotonic() - started, 2),
     }
+    if (
+        tree_digest(vault) != final_content
+        or not parents.revalidate(vault)
+        or any(not proof.current(vault) for proof in proofs)
+    ):
+        raise StateError("vault or vector publication changed during final coverage proof")
+    result["seconds"] = round(time.monotonic() - started, 2)
+    return result
+
+
+def product_source_identity() -> dict:
+    """Installed origin and Git revision, separate from the harness content pin."""
+    from exomem.install_info import package_identity
+
+    return package_identity("source", role="switch-eval-state-builder")
 
 
 def mcp_server_entry(
@@ -594,6 +648,148 @@ def validate_build_cpu_threads(cpu_threads: int | None) -> None:
         raise StateError(f"--cpu-threads must be between 1 and {available}")
 
 
+def require_checkpoint_selection(layout: Layout, checkpoint_from: Path | None) -> dict | None:
+    """Refuse an implicit destructive retry before ordinary custody recovery."""
+    path = layout.run / "checkpoint-import.json"
+    if not path.exists():
+        if checkpoint_from is not None:
+            raise StateError("prepare --import-checkpoint-from before importing checkpoint state")
+        return None
+    try:
+        intent = json.loads(path.read_bytes())
+        # Version 1 fixes this import protocol, rather than a vault vocabulary.
+        valid = intent["version"] == 1 and intent["successor_run"] == str(layout.run.resolve())
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise StateError("checkpoint import intent is unreadable; preserved the successor") from error
+    if not valid:
+        raise StateError("checkpoint import intent does not match the successor")
+    if checkpoint_from is None:
+        raise StateError("checkpoint import requires --checkpoint-from before retry")
+    if str(Path(checkpoint_from).resolve()) != intent["archive_run"]:
+        raise StateError("checkpoint selection differs from the recorded import")
+    return intent
+
+
+def prepare_checkpoint_import(layout: Layout, archive_run: Path, *, harness_digest: str) -> dict:
+    """Pin an unproven archive before copying its opaque experimental inputs."""
+    from exomem import state_migration, state_paths
+
+    archive = Layout.at(archive_run)
+    successor, predecessor = layout.run.resolve(), archive.run.resolve()
+    if predecessor.is_relative_to(successor) or successor.is_relative_to(predecessor):
+        raise StateError("checkpoint archive and successor run roots must be disjoint")
+    inputs_bytes = (archive.run / "inputs.json").read_bytes()
+    inputs = json.loads(inputs_bytes)
+    try:
+        imported_protocol, discovery_projection = protocol.rebind_discovery(inputs.get("protocol"))
+    except ValueError as error:
+        raise StateError("checkpoint recorded protocol cannot bind the current command registry") from error
+    if inputs.get("design") != protocol.DESIGN or imported_protocol != protocol.snapshot():
+        raise StateError("checkpoint recorded protocol differs from the current implementation")
+    try:
+        retrieval = inputs["retrieval_profile"]
+        specs = arm_specs(hook_mode=inputs["hook_mode"], profile=retrieval["name"])
+        current_retrieval = {"name": retrieval["name"], "settings": profile_settings(retrieval["name"])}
+    except (KeyError, TypeError, ValueError) as error:
+        raise StateError("checkpoint retrieval settings or hook mode are unsupported") from error
+    if retrieval != current_retrieval:
+        raise StateError("checkpoint retrieval settings differ from the current implementation")
+    selected = inputs.get("arms")
+    if (
+        not isinstance(selected, list) or not selected
+        or any(not isinstance(arm, str) or arm not in specs for arm in selected)
+        or len(set(selected)) != len(selected)
+    ):
+        raise StateError("checkpoint arms differ from the current protocol")
+    intent_path = layout.run / "checkpoint-import.json"
+    if not intent_path.exists() and layout.run.exists() and any(layout.run.iterdir()):
+        raise StateError("checkpoint import requires an empty successor run")
+    trees = {}
+    for tree, source in inputs["trees"].items():
+        frozen = Path(source["path"]).resolve()
+        if frozen.is_relative_to(successor) or frozen.is_relative_to(predecessor):
+            raise StateError("the frozen source must be outside the archive and successor roots")
+        if tree_digest(frozen) != source["digest"]:
+            raise StateError(f"tree {tree}: frozen source differs from predecessor inputs")
+        baseline = archive.shared_tree(tree)
+        if (baseline / "state.json").exists():
+            raise StateError(f"tree {tree}: completed donors require --seed-build-from")
+        retained = baseline / "state"
+        if not retained.is_dir():
+            raise StateError(f"tree {tree}: checkpoint has no retained baseline machine state")
+        vault = Slot(layout.slot).vault
+        identity = state_paths.vault_state_key(vault)
+        try:
+            manifest = state_migration._load_manifest(retained / identity, vault_root=vault)
+        except state_migration.StateMigrationManifestError as error:
+            raise StateError(f"tree {tree}: checkpoint does not match the original slot") from error
+        if manifest is None or manifest["state"] != "complete":
+            raise StateError(f"tree {tree}: checkpoint requires the original slot migration manifest")
+        evidence = {}
+        # These filenames belong to the fixed preparation evidence protocol.
+        for name in ("build.stdout", "build.stderr", "quiescence.json"):
+            path = baseline / name
+            if path.exists():
+                evidence[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        trees[tree] = {
+            "source_vault": str(frozen), "snapshot_digest": source["digest"],
+            "state_digest": tree_digest(retained), "vault_state_key": identity,
+            "evidence": evidence,
+        }
+    opaque = {name: (archive.run / name).read_bytes() for name in ("cases.json", "plan.json")}
+    intent = {
+        "version": 1, "archive_run": str(predecessor), "successor_run": str(successor),
+        "predecessor_inputs_digest": hashlib.sha256(inputs_bytes).hexdigest(),
+        "predecessor_harness_digest": inputs["harness_digest"],
+        "opaque_inputs": {name: hashlib.sha256(data).hexdigest() for name, data in opaque.items()},
+        "harness_digest": harness_digest, "product_source": product_source_identity(),
+        "discovery_projection": discovery_projection,
+        "trees": trees,
+    }
+    if "product_source" in inputs:
+        intent["predecessor_product_source"] = inputs["product_source"]
+    if "checkpoint_predecessor" in inputs:
+        intent["predecessor_checkpoint"] = inputs["checkpoint_predecessor"]
+    if intent_path.exists() and json.loads(intent_path.read_bytes()) != intent:
+        raise StateError("checkpoint import differs from its recorded intent")
+    layout.run.mkdir(parents=True, exist_ok=True)
+    # An interruption can restart these copies only after validating the immutable archive.
+    _write_json_atomically(intent_path, intent)
+    for name, data in opaque.items():
+        (layout.run / name).write_bytes(data)
+    successor_inputs = {
+        **inputs, "harness_digest": harness_digest, "product_source": intent["product_source"],
+        "protocol": imported_protocol,
+        "checkpoint_predecessor": intent,
+    }
+    _write_json_atomically(layout.run / "inputs.json", successor_inputs)
+    return successor_inputs
+
+
+def _prepare_checkpoint_slot(layout: Layout, *, tree: str, source_vault: Path, intent: dict) -> Slot:
+    """Restart from retained state and the frozen source, never a dirty successor."""
+    checkpoint = intent["trees"][tree]
+    source = Path(source_vault).resolve()
+    archive = Layout.at(Path(intent["archive_run"]))
+    retained = archive.shared_tree(tree) / "state"
+    if str(source) != checkpoint["source_vault"] or tree_digest(source) != checkpoint["snapshot_digest"]:
+        raise StateError(f"tree {tree}: checkpoint frozen source changed")
+    if tree_digest(retained) != checkpoint["state_digest"]:
+        raise StateError(f"tree {tree}: retained checkpoint state changed")
+    # The intent authorizes replacing only this import's partial successor copies.
+    (layout.run / "slot-vault.json").unlink(missing_ok=True)
+    target = layout.shared_tree(tree)
+    for name in ("state", "vault"):
+        path = target / name
+        if path.exists():
+            shutil.rmtree(path)
+    slot = prepare_build_slot(layout, source)
+    shutil.copytree(retained, slot.state, symlinks=True)
+    if tree_digest(slot.state) != checkpoint["state_digest"]:
+        raise StateError(f"tree {tree}: checkpoint copy differs from the retained state")
+    return slot
+
+
 def _prepare_build_seed(
     layout: Layout, spec: ArmSpec, *, tree: str, snapshot_digest: str, donor_run: Path
 ) -> tuple[dict, dict, Path]:
@@ -659,11 +855,16 @@ def build_tree(
     parent_env: Mapping[str, str],
     cpu_threads: int | None = None,
     seed_build_from: Path | None = None,
+    checkpoint_from: Path | None = None,
 ) -> dict:
     """Publish one tree baseline; packet mode does not affect index construction."""
 
     validate_build_cpu_threads(cpu_threads)
-    recover_session_vault(layout)
+    checkpoint = require_checkpoint_selection(layout, checkpoint_from)
+    if checkpoint is not None and seed_build_from is not None:
+        raise StateError("checkpoint import and proven donor seeding are distinct modes")
+    if checkpoint is None:
+        recover_session_vault(layout)
     target = layout.shared_tree(tree)
     pending_seed = target / "seed-build.json"
     if pending_seed.exists() and seed_build_from is None:
@@ -690,7 +891,7 @@ def build_tree(
         seed = _prepare_build_seed(
             layout, spec, tree=tree, snapshot_digest=snapshot_digest, donor_run=seed_build_from
         )
-    if (target / "state").exists():
+    if checkpoint is None and (target / "state").exists():
         shutil.rmtree(target / "state")
     # An interrupted proof may have returned the original here. Reuse it, never copy it.
     returned = target / "vault"
@@ -701,10 +902,13 @@ def build_tree(
         "shared": True,
     }
     try:
-        slot = prepare_build_slot(
-            layout, returned if returned.exists() else source_vault,
-            move_vault=returned.exists(), custody=custody,
-        )
+        if checkpoint is not None:
+            slot = _prepare_checkpoint_slot(layout, tree=tree, source_vault=source_vault, intent=checkpoint)
+        else:
+            slot = prepare_build_slot(
+                layout, returned if returned.exists() else source_vault,
+                move_vault=returned.exists(), custody=custody,
+            )
         if seed is not None:
             shutil.copytree(seed[2], slot.state, symlinks=True)
             if tree_digest(slot.state) != seed[0]["state_digest"]:
@@ -737,8 +941,15 @@ def build_tree(
             raise StateError(f"tree {tree}: state build exited {completed.returncode}; see {target}")
         build = json.loads(completed.stdout.strip().splitlines()[-1])
         # The first arm's surface is captured before freezing the vault, as the protocol requires.
+        published_content = build.get("vault_digest")
+        if not isinstance(published_content, str):
+            raise StateError(f"tree {tree}: state builder lacks final vault coverage identity")
+        if tree_digest(slot.vault) != published_content:
+            raise StateError(f"tree {tree}: vault changed after final vector coverage; preserved {slot.vault}")
         surface_out = layout.arm_tree(spec.arm_id, tree)
         surface = capture_surface(slot, spec, env=env, out=surface_out)
+        if tree_digest(slot.vault) != published_content:
+            raise StateError(f"tree {tree}: surface capture changed the published vault; preserved {slot.vault}")
         if seed is not None and (
             tree_digest(slot.vault) != seed[0]["vault_digest"]
             or signature_digest(slot.vault) != seed[0]["vault_signature_digest"]
@@ -749,7 +960,7 @@ def build_tree(
             "profile": profile,
             "source_vault": str(source_vault),
             "snapshot_digest": snapshot_digest,
-            "vault_digest": tree_digest(slot.vault),
+            "vault_digest": published_content,
             "vault_signatures": signature_manifest(slot.vault),
             "vault_signature_digest": signature_digest(slot.vault),
             "build": build,
@@ -766,6 +977,18 @@ def build_tree(
                     "metadata_digest": provenance["donor_metadata_digest"],
                     **build_settings,
                 }),
+                preparation={"cpu_threads": cpu_threads, "resumed": resumed},
+            )
+        if checkpoint is not None:
+            # An unproven checkpoint has no certified build settings to inherit.
+            build_settings = {}
+            record.update(
+                checkpoint={
+                    "archive_run": checkpoint["archive_run"], **checkpoint["trees"][tree],
+                    **({"product_source": checkpoint["predecessor_product_source"]}
+                       if "predecessor_product_source" in checkpoint else {}),
+                },
+                product_source=checkpoint["product_source"],
                 preparation={"cpu_threads": cpu_threads, "resumed": resumed},
             )
         record.update(build_settings)
@@ -811,10 +1034,13 @@ def build_arm(
     parent_env: Mapping[str, str],
     cpu_threads: int | None = None,
     seed_build_from: Path | None = None,
+    checkpoint_from: Path | None = None,
 ) -> dict:
     """Copy the tree baseline for this arm and capture its own product surface."""
 
-    recover_session_vault(layout)
+    checkpoint = require_checkpoint_selection(layout, checkpoint_from)
+    if checkpoint is None:
+        recover_session_vault(layout)
     if (layout.shared_tree(tree) / "seed-build.json").exists() and seed_build_from is None:
         raise StateError(f"tree {tree}: pending seed requires --seed-build-from before retry")
     target = layout.arm_tree(spec.arm_id, tree)
@@ -830,6 +1056,7 @@ def build_arm(
         parent_env=parent_env,
         cpu_threads=cpu_threads,
         seed_build_from=seed_build_from,
+        checkpoint_from=checkpoint_from,
     )
     target.mkdir(parents=True, exist_ok=True)
     if (target / "state").exists():

@@ -1194,7 +1194,11 @@ def test_session_exceptions_return_the_unchanged_vault(built_slot_tree: Layout, 
 
 
 def test_the_builder_publishes_vectors_and_the_active_pointer(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import socket
+
     import numpy as np
+    from membench.utility.switch_eval import state
     from membench.utility.switch_eval.state import build_state
 
     from exomem import embedding_backend, embeddings, index_paths, recall_migration, state_paths
@@ -1217,6 +1221,15 @@ def test_the_builder_publishes_vectors_and_the_active_pointer(vault: Path, monke
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_MODEL_OFFLINE", "1")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+
+    def refuse_connection(*args, **kwargs):
+        raise AssertionError("synthetic builder attempted a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse_connection)
+    monkeypatch.setattr(socket, "create_connection", refuse_connection)
     monkeypatch.delenv(recall_migration.REEMBED_ENV, raising=False)
     monkeypatch.setattr(embeddings, "MODEL_NAME", "fixture/encoder")
     monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
@@ -1230,6 +1243,69 @@ def test_the_builder_publishes_vectors_and_the_active_pointer(vault: Path, monke
         assert sidecar.is_file()
         assert embeddings.get_embedding_index(vault).file_mtimes()
         assert built["vectors"]["state"] == "current"
+        assert built["vault_digest"] == state.tree_digest(vault)
+
+        page = next(path for path in index_paths.iter_index_markdown(vault)
+                    if embeddings.reconstruct_publication(vault, path) is not None)
+        info = page.stat()
+        page.write_text(page.read_text() + "\nA changed observation with the same modification time.\n")
+        os.utime(page, ns=(info.st_atime_ns, info.st_mtime_ns))
+        assert embeddings.reconstruct_publication(vault, page) is None
+        media_parent = page.parent / "extracted-attachment.md"
+
+        def media_output(root):
+            media_parent.write_text("---\ntype: note\n---\n# Extracted attachment\n\nFinal media content.\n")
+            return {"passes": [{"attempted": 1, "files_written": 1}], "files_written": 1}
+
+        monkeypatch.setattr(state, "converge_media", media_output)
+        rebuilt = build_state(vault)
+        assert embeddings.reconstruct_publication(vault, page) is not None
+        assert embeddings.reconstruct_publication(vault, media_parent) is not None
+        assert rebuilt["vectors"]["coverage"]["freshly_published_parents"] >= 1
+        assert rebuilt["convergence"]["files_written"] == 1
+
+        # A timed segmenter cannot reconstruct without inference. Its local write
+        # can still finish both projections without returning a volatile proof.
+        reconstruct = embeddings.reconstruct_publication
+        upsert = embeddings.upsert_after_write_status
+        monkeypatch.setattr(embeddings, "reconstruct_publication", lambda root, path: (
+            None if path == media_parent else reconstruct(root, path)
+        ))
+        monkeypatch.setattr(state, "converge_media", lambda root: {"passes": [], "files_written": 0})
+        fresh = build_state(vault)
+        assert fresh["vectors"]["coverage"]["freshly_published_parents"] == 1
+
+        def ineligible(root, paths, **kwargs):
+            return replace(upsert(root, paths, **kwargs), eligible_count=0)
+
+        monkeypatch.setattr(embeddings, "upsert_after_write_status", ineligible)
+        with pytest.raises(state.StateError, match="did not complete"):
+            build_state(vault)
+
+        def source_changed(root, paths, **kwargs):
+            status = upsert(root, paths, **kwargs)
+            info = paths[0].stat()
+            os.utime(paths[0], ns=(info.st_atime_ns, info.st_mtime_ns + 1))
+            return status
+
+        monkeypatch.setattr(embeddings, "upsert_after_write_status", source_changed)
+        with pytest.raises(state.StateError, match="source changed"):
+            build_state(vault)
+
+        from exomem.context_catalogue import ContextCatalogue
+
+        monkeypatch.setattr(embeddings, "upsert_after_write_status", upsert)
+        monkeypatch.setattr(embeddings, "reconstruct_publication", reconstruct)
+        owner_coverage = ContextCatalogue.owner_coverage
+
+        def changed_during_catalogue_report(catalogue):
+            result = owner_coverage(catalogue)
+            page.write_text(page.read_text() + "\nA write after vector coverage.\n")
+            return result
+
+        monkeypatch.setattr(ContextCatalogue, "owner_coverage", changed_during_catalogue_report)
+        with pytest.raises(state.StateError, match="changed during final coverage"):
+            build_state(vault)
     finally:
         embeddings.unload_model()
         embeddings.clear_embedding_indexes()
@@ -1285,7 +1361,9 @@ def test_a_startup_write_refuses_the_build_instead_of_blessing_it(tmp_path: Path
     def built(*args, **kwargs):
         (layout.slot / "state").mkdir()
         (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
-        return subprocess.CompletedProcess(args[0], 0, json.dumps({"vectors": {"state": "current"}}), "")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({
+            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+        }), "")
 
     monkeypatch.setattr(state, "mcp_server_entry", stand_in_entry)
     monkeypatch.setattr(state.subprocess, "run", built)
@@ -1311,7 +1389,9 @@ def test_an_interrupted_build_retries_without_nesting_state(tmp_path: Path, monk
     def built(*args, **kwargs):
         (layout.slot / "state").mkdir()
         (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
-        return subprocess.CompletedProcess(args[0], 0, json.dumps({"vectors": {"state": "current"}}), "")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({
+            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+        }), "")
 
     def proof(slot, *args, **kwargs):
         signatures.append(state.signature_digest(slot.vault))
@@ -1387,7 +1467,7 @@ def test_state_cpu_threads_reach_only_the_builder(
     def built(*args, **kwargs):
         (layout.slot / "state").mkdir()
         (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
-        code = f"import json, os; print(json.dumps({{'vectors': {{'state': 'current'}}, 'cpu_threads': os.environ.get({CPU_THREADS_ENV!r})}}))"
+        code = f"import json, os; print(json.dumps({{'vectors': {{'state': 'current'}}, 'vault_digest': {state.tree_digest(layout.slot / 'vault')!r}, 'cpu_threads': os.environ.get({CPU_THREADS_ENV!r})}}))"
         result = real_run(
             [sys.executable, "-c", code],
             env=kwargs["env"],
@@ -1456,7 +1536,9 @@ def test_an_interrupted_arm_copy_retries_from_the_shared_baseline(
         (layout.slot / "state").mkdir()
         (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
         return subprocess.CompletedProcess(
-            args[0], 0, json.dumps({"vectors": {"state": "current"}}), ""
+            args[0], 0, json.dumps({
+                "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+            }), ""
         )
 
     def surface(slot, spec, **kwargs):
@@ -1561,6 +1643,7 @@ def test_seeded_state_republishes_and_captures_each_arm_with_original_vector_pro
         builds.append(kwargs["env"][CPU_THREADS_ENV])
         return subprocess.CompletedProcess(args[0], 0, json.dumps({
             "vectors": {"state": "current", "chunks_processed": 0},
+            "vault_digest": state.tree_digest(layout.slot / "vault"),
             "owner_coverage": {"available": False, "reason": "catalogue_unavailable"},
         }), "")
 
@@ -1618,7 +1701,9 @@ def test_seed_and_score_preserve_unknown_legacy_settings_separately_from_explici
     monkeypatch.setattr(cli, "_stage", lambda *args: None)
     monkeypatch.setattr(state, "effective_online_cpus", lambda: 2)
     monkeypatch.setattr(state.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
-        args[0], 0, json.dumps({"vectors": {"state": "current"}}), "",
+        args[0], 0, json.dumps({
+            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+        }), "",
     ))
     monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {})
     monkeypatch.setattr(state, "prove_quiescence", lambda *args, **kwargs: {
@@ -1712,7 +1797,9 @@ def test_seed_interruption_returns_custody_and_retries_from_the_retained_donor(
         assert state.tree_digest(layout.slot / "state") == original_state
         (layout.slot / "state" / "preparation-write").write_text("discard before retry")
         interrupt("builder")
-        return subprocess.CompletedProcess(args[0], 0, json.dumps({"vectors": {"state": "current"}}), "")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({
+            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+        }), "")
 
     def surface(*args, **kwargs):
         interrupt("surface")
@@ -1771,7 +1858,9 @@ def test_seed_preparation_cannot_bless_a_builder_write_to_the_original_vault(
 
     def built(*args, **kwargs):
         (layout.slot / "vault" / "page.md").write_text("Unexpected builder write.")
-        return subprocess.CompletedProcess(args[0], 0, json.dumps({"vectors": {"state": "current"}}), "")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({
+            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+        }), "")
 
     monkeypatch.setattr(state.subprocess, "run", built)
     monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {})
@@ -1782,3 +1871,289 @@ def test_seed_preparation_cannot_bless_a_builder_write_to_the_original_vault(
     assert (layout.slot / "vault" / "page.md").read_text() == "Unexpected builder write."
     assert (layout.run / "slot-vault.json").is_file()
     assert not (layout.shared_tree("snapshot") / "state.json").exists()
+
+
+@pytest.fixture
+def failed_checkpoint(seed_build_round: tuple[Layout, Layout, Path]) -> tuple[Layout, Layout, Path]:
+    """An archived failed proof retains state and dirty custody at the old serving identity."""
+    from dataclasses import asdict
+
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import state
+
+    from exomem.commands import product_commands_for, resolve_command
+
+    layout, archive, source = seed_build_round
+    baseline = archive.shared_tree("snapshot")
+    (baseline / "state.json").unlink()
+    archive.slot.mkdir()
+    (baseline / "vault").rename(archive.slot / "vault")
+    dirty = archive.slot / "vault"
+    dirty.mkdir(parents=True, exist_ok=True)
+    (dirty / "page.md").write_text("Dirty failed proof output.")
+    (archive.run / "slot-vault.json").write_text('{"session":"failed","digest":"unmatched"}')
+    (baseline / "build.stdout").write_text('{"vectors":{"state":"current"}}\n')
+    (baseline / "build.stderr").write_text("Preserved publisher diagnostics.\n")
+    (baseline / "quiescence.json").write_text('{"content_unchanged":false}')
+    case = _case("checkpoint-case")
+    key_file = source.parent / "key-input.jsonl"
+    key_file.write_text(json.dumps(case.as_dict()) + "\n")
+    case_file = source.parent / "case-input.jsonl"
+    case_file.write_text(json.dumps({"case_id": case.case_id, "turns": case.turns}) + "\n")
+    commands = product_commands_for("mcp")
+    native_tools = [resolve_command(name, commands).name for name in protocol.READ_TOOLS]
+    predecessor_protocol = protocol.snapshot()
+    predecessor_protocol.update(
+        READ_TOOLS=native_tools, ACTIVATION_TOOL=native_tools[0], P_FILTERED_TOOL=native_tools[0],
+    )
+    inputs = {
+        "design": protocol.DESIGN, "protocol": predecessor_protocol,
+        "harness_digest": "previous-harness", "arms": ["P"], "repeats": 1, "seed": 0,
+        "hook_mode": arm_specs()["M"].hook_mode,
+        "retrieval_profile": {"name": arm_specs()["P"].profile,
+                              "settings": state.profile_settings(arm_specs()["P"].profile)},
+        "actor_model": "fixture-model", "client": {"executable": sys.executable,
+            "version": "fixture", "launcher": []},
+        "trees": {"snapshot": {"path": str(source), "digest": state.tree_digest(source)}},
+        "product_source": {"source_revision": "predecessor-product"},
+        "keys": [{"split": case.split, "path": str(key_file), "sha256": cli._sha256_file(key_file)}],
+        "case_files": [{"path": str(case_file), "sha256": cli._sha256_file(case_file)}],
+        "case_ids": [case.case_id], "struck_before_freeze": [],
+    }
+    (archive.run / "inputs.json").write_text(json.dumps(inputs))
+    (archive.run / "cases.json").write_text("  " + json.dumps([case.as_dict()]) + "\n")
+    plan = plan_sessions([case], arm_ids=("P",), repeats=1, seed=0)
+    (archive.run / "plan.json").write_text(json.dumps([asdict(item) for item in plan]) + "  \n")
+    return layout, archive, source
+
+
+def test_failed_checkpoint_import_preserves_opaque_inputs_and_earns_new_state_proof(
+    failed_checkpoint: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import state
+    from membench.utility.switch_eval.score import check_trees
+
+    from exomem import state_paths
+
+    layout, archive, source = failed_checkpoint
+    predecessor_bytes = (archive.run / "inputs.json").read_bytes()
+    before = state.tree_digest(archive.run)
+    monkeypatch.setattr(state, "product_source_identity", lambda: {"source_revision": "current-product"})
+    assert cli.main(["prepare", "--run", str(layout.run), "--import-checkpoint-from", str(archive.run)]) == 0
+    for name in ("cases.json", "plan.json"):
+        assert (layout.run / name).read_bytes() == (archive.run / name).read_bytes()
+    inputs = json.loads((layout.run / "inputs.json").read_text())
+    original = json.loads((archive.run / "inputs.json").read_text())
+    assert {key: inputs[key] for key in original if key not in ("harness_digest", "product_source", "protocol")} == {
+        key: value for key, value in original.items() if key not in ("harness_digest", "product_source", "protocol")
+    }
+    assert inputs["protocol"] == protocol.snapshot()
+    projection = inputs["checkpoint_predecessor"]["discovery_projection"]
+    assert projection["execution_names"] == original["protocol"]["READ_TOOLS"]
+    assert projection["predecessor"]["READ_TOOLS"] == original["protocol"]["READ_TOOLS"]
+    assert projection["predecessor"]["ACTIVATION_TOOL"] == original["protocol"]["ACTIVATION_TOOL"]
+    assert projection["predecessor"]["P_FILTERED_TOOL"] == original["protocol"]["P_FILTERED_TOOL"]
+    assert projection["current"]["READ_TOOLS"] == inputs["protocol"]["READ_TOOLS"]
+    assert projection["current"]["ACTIVATION_TOOL"] == inputs["protocol"]["ACTIVATION_TOOL"]
+    assert projection["current"]["P_FILTERED_TOOL"] == inputs["protocol"]["P_FILTERED_TOOL"]
+    assert inputs["harness_digest"] == cli._harness_digest()
+    assert inputs["product_source"] == {"source_revision": "current-product"}
+    assert inputs["checkpoint_predecessor"]["predecessor_product_source"] == original["product_source"]
+    assert not (layout.shared_tree("snapshot") / "state.json").exists()
+
+    def built(*args, **kwargs):
+        machine = layout.slot / "state" / state_paths.vault_state_key(layout.slot / "vault")
+        assert (machine / "vectors.bin").read_bytes() == b"expensive compatible vectors"
+        assert state.tree_digest(layout.slot / "vault") == state.tree_digest(source)
+        (machine / "lexical.sqlite").write_bytes(b"fresh publication")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({
+            "vectors": {"state": "current", "coverage": {"reconstructed_parents": 1}},
+            "vault_digest": state.tree_digest(layout.slot / "vault"),
+        }), "")
+
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {"fresh": True})
+    # Keep the real quiescence comparison; only the fresh-server transport is synthetic.
+    monkeypatch.setattr(state, "_ask_surface", lambda *args, **kwargs: ("", []))
+    assert cli.main(["state", "--run", str(layout.run), "--checkpoint-from", str(archive.run)]) == 0
+    record = state.load_arm_state(layout, "P", "snapshot")
+    state._require_build_proof(record)
+    assert record["quiescence"]["content_unchanged"] is True
+    assert record["checkpoint"]["state_digest"] == state.tree_digest(archive.shared_tree("snapshot") / "state")
+    assert "cpu_threads" not in record
+    assert record["preparation"]["cpu_threads"] is None
+    assert check_trees(layout, cases=[_case("checkpoint-case")], trees=inputs["trees"], arm_ids=["P"]) == []
+    assert cli._stage_problems(layout, inputs, ["state"]) == []
+    assert (archive.run / "inputs.json").read_bytes() == predecessor_bytes
+    assert state.tree_digest(archive.run) == before
+
+
+def test_interrupted_checkpoint_requires_explicit_retry_before_any_custody_or_cleanup(
+    failed_checkpoint: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import state
+
+    layout, archive, source = failed_checkpoint
+    monkeypatch.setattr(state, "product_source_identity", lambda: {"source_revision": "fixture"})
+    cli.main(["prepare", "--run", str(layout.run), "--import-checkpoint-from", str(archive.run)])
+    before = state.tree_digest(archive.run)
+
+    copytree = state.shutil.copytree
+
+    def interrupted(source, destination, *args, **kwargs):
+        result = copytree(source, destination, *args, **kwargs)
+        if Path(destination) == layout.slot / "state":
+            (Path(destination) / "partial").write_text("interrupted import")
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(state.shutil, "copytree", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                        parent_env={}, checkpoint_from=archive.run)
+    (layout.run / "slot-vault.json").write_text('{"unreadable":"partial custody"}')
+    partial = state.tree_digest(layout.run)
+    for build in (state.build_tree, state.build_arm):
+        for selection in (None, source):
+            with pytest.raises(state.StateError, match="--checkpoint-from|checkpoint selection"):
+                build(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                      parent_env={}, checkpoint_from=selection)
+            assert state.tree_digest(layout.run) == partial
+    assert state.tree_digest(archive.run) == before
+
+    monkeypatch.setattr(state.shutil, "copytree", copytree)
+
+    def built(*args, **kwargs):
+        assert not (layout.slot / "state" / "partial").exists()
+        assert state.tree_digest(layout.slot / "state") == state.tree_digest(archive.shared_tree("snapshot") / "state")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({
+            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+        }), "")
+
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {})
+    monkeypatch.setattr(state, "_ask_surface", lambda *args, **kwargs: ("", []))
+    state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                    parent_env={}, checkpoint_from=archive.run)
+    assert state.tree_digest(archive.run) == before
+
+
+@pytest.mark.parametrize("topology", ["equal", "nested_successor", "nested_archive", "alias", "frozen_source"])
+def test_checkpoint_topology_refuses_before_it_can_delete_evidence(
+    failed_checkpoint: tuple[Layout, Layout, Path], topology: str,
+) -> None:
+    from membench.utility.switch_eval import state
+
+    layout, archive, source = failed_checkpoint
+    if topology == "equal":
+        layout = archive
+    elif topology == "nested_successor":
+        layout = Layout(archive.run / "successor")
+    elif topology == "nested_archive":
+        destination = layout.slot / "archive"
+        destination.parent.mkdir(parents=True)
+        archive.run.rename(destination)
+        archive = Layout(destination)
+    elif topology == "alias":
+        layout.run.symlink_to(archive.run, target_is_directory=True)
+    else:
+        destination = archive.run / "frozen-source"
+        source.rename(destination)
+        path = archive.run / "inputs.json"
+        inputs = json.loads(path.read_text())
+        inputs["trees"]["snapshot"]["path"] = str(destination)
+        path.write_text(json.dumps(inputs))
+    before = state.tree_digest(archive.run)
+    with pytest.raises(state.StateError, match="disjoint|frozen source must be outside"):
+        state.prepare_checkpoint_import(layout, archive.run, harness_digest="fixture")
+    assert state.tree_digest(archive.run) == before
+
+
+def test_surface_capture_cannot_bless_a_write_after_final_vector_publication(
+    failed_checkpoint: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import state
+
+    layout, archive, source = failed_checkpoint
+    monkeypatch.setattr(state, "product_source_identity", lambda: {"source_revision": "fixture"})
+    cli.main(["prepare", "--run", str(layout.run), "--import-checkpoint-from", str(archive.run)])
+    before = state.tree_digest(archive.run)
+    monkeypatch.setattr(state.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
+        args[0], 0, json.dumps({
+            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+        }), "",
+    ))
+
+    def surface(slot, *args, **kwargs):
+        (slot.vault / "page.md").write_text("Unexpected surface-capture write.")
+        return {}
+
+    monkeypatch.setattr(state, "capture_surface", surface)
+    with pytest.raises(state.StateError, match="surface capture changed"):
+        state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                        parent_env={}, checkpoint_from=archive.run)
+    assert not (layout.shared_tree("snapshot") / "state.json").exists()
+    assert not (layout.arm_tree("P", "snapshot") / "state.json").exists()
+    assert state.tree_digest(archive.run) == before
+
+
+@pytest.mark.parametrize("changed", ["protocol", "retrieval_profile", "invalid_tool", "unrelated_tool"])
+def test_checkpoint_import_refuses_a_changed_experimental_contract(
+    failed_checkpoint: tuple[Layout, Layout, Path], changed: str,
+) -> None:
+    from membench.utility.switch_eval import state
+
+    layout, archive, _source = failed_checkpoint
+    path = archive.run / "inputs.json"
+    inputs = json.loads(path.read_bytes())
+    if changed == "protocol":
+        inputs["protocol"]["PULL_BUDGET_PER_TURN"] = protocol.PULL_BUDGET_PER_TURN // 2
+    elif changed == "retrieval_profile":
+        del inputs["retrieval_profile"]["settings"]["EXOMEM_LEXICAL_BACKEND"]
+    elif changed == "invalid_tool":
+        inputs["protocol"]["READ_TOOLS"][0] = "unknown-command"
+    else:
+        from exomem.commands import product_commands_for
+
+        other = next(command for command in product_commands_for("mcp")
+                     if command.name not in inputs["protocol"]["READ_TOOLS"])
+        inputs["protocol"]["READ_TOOLS"][0] = other.public_name
+    path.write_text(json.dumps(inputs))
+    before = state.tree_digest(archive.run)
+    with pytest.raises(state.StateError, match="protocol|retrieval settings"):
+        state.prepare_checkpoint_import(layout, archive.run, harness_digest="fixture")
+    assert not layout.run.exists()
+    assert state.tree_digest(archive.run) == before
+
+
+@pytest.mark.parametrize("handoff", ["missing", "changed"])
+def test_parent_requires_the_childs_exact_final_coverage_identity(
+    failed_checkpoint: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+    handoff: str,
+) -> None:
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import state
+
+    layout, archive, source = failed_checkpoint
+    monkeypatch.setattr(state, "product_source_identity", lambda: {"source_revision": "fixture"})
+    cli.main(["prepare", "--run", str(layout.run), "--import-checkpoint-from", str(archive.run)])
+    before = state.tree_digest(archive.run)
+
+    def built(*args, **kwargs):
+        report = {"vectors": {"state": "current"}}
+        if handoff == "changed":
+            report["vault_digest"] = state.tree_digest(layout.slot / "vault")
+            (layout.slot / "vault" / "page.md").write_text("A write after the child proved coverage.")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps(report), "")
+
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: pytest.fail("unproven coverage reached surface capture"))
+    with pytest.raises(state.StateError, match="coverage identity|changed after final vector coverage"):
+        state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                        parent_env={}, checkpoint_from=archive.run)
+    assert not (layout.shared_tree("snapshot") / "state.json").exists()
+    assert not (layout.arm_tree("P", "snapshot") / "state.json").exists()
+    assert state.tree_digest(archive.run) == before
