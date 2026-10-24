@@ -27,7 +27,7 @@ import logging
 import secrets
 import sqlite3
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1133,7 +1133,7 @@ def ensure(
 
 
 def ensure_unlisted(
-    vault_root: Path, *, freshness_stamp: str = ""
+    vault_root: Path, *, freshness_stamp: str = "", visible: Callable[[str], bool] | None = None
 ) -> tuple[str, ContextCatalogue | None, bool]:
     """`ensure`, naming only the lag that has no list: `(state, catalogue, unlisted)`.
 
@@ -1143,12 +1143,17 @@ def ensure_unlisted(
     name are the other kind of lag. A reader that serves only some callers
     needs the two apart, because a caller can ask whether a listed path is
     one it may see, and can ask nothing of an unlisted one.
+
+    For a restricted reader (`visible` given), an activation index that lags
+    only by pages that reader may not see is not a lag for it (`view_lag`).
     """
     if disabled():
         return DISABLED, None, False
     root = Path(vault_root)
     # Anchors are mirrored from the activation index, so it is built and current first.
-    state, index, index_stale = working_set_runtime.ensure_index(root, freshness_stamp=freshness_stamp)
+    state, index, index_stale = working_set_runtime.ensure_index(
+        root, freshness_stamp=freshness_stamp, visible=visible
+    )
     if state != READY or index is None:
         return state, None, False
     catalogue = ContextCatalogue(root)

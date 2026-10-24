@@ -20,6 +20,7 @@ from test_working_set_index import _seed_planning, _seed_structure
 
 from exomem import (
     commands,
+    context_catalogue,
     context_pack,
     freshness,
     lexstore,
@@ -406,3 +407,60 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
 
     assert published == [True]
     assert served.get("abstention") == {"reason": "unavailable"}
+
+
+# ---- activation map ------------------------------------------------------
+
+
+@pytest.fixture
+def mapped(activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The activation fixture, plus a context catalogue folded at the current stamp.
+
+    The catalogue's own fold is warm, so the only lag a hidden write leaves is
+    the activation index's: `unlisted` follows that lag alone.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    stamp = _stamp(activation.vault)
+    catalogue = context_catalogue.ContextCatalogue(activation.vault)
+    catalogue.rebuild()
+    catalogue.update(freshness_stamp=stamp)
+    catalogue.close()
+    context_catalogue._CHECKPOINTS[activation.vault.absolute()] = freshness.consumer_checkpoint(
+        activation.vault, "kb"
+    )
+    yield activation
+    context_catalogue._CHECKPOINTS.clear()
+
+
+def _map_activation(vault: Path, *, restricted: bool = True) -> dict:
+    with _caller(restricted):
+        return commands.op_activate_context(vault, turn="")
+
+
+def test_a_withheld_write_leaves_the_restricted_map_served(mapped: SimpleNamespace) -> None:
+    before = _map_activation(mapped.vault)
+    assert before["abstained"] is False, before.get("abstention")
+
+    _write_as_the_service_does(mapped.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    after = _map_activation(mapped.vault)
+    assert after["abstained"] is False
+    assert after["map"]["items"] == before["map"]["items"]
+
+
+def test_a_visible_write_holds_the_restricted_map_back_as_warming(mapped: SimpleNamespace) -> None:
+    _map_activation(mapped.vault)
+    page = mapped.vault / "Knowledge Base/Products/Cargo Sled.md"
+    _write_as_the_service_does(
+        mapped.vault, "Knowledge Base/Products/Cargo Sled.md",
+        page.read_text(encoding="utf-8") + "\nAn added line.\n",
+    )
+
+    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+
+
+def test_a_withheld_write_marks_the_owner_map_stale(mapped: SimpleNamespace) -> None:
+    _map_activation(mapped.vault, restricted=False)
+    _write_as_the_service_does(mapped.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert _map_activation(mapped.vault, restricted=False)["map"]["stale"] is True

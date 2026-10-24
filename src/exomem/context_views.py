@@ -587,8 +587,8 @@ def _prepare(
     elif target.kind == PROFILE_ANCHOR:
         key, ref = target.key, anchor_profile_ref(target.key)
     state, catalogue, unlisted = (
-        context_catalogue.ensure_unlisted(root, freshness_stamp=freshness_stamp)
-        if freshness_stamp else context_catalogue.ensure_unlisted(root)
+        context_catalogue.ensure_unlisted(root, freshness_stamp=freshness_stamp, visible=caller.visible)
+        if freshness_stamp else context_catalogue.ensure_unlisted(root, visible=caller.visible)
     )
     return _Prepared(root, target, ref, key, registries, caller, state, catalogue, unlisted)
 
