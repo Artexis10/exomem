@@ -336,9 +336,12 @@ def test_requested_widening_keeps_the_reserve_under_limit_minus_one(
     assert seeded["outside"], "the fixture seeded nothing outside the knowledge base"
 
 
-@pytest.mark.parametrize("warm_widening_cache", [False, True])
+@pytest.mark.parametrize(("result_level", "warm_widening_cache"), [
+    ("page", False), ("page", True), ("mixed", False),
+])
 def test_requested_widening_declines_when_the_catalogue_is_not_live(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, warm_widening_cache: bool,
+    result_level: str,
 ) -> None:
     """A catalogue behind the corpus declines; it never substitutes a scan.
 
@@ -348,10 +351,10 @@ def test_requested_widening_declines_when_the_catalogue_is_not_live(
     """
     _seed(vault)
     warm_managed_cell(vault)
-    baseline = _paths(_recall(vault))
+    baseline = _paths(_recall(vault, result_level=result_level))
 
     if warm_widening_cache:
-        assert _outside_paths(_recall(vault, widen_outside_kb=True))
+        assert _outside_paths(_recall(vault, widen_outside_kb=True, result_level=result_level))
 
     _age_the_vault_catalogue(vault)
     tripwires = _withdraw_corpus_builds(monkeypatch)
@@ -360,7 +363,7 @@ def test_requested_widening_declines_when_the_catalogue_is_not_live(
     )
     monkeypatch.setattr(find_module, "_eligible_filter_paths", oracle)
 
-    result = _recall(vault, widen_outside_kb=True)
+    result = _recall(vault, widen_outside_kb=True, result_level=result_level)
 
     assert _outside_paths(result) == [], _paths(result)
     assert _paths(result) == baseline, (

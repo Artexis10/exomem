@@ -534,11 +534,22 @@ it with the current path on the reference corpus.
   Lost evidence leaves an empty slot; it cannot promote another rank or move a
   truncation annotation to another hit.
 
-  This boundary currently covers nonempty managed keyword recall and semantic
-  recall with complete ranking metadata and no shortcut page filters. Widening,
-  post-selection date filters, empty-query browse, semantic keyword fallback
-  and possible reranking retain
-  their existing paths. Reranking needs canonical passages before fusion, so
+  This boundary covers managed keyword recall, empty-query browse, semantic
+  keyword fallback and semantic recall with complete ranking metadata.
+  Public page and date shortcuts enter typed eligibility before mixed selection;
+  they do not create a second filter after hydration. Direct legacy ranker calls
+  with unresolved shortcuts retain their existing path.
+  Browse and fallback reuse the same frozen rank plan and page memo. Fallback
+  explanations retain the original keyword ranks after selected evidence loss.
+  Managed non-reranked widening selects its outside prefix from the same
+  catalogue ranking fields. It excludes every original primary identity,
+  preserves the existing strong/weak segments and reserve formula, and freezes
+  the widened page order before mixed fusion. Primary, outside and mixed ranks
+  remain distinct. A lost outside proof leaves its reserved slot empty.
+  Selected outside hydration finishes inside the admitted catalogue scope;
+  deferred trace finalization retains the original acquisition ranks.
+  Incomplete ranking metadata and possible reranking retain their existing paths.
+  Reranking needs canonical passages before fusion, so
   moving it would change the ranking contract. These paths remain unoptimized;
   they receive no read-budget exemption, and task 6.6 stays open.
 - **Dense search.** The vector lane asks for 3 x `candidate_k` chunk rows and
