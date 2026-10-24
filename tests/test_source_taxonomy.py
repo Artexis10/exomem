@@ -24,6 +24,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
+import jsonschema
 import pytest
 import yaml
 
@@ -806,12 +807,17 @@ def test_the_published_tool_schema_never_carries_a_vaults_own_vocabulary(
     for vault_added in ("field-notebook", "agroforestry"):
         assert vault_added not in serialized
 
-    # It states the open contract instead, so the frozen text never teaches an
-    # agent that the set is closed.
+    # The schema admits new kinds and domains without publishing the live registry.
     capture = json.loads(serialized)["capture_source"]
-    assert "open vocabularies" in capture["description"].lower()
-    properties = capture["inputSchema"]["properties"]
-    assert "not a closed set" in properties["source_type"]["description"].lower()
+    jsonschema.validate(
+        {
+            "title": "Notebook entry",
+            "content": "Body text for a captured source.",
+            "source_type": "field-notebook",
+            "domain": "agroforestry",
+        },
+        capture["inputSchema"],
+    )
 
     # The current set reaches the agent through bootstrap, which is per-vault.
     block = commands.op_bootstrap(vault, profile="full")["source_taxonomy"]

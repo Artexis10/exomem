@@ -291,7 +291,7 @@
     }
   },
   "capture_source": {
-    "description": "Save raw source material; optionally prepare a note.\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a proposal; reuse it instead of calling prepare_note.\n\n`source_kind` (what it IS) is required; `domain` (what it is ABOUT) is optional.\nBoth are open vocabularies; new slugs register.",
+    "description": "Save raw text or file handles losslessly in Sources/.\n\nProof goes to preserve_evidence or preserve_artifacts. source_kind is\nrequired; domain is optional. Both accept new slugs. compile_guidance\nreturns a proposal; reuse it instead of calling prepare_note.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -308,11 +308,11 @@
         },
         "source_type": {
           "type": "string",
-          "description": "Alias of source_kind; supply either. Open vocabulary, not a closed set."
+          "description": "Alias of source_kind; conflicts are refused."
         },
         "url": {
           "type": "string",
-          "description": "Required for kinds that declare it, such as article, paper, video."
+          "description": "Required when the source kind declares it."
         },
         "tags": {
           "items": {
@@ -326,7 +326,7 @@
         },
         "compile_guidance": {
           "default": false,
-          "description": "Return a proposal; skip another prepare_note call.",
+          "description": "Return a reusable proposal.",
           "type": "boolean"
         },
         "suggested_title": {
@@ -335,7 +335,7 @@
         },
         "source_kind": {
           "type": "string",
-          "description": "What it IS, lowercase slug: the closest known kind or a new one. Differing values with source_type are refused."
+          "description": "What it IS; open lowercase slug, including new kinds."
         },
         "domain": {
           "type": "string",
@@ -409,6 +409,30 @@
           "default": false,
           "description": "Keep the original owner-only until a whole-artifact release.",
           "type": "boolean"
+        },
+        "source_identity": {
+          "additionalProperties": false,
+          "properties": {
+            "system": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "record_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "revision": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "system",
+            "record_id",
+            "revision"
+          ],
+          "type": "object",
+          "description": "Opaque text identity; identical inputs reuse the Source indefinitely."
         },
         "response_detail": {
           "default": "compact",

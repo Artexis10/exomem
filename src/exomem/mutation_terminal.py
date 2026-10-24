@@ -1915,6 +1915,18 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         )
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
+    if isinstance(leaf, Mapping) and isinstance(leaf.get("source"), Mapping):
+        # Closed text capture outcomes belong to the durable capture protocol.
+        from typing import get_args
+
+        from .source_capture import CaptureOutcome
+
+        if leaf.get("capture_outcome") in get_args(CaptureOutcome):
+            compact["capture_outcome"] = leaf["capture_outcome"]
+            compact["source"] = {
+                key: leaf["source"][key] for key in ("path", "ref")
+                if key in leaf["source"]
+            }
     if result.get("state") == "committed":
         compact.update(_commit_metadata_projection(leaf))
     compact.update(_media_result_projection(leaf))

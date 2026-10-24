@@ -7491,6 +7491,11 @@ def invoke_command(
 
     def _invoke() -> Any:
         with _owner_authority_scope(command.name):
+            # This fixed capture field gates cached terminals and key mismatch, too.
+            if command.name == "capture_source" and kwargs.get("source_identity") is not None:
+                from .source_capture import require_authority
+
+                require_authority(injected[0])
             return get_manager().invoke(
                 dispatch_command,
                 injected,
