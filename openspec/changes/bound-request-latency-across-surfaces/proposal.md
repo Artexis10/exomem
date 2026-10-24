@@ -31,6 +31,7 @@ Existing latency checks measure different boundaries, populations and percentile
 - `get-payload-shape`: Distinguish complete inbound links from unknown inbound links without blocking the permitted page body.
 - `live-index-freshness`: Read requests use published derived generations; optional inbound enrichment no longer rebuilds the index on the request thread.
 - `release-gate`: The free-text artifact census is published per vault instead of walked per request, and stays exact for service writes.
+- `stable-memory-references`: Read-only commands resolve references from the identity projection while an outside edit is pending, with a live identity re-check. Trash-folder owners join the projection in a table used only for references.
 
 Existing latency capabilities retain their numerical bars and lifecycle contracts; this change references them without replacing their requirements.
 
