@@ -387,10 +387,11 @@ def test_context_neighborhood_drops_raw_record_inbound_link(tmp_path: Path) -> N
     page = find_module._CACHE.get(note, vault)
     assert page is not None
 
-    neighbors, dropped = context_pack._neighborhood(vault, [page], 10)
+    neighbors, dropped, inbound_complete = context_pack._neighborhood(vault, [page], 10)
 
     assert neighbors == []
     assert dropped == 0
+    assert inbound_complete
 
 
 def test_index_path_rechecks_manifest_before_graph_publication(

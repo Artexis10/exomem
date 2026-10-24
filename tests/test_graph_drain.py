@@ -1121,15 +1121,16 @@ def test_inbound_event_patch_cannot_reinsert_data_after_eviction(
     vault_module.find_inbound_wikilinks(vault, target)
     source.write_text(_page("A", "A has no links."), encoding="utf-8")
     changed = source.relative_to(vault).as_posix()
-    real_patch = vault_module._InboundIndexData.on_files_changed
+    real_plan = vault_module._plan_inbound_edit
     patched = threading.Event()
     release = threading.Event()
     failures: list[BaseException] = []
 
-    def paused_patch(self, root: Path, changed_rels, deleted_rels):  # noqa: ANN001
-        real_patch(self, root, changed_rels, deleted_rels)
+    def paused_patch(root: Path, changed_rels, deleted_rels):  # noqa: ANN001
+        edit = real_plan(root, changed_rels, deleted_rels)
         patched.set()
         assert release.wait(20)
+        return edit
 
     def patcher() -> None:
         try:
@@ -1137,7 +1138,7 @@ def test_inbound_event_patch_cannot_reinsert_data_after_eviction(
         except BaseException as error:  # noqa: BLE001 - thread failure reaches the assertion
             failures.append(error)
 
-    monkeypatch.setattr(vault_module._InboundIndexData, "on_files_changed", paused_patch)
+    monkeypatch.setattr(vault_module, "_plan_inbound_edit", paused_patch)
     thread = threading.Thread(target=patcher, name="stale-inbound-patch")
     thread.start()
     try:
