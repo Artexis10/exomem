@@ -12768,7 +12768,7 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
         if adapter == "apply-conditional":
             return kwargs.get("apply") is not True
         if adapter == "import-conditional":
-            from .collection_store.importer import READ_ONLY_MODES
+            from .collection_store.import_modes import READ_ONLY_MODES
 
             request = kwargs.get("import_request")
             mode = request.get("mode") if isinstance(request, dict) else None
@@ -13571,9 +13571,9 @@ def validate_operation_entries(commands: Iterable[Command] | None = None) -> Non
     importer, so an operation added to either without a variant fails here. Each
     variant is classified by the same read-only rule the lease applies to a call.
     """
-    from .collection_store import importer
+    from .collection_store import import_modes
 
-    modes = {"record_memory": {"import": importer.MODES}}
+    modes = {"record_memory": {"import": import_modes.MODES}}
     for command in PRODUCT_COMMANDS if commands is None else commands:
         if not command.renderings:
             continue

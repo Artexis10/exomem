@@ -66,6 +66,8 @@ from . import (
     takeover,
     tokens,
 )
+from .import_modes import MODE_FIELDS as _MODE_FIELDS
+from .import_modes import MODES, READ_ONLY_MODES  # noqa: F401 - the importer's public mode names
 
 log = logging.getLogger(__name__)
 
@@ -290,16 +292,6 @@ class _Request:
     saved: str | None = None
 
 
-#: Modes that write nothing. Lease and egress classify these as reads and every other mode as a mutation.
-READ_ONLY_MODES = frozenset({"preview", "status"})
-_MODE_FIELDS = {
-    "preview": ({"source_ref", "format"}, {"mapping", "members"}),
-    "start": ({"source_ref", "format", "mapping"}, {"members", "reimport"}),
-    "status": ({"continuation"}, set()),
-    "cancel": ({"continuation"}, set()),
-}
-#: Every mode an import request may name; the Records tool entries must cover each one.
-MODES = frozenset(_MODE_FIELDS)
 
 
 def _parse_request(raw: Any) -> _Request:

@@ -115,6 +115,7 @@ from pathlib import Path
 _KB_SERVER = r"(?:exomem|knowledge[_-]?base)"
 # KB write tools — mixed tools include their operation selector so read-only
 # discovery does not suppress the reminder. Legacy names remain recognized.
+# nosemgrep: ep-word-search -- tool and operation names the server registry fixes; the hook cannot import it.
 _KB_WRITE = re.compile(
     _KB_SERVER
     + r".*(?:"
