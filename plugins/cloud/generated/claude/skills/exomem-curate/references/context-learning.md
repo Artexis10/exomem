@@ -19,7 +19,7 @@ Use the current capability list and engagement envelope. A miss, advisory, or ex
 Reuse an existing incident collection when its declared schema fits.
 Map evidence roles to that schema instead of adding a product taxonomy or a parallel queue.
 The roles are the source-backed expectation, the context that reached the agent, committed correction evidence, retrieval and later-answer checks, and unresolved evidence or behavior.
-A vault built from the scaffold carries an optional example collection at `_Schema/examples/context-learning/incident-collection.md`; it does not authorize collection creation.
+A vault built from the scaffold carries an optional example collection at `examples/context-learning/incident-collection.md` in its schema directory (`.exomem/schema/` in current vaults); it does not authorize collection creation.
 
 Keep the record bounded and within the source's disclosure rules.
 Do not copy transcripts, private artifacts, or withheld content into a more visible incident.

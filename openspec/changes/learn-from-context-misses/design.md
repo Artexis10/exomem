@@ -83,3 +83,19 @@ The server performs no generative model call. The active agent remains the seman
 1. Ship the generic workflow reference and optional collection example through the existing scaffold deployment, with no live vault change.
 2. Verify an isolated example through existing tools, with source-derived expectations and ordinary answer evidence retained.
 3. Restore prior guidance to undo the workflow; retain committed incident history and use governed corrections for accepted data edits.
+
+## Verified Outcome
+
+The workflow shipped in 0.142.0 as the scaffold reference `references/context-learning.md`, its skill route, and an optional example collection.
+
+- Correction: blind-judged real sessions on an invented vault answered the diagnosed miss wrongly before a source-backed correction and correctly after it. The unrelated-topic control stayed correct. One session per cell, so these are per-case observations, not an effect size.
+- Fresh transfer: inconclusive. The baseline already answered the fresh case.
+- Incident filing: an engaged session filed an incident mapped onto a differently named collection schema. Filing stays with the engagement policy, as decided above.
+- Stale target: `tests/test_drift_guard.py::test_edit_with_stale_hash_refuses_and_leaves_file_untouched` and `tests/test_records_bulk_upsert.py::test_a_stale_guard_refuses_the_whole_batch`.
+- Restricted reader: `tests/test_origin_disclosure_sweep.py`; incident records use the same disclosure doors as their sources.
+- Unavailable check and held-out exclusion: the shipped reference requires both, and no server-side component exists to test. The proof runs froze each key before any answer and used no held-out material.
+
+Remaining limits:
+
+- The evidence shows that the guidance works on single cases. It does not measure how often agents start the workflow unprompted.
+- Back-reference and supersession repair still has regex paths outside the shared list helper, and pages that the old code corrupted need a one-off repair.
