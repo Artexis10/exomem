@@ -22,5 +22,5 @@
 
 ## 5. Proof and delivery
 
-- [ ] 5.1 Run the benchmark after the change on the same seed and profiles; record before and after under `docs/benchmarks/`. Verify: every collection item is landed or refused with a code, and a re-run creates no Source.
+- [x] 5.1 Run the benchmark after the change on the same seed and profiles; record before and after under `docs/benchmarks/`. Verify: every collection item is landed or refused with a code, and a re-run creates no Source.
 - [ ] 5.2 Run the full suite, the privacy gate and `openspec validate --all --strict`; get an independent review; merge.
