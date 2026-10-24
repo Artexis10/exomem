@@ -40,7 +40,7 @@
 - [ ] 3.5 Localize overdue activation intervals through a bounded isolated reproduction; record the responsible work, including packet finalization. Reuse `RequestBudget` checks in controllable loops/waits and existing safe deferral paths; retain managed index rebuild deferral. Verify packet or existing budget abstention returns within the absolute deadline; classify every overrun as failed and unresolved. Preserve canonical mutation immunity and exact terminal/component custody; keep an unsafe-to-bound repair open while independent work continues.
 - [ ] 3.6 Establish pending bars from current measurements where justified; verify recorded choices and keep remaining thresholds null and pending.
 - [x] 3.7 Keep optional direct-read links off the foreground build path. Verify cold and evicted reads release permitted bodies with unknown inbound links, existing watcher recovery restores exact links, and mutation safety remains complete.
-  - Evidence: merged in #1880 (12cde6096) with the cold and evicted direct-read tests.
+  - Evidence: merged in #1880 (12cde6096); tests/test_read_link_availability.py.
 - [x] 3.8 Publish the free-text artifact census as a base and an add-only overlay (design decision 9).
   - Add aliases from self-write registration and from watcher events, before their Markdown filters.
   - Rebuild the base in the background from event-named directories, plus a periodic walk.
@@ -50,11 +50,11 @@
   - Evidence: merged in #2068 (21985c24a); tests/test_artifact_census_publication.py.
 - [x] 3.9 Cache the admitted recall path set per admitted checkpoint, filled by catalogue publication. Shadow pending paths by set difference.
   - Verify: identity with a fresh selection at the same checkpoint; a cache miss on a policy change; pending-overlay visibility.
-  - Evidence: merged in #2068 (21985c24a); tests/test_admitted_recall_path_set.py.
+  - Evidence: merged in #2068 (21985c24a); tests/test_admitted_recall_path_set.py, with the pending overlay in tests/test_pending_recall_delta.py and tests/test_fast_ack_visibility.py.
 - [x] 3.10 Catch up the embedding matrix on the derived drain after a batch commits.
   - A request serves a lagging matrix only when its epoch, instance, space and policy match. It starts the single-flight catch-up in the background.
   - Verify: a stale serve never returns a changed path's text; own writes stay visible; a policy-identity change still refuses; the request thread runs no catch-up.
-  - Evidence: merged in #2068 (21985c24a); the catch-up runs on the background matrix loader, not the derived drain; tests/test_embedding_matrix_lag_serve.py.
+  - Evidence: merged in #2068 (21985c24a); the catch-up runs on the background matrix loader, not the derived drain; tests/test_embedding_matrix_lag_serve.py, with own-write visibility in tests/test_fast_ack_visibility.py.
 - [x] 3.11 On a due-state key miss, serve the newest build for the same vault, audience, resolution and purpose, after the existing re-checks. Schedule the refresh for the new key.
   - Verify: dismissals and removals apply at once; no reuse across audiences; served content equals a fresh build after the refresh.
   - Evidence: merged in #2068 (21985c24a); tests/test_due_state_stale_reuse.py.
@@ -62,7 +62,7 @@
   - When a patch bridge is incomplete, republish the patched index instead of emptying the cache.
   - Keep a reverse map from file to targets, so that a patch costs the change.
   - Verify: a self-written link appears without a rebuild; the explicit inbound command keeps its synchronous lookup; the patched index equals a full rebuild.
-  - Evidence: merged in #2068 (21985c24a); a miss starts one background build instead of recording demand; tests/test_pack_inbound_recovery.py.
+  - Evidence: merged in #2068 (21985c24a); a miss records demand and, when only a rebuild can restore the index, also starts one background build rather than waiting for the reconcile pass; tests/test_pack_inbound_recovery.py and tests/test_inbound_index_incremental.py.
 - [x] 3.13 Resolve references from the identity projection while it is stale. Keep owners under the knowledge-base trash folder in a table used only for references, outside the uniqueness checks.
   - Verify: a trash-owned reference resolves with the census scan disabled; the path decision stays live.
   - Evidence: merged in #2068 (21985c24a); tests/test_memory_refs.py.
