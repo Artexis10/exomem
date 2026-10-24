@@ -86,6 +86,9 @@ _REMEDIATION: dict[str, str] = {
     "RETRIEVAL_INDEX_WARMING": (
         "Retry the exact recall after the maintained semantic index finishes warming."
     ),
+    "ORIGIN_INPUT_LOOKUP_STALE": (
+        "Retry the same write shortly; linked names are re-checked in the background."
+    ),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": (
         "Retry with the same mutation identity; do not submit a revised payload."
     ),
@@ -162,6 +165,9 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         # prove completeness — retryable with bounded `retry_after_ms`, never a
         # client-fault 400.
         "RETRIEVAL_INDEX_WARMING",
+        # A name-linked retained input the lookup could not yet check; the refusal
+        # schedules the build that settles it, so the same write succeeds on retry.
+        "ORIGIN_INPUT_LOOKUP_STALE",
     }
 )
 _NOT_FOUND_CODES = frozenset({"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"})

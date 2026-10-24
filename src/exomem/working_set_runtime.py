@@ -2614,6 +2614,18 @@ def name_lookup(vault_root: Path) -> NameLookup:
     return NameLookup(LOOKUP_CURRENT if current else LOOKUP_STALE, checkpoint, stamp, index_stamp)
 
 
+def lookup_settled(scan_start: NameLookup, scan_end: NameLookup) -> bool:
+    """Whether two readings that bracket a check found the lookup current throughout.
+
+    The name gate refuses on any checkpoint change, so the readings must agree on
+    the whole checkpoint, not only the stamp.
+    """
+    return (
+        scan_start.state == scan_end.state == LOOKUP_CURRENT
+        and scan_start.checkpoint == scan_end.checkpoint
+    )
+
+
 def request_lookup_refresh(vault_root: Path, lookup: NameLookup) -> None:
     """Schedule the stamped build a stale lookup needs; never on the caller's thread.
 

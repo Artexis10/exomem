@@ -411,6 +411,15 @@ content: omit the raw representation and retain existing exact-read refusal
 rules and canonical drift guards. Source capture text is still raw evidence,
 not a designated managed origin block.
 
+A retained input whose text links a page by name is released only against current name lookup evidence, and any knowledge-base write leaves that evidence stale until a stamped build lands.
+A refused check asks for that build itself: `egress.direct_text_references_visible` calls `working_set_runtime.request_lookup_refresh`, which is managed-only, single-flight and never builds on the caller's thread.
+That schedules a build; it does not rebuild an index inside recovery.
+Origin authoring brackets its check with two lookup readings and compares them with `working_set_runtime.lookup_settled`, the rule that history shares.
+An unsettled pair gives an unrestricted writer the retryable `ORIGIN_INPUT_LOOKUP_STALE` (HTTP 503).
+A restricted caller keeps `ORIGIN_INPUT_UNAVAILABLE`, because the state flips on every write, withheld pages included.
+A lookup with no live registry or index keeps it too, because no build can settle that.
+The code is not `ORIGIN_INPUT_STALE`: projection skips that code and would show a carrier whose input was refused, so the new code stays in the branch that removes the payload.
+
 ##### Origin-aware projector refresh
 
 A projector change requires fresh canonical search fields for every active

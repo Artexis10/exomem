@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import note_types, provenance, retained_inputs, source_closure
+from . import note_types, provenance, retained_inputs, source_closure, working_set_runtime
 from .episode_recovery import EpisodeInputOwner
+from .governance import egress
 from .vault import PathGuard, PlannedWrite, parse_frontmatter
 
 if TYPE_CHECKING:
@@ -84,6 +85,30 @@ def _unavailable() -> provenance.OriginError:
     return provenance.OriginError("ORIGIN_INPUT_UNAVAILABLE", "retained input is unavailable")
 
 
+def _text_refused(
+    vault_root: Path, lookup_before: working_set_runtime.NameLookup | None
+) -> provenance.OriginError:
+    """The refusal for input text the name gate would not release.
+
+    A stale name lookup alone can cause it, and the gate has already asked for the
+    build that ends it, so an unrestricted writer is told to retry. A restricted
+    caller is not: the lookup state flips on any write, withheld pages included,
+    so telling it would reveal writes, as recall withholds its vault generation.
+    Without a live lookup no build can help, so that answer stays unavailable.
+    """
+    if lookup_before is None or egress.caller_restricted(vault_root):
+        return _unavailable()
+    lookup_after = working_set_runtime.name_lookup(vault_root)
+    if working_set_runtime.lookup_settled(lookup_before, lookup_after) or (
+        working_set_runtime.LOOKUP_UNAVAILABLE in (lookup_before.state, lookup_after.state)
+    ):
+        return _unavailable()
+    return provenance.OriginError(
+        "ORIGIN_INPUT_LOOKUP_STALE",
+        "linked names could not be checked yet; retry the same write shortly",
+    )
+
+
 def resolve_origin_input(
     vault_root: Path, binding: object, *, disclosure: bool = False
 ) -> OriginInputProof:
@@ -122,8 +147,14 @@ def resolve_origin_input(
         if end > len(text):
             raise provenance.OriginError("ORIGIN_INPUT_STALE", "retained input span changed")
         text = text[start:end]
+    # Only admission that resolves prose names depends on lookup currency.
+    lookup_before = (
+        working_set_runtime.name_lookup(vault_root)
+        if egress.name_lookup_required(vault_root)
+        else None
+    )
     if not retained_inputs.exact_text_visible(vault_root, text):
-        raise _unavailable()
+        raise _text_refused(vault_root, lookup_before)
     root = retained.canonical
     journal_guard = None
     if str(page.frontmatter.get("source_type") or "").casefold() == "episode":

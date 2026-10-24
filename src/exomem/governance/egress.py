@@ -1067,6 +1067,8 @@ def direct_text_references_visible(
 
         lookup = working_set_runtime.name_lookup(root)
         if lookup.state != working_set_runtime.LOOKUP_CURRENT:
+            # A refusal on staleness owes the stamped build that ends it; this only schedules one.
+            working_set_runtime.request_lookup_refresh(root, lookup)
             return False
         checkpoint = lookup.checkpoint
         try:
