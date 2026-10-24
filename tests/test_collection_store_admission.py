@@ -136,14 +136,17 @@ def test_publication_without_a_recorded_epoch_keeps_file_writer_authority(produc
             yield writer.handle, lambda: True
 
     with step(0, None) as (handle, check):
-        result = replica.publish_replica(session.root, handle, authority_check=check, deadline=time.monotonic() + 5)
+        result = replica.publish_replica(
+            session.root, handle, authority_check=check, deadline=time.monotonic() + 5, force=True,
+        )
     assert result.status == "published", result
     with step(0, None) as (handle, _check), handle.transaction() as conn:
-        conn.execute("DELETE FROM store_meta WHERE key IN (?,?)",
-                     (schema.META_PUBLISHED_REPLICA_EPOCH, schema.META_PUBLISHED_INTENT_SHA256))
+        conn.execute("DELETE FROM store_meta WHERE key=?", (schema.META_PUBLISHED_REPLICA_EPOCH,))
     with closing(connection.open_reader(session.path)) as reader:
         legacy = dict(reader.execute("SELECT key,value FROM store_meta"))
-    assert schema.META_LEASE_EPOCH in legacy and authority.PENDING_CREATE not in legacy
+    # The key set of a store whose last publication predates the recorded epoch.
+    assert schema.META_LEASE_EPOCH in legacy
+    assert {authority.PENDING_CREATE, schema.META_PUBLISHED_INTENT_SHA256}.isdisjoint(legacy)
 
     assert replica.file_writer_marker(session.root) == authority.read_marker(session.root)
 
