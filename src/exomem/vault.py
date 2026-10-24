@@ -7696,6 +7696,9 @@ def append_frontmatter_list_item(text: str, key: str, value: str) -> str:
         else:
             at, insertion = line_end + 1, f"{dash}- {quoted}{newline}"
     elif isinstance(node, yaml.ScalarNode):
+        # Only a None value reaches here: an empty value or a null spelling (`~`,
+        # `null`). Drop the spelling so the new block list is the key's only value.
+        block = block[: node.start_mark.index] + block[node.end_mark.index :]
         at = block.find("\n", node.start_mark.index)
         if at == -1:
             at = len(block)

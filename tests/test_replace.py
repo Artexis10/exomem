@@ -239,12 +239,46 @@ def test_replace_appends_to_a_default_style_superseded_by_list(vault: Path) -> N
     assert result.new_path.removesuffix(".md") in old_fm["superseded_by"][1]
 
 
+def test_replace_marks_a_predecessor_whose_superseded_by_is_null(vault: Path) -> None:
+    """A hand-edited `superseded_by: ~` parses to no value, like an empty key;
+    it must take the successor link rather than block the replacement."""
+    old_rel = _make_insight(vault, "Null Pointer Predecessor")
+    _give_predecessor_a_superseded_by(vault, old_rel, "superseded_by: ~")
+
+    result = replace_module.replace(
+        vault,
+        old_path=old_rel,
+        content=_compact_content("Null Pointer Successor", body="revised."),
+        note_type="insight",
+        title="Null Pointer Successor",
+        today=TODAY,
+    )
+
+    old_fm, _body, _raw = vault_module.parse_frontmatter(_read(vault / old_rel), strict=True)
+    assert old_fm["status"] == "superseded"
+    assert len(old_fm["superseded_by"]) == 1
+    assert result.new_path.removesuffix(".md") in old_fm["superseded_by"][0]
+
+
 def test_replace_refuses_instead_of_half_marking_an_unextendable_superseded_by(
     vault: Path,
 ) -> None:
     old_rel = _make_insight(vault, "Unextendable Predecessor")
     _give_predecessor_a_superseded_by(vault, old_rel, "superseded_by: legacy-pointer")
     before = _markdown_snapshot(vault)
+
+    # The preview refuses too, so a draft never promises a commit that refuses.
+    with pytest.raises(replace_module.ReplaceError) as preview:
+        replace_module.replace(
+            vault,
+            old_path=old_rel,
+            content=_compact_content("Unextendable Successor", body="revised."),
+            note_type="insight",
+            title="Unextendable Successor",
+            today=TODAY,
+            validate_only=True,
+        )
+    assert preview.value.code == "INVALID_FRONTMATTER"
 
     with pytest.raises(replace_module.ReplaceError) as exc:
         replace_module.replace(

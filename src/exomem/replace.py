@@ -641,9 +641,6 @@ def replace(
             ["status"],
             "replacement successor must be an active governed compiled conclusion",
         )
-    if validate_only:
-        return prepared.preflight
-
     # The draft token pins the path date across the draft->commit gap (it is
     # already baked into `prepared.destination`); knowledge time is stamped at
     # commit, when the supersession actually happened.
@@ -656,12 +653,16 @@ def replace(
     elif old_updated == old_text:
         # Committing the successor beside an unmarked predecessor would leave two
         # active conclusions and report success, so refuse before any write.
+        # A draft reports the same refusal, so a preview never promises a commit that refuses.
         raise ReplaceError(
             "INVALID_FRONTMATTER",
             ["old_path"],
             "old page frontmatter could not be marked superseded safely "
             "(its superseded_by list is not extendable); nothing was written",
         )
+    if validate_only:
+        return prepared.preflight
+
     auxiliary = list(prepared.auxiliary_writes)
     log_file = root / "Knowledge Base" / "log.md"
     replacement_body = f"Supersedes `{rel_old_no_ext}` via exomem."

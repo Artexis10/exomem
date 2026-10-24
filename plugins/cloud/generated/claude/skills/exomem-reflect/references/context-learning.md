@@ -1,7 +1,7 @@
 # Learn from a context miss
 
 Use this workflow when an observed miss or source-backed feedback calls a durable conclusion or its delivery into question.
-Make the source-backed correction whenever the feedback supports one. File the miss in an incident collection only when the user asks, a workflow engages this procedure, or the live engagement policy delegates filing observed outcomes.
+Make the source-backed correction whenever the feedback supports one and the active engagement policy permits the write. File the miss in an incident collection only when the user asks, a workflow engages this procedure, or the live engagement policy delegates filing observed outcomes.
 For new material, first use the existing capture and compilation workflow in [writing](writing.md).
 Use this procedure when that material supports a correction or exposes a context failure.
 The active agent diagnoses and writes through existing tools. This procedure adds no background learner or automatic correction.
@@ -18,7 +18,8 @@ Use the current capability list and engagement envelope. A miss, advisory, or ex
 
 Reuse an existing incident collection when its declared schema fits.
 Map evidence roles to that schema instead of adding a product taxonomy or a parallel queue.
-The [optional collection example](../examples/context-learning/incident-collection.md) illustrates these roles; it does not authorize collection creation.
+The roles are the source-backed expectation, the context that reached the agent, committed correction evidence, retrieval and later-answer checks, and unresolved evidence or behavior.
+A vault built from the scaffold carries an optional example collection at `_Schema/examples/context-learning/incident-collection.md`; it does not authorize collection creation.
 
 Keep the record bounded and within the source's disclosure rules.
 Do not copy transcripts, private artifacts, or withheld content into a more visible incident.

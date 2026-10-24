@@ -257,18 +257,9 @@ def test_backref_keeps_a_default_style_ingested_into_list_readable(vault: Path) 
     )
 
 
-@pytest.mark.parametrize(
-    "ingested_into",
-    [
-        pytest.param("ingested_into: legacy-pointer", id="not-a-list"),
-        pytest.param("ingested_into: ~", id="null-spelled-out"),
-    ],
-)
-def test_backref_leaves_a_source_it_cannot_extend_byte_identical(
-    vault: Path, ingested_into: str
-) -> None:
+def test_backref_leaves_a_source_it_cannot_extend_byte_identical(vault: Path) -> None:
     source_rel = "Knowledge Base/Sources/Articles/unextendable.md"
-    _captured(vault, source_rel, ingested_into=ingested_into)
+    _captured(vault, source_rel, ingested_into="ingested_into: legacy-pointer")
     before = (vault / source_rel).read_bytes()
 
     created = _remember(
