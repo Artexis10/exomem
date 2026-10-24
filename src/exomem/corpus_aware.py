@@ -1124,9 +1124,12 @@ def pairwise_best_cosine_from_sidecar(
             metadata, matrix = (
                 (resident.metadata, resident.matrix) if resident is not None else idx.all_vectors()
             )
+            # A lagging matrix still holds the old vectors of a page the sidecar
+            # has since rewritten; such a page contributes no pairs.
+            stale = resident.stale_paths if resident is not None and resident.stale_paths else ()
             rows_by_page: dict[str, list[tuple[int, int]]] = {}
             for row, (file_path, chunk_index) in enumerate(metadata):
-                if file_path in wanted:
+                if file_path in wanted and file_path not in stale:
                     rows_by_page.setdefault(file_path, []).append((chunk_index, row))
             texts = idx._texts_for(
                 [(fp, ci) for fp, rows in rows_by_page.items() for ci, _row in rows]
