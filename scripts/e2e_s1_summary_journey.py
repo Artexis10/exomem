@@ -546,7 +546,14 @@ async def discover_and_plan(journey: Journey, service: Session) -> None:
         chapter = await service.call("schema_memory", subject="query-engine", operation="inspect", name=name)
         sizes[name] = len(json.dumps(chapter, ensure_ascii=False, separators=(",", ":")).encode())
         # The query-engine discovery contract fixes the chapter ceiling at 64 KiB.
-        expect(chapter["chapter"] == name and chapter["route"]["tool"] == "record_memory"
+        from exomem.command_surface import find_rendering
+        from exomem.commands import PRODUCT_COMMANDS
+
+        route_tool = chapter["route"]["tool"]
+        # Over MCP the route names the listed Records rendering for the served shape.
+        found = find_rendering(route_tool, PRODUCT_COMMANDS)
+        routes_records = route_tool == "record_memory" or (found is not None and found[0].name == "record_memory")
+        expect(chapter["chapter"] == name and routes_records
                and sizes[name] <= 64 * 1024, "installed query grammar is absent or exceeds its byte bound", chapter)
     for mode in ("compose", "explain", "preview", "dry_run"):
         planned = await service.query({**SAMPLE_DAILY, "mode": mode, "execution_profile": "analytics"}, SAMPLES_ID)
