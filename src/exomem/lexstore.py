@@ -1832,7 +1832,9 @@ def full_rebuild_in_flight(vault_root: Path) -> bool:
         return vault_root.resolve() in _FULL_REBUILDS_IN_FLIGHT
 
 
-def rebase_inherited_catalog_lineage(vault_root: Path) -> tuple[str, ...]:
+def rebase_current_catalog_lineage(
+    vault_root: Path, *, publication_timeout: float = _PUBLICATION_TIMEOUT_BACKGROUND
+) -> tuple[str, ...]:
     """Make a proven-current catalog a delta origin for this registry baseline.
 
     Warm-up and registry reseeds use the same exact-state proof. Standbys
@@ -1843,9 +1845,11 @@ def rebase_inherited_catalog_lineage(vault_root: Path) -> tuple[str, ...]:
     if not maintained_content_index_enabled() or service_standby.in_standby():
         return ()
     try:
-        return get_store(vault_root).rebase_inherited_checkpoints()
+        return get_store(vault_root).rebase_current_checkpoints(
+            publication_timeout=publication_timeout
+        )
     except Exception as error:  # noqa: BLE001 - a later write hands off to repair
-        log.info("inherited catalog lineage rebase skipped (%s)", error)
+        log.info("current catalog lineage rebase skipped (%s)", error)
         return ()
 
 
@@ -6364,7 +6368,9 @@ class LexicalStore:
                 self._stranded_scopes |= stranded
         return witnessed
 
-    def rebase_inherited_checkpoints(self) -> tuple[str, ...]:
+    def rebase_current_checkpoints(
+        self, *, publication_timeout: float = _PUBLICATION_TIMEOUT_BACKGROUND
+    ) -> tuple[str, ...]:
         """Re-stamp an exactly-current catalog in this registry's lineage.
 
         A replacement process inherits a catalog whose stored checkpoints name
@@ -6395,9 +6401,9 @@ class LexicalStore:
                 return ()
         rebased: list[str] = []
         try:
-            # Warm-up runs off the request path, so it can wait out a start-up
-            # watcher batch rather than leave the first write to the repair.
-            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
+            # Serialize checkpoint writes with catalog replacement. The caller
+            # sets its wait bound; a busy skip can leave a later write needing repair.
+            with self._publication_lock(timeout=publication_timeout):
                 # Older atomic replacements leave an otherwise-current database
                 # in DELETE mode. Restore concurrent reads before serving it.
                 conn = self._connect_setup()
@@ -6425,7 +6431,7 @@ class LexicalStore:
                 finally:
                     conn.close()
         except (VaultLockError, sqlite3.Error) as error:
-            log.info("inherited catalog lineage left as is (%s)", error)
+            log.info("current catalog lineage left as is (%s)", error)
         return tuple(rebased)
 
     def _hand_off_stranded_scopes(self) -> bool:

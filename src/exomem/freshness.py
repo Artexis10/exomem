@@ -2014,6 +2014,7 @@ def rebaseline(vault_root: Path) -> dict[str, bool]:
 
     Each scope is independent: a failed walk leaves only that scope non-live so
     the watcher's next periodic reconcile can initialize it without fanout.
+    Consumers own publication of their derived state after this projection.
     """
     invalidate(vault_root)
     result = {scope: False for scope in SCOPES}
@@ -2042,10 +2043,6 @@ def rebaseline(vault_root: Path) -> dict[str, bool]:
                 vault_root,
                 scope,
             )
-    from . import lexstore
-
-    # Reuse exact catalog-state proof before the next write advances this baseline.
-    lexstore.rebase_inherited_catalog_lineage(vault_root)
     return result
 
 

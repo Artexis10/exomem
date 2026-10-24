@@ -1196,6 +1196,39 @@ def test_bound_mcp_tool_returns_public_operation_error_as_failure_content(
     assert result["error"] == public_error.as_public_dict()
 
 
+def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.semantic_writes import SemanticWriteError
+
+    def leaf(vault):  # noqa: ANN001, ARG001
+        raise AssertionError("invoke seam should replace the leaf")
+
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    bound = command_surface.bind_vault(leaf, object(), command=command)
+    refusal = SemanticWriteError(
+        "RELATION_REVIEW_STABLE_ID_REQUIRED",
+        "lifecycle reviewed-none requires one unique stable page identity",
+    )
+    monkeypatch.setattr(
+        "exomem.writer_lease.invoke_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(refusal),
+    )
+
+    result = bound()
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "RELATION_REVIEW_STABLE_ID_REQUIRED"
+    assert result["error"]["message"] == refusal.reason
+    remediation = result["error"]["remediation"]
+    assert 'maintain_memory(mode="backfill-ids")' in remediation
+    assert "confirmation" in remediation
+    assert "backfill of missing IDs" in remediation
+    assert remediation.index("identity issues") < remediation.index("confirmation")
+    assert "CLI" in remediation
+    assert "re-read and validate" in remediation
+
+
 def test_bound_mcp_tool_does_not_flatten_unexpected_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
