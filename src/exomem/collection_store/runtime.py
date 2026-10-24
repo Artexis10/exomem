@@ -1546,7 +1546,7 @@ class StoreServer:
         policy and release checks once per slice, not once per window.
         """
         from ..governance import principal
-        from . import capability, edit_back
+        from . import capability, chain, edit_back
         from .preview import _mutate, preview_store
 
         if self.runtime is None or not capability.views_published(self.root):
@@ -1575,7 +1575,12 @@ class StoreServer:
                                                   if change[0] not in owned or change[1] is not None or change[2]], dirty)
 
                     def mutate(method, *args, **kwargs):
-                        return _mutate(self.root, method, *args, **kwargs)
+                        before = chain.recorded_head(writer.connection)
+                        result = _mutate(self.root, method, *args, **kwargs)
+                        if chain.recorded_head(writer.connection) != before:
+                            # A new canonical edit needs its own install and confirmation passes.
+                            self._views_after, self._views_passes = None, 0
+                        return result
 
                     started = time.monotonic()
                     wait = self._edit_back.run(writer, now=started, mutate=mutate, limit=VIEW_BATCH_PATHS)

@@ -1904,8 +1904,15 @@ async def compatible_rollback(copied: Journey, settled: dict[str, Any]) -> dict[
 
 
 async def same_answers(journey: Journey, service: Session, references: dict[str, Any], summary_before: list) -> None:
+    import yaml
+
     with journey.step("7. store mode answers as file mode did"):
         answers = await file_answers(journey, service)
+        path = journey.file_collections["records"]
+        declared = yaml.safe_load((journey.vault / path).read_text().split("---\n")[1])
+        answers["records inspect"] = shared_inspection(
+            answers["records inspect"], store_id=marker_entries(journey)[path]["store_id"],
+            fields=list(declared["item_schema"]["fields"]))
         for name, reference in references.items():
             expect(without_storage_identity(answers[name]) == without_storage_identity(reference),
                    f"{name} differs between file mode and store mode", {"file": reference, "store": answers[name]})
@@ -1913,6 +1920,16 @@ async def same_answers(journey: Journey, service: Session, references: dict[str,
                "Records inspection does not report the store's view projection", answers["records inspect"])
         summary, _ = await paged(service, DAILY, "groups", 30)
         expect(summary == summary_before, "the summary collection answers differently after the move")
+
+
+def shared_inspection(inspection: dict[str, Any], *, store_id: str, fields: list[str]) -> dict[str, Any]:
+    """Check store-only owner discovery separately from the shared collection answers."""
+    basis, contract = inspection.get("field_release_basis"), inspection["contract"]
+    expect(isinstance(basis, dict) and basis.get("version") == 1
+           and basis.get("store_id") == store_id and basis.get("collection_id") == contract["collection_id"]
+           and basis.get("path") == basis.get("ref") == contract["path"] and basis.get("fields") == fields,
+           "inspection returned a different canonical field-release basis", basis)
+    return {key: value for key, value in inspection.items() if key != "field_release_basis"}
 
 
 async def store_mode_writes(journey: Journey, service: Session, summary_before: list,

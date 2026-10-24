@@ -1009,11 +1009,20 @@ def test_continuously_queued_requests_do_not_starve_a_notified_view_edit(served,
     """Defect: a busy service always takes the next request and never applies a settled saved view."""
     from exomem import file_watcher
     from exomem.collection_store import runtime
+    from exomem.collection_store.writer import CollectionWriter
 
     root = served.root
     monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
     server = runtime._server(root)
     until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
+    apply_edit = CollectionWriter.apply_view_edit
+
+    def edit_after_completed_publication_passes(writer, *args, **kwargs):
+        # A settled edit can follow a completed wake while the request queue remains busy.
+        server._views_after, server._views_passes = None, 2
+        return apply_edit(writer, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "apply_view_edit", edit_after_completed_publication_passes)
     _, path = published_view(root, "Busy", count=1)
     pumping = threading.Event()
     pumping.set()

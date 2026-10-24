@@ -1102,3 +1102,30 @@ def test_imported_original_read_proof_rejects_edits_and_later_canonical_changes(
             decision = operation.projection_decision(
                 projection["path"], content=original, manifest_for=operation.field_manifest)
     assert decision.level == 0
+
+
+def test_imported_inspection_compares_the_existing_journey_contract(store, tmp_path, monkeypatch):
+    """A neutral imported collection must preserve the journey's file-mode inspection."""
+    from pathlib import Path
+
+    from exomem.collection_store.preview import preview_store
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+    from exomem.record_memory import record_memory
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "scripts"))
+    import e2e_s1_summary_journey as journey
+
+    root, path = _items(tmp_path / "imported", values={"title": "One", "count": 1})
+    relative = path.relative_to(root).as_posix()
+    with request_scope(owner_principal(surface="mcp")):
+        before = egress.filter_withheld_entries(root, record_memory(root, "inspect", collection=relative))
+        with _capture(tmp_path / "imported", root, path) as (audit, captured), store.handle.transaction() as conn:
+            legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        with preview_store(root, store.handle):
+            after = egress.filter_withheld_entries(root, record_memory(root, "inspect", collection=relative))
+    store_id = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+    shared = journey.shared_inspection(after, store_id=store_id, fields=["title", "count"])
+    assert journey.without_storage_identity(before) == journey.without_storage_identity(shared)
+    with pytest.raises(RuntimeError, match="different canonical field-release basis"):
+        journey.shared_inspection(after, store_id="another-store", fields=["title", "count"])
