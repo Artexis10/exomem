@@ -2,6 +2,8 @@ import asyncio
 import importlib.util
 import json
 import socket
+import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +15,32 @@ SPEC = importlib.util.spec_from_file_location("e2e_product_loop_under_test", SCR
 assert SPEC is not None and SPEC.loader is not None
 e2e_product_loop = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(e2e_product_loop)
+
+
+def test_successful_installed_journey_preserves_read_recovery_evidence(tmp_path, monkeypatch, capsys):
+    """The parent must expose retry evidence even when its installed child completes successfully."""
+    first = "s1-journey: query attempt=1 refused=QUERY_TIMEOUT retryable=true roundtrip_ms=201; retry=1/1"
+    recovered = "s1-journey: query attempts=2 outcome=complete total_roundtrip_ms=210"
+    summary = json.dumps({"success": True, "journey": "s1-summary"})
+
+    def run(command, **_options):
+        if command[:2] == ["uv", "build"]:
+            (tmp_path / "dist" / "exomem-fixture.whl").write_bytes(b"controlled wheel boundary")
+        stdout = ""
+        if any(Path(part).name == "e2e_s1_summary_journey.py" for part in command):
+            stdout = "\n".join((first, recovered, summary)) + "\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(e2e_product_loop, "_e2e_workdir", lambda **_kw: nullcontext(str(tmp_path)))
+    monkeypatch.setattr(e2e_product_loop, "_installed_records_summary_enabled", lambda *_a, **_kw: True)
+    monkeypatch.setattr(e2e_product_loop, "_run", run)
+    monkeypatch.setattr(e2e_product_loop.sys, "argv", ["e2e_product_loop.py", "--python", "controlled-python",
+                                                   "--budget-seconds", "10", "--request-timeout", "1"])
+    assert e2e_product_loop.main() == 0
+    output = capsys.readouterr().out
+    assert first in output
+    assert recovered in output
+    assert summary in output
 
 
 @pytest.mark.parametrize("interrupted_profile", ["epistemic", "provenance", "causal"])
