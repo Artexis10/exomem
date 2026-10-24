@@ -711,14 +711,14 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
     state_builds = {}
     for tree in sorted({case.tree for case in cases}):
         record = _load(layout.shared_tree(tree), "state.json")
+        # This projection follows the fixed build-record schema; absent fields stay unknown.
         state_builds[tree] = {
-            "cpu_threads": record.get("cpu_threads"),
-            "resumed": record.get("resumed"),
-            "vector_build": record.get("vector_build"),
-            "preparation": record.get("preparation"),
-            "seed_build": record.get("seed_build"),
-            "vectors": record.get("build", {}).get("vectors"),
+            key: record[key]
+            for key in ("cpu_threads", "resumed", "vector_build", "preparation", "seed_build")
+            if key in record
         }
+        if "vectors" in record.get("build", {}):
+            state_builds[tree]["vectors"] = record["build"]["vectors"]
     return {**result, "power_step": power_digest, "state_builds": state_builds}
 
 

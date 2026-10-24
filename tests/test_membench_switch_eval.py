@@ -1592,6 +1592,61 @@ def test_seeded_state_republishes_and_captures_each_arm_with_original_vector_pro
     assert "catalogue_unavailable" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("legacy_settings, expected_settings", [
+    ({}, ("unrecorded", "unrecorded")),
+    ({"cpu_threads": None, "resumed": False}, (None, False)),
+])
+def test_seed_and_score_preserve_unknown_legacy_settings_separately_from_explicit_defaults(
+    seed_build_round: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+    legacy_settings: dict, expected_settings: tuple,
+) -> None:
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import audit, judge, state
+
+    layout, donor, source = seed_build_round
+    metadata = donor.shared_tree("snapshot") / "state.json"
+    original = json.loads(metadata.read_text())
+    del original["cpu_threads"], original["resumed"], original["vector_build"], original["preparation"]
+    original.update(legacy_settings)
+    metadata.write_text(json.dumps(original))
+    case = _case("legacy-settings")
+    inputs = {
+        "arms": ["P"], "trees": {"snapshot": {"path": str(source)}},
+        "repeats": 1, "seed": 0, "harness_digest": "fixture-harness",
+    }
+    monkeypatch.setattr(cli, "_context", lambda path: (layout, inputs, [case], [], arm_specs()))
+    monkeypatch.setattr(cli, "_stage", lambda *args: None)
+    monkeypatch.setattr(state, "effective_online_cpus", lambda: 2)
+    monkeypatch.setattr(state.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
+        args[0], 0, json.dumps({"vectors": {"state": "current"}}), "",
+    ))
+    monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {})
+    monkeypatch.setattr(state, "prove_quiescence", lambda *args, **kwargs: {
+        "content_unchanged": True, "signatures_unchanged": True,
+    })
+    assert cli.main([
+        "state", "--run", str(layout.run), "--cpu-threads", "1",
+        "--seed-build-from", str(donor.run),
+    ]) == 0
+    record = json.loads((layout.shared_tree("snapshot") / "state.json").read_text())
+    assert (record.get("cpu_threads", "unrecorded"), record.get("resumed", "unrecorded")) == expected_settings
+    origin = record["vector_build"]
+    assert (origin.get("cpu_threads", "unrecorded"), origin.get("resumed", "unrecorded")) == expected_settings
+    assert record["preparation"] == {"cpu_threads": 1, "resumed": False}
+
+    session = _session(layout, case.case_id, "P", 1, AttemptResult(ACTOR_FAILURE, "timeout"))
+    monkeypatch.setattr(cli, "_standing", lambda *args: (
+        {session["session_id"]: session}, None, {"seed": 0, "inputs_digest": "fixture-inputs"},
+    ))
+    monkeypatch.setattr(judge, "resolved_verdicts", lambda *args: {})
+    monkeypatch.setattr(audit, "load_audit", lambda *args, **kwargs: None)
+    assert cli.main(["score", "--run", str(layout.run)]) == 0
+    scored = json.loads((layout.score / "score.json").read_text())["state_builds"]["snapshot"]
+    assert (scored.get("cpu_threads", "unrecorded"), scored.get("resumed", "unrecorded")) == expected_settings
+    assert scored["vector_build"] == origin
+    assert scored["preparation"] == record["preparation"]
+
+
 @pytest.mark.parametrize("mismatch", ["identity", "profile", "state", "snapshot", "manifest", "custody"])
 def test_seed_mismatches_refuse_before_moving_the_original_vault(
     seed_build_round: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,

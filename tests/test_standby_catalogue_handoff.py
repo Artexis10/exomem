@@ -879,37 +879,45 @@ def test_a_permission_change_alone_reparses_one_page_not_the_catalogue(
     assert lexstore.search_bm25(root, f"{MARKER}1", k=3, scope="kb")
 
 
-def test_a_discard_cancels_a_running_build_and_waits_for_it(
+def test_a_discard_timeout_keeps_a_running_builds_temp_locked(
     older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No temp may outlive a discard unlocked, so the discard stops the builder."""
+    """A bounded discard retains ownership until the cancelled writer cleans up."""
     import threading
 
     root = older_catalogue
     inside = threading.Event()
+    release = threading.Event()
     real_insert = lexstore.LexicalStore._insert_page
 
     def slow_first_insert(self, conn, *args, **kwargs):
         if not inside.is_set():
             inside.set()
-            time.sleep(0.5)
+            assert release.wait(30), "the test did not release its paused writer"
         return real_insert(self, conn, *args, **kwargs)
 
     monkeypatch.setattr(lexstore.LexicalStore, "_insert_page", slow_first_insert)
+    monkeypatch.setattr(lexstore, "_DETACHED_DISCARD_WAIT", 0.0)
     outcome: dict = {}
     builder = threading.Thread(
         target=lambda: outcome.setdefault("built", lexstore.build_detached_catalog(root))
     )
     builder.start()
-    assert inside.wait(30), "the build never reached materialization"
-
-    lexstore.discard_detached_catalogs()
-
-    alive_after_discard = builder.is_alive()
-    builder.join(30)
-    assert alive_after_discard is False, "the discard returned while its builder still ran"
+    try:
+        assert inside.wait(30), "the build never reached materialization"
+        with lexstore._DETACHED_LOCK:
+            (detached,) = [item for item in lexstore._DETACHED.values() if item.vault_root == root]
+        lexstore.discard_detached_catalogs()
+        assert detached.cancelled.is_set()
+        assert _temps(root), "the paused writer's temp family was removed"
+        assert detached.lock.held(), "the paused writer lost ownership of its temp"
+    finally:
+        release.set()
+        builder.join(30)
+    assert not builder.is_alive(), "the released test writer did not exit"
     assert outcome["built"] is None
     assert _temps(root) == []
+    assert not detached.lock.held()
 
 
 def test_a_failed_discard_after_a_failed_adoption_still_promotes(

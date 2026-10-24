@@ -753,21 +753,22 @@ def build_tree(
             "vault_signatures": signature_manifest(slot.vault),
             "vault_signature_digest": signature_digest(slot.vault),
             "build": build,
-            "cpu_threads": cpu_threads,
-            "resumed": resumed,
         }
+        # The build-record schema fixes these fields; absent donor fields stay unknown.
+        build_settings = {"cpu_threads": cpu_threads, "resumed": resumed}
         if seed is not None:
             donor, provenance, _state = seed
+            build_settings = {key: donor[key] for key in build_settings if key in donor}
             record.update(
-                cpu_threads=donor.get("cpu_threads"), resumed=donor.get("resumed"),
                 seed_build=provenance,
                 vector_build=donor.get("vector_build", {
                     "run": provenance["donor_run"],
                     "metadata_digest": provenance["donor_metadata_digest"],
-                    "cpu_threads": donor.get("cpu_threads"), "resumed": donor.get("resumed"),
+                    **build_settings,
                 }),
                 preparation={"cpu_threads": cpu_threads, "resumed": resumed},
             )
+        record.update(build_settings)
         # Freeze a baseline before the proof server can add process-local activity.
         shutil.move(str(slot.state), str(target / "state"))
         shutil.copytree(target / "state", slot.state, symlinks=True)
