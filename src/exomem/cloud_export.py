@@ -129,14 +129,18 @@ def _failure_diagnostic(error: Exception) -> dict:
     detail = {"type": type(error).__name__}
     frame = error.__traceback__
     while frame is not None:
-        detail["function"] = frame.tb_frame.f_code.co_name
+        # The portability raise helper is never the cause; its caller is the check that refused.
+        if frame.tb_frame.f_code is not vault_portability._fail.__code__:
+            detail["function"] = frame.tb_frame.f_code.co_name
         frame = frame.tb_next
     if isinstance(error, vault_portability.PortabilityError):
         detail["code"] = error.code
         if error.limit is not None:
             detail["limit"] = error.limit
-    if isinstance(error, OSError) and error.errno is not None:
-        detail["errno"] = error.errno
+    # A refusal raised while handling an OSError keeps that OSError's number.
+    cause = error if isinstance(error, OSError) else error.__cause__ or error.__context__
+    if isinstance(cause, OSError) and cause.errno is not None:
+        detail["errno"] = cause.errno
     return detail
 
 
