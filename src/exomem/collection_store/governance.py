@@ -1709,7 +1709,7 @@ class OperationAuthorization:
                     # A retired page must not disclose a raw-history boundary through an empty matching header.
                     return Decision(0)
             if content is not None:
-                from . import views
+                from . import legacy_originals, views
 
                 cursor = self.conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
                 row = cursor.fetchone()
@@ -1729,7 +1729,9 @@ class OperationAuthorization:
                     root=self.root, cache=self.cache, operation=self,
                 )
                 if content != rendered.encode("utf-8"):
-                    return Decision(0)
+                    # Migration preserves initial source bytes before asynchronous stamping.
+                    if not legacy_originals.current_view_matches(self.conn, projection, content):
+                        return Decision(0)
                 parsed = find_corpus.parse_page(self.root / path, 0, self.root, content=content)
                 if parsed is None:
                     return Decision(0)

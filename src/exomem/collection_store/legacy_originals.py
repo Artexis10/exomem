@@ -139,6 +139,34 @@ def view_basis(conn, projection):
     return (expected, False) if expected is not None and expected == projection["published_sha256"] else None
 
 
+def current_view_matches(conn, projection, raw):
+    """Prove an imported view's bytes still describe its current canonical content."""
+    from .connection import CollectionStoreError
+
+    kind = projection["kind"]
+    if kind == "log":
+        # A whole log's editable base survives writes; its read authority must not.
+        current = conn.execute(
+            "SELECT created_txn=updated_txn FROM collections WHERE collection_id=?",
+            (projection["collection_id"],),
+        ).fetchone()
+        if current != (1,):
+            return False
+    elif kind == "item":
+        # A revised schema can reinterpret unchanged row bytes; require their original contract.
+        current = conn.execute(
+            "SELECT manifest_version FROM collections WHERE collection_id=?",
+            (projection["collection_id"],),
+        ).fetchone()
+        if current != (1,):
+            return False
+    try:
+        basis = view_basis(conn, projection)
+    except CollectionStoreError:
+        return False
+    return basis is not None and hashlib.sha256(raw).hexdigest() == basis[0]
+
+
 def backfill(writer, check):
     """Capture recoverable older imports before publication, never reconstructing original bytes."""
     from .. import record_formats, vault
