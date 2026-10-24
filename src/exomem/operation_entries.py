@@ -16,16 +16,29 @@ The selector and mode values are the closed selector of these two commands (thei
 `Literal` signatures and the egress selector registry), not vocabulary that a vault
 or a customer defines. `assert_coverage` fails startup when the entries and that
 registry drift apart.
+
+The same entries also spell a call. `spell_call` turns a grouped-command call into
+the tool and arguments that a surface of a given shape lists, and `unspell_call` turns
+them back, so guidance on MCP never names a tool that the surface hides.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal, get_args
 
 Effect = Literal["read", "write"]
+
+#: How the MCP surface publishes a command that has renderings. `nested` carries the
+#: operation in one `operation` object, `flat` carries it as an `action` plus its fields,
+#: and `grouped` lists only the grouped command. EXPERIMENTAL: the single-purpose-tools
+#: pilot compares the three and then removes the losers.
+ToolShape = Literal["nested", "flat", "grouped"]
+TOOL_SHAPES: tuple[str, ...] = get_args(ToolShape)
+DEFAULT_TOOL_SHAPE: ToolShape = "nested"
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,3 +461,171 @@ def assert_coverage(
         raise RuntimeError(
             f"operation entries for {command} do not cover its selector: " + "; ".join(problems)
         )
+
+
+# --- Spelling a call --------------------------------------------------------------------
+
+
+@cache
+def _renderings_of(command: str) -> tuple[Rendering, ...]:
+    operations = OPERATIONS.get(command)
+    return () if operations is None else operations.renderings_with_entries()
+
+
+def _require_shape(shape: str) -> None:
+    if shape not in TOOL_SHAPES:
+        raise ValueError(f"tool shape must be one of {', '.join(TOOL_SHAPES)}; got {shape!r}")
+
+
+def spellings(command: str) -> tuple[str, ...]:
+    """Every public name a grouped command can be called by: itself, then its renderings."""
+    return (command, *(rendering.name for rendering in _renderings_of(command)))
+
+
+def listed_tools(command: str, shape: str, effect: Effect | None = None) -> tuple[str, ...]:
+    """The tool names a surface of this shape lists for one grouped command.
+
+    `effect` keeps one side's tools. A command without renderings, or any command on the
+    `grouped` shape, is listed under its own name whatever the side asked for.
+    """
+    _require_shape(shape)
+    renderings = _renderings_of(command) if shape != "grouped" else ()
+    if not renderings:
+        return (command,)
+    return tuple(r.name for r in renderings if effect in (None, r.effect))
+
+
+def selector_label(command: str, shape: str) -> str:
+    """The argument that names the operation, as a client of this shape writes it."""
+    _require_shape(shape)
+    operations = OPERATIONS.get(command)
+    if operations is None:
+        raise ValueError(f"no operation entries for {command}")
+    return "operation.kind" if shape == "nested" else operations.selector
+
+
+def spell_call(
+    command: str, arguments: Mapping[str, Any], shape: str
+) -> tuple[str, dict[str, Any]]:
+    """The tool and arguments that carry a grouped-command call on a surface of this shape.
+
+    The inverse of `unspell_call`: a call that `resolve_invocation` accepts resolves back
+    to `arguments`. A command without renderings, and the `grouped` shape, spell a call as
+    itself. Raises ValueError for an operation that no rendering carries, because guidance
+    that names a tool the surface cannot call must fail where it is written.
+    """
+    _require_shape(shape)
+    renderings = _renderings_of(command) if shape != "grouped" else ()
+    if not renderings:
+        return command, dict(arguments)
+    selector = OPERATIONS[command].selector
+    kind = arguments.get(selector)
+    fields = {key: value for key, value in arguments.items() if key != selector}
+    for rendering in renderings:
+        if rendering.variant_for(kind, fields) is None:
+            continue
+        if shape == "nested":
+            return rendering.name, {"operation": {"kind": kind, **fields}}
+        return rendering.name, {selector: kind, **fields}
+    raise ValueError(f"no rendering of {command} carries {selector}={kind!r}")
+
+
+def call_text(command: str, arguments: Mapping[str, Any], shape: str) -> str:
+    """A call in prose: the tool name and its arguments, as `tool(key='value', ...)`."""
+    tool, spelled = spell_call(command, arguments, shape)
+    return f"{tool}({', '.join(f'{key}={value!r}' for key, value in spelled.items())})"
+
+
+def call_route(command: str, arguments: Mapping[str, Any], shape: str) -> dict[str, Any]:
+    """A call as a payload route, `{"tool": ..., "args": ...}`, spelled for this shape."""
+    tool, spelled = spell_call(command, arguments, shape)
+    return {"tool": tool, "args": spelled}
+
+
+def tools_text(command: str, shape: str, effect: Effect | None = None) -> str:
+    """The tool names a surface of this shape lists for a command, for one line of prose."""
+    return "/".join(listed_tools(command, shape, effect))
+
+
+def route(command: str, shape: str, actions: Sequence[str]) -> dict[str, Any]:
+    """The route a bootstrap advertises for some operations of a grouped command.
+
+    A command without renderings, and the `grouped` shape, name one tool. Otherwise each
+    listed tool names the operations it carries, and `selector` names the argument that
+    holds the operation. Raises ValueError for an operation that no rendering carries,
+    because a route to a call the surface cannot take must fail where it is written.
+    """
+    _require_shape(shape)
+    renderings = _renderings_of(command) if shape != "grouped" else ()
+    if not renderings:
+        return {"tool": command, "actions": list(actions)}
+    by_tool = {r.name: [a for a in actions if a in r.kinds] for r in renderings}
+    missing = [a for a in actions if not any(a in carried for carried in by_tool.values())]
+    if missing:
+        raise ValueError(f"no rendering of {command} carries {', '.join(missing)}")
+    return {"tools": by_tool, "selector": selector_label(command, shape)}
+
+
+def split_operation(
+    rendering: Rendering, shape: str, body: Mapping[str, Any]
+) -> tuple[Any, dict[str, Any]] | None:
+    """The operation kind and its fields from a rendering call's arguments, or None.
+
+    `body` holds the arguments without the transport keys and the tool's own extra
+    arguments. A nested call must carry one `operation` object and nothing else.
+    """
+    if shape == "nested":
+        operation = body.get("operation")
+        if set(body) != {"operation"} or not isinstance(operation, Mapping):
+            return None
+        return operation.get("kind"), {k: v for k, v in operation.items() if k != "kind"}
+    return body.get(rendering.selector), {k: v for k, v in body.items() if k != rendering.selector}
+
+
+def unspell_call(
+    tool: str, arguments: Mapping[str, Any], shape: str
+) -> tuple[str, dict[str, Any]] | None:
+    """The grouped command and flat arguments that a tool call of this shape stands for.
+
+    None when `tool` is not a name this shape lists for a converted command, or when the
+    arguments do not select an operation that the tool carries. It checks which operation
+    the call names and nothing about the operation's own fields: the grouped command's
+    argument rules do that when the call runs.
+    """
+    _require_shape(shape)
+    for command, operations in OPERATIONS.items():
+        if shape == "grouped":
+            if tool == command:
+                return command, dict(arguments)
+            continue
+        for rendering in _renderings_of(command):
+            if rendering.name != tool:
+                continue
+            parsed = split_operation(rendering, shape, arguments)
+            if parsed is None:
+                return None
+            kind, fields = parsed
+            if rendering.variant_for(kind, fields) is None:
+                return None
+            return command, {operations.selector: kind, **fields}
+    return None
+
+
+def write_selectors() -> tuple[str, ...]:
+    """Every `tool:operation` selector that always writes, for a hook that cannot import this module.
+
+    A rendering selector names a write operation of a change tool, whatever the host calls
+    it. A grouped selector leaves out an operation that is a read in some modes (an import
+    preview against an import start), because the operation alone does not say which. A
+    standalone hook stamps this list, and a test fails when the hook and these entries drift.
+    """
+    selectors: set[str] = set()
+    for command, operations in OPERATIONS.items():
+        reads = {entry.action for entry in operations.entries if entry.effect == "read"}
+        for entry in operations.entries:
+            if entry.effect != "write":
+                continue
+            selectors.add(f"{entry.rendering}:{entry.action}")
+            if entry.action not in reads:
+                selectors.add(f"{command}:{entry.action}")
+    return tuple(sorted(selectors))

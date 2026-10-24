@@ -11,7 +11,7 @@ import functools
 import json
 from pathlib import Path
 
-from .. import collection_profiles, held_fs, memory_refs, vault
+from .. import capabilities, collection_profiles, held_fs, memory_refs, vault
 from .. import structured_collections as collections
 from .connection import CollectionStoreError
 
@@ -226,7 +226,11 @@ def refuse_view_paths(root, paths, refusal, *, expected_marker=None):
         raise refusal(error.code, error.reason) from None
     if entry is not None:
         profile = entry.get("semantic_profile")
-        tool = "its collection's tool" if profile is None else collection_profiles.profile_for(profile).tool
+        tool = (
+            "its collection's tool"
+            if profile is None
+            else capabilities.active_tools_text(collection_profiles.profile_for(profile).tool, "write")
+        )
         raise refusal(VIEW_PATH, f"this path holds the views of a store collection; change its items with {tool}")
 
 

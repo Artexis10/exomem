@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
+
+from . import operation_entries
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,8 +25,13 @@ class ActiveSurfaceDescriptor:
     hand_registered_tools: tuple[str, ...] = ()
     unavailable_reasons: tuple[tuple[str, str], ...] = ()
     compatibility_commands: tuple[str, ...] = ()
+    #: How this surface spells a converted command (see `operation_entries.TOOL_SHAPES`).
+    #: Only an MCP surface lists renderings; every other surface keeps the grouped spelling.
+    tool_shape: str = "grouped"
 
     def __post_init__(self) -> None:
+        if self.tool_shape not in operation_entries.TOOL_SHAPES:
+            raise ValueError(f"unknown tool shape: {self.tool_shape!r}")
         for field_name in (
             "product_commands",
             "exported_aliases",
@@ -55,6 +63,7 @@ class ActiveSurfaceDescriptor:
                 "available_product_tools": sorted(self.product_commands),
                 "exported_aliases": sorted(self.exported_aliases),
                 "hand_registered_tools": sorted(self.hand_registered_tools),
+                **self._shape_metadata(),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -70,8 +79,18 @@ class ActiveSurfaceDescriptor:
             "available_product_tools": sorted(self.product_commands),
             "exported_aliases": sorted(self.exported_aliases),
             "hand_registered_tools": sorted(self.hand_registered_tools),
+            **self._shape_metadata(),
             "active_capability_sha256": self.fingerprint,
         }
+
+    def _shape_metadata(self) -> dict[str, str]:
+        """The tool shape, stated only when it is not the grouped spelling every other surface uses.
+
+        Two shapes list the same names and take different arguments, so the fingerprint
+        has to tell them apart; leaving the default out keeps every grouped surface's
+        fingerprint as it was.
+        """
+        return {} if self.tool_shape == "grouped" else {"tool_shape": self.tool_shape}
 
 
 _ACTIVE_SURFACE: ContextVar[ActiveSurfaceDescriptor | None] = ContextVar(
@@ -94,3 +113,38 @@ def active_surface(descriptor: ActiveSurfaceDescriptor) -> Iterator[None]:
         yield
     finally:
         _ACTIVE_SURFACE.reset(token)
+
+
+def current_tool_shape() -> str:
+    """The tool shape of the surface serving this call.
+
+    Where no surface is bound (a direct Python call, a test, a script) nothing lists a
+    rendering, so the answer is the grouped spelling that the command registry executes.
+    """
+    active = _ACTIVE_SURFACE.get()
+    return "grouped" if active is None else active.tool_shape
+
+
+def active_spell_call(command: str, arguments: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The tool and arguments that call a grouped command on the surface serving this call."""
+    return operation_entries.spell_call(command, arguments, current_tool_shape())
+
+
+def active_call_text(command: str, arguments: Mapping[str, Any]) -> str:
+    """A grouped-command call written the way the surface serving this call spells it."""
+    return operation_entries.call_text(command, arguments, current_tool_shape())
+
+
+def active_tools(command: str, effect: operation_entries.Effect | None = None) -> tuple[str, ...]:
+    """The tools the surface serving this call lists for a grouped command, one side if asked."""
+    return operation_entries.listed_tools(command, current_tool_shape(), effect)
+
+
+def active_call_route(command: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """A grouped-command call as a `{"tool", "args"}` route, spelled for the serving surface."""
+    return operation_entries.call_route(command, arguments, current_tool_shape())
+
+
+def active_tools_text(command: str, effect: operation_entries.Effect | None = None) -> str:
+    """The tools the serving surface lists for a grouped command, for one line of prose."""
+    return operation_entries.tools_text(command, current_tool_shape(), effect)

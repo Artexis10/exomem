@@ -111,24 +111,55 @@ import urllib.request
 from functools import lru_cache
 from pathlib import Path
 
+# The server-name token that marks an Exomem tool; a host fixes it, a vault does not.
+_KB_SERVER = r"(?:exomem|knowledge[_-]?base)"
 # KB write tools — mixed tools include their operation selector so read-only
 # discovery does not suppress the reminder. Legacy names remain recognized.
 _KB_WRITE = re.compile(
-    r"(?:exomem|knowledge[_-]?base).*(?:"
+    _KB_SERVER
+    + r".*(?:"
     r"note|add|edit|append|create_file|replace|remember|capture_source|"
     r"preserve_evidence|preserve_artifacts|manage_memory_file|"
     r"connect_memory:(?:create-entity|accept-relation)|"
-    # Structured-collection lifecycle writes. A turn that filed the record or
-    # moved the plan item did exactly what the capture contract asks for, and
-    # was nudged anyway because the detector knew only page and entity writes.
-    # Spelled out per action so `inspect`/`query`/`describe`/`validate` stay
-    # read-only discovery that leaves the check armed.
-    r"record_memory:(?:create|append|update|revise|rebaseline)|"
-    r"plan_memory:(?:create|add|update|triage)|"
     r"observe_memory:(?:add|update|remove)|"
     r"episode_memory:(?:record|prepare|disposition|resume)"
     r")",
     re.I,
+)
+# Structured-collection lifecycle writes, as `tool:operation` for every spelling a host can
+# call: the grouped `record_memory`/`plan_memory` and the `change_*` renderings. A turn that
+# filed the record or moved the plan item did exactly what the capture contract asks for.
+# `read_*` renderings and the read operations are absent, so discovery leaves the check armed.
+# Stamped from `exomem.operation_entries.write_selectors()`; the hook cannot import the package,
+# and `tests/test_single_purpose_guidance.py` fails when this list and the entries drift.
+_COLLECTION_WRITES = (
+    "change_plans:add",
+    "change_plans:create",
+    "change_plans:rebaseline",
+    "change_plans:revise",
+    "change_plans:triage",
+    "change_plans:update",
+    "change_records:append",
+    "change_records:bulk_upsert",
+    "change_records:create",
+    "change_records:discard",
+    "change_records:import",
+    "change_records:rebaseline",
+    "change_records:revise",
+    "change_records:update",
+    "plan_memory:add",
+    "plan_memory:create",
+    "plan_memory:rebaseline",
+    "plan_memory:revise",
+    "plan_memory:triage",
+    "plan_memory:update",
+    "record_memory:append",
+    "record_memory:bulk_upsert",
+    "record_memory:create",
+    "record_memory:discard",
+    "record_memory:rebaseline",
+    "record_memory:revise",
+    "record_memory:update",
 )
 # Preparation only returns a proposal; standalone deployers copy bytes and cannot import the registry.
 _PREPARATION_TOOL_SUFFIXES = ("compile_source", "prepare_note")
@@ -139,7 +170,7 @@ _PREPARATION_TOOL_SUFFIXES = ("compile_source", "prepare_note")
 #: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
     "[Exomem capture check] Per live policy: no transcripts; supersede_note supersedes a "
-    "contradicted conclusion; intent->Planning/plan_memory, outcome->Records/record_memory; "
+    "contradicted conclusion; intent->Planning, outcome->Records; "
     "no transient code/test/CI; nothing durable: stop. "
     'Rules: Exomem skill or bootstrap(profile="compact").'
 )
@@ -439,7 +470,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
                 arguments = {}
             namespace = str(record.get("namespace") or "")
             name = str(record.get("name") or "")
-            operation = str(arguments.get("operation") or "")
+            operation = _operation_of(arguments)
             tools.append(
                 {
                     "id": str(record.get("call_id") or ""),
@@ -456,11 +487,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
                 elif b.get("type") == "tool_use":
                     name = str(b.get("name", ""))
                     tool_input = b.get("input")
-                    operation = (
-                        str(tool_input.get("operation", ""))
-                        if isinstance(tool_input, dict)
-                        else ""
-                    )
+                    operation = _operation_of(tool_input) if isinstance(tool_input, dict) else ""
                     tools.append(
                         {
                             "id": str(b.get("id") or ""),
@@ -500,6 +527,28 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     return "".join(reversed(chunks)), tools
 
 
+def _operation_of(arguments: dict) -> str:
+    """The operation a tool call selects, whichever argument form the tool takes.
+
+    The mixed tools take `operation` as a string; the grouped Records and Planning
+    commands and the flat `read_*`/`change_*` renderings take `action`; the nested
+    renderings take `operation` as an object whose `kind` names it. Without all three a
+    mutation and a read look alike.
+    """
+    operation = arguments.get("operation")
+    if isinstance(operation, dict):
+        operation = operation.get("kind")
+    return str(operation or arguments.get("action") or "")
+
+
+def _is_collection_write(name: str, operation: str) -> bool:
+    """Whether a call to an Exomem tool is a write of a Records or Planning collection."""
+    if not operation or not re.search(_KB_SERVER, name, re.I):
+        return False
+    selector = f"{name}:{operation}".lower()
+    return any(selector.endswith(write) for write in _COLLECTION_WRITES)
+
+
 def _successful_kb_write(tool: dict) -> bool:
     """Whether one observed tool call completed a real KB mutation."""
     if tool.get("failed"):
@@ -508,13 +557,9 @@ def _successful_kb_write(tool: dict) -> bool:
     if name.lower().rsplit("__", 1)[-1] in _PREPARATION_TOOL_SUFFIXES:
         return False
     tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
-    # `operation` for the mixed tools that use it; `action` for the two
-    # structured-collection commands, whose selector is spelled `action`. Without
-    # the second name every Records and Planning call looked like a bare tool
-    # name, so a mutation and a read were indistinguishable here.
-    operation = str(tool.get("operation") or "") or str(tool_input.get("action") or "")
+    operation = str(tool.get("operation") or "") or _operation_of(tool_input)
     selector = f"{name}:{operation}" if operation else name
-    if not _KB_WRITE.search(selector):
+    if not (_KB_WRITE.search(selector) or _is_collection_write(name, operation)):
         return False
     # Hook deployers copy standalone bytes; these closed API spellings need no package or runtime name resource.
     if name.lower().endswith(("edit_memory", "edit_note")) and tool_input.get("validate_only") is True:

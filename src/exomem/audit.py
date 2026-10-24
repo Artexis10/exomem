@@ -99,6 +99,7 @@ import yaml
 
 from . import (
     access,
+    capabilities,
     contradiction_stance,
     indexes,
     lifecycle_statuses,
@@ -5434,8 +5435,8 @@ def unreflected_component(
         proposed_fix=(
             "Surfaced for REVIEW only -- nothing is judged, written, or "
             "transitioned. Read the joined events and, if they settle the item, "
-            'move it yourself with plan_memory(action="triage"); remove the '
-            "manifest binding if these events are not about this work."
+            f"move it yourself with {capabilities.active_call_text('plan_memory', {'action': 'triage'})}; "
+            "remove the manifest binding if these events are not about this work."
         ),
         paths=paths[:_UNREFLECTED_REF_LIMIT],
         meta={

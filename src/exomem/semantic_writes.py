@@ -23,6 +23,7 @@ from typing import Any, Literal
 from . import (
     activation_manifest,
     call_spans,
+    capabilities,
     freshness,
     lifecycle_statuses,
     memory_schema,
@@ -103,9 +104,11 @@ def _reject_generic_structured_item_write(path: str, source: str) -> None:
     route = _structured_item_product_route(source)
     if route is None:
         return
+    # The route is a grouped command; the message names the tool the active surface lists for its writes.
+    owner = "/".join(capabilities.active_tools(route, "write"))
     raise SemanticWriteError(
         "STRUCTURED_ITEM_REQUIRES_PRODUCT_ROUTE",
-        f"{path} is owned by {route}; use that product route so its schema and audit chain remain valid",
+        f"{path} is owned by {owner}; use that product route so its schema and audit chain remain valid",
     )
 
 

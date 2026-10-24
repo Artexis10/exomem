@@ -153,6 +153,7 @@ from .command_surface import (
     Command,
     Param,  # noqa: F401 - re-exported for server.py
     bind_vault,  # noqa: F401 - re-exported for server.py
+    listed_names,
     mcp_tool_annotations,  # noqa: F401 - re-exported for server.py
     resolve_command,
 )
@@ -919,6 +920,17 @@ def op_bootstrap(
         " (section vocabulary)" if profile == "compact" else ""
     )
     active_product_names = frozenset(active_descriptor.product_commands)
+    tool_shape = active_descriptor.tool_shape
+
+    def listed(command: str) -> bool:
+        """Whether the surface lists a command under any of its spellings."""
+        return any(name in active_product_names for name in operation_entries.spellings(command))
+
+    def tools_text(command: str, effect: operation_entries.Effect | None = None) -> str:
+        return operation_entries.tools_text(command, tool_shape, effect)
+
+    def call_text(command: str, arguments: dict[str, object]) -> str:
+        return operation_entries.call_text(command, arguments, tool_shape)
     # The recall contract opens with a line that names `activate_context`. Where the
     # surface does not export it, the filter below would drop the WHOLE recall
     # contract; carry the same instruction through `ask_memory` instead.
@@ -1296,9 +1308,11 @@ def op_bootstrap(
             "status": vocabulary_operation("govern_memory", {"operation": "vocabulary-status"}),
         }
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
-    simple_actions = simple_action_catalog(selected_packs, available_tools=active_product_names)
+    simple_actions = simple_action_catalog(
+        selected_packs, available_tools=active_product_names, tool_shape=tool_shape
+    )
     front_door_actions = product_front_door_catalog(
-        selected_packs, available_tools=active_product_names
+        selected_packs, available_tools=active_product_names, tool_shape=tool_shape
     )
     if profile == "compact":
         _compact_action_pack_guidance(simple_actions)
@@ -1335,12 +1349,16 @@ def op_bootstrap(
     semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(
         authoring_contract, profile=profile
     )
-    if "record_memory" in active_product_names:
+    if listed("record_memory"):
+        contract_tool, contract_arguments = operation_entries.spell_call(
+            "record_memory", {"action": "describe"}, tool_shape
+        )
         records_contract = {
             "available": True,
-            "route": {
-                "tool": "record_memory",
-                "actions": [
+            "route": operation_entries.route(
+                "record_memory",
+                tool_shape,
+                [
                     "describe",
                     "validate",
                     "inspect",
@@ -1351,16 +1369,13 @@ def op_bootstrap(
                     "revise",
                     "rebaseline",
                 ],
-            },
+            ),
             "manifest": {
                 "filename": "_collection.md",
                 "collection_versions": [1],
                 "semantic_profiles": ["planning", "records"],
             },
-            "contract_route": {
-                "tool": "record_memory",
-                "arguments": {"action": "describe"},
-            },
+            "contract_route": {"tool": contract_tool, "arguments": contract_arguments},
             "agent_workflow": ["describe", "validate", "create", "inspect", "append"],
             "maintenance_workflow": ["validate", "revise"],
             "recovery_workflow": ["inspect", "rebaseline"],
@@ -1380,11 +1395,13 @@ def op_bootstrap(
                 # goes, because the evidence for them exists only in the
                 # conversation and a hookless client reads nothing else.
                 "stated_intent": (
-                    "work the user commits to, sequences or reorders; route: plan_memory"
+                    "work the user commits to, sequences or reorders; route: "
+                    f"{tools_text('plan_memory', 'write')}"
                 ),
                 "observed_outcome": (
                     "reported as happened: produced, delivered, approved, "
-                    "published, failed; route: record_memory"
+                    "published, failed; route: "
+                    f"{tools_text('record_memory', 'write')}"
                 ),
                 "pairing_rule": (
                     "an outcome on an open Planning item is recorded once. A user may "
@@ -1433,11 +1450,10 @@ def op_bootstrap(
     # The live surface adds the vault's lists.
     planning_values = PlanningValues(vault_root)
     planning_contract = {
-        "available": "plan_memory" in active_product_names,
-        "route": {
-            "tool": "plan_memory",
-            "actions": ["inspect", "create", "query", "add", "update", "triage"],
-        },
+        "available": listed("plan_memory"),
+        "route": operation_entries.route(
+            "plan_memory", tool_shape, ["inspect", "create", "query", "add", "update", "triage"]
+        ),
         "kinds": list(planning_values.values("kind")),
         "horizons": list(planning_values.values("horizon")),
         "lifecycle": ["active", "archived"],
@@ -1461,10 +1477,10 @@ def op_bootstrap(
         ),
         "intent_first_routing": (
             "Route goals, priorities, commitments, candidate work, and future-state intent to "
-            "plan_memory before treating them as observed Records."
+            f"{tools_text('plan_memory', 'write')} before treating them as observed Records."
         ),
         "inventory": (
-            "plan_memory(action='inspect') without collection lists manifest_path. "
+            f"{call_text('plan_memory', {'action': 'inspect'})} without collection lists manifest_path. "
             "Query by title or natural key plus lifecycle/status. For update/triage, "
             "use inspect/query snapshot as expected_container_hash and the chosen "
             "query row's plan_id and item_version as plan_id and expected_item_version. "
@@ -1826,7 +1842,8 @@ def op_bootstrap(
                 ),
                 "collection_candidate": (
                     "a strong collection_candidate is a proposal: draft its schema through "
-                    "record_memory describe and validate, ask one question in domain language, "
+                    f"{tools_text('record_memory', 'read')} describe and validate, ask one "
+                    "question in domain language, "
                     "and create only after that inline confirmation. Backfill only exactly dated "
                     "evidence units, citing each unit or artifact in sources"
                 ),
@@ -2155,12 +2172,16 @@ def op_bootstrap(
             ],
         },
         "product_commands": product_tool_catalog(
-            active_product_names, callable_tools=active_descriptor.callable_commands
+            active_product_names,
+            callable_tools=active_descriptor.callable_commands,
+            tool_shape=tool_shape,
         ),
         **(
             {
                 "tool_catalog": product_tool_catalog(
-                    active_product_names, callable_tools=active_descriptor.callable_commands
+                    active_product_names,
+                    callable_tools=active_descriptor.callable_commands,
+                    tool_shape=tool_shape,
                 )
             }
             if profile != "compact"
@@ -13845,30 +13866,47 @@ def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescripto
     )
 
 
+def _listed_commands(
+    available_tools: frozenset[str] | set[str] | None, tool_shape: str
+) -> tuple[tuple[Command, tuple[str, ...]], ...]:
+    """Each product command the surface lists, with the tool names it lists it under."""
+    listed = []
+    for command in PRODUCT_COMMANDS:
+        names = tuple(
+            name
+            for name in listed_names(command, tool_shape)
+            if available_tools is None or name in available_tools
+        )
+        if names:
+            listed.append((command, names))
+    return tuple(listed)
+
+
 def product_tool_catalog(
     available_tools: frozenset[str] | set[str] | None = None,
     *,
     callable_tools: frozenset[str] | set[str] | None = None,
+    tool_shape: str = "grouped",
 ) -> dict:
     """Registry-derived product surface: primary tools first, advanced tools visible."""
-    selected = tuple(
-        command
-        for command in PRODUCT_COMMANDS
-        if available_tools is None or command.public_name in available_tools
-    )
-    primary = [c.public_name for c in selected if c.product_surface == "primary"]
-    advanced = [c.public_name for c in selected if c.product_surface != "primary"]
+    selected = _listed_commands(available_tools, tool_shape)
+    routes: dict[str, list[str]] = {}
+    for command, names in selected:
+        reachable: list[str] = []
+        for route in command.routes:
+            if callable_tools is not None and route not in callable_tools:
+                continue
+            resolved = resolve_command(route, PRODUCT_COMMANDS)
+            reachable.extend(
+                operation_entries.listed_tools(resolved.public_name if resolved else route, tool_shape)
+            )
+        for name in names:
+            routes[name] = reachable
     return {
-        "primary": primary,
-        "advanced": advanced,
-        "first_run_safe": [c.public_name for c in selected if c.first_run_safe],
-        "routes": {
-            c.public_name: [
-                resolved.public_name if (resolved := resolve_command(route, PRODUCT_COMMANDS)) else route
-                for route in c.routes if callable_tools is None or route in callable_tools
-            ]
-            for c in selected
-        },
+        "primary": [n for c, names in selected if c.product_surface == "primary" for n in names],
+        "advanced": [n for c, names in selected if c.product_surface != "primary" for n in names],
+        "first_run_safe": [n for c, names in selected if c.first_run_safe for n in names],
+        "routes": routes,
     }
 
 
@@ -13880,6 +13918,7 @@ def _bootstrap_known_callable_names() -> frozenset[str]:
         {
             *PRODUCT_PUBLIC_NAMES,
             *(name for command in PRODUCT_COMMANDS for name in command.callable_names),
+            *(rendering.name for command in PRODUCT_COMMANDS for rendering in command.renderings),
             *(command.name for command in COMMANDS),
             *PRODUCT_ROUTE_HELPERS,
             *simple_action_names(),
@@ -13999,6 +14038,12 @@ def _unavailable_route_reason(tool: str) -> str:
     return reasons.get(tool, "No route for this action is exported by the active surface.")
 
 
+def _spelled_route(route: dict, tool_shape: str) -> dict:
+    """A stored route call, spelled as the surface of this shape lists it."""
+    tool, args = operation_entries.spell_call(route["tool"], route.get("args", {}), tool_shape)
+    return {**route, "tool": tool, "args": args} if "args" in route else {**route, "tool": tool}
+
+
 def simple_action_names() -> tuple[str, ...]:
     """The stable, beginner-facing action vocabulary."""
     return _SIMPLE_ACTIONS
@@ -14008,8 +14053,13 @@ def simple_action_catalog(
     selected_packs: dict | None = None,
     *,
     available_tools: frozenset[str] | set[str] | None = None,
+    tool_shape: str = "grouped",
 ) -> dict:
-    """Product action map over product commands; no duplicate command logic."""
+    """Product action map over product commands; no duplicate command logic.
+
+    A route is stored as the grouped command call and spelled for `tool_shape` here, so
+    the table names the tools the surface lists and keeps one definition of each call.
+    """
     known_commands = {command.public_name for command in PRODUCT_COMMANDS} | {"doctor"}
     out: dict[str, dict] = {}
     for action in _SIMPLE_ACTIONS:
@@ -14021,12 +14071,13 @@ def simple_action_catalog(
             "intent": definition["intent"],
             "safety": definition["safety"],
             "advanced": [
-                tool
+                name
                 for tool in definition.get("advanced", [])
-                if available_tools is None or tool in available_tools
+                for name in operation_entries.listed_tools(tool, tool_shape)
+                if available_tools is None or name in available_tools
             ],
         }
-        primary_route = definition["route"]
+        primary_route = _spelled_route(definition["route"], tool_shape)
         if available_tools is None or primary_route["tool"] in available_tools:
             out[action]["route"] = primary_route
         else:
@@ -14041,10 +14092,10 @@ def simple_action_catalog(
             "fix_route",
             "reconcile_route",
         ):
-            if key in definition and (
-                available_tools is None or definition[key]["tool"] in available_tools
-            ):
-                out[action][key] = definition[key]
+            if key in definition:
+                spelled = _spelled_route(definition[key], tool_shape)
+                if available_tools is None or spelled["tool"] in available_tools:
+                    out[action][key] = spelled
 
     packs = (selected_packs or {}).get("packs") or []
     if packs:
@@ -14071,16 +14122,19 @@ def product_front_door_catalog(
     selected_packs: dict | None = None,
     *,
     available_tools: frozenset[str] | set[str] | None = None,
+    tool_shape: str = "grouped",
 ) -> dict:
-    """Map simple product verbs to the typed tools that enforce governance."""
+    """Map simple product verbs to the typed tools that enforce governance.
+
+    A command with renderings is listed under every rendering, since the metadata names
+    the actions of the whole command and does not split them by side.
+    """
     out = {action: {"primary_tools": [], "advanced_tools": []} for action in _PRODUCT_ACTIONS}
-    for command in PRODUCT_COMMANDS:
-        if available_tools is not None and command.public_name not in available_tools:
-            continue
+    for command, names in _listed_commands(available_tools, tool_shape):
         bucket = "primary_tools" if command.product_surface == "primary" else "advanced_tools"
         for action in command.product_actions:
             if action in out:
-                out[action][bucket].append(command.public_name)
+                out[action][bucket].extend(names)
     out["adopt"]["contract"] = (
         "scan-only by default; write modes preserve originals and stay under Knowledge Base/"
     )

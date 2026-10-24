@@ -24,7 +24,7 @@ from starlette.middleware import Middleware as ASGIMiddleware
 from . import capabilities, cloud_cell, edit_operations, guards, multi_edit
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
-from .command_surface import DEFAULT_TOOL_SHAPE, TOOL_SHAPES, rendering_annotations
+from .command_surface import DEFAULT_TOOL_SHAPE, TOOL_SHAPES, listed_names, rendering_annotations
 from .edge_ingress import EdgeIngressMiddleware
 from .operation_schema import rendering_handler
 from .server_assets import (
@@ -807,8 +807,17 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             else "product"
         ),
         tier2_enabled=expose_tier2,
-        product_commands=tuple(command.public_name for command in product_commands),
-        compatibility_commands=tuple(command.name for command in product_commands if command.preferred_name),
+        product_commands=tuple(
+            name for command in product_commands for name in listed_names(command, tool_shape)
+        ),
+        # A hidden spelling stays callable: the compatibility alias of a preferred name, and
+        # the grouped name of a command whose operations the surface lists as renderings.
+        compatibility_commands=tuple(
+            command.name
+            for command in product_commands
+            if command.preferred_name or (command.renderings and tool_shape != "grouped")
+        ),
+        tool_shape=tool_shape,
         exported_aliases=tuple(command.name for command in legacy_commands),
         hand_registered_tools=tuple(
             sorted(commands_module.HAND_REGISTERED_EXCEPTIONS)

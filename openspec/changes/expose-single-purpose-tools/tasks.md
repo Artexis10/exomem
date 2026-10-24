@@ -11,9 +11,9 @@
 
 ## 2. MCP-facing guidance and generated surfaces
 
-- [ ] 2.1 Render every MCP-facing name from the active rendering: bootstrap Records and Planning contracts and routes, the action catalog, the surface descriptor's available and callable names, the `create_note` Records disposition payload and its terminal validation, remediation strings, hook reminder text and the scaffold skill. Keep REST and CLI on the grouped spelling. Verify: a test fails when any MCP response or shipped guidance names a hidden spelling; REST and CLI guidance is unchanged.
-- [ ] 2.2 Make the capture-nudge hook count `change_*` as a write and `read_*` as a read. Verify: a filed record through `change_records` does not trigger the nudge; the plugin copies match.
-- [ ] 2.3 Regenerate the schema fixtures, tool surface contract, capability docs, skill contract, both plugin trees and the pending ChatGPT digest; set byte ceilings for the four tools from their measured size. Verify: each generator's check and `tests/test_tool_schema_budget.py` pass.
+- [x] 2.1 Render every MCP-facing name from the active rendering: bootstrap Records and Planning contracts and routes, the action catalog, the surface descriptor's available and callable names, the `create_note` Records disposition payload and its terminal validation, remediation strings, hook reminder text and the scaffold skill. Keep REST and CLI on the grouped spelling. Verify: a test fails when any MCP response or shipped guidance names a hidden spelling; REST and CLI guidance is unchanged.
+- [x] 2.2 Make the capture-nudge hook count `change_*` as a write and `read_*` as a read. Verify: a filed record through `change_records` does not trigger the nudge; the plugin copies match.
+- [x] 2.3 Regenerate the schema fixtures, tool surface contract, capability docs, skill contract, both plugin trees and the pending ChatGPT digest; set byte ceilings for the four tools from their measured size. Verify: each generator's check and `tests/test_tool_schema_budget.py` pass.
 
 ## 3. Tool-selection eval
 

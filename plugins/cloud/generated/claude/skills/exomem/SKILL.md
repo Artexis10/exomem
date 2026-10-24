@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 20b6ef9b3e82ef92b4692035a5d5a8eda4649b989a8fb038ce3feafeae5e3a7a
+  skill_contract: 810b6089b4bcac3ba4f9434328a563bd9c82903ea5247cb70ecbb65c0e3dc55d
   version: "0.32.0"
 ---
 
@@ -59,7 +59,7 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 | Filtered/unit/media recall, unresolved identities, or retrieval diagnostics | `search_memory`, `read_memory`, `connect_memory`, `query_dataset`, `read_media` | [recall](references/recall.md) |
 | Capture/compile/edit a conclusion or entity, connect or supersede knowledge | `create_note`, `observe_memory`, `edit_note`, `supersede_note`, `capture_source`, `prepare_note`, `connect_memory` | [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Preserve or retrieve original files, process media | `capture_source`, `preserve_evidence`, `preserve_artifacts`, `transfer_artifact`, `process_media`, `read_media` | [operation routing and transport](references/operation-routing.md); [mutation results](references/mutation-results.md) before any mutation |
-| Save intent or observed events; interpret an ambiguous action | `plan_memory`, `record_memory`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
+| Save intent or observed events; interpret an ambiguous action | `read_plans`, `change_plans`, `read_records`, `change_records`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
 | Record what a conversation worked on, decided and left open | `episode_memory` | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
 | Learn from a context miss or source-backed feedback | Existing recall and governed write tools | [context learning](references/context-learning.md) |
 | Review, adopt, audit, restructure, or maintain a vault | `review_memory`, `triage_memory`, `adopt_vault`, `maintain_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |

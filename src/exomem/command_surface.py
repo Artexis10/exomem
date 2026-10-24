@@ -444,13 +444,21 @@ def resolve_command(name: str, commands: Iterable[Command]) -> Command | None:
     return next((command for command in commands if name in command.callable_names), None)
 
 
-#: How the MCP surface publishes a command that has renderings. `nested` carries the
-#: operation in one `operation` object, `flat` carries it as an `action` plus its fields,
-#: and `grouped` lists only the grouped command. EXPERIMENTAL: the single-purpose-tools
-#: pilot compares the three and then removes the losers.
-ToolShape = typing.Literal["nested", "flat", "grouped"]
-TOOL_SHAPES: tuple[str, ...] = typing.get_args(ToolShape)
-DEFAULT_TOOL_SHAPE: ToolShape = "nested"
+ToolShape = operation_entries.ToolShape
+TOOL_SHAPES = operation_entries.TOOL_SHAPES
+DEFAULT_TOOL_SHAPE = operation_entries.DEFAULT_TOOL_SHAPE
+
+
+def listed_names(command: Command, shape: str) -> tuple[str, ...]:
+    """The names MCP discovery lists for a command on a surface of this shape.
+
+    A command with renderings is listed by them, and its own name stays callable but
+    hidden; every other command, and every command on the `grouped` shape, is listed
+    under its public name.
+    """
+    if command.renderings and shape != "grouped":
+        return tuple(rendering.name for rendering in command.renderings)
+    return (command.public_name,)
 
 
 class UnresolvedInvocation(LookupError):
@@ -503,17 +511,11 @@ def resolve_invocation(
     carried = {key: value for key, value in arguments.items() if key in passthrough}
     body = {key: value for key, value in arguments.items() if key not in passthrough}
     tool_arguments = {key: body.pop(key) for key in rendering.tool_arguments if key in body}
-    if shape == "nested":
-        label = "operation.kind"
-        operation = body.pop("operation", None)
-        if body or not isinstance(operation, Mapping):
-            rules.refuse(f"{rendering.name} takes an operation object and nothing else")
-        kind = operation.get("kind")
-        fields = {key: value for key, value in operation.items() if key != "kind"}
-    else:
-        label = rendering.selector
-        kind = body.pop(rendering.selector, None)
-        fields = body
+    parsed = operation_entries.split_operation(rendering, shape, body)
+    if parsed is None:
+        rules.refuse(f"{rendering.name} takes an operation object and nothing else")
+    kind, fields = parsed
+    label = operation_entries.selector_label(command.name, shape)
     variant = rendering.variant_for(kind, fields)
     if variant is None:
         sibling = next(

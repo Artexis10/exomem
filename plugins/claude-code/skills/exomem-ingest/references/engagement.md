@@ -121,7 +121,7 @@ is made**, or **an observed outcome or event is reported** — capture it:
   Planning, then update a matching item before creating an inbox item.
 - An **observed outcome or event** is the mirror class: the conversation reports
   that something happened, was produced, measured, delivered, approved,
-  published, or failed. Route it to Records — `record_memory(action="append")`
+  published, or failed. Route it to Records — `change_records(operation={"kind": "append", ...})`
   into the one compatible collection.
 - **Pairing rule.** Append an observed outcome to Records first; it is the
   canonical observation. It never changes Planning automatically. An explicit
@@ -315,7 +315,7 @@ report a non-committing `handoff_required` or
 `handoff_prepared`; a token or description is not a saved artifact.
 
 Delivery is a later fact. Record it only after a committed local Evidence
-receipt, through `record_memory(action="append", delivery={...})` and one
+receipt, through `change_records(operation={"kind": "append", "delivery": {...}, ...})` and one
 compatible existing Records collection whose declared link field names the
 Evidence companion. Keep reported remote identity separate and set verified
 identity only from matching platform proof; never infer remote byte equality.

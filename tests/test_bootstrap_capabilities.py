@@ -15,6 +15,7 @@ from exomem import commands, workflow_skills
 from exomem import server as server_module
 from exomem.__main__ import _simple_cli_action_names, main
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+from exomem.command_surface import DEFAULT_TOOL_SHAPE, listed_names
 
 GENERIC_PROFILES = ("compact", "full", "diagnostics")
 PROFILES = (*GENERIC_PROFILES, "session")
@@ -26,6 +27,7 @@ TIER2_PRODUCT_TOOLS = {
 }
 KNOWN_CALLABLE_NAMES = (
     set(commands.PRODUCT_PUBLIC_NAMES)
+    | {rendering.name for command in commands.PRODUCT_COMMANDS for rendering in command.renderings}
     | {command.name for command in commands.COMMANDS}
     | set(commands.PRODUCT_ROUTE_HELPERS)
     | set(commands.simple_action_names())
@@ -236,11 +238,11 @@ def test_all_mcp_bootstrap_profiles_match_live_tools(
     )
     mcp = server_module.build_server(require_auth=False)
     live_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    # A command with renderings is listed by them; its grouped name is a hidden spelling.
     product_tuple = tuple(
-        command.public_name
-        for command in commands.product_commands_for(
-            "mcp", expose_tier2=tier2_enabled
-        )
+        name
+        for command in commands.product_commands_for("mcp", expose_tier2=tier2_enabled)
+        for name in listed_names(command, DEFAULT_TOOL_SHAPE)
     )
     aliases = live_names - set(product_tuple)
 

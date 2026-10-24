@@ -32,7 +32,7 @@ an outcome under a propose-after-outcome posture may only propose that change.
 
 For recall or correction of an observed event or state, inspect Records
 independently of ordinary Note recall. Raw Records items do not appear there.
-Call `record_memory(action="inspect")` to list admitted collections, then inspect
+Call `read_records(operation={"kind": "inspect"})` to list admitted collections, then inspect
 one compatible collection using its returned `manifest_path` as `collection`.
 Run a bounded `query` for the requested identity or declared fields.
 An empty ordinary search does not establish that no matching Record exists.
@@ -44,7 +44,7 @@ For `update`, copy the returned internal UUID into `item_key`, the row's
 Do not infer that a matching row exists or create another collection when
 the inventory, schema, or query does not establish one.
 
-For Planning recall or a change, call `plan_memory(action="inspect")` to list admitted
+For Planning recall or a change, call `read_plans(operation={"kind": "inspect"})` to list admitted
 collections. Copy the chosen `manifest_path` into `collection`, then inspect
 that collection and run a bounded `query` for the requested items.
 For a change, identify exactly one item before choosing a write.
@@ -87,8 +87,8 @@ when Exomem cannot capture; move durable results to Exomem when it can.
 | `ask` | "what do I know," "find what I concluded," "show the context" | Reuse turn context; `search_memory(detail="compact", rerank=false)` for gaps, then `read_memory` or `search_memory(deep=true)` as needed |
 | `create_note` | "remember this," "save this conclusion," "write this decision" | `create_note`; use `supersede_note` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | Pick the lane first, then the transport. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
-| `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `plan_memory` for intended future state in a configured Planning collection |
-| `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `record_memory` for observed state in a configured Record collection |
+| `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `read_plans` or `change_plans` for intended future state in a configured Planning collection |
+| `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `read_records` or `change_records` for observed state in a configured Record collection |
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
@@ -101,7 +101,7 @@ without waiting for a magic verb. When exactly one compatible existing collectio
 accepts a sufficiently identified observation, the active engagement policy may
 append or update it and the agent reports the mutation. Ask one focused question
 when collections compete or identity, date, provenance, or ownership is unclear.
-When no collection fits, use `record_memory(action="describe")` and propose a
+When no collection fits, use `read_records(operation={"kind": "describe"})` and propose a
 concise collection; the agent must not silently create a long-lived schema.
 A refused Record write is held rather than lost: the response names the failing
 field and returns a `held` reference, so fix the named field and resume by that
@@ -112,7 +112,7 @@ A committed Note or Evidence write may return `records_routing` when its authore
 terms have one clear existing Records home. Read the observation before appending
 under the active capture disposition, and resume a returned held candidate when
 needed; the advisory never writes a record by itself. A strong
-`collection_candidate` is likewise a proposal: use `record_memory(action="describe")`
+`collection_candidate` is likewise a proposal: use `read_records(operation={"kind": "describe"})`
 and `validate` to draft a concise schema, ask one question in the user's domain
 language, and create only after that inline confirmation. Backfill only exactly
 dated evidence units, citing each unit or artifact in `sources`; prose notes stay
@@ -146,7 +146,7 @@ title and tags only, compared in a folded form, so `failure`/`failures` and
 never count as shared vocabulary.
 
 A strong route of a failure-shaped note carries a `disposition`, set by the
-user's prominence: `file` (perform the ready `record_memory` payload without
+user's prominence: `file` (perform the ready `change_records` call without
 asking), `append_occurrence` (perform the ready update payload, which adds the
 note to the existing item it recurs), `ask` (put the one precomposed question
 once and act only on yes), or `hold` (leave it for review). Editing a note that
@@ -186,12 +186,12 @@ Examples:
 - "Keep this receipt for the warranty case" -> `preserve_evidence`, `preserve_artifacts`, or `transfer_artifact`, not as a
   general note.
 - "I completed a dated training session" -> resolve exactly one compatible
-  collection before `record_memory(action="append")`; keep the session as an
+  collection before `change_records(operation={"kind": "append", ...})`; keep the session as an
   observed Record, not a compiled conclusion. If none fits, propose a collection
   rather than creating one silently.
-- "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
-- "The second one is done, the rest can wait" -> one landing, two consequences: `record_memory(action="append")` for the produced deliverable, then `plan_memory(action="triage")` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Discover the collection with `browse_memory` when none is named, inspect that exact collection with `plan_memory(action="inspect", collection=...)`, then resolve the item with `plan_memory(action="query")` filtered on the title or a natural-key field plus `lifecycle` and `status`.
-- "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from elapsed time — a stated outcome is evidence, the clock is not.
+- "Show my last three months" -> `read_records(operation={"kind": "query", ...})` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
+- "The second one is done, the rest can wait" -> one landing, two consequences: `change_records(operation={"kind": "append", ...})` for the produced deliverable, then `change_plans(operation={"kind": "triage", ...})` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Discover the collection with `browse_memory` when none is named, inspect that exact collection with `read_plans(operation={"kind": "inspect", "collection": ...})`, then resolve the item with `read_plans(operation={"kind": "query", ...})` filtered on the title or a natural-key field plus `lifecycle` and `status`.
+- "Save this feature idea" -> `change_plans(operation={"kind": "add", ...})`; use explicit `triage` for a horizon or hierarchy change, never infer it from elapsed time — a stated outcome is evidence, the clock is not.
 - "Compile these three sources" -> ensure the three originals are already
   captured as Source/Evidence pages (capture any missing originals first), then
   draft a sourced note with
@@ -204,5 +204,5 @@ Examples:
 
 ## Tool parameter notes
 
-- `plan_memory`: `inspect`, `validate` and `query` are read-only; `create`, `add`, `update`, `triage`, `revise`, `rebaseline` are guarded writes. A plan's UUID is durable identity, not its filename. New collections can declare human filenames and managed presentation blocks; an existing UUID collection moves only through a read-only `maintain_memory(mode="structured-files")` preview followed by exact-plan apply. Never infer completion or horizon changes from elapsed time.
-- `record_memory`: `item_key` is the item's internal UUID (required for update; on append identity derives from the collection's declared natural key). `expected_container_hash` guards append, update, revise and rebaseline; `expected_manifest_hash` guards revise and rebaseline; `acknowledged_gap_codes` are the exact inspect-reported codes for rebaseline. `delivery` is a receipt-gated artifact-delivery envelope for append only: field mappings are vault-schema-neutral and never set item values or create or loosen a collection. `expand_children` expands the one unambiguous child container; `expand_child` names an exact declared child. `held` resumes a held candidate on append/update (`item`/`changes` supply overrides, null removes a field) or names the one to remove on discard; a refused append/update is held unless `hold=false`.
+- `read_plans` and `change_plans`: `inspect`, `validate` and `query` are read-only (`read_plans`); `create`, `add`, `update`, `triage`, `revise`, `rebaseline` are guarded writes (`change_plans`). A plan's UUID is durable identity, not its filename. New collections can declare human filenames and managed presentation blocks; an existing UUID collection moves only through a read-only `maintain_memory(mode="structured-files")` preview followed by exact-plan apply. Never infer completion or horizon changes from elapsed time.
+- `read_records` and `change_records`: `item_key` is the item's internal UUID (required for update; on append identity derives from the collection's declared natural key). `expected_container_hash` guards append, update, revise and rebaseline; `expected_manifest_hash` guards revise and rebaseline; `acknowledged_gap_codes` are the exact inspect-reported codes for rebaseline. `delivery` is a receipt-gated artifact-delivery envelope for append only: field mappings are vault-schema-neutral and never set item values or create or loosen a collection. `expand_children` expands the one unambiguous child container; `expand_child` names an exact declared child. `held` resumes a held candidate on append/update (`item`/`changes` supply overrides, null removes a field) or names the one to remove on discard; a refused append/update is held unless `hold=false`.

@@ -18,7 +18,7 @@ from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 
-from .. import held_fs, state_migration, state_paths, vault, writer_lease
+from .. import capabilities, held_fs, state_migration, state_paths, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
 from . import authority, capability, chain, connection, custody, owner, replica, schema, takeover
@@ -853,7 +853,8 @@ def require_summary_manifest(root, manifest_path, manifest_text):
         raise CollectionStoreError(
             "COLLECTION_STORE_SUMMARY_REQUIRED",
             "the collection store creates only summary collections: add \"view_mode: summary\" to the "
-            "manifest, or create an items-mode collection with record_memory(action=\"create\"), "
+            "manifest, or create an items-mode collection with "
+            f"{capabilities.active_call_text('record_memory', {'action': 'create'})}, "
             "which keeps it in files")
 
 
