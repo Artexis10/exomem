@@ -15,6 +15,7 @@ Existing latency checks measure different boundaries, populations and percentile
 - Require attribution before runtime fixes and compare installed before/after arms on the same inputs, with data, authorization and packet identity checks.
 - Repair read-only deadline overruns through existing budget and deferral paths, including packet finalization; keep unsafe-to-bound repairs open.
 - Keep direct page reads available during optional link recovery. Serve unknown inbound links explicitly instead of building a vault index before releasing the page.
+- Keep work that grows with the vault off read requests. Each derived structure's publisher advances it, and a request reads the last published generation. A caller sees its own writes at once, and other changes appear within the publisher's bound. This covers the free-text artifact census, the admitted recall path set, the embedding matrix catch-up, the due-state block, context-pack neighbourhoods, reference resolution and pending visibility.
 - Preserve canonical mutation immunity, exact terminal custody and pending-read visibility. Optional heavy paths keep their existing default-off and soft-fail behavior.
 
 ## Capabilities
@@ -28,6 +29,8 @@ Existing latency checks measure different boundaries, populations and percentile
 - `agent-bootstrap-contract`: Keep compact and session latency advisories within existing budgets while full and diagnostics profiles retain spans and coverage.
 - `attention-queue`: Scope write advice to affected pages while preserving global bootstrap and review counts.
 - `get-payload-shape`: Distinguish complete inbound links from unknown inbound links without blocking the permitted page body.
+- `live-index-freshness`: Read requests use published derived generations; optional inbound enrichment no longer rebuilds the index on the request thread.
+- `release-gate`: The free-text artifact census is published per vault instead of walked per request, and stays exact for service writes.
 
 Existing latency capabilities retain their numerical bars and lifecycle contracts; this change references them without replacing their requirements.
 
