@@ -190,13 +190,18 @@ def file_writer_marker(root, acquired=None):
                     version = file.version()
                     if snapshot._file_sha256(file.descriptor) != digest or file.version() != version:
                         return None
+                    # A publisher older than the epoch and intent bookkeeping recorded neither key, so
+                    # nothing can bind them; the digest-checked copy at the current head is its proof.
+                    # The store's own producer republishes it and stamps the epoch on its first publication.
+                    legacy = _EPOCH not in metadata and _INTENT not in metadata
                     copied_raw = None
-                    if not _published_metadata_current(metadata):
+                    if not legacy and not _published_metadata_current(metadata):
                         copied_raw = _read_copied_intent(
                             filesystem, _Verification(file, parent, relative.name, version),
                             digest=digest, head=_head(metadata), epoch=metadata.get(_EPOCH),
                         )
-                    if not _published_metadata_current(metadata, copied_raw=copied_raw, raw_marker=raw):
+                    if not legacy and not _published_metadata_current(
+                            metadata, copied_raw=copied_raw, raw_marker=raw):
                         return None
                     filesystem.validate_directory(parent).require()
                     with filesystem.file(parent, relative.name).require() as current:
