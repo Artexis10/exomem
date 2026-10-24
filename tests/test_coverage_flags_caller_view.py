@@ -22,6 +22,7 @@ from exomem import (
     commands,
     context_catalogue,
     context_pack,
+    context_views,
     freshness,
     lexstore,
     readiness,
@@ -226,7 +227,29 @@ def _stamp(vault: Path) -> str:
 
 
 @pytest.fixture
-def activation(vault: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+def withheld_path(request: pytest.FixtureRequest) -> str | None:
+    """A page, besides the hidden hub, that the external reader may not see (`indirect` parameter)."""
+    return getattr(request, "param", None)
+
+
+def _withhold_from_external(vault: Path, rel: str) -> None:
+    scope, rule = "01ARZ3NDEKTSV4RRFFQ69G5FB2", "01ARZ3NDEKTSV4RRFFQ69G5FB3"
+    governance = vault / "Knowledge Base/_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes/extra.yaml").write_text(
+        f'governance_version: 1\nid: {scope}\nname: Extra\npaths: ["{rel}"]\n', encoding="utf-8"
+    )
+    (governance / "rules/extra-external.yaml").write_text(
+        f'governance_version: 1\nid: {rule}\nscope_ids: ["{scope}"]\naudience: external\nceiling: 0\n',
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def activation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, withheld_path: str | None
+) -> SimpleNamespace:
     """A managed runtime whose activation catalogue was built at the current stamp.
 
     A scheduled build never runs, so the catalogue stays behind until a test
@@ -239,6 +262,8 @@ def activation(vault: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     hidden.write_text(HUB_BODY.format("First."), encoding="utf-8")
     write_scope(vault)
     write_rule(vault, ceiling=0)
+    if withheld_path is not None:
+        _withhold_from_external(vault, withheld_path)
     _seed_live_recall(vault)
     lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
@@ -464,3 +489,38 @@ def test_a_withheld_write_marks_the_owner_map_stale(mapped: SimpleNamespace) -> 
     _write_as_the_service_does(mapped.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
 
     assert _map_activation(mapped.vault, restricted=False)["map"]["stale"] is True
+
+
+REGISTRY = "Knowledge Base/_Schema/project-keys.yaml"
+EDIT = "  maritime-route:\n    folder: Maritime Route\n    category: logistics\n"
+
+
+def _edit_registry(vault: Path) -> None:
+    registry = vault / REGISTRY
+    _write_as_the_service_does(vault, REGISTRY, registry.read_text(encoding="utf-8") + EDIT)
+
+
+@pytest.mark.parametrize("withheld_path", [REGISTRY], indirect=True)
+def test_a_withheld_registry_edit_leaves_the_restricted_map_served(mapped: SimpleNamespace) -> None:
+    with _caller(True):
+        assert not context_views.CallerView.current(mapped.vault).projects_admitted
+    before = _map_activation(mapped.vault)
+    assert before["abstained"] is False, before.get("abstention")
+
+    _edit_registry(mapped.vault)
+
+    after = _map_activation(mapped.vault)
+    assert after["abstained"] is False
+    assert after["map"]["items"] == before["map"]["items"]
+
+
+def test_a_released_registry_edit_holds_the_restricted_map_back_as_warming(
+    mapped: SimpleNamespace,
+) -> None:
+    with _caller(True):
+        assert context_views.CallerView.current(mapped.vault).projects_admitted
+    _map_activation(mapped.vault)
+
+    _edit_registry(mapped.vault)
+
+    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}

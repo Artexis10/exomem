@@ -1133,7 +1133,11 @@ def ensure(
 
 
 def ensure_unlisted(
-    vault_root: Path, *, freshness_stamp: str = "", visible: Callable[[str], bool] | None = None
+    vault_root: Path,
+    *,
+    freshness_stamp: str = "",
+    visible: Callable[[str], bool] | None = None,
+    registry_visible: bool = True,
 ) -> tuple[str, ContextCatalogue | None, bool]:
     """`ensure`, naming only the lag that has no list: `(state, catalogue, unlisted)`.
 
@@ -1145,14 +1149,16 @@ def ensure_unlisted(
     one it may see, and can ask nothing of an unlisted one.
 
     For a restricted reader (`visible` given), an activation index that lags
-    only by pages that reader may not see is not a lag for it (`view_lag`).
+    only by pages that reader may not see is not a lag for it (`view_lag`). A
+    reader whose map omits the project entries (`registry_visible=False`) is
+    not told of a project-registry edit either.
     """
     if disabled():
         return DISABLED, None, False
     root = Path(vault_root)
     # Anchors are mirrored from the activation index, so it is built and current first.
     state, index, index_stale = working_set_runtime.ensure_index(
-        root, freshness_stamp=freshness_stamp, visible=visible
+        root, freshness_stamp=freshness_stamp, visible=visible, registry_visible=registry_visible
     )
     if state != READY or index is None:
         return state, None, False

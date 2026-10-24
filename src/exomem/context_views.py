@@ -586,9 +586,10 @@ def _prepare(
         ref = topic_profile_ref(resolved) if target.profile else topic_ref(resolved)
     elif target.kind == PROFILE_ANCHOR:
         key, ref = target.key, anchor_profile_ref(target.key)
-    state, catalogue, unlisted = (
-        context_catalogue.ensure_unlisted(root, freshness_stamp=freshness_stamp, visible=caller.visible)
-        if freshness_stamp else context_catalogue.ensure_unlisted(root, visible=caller.visible)
+    # A caller not admitted to the project registry is served no project entries (`_world`).
+    state, catalogue, unlisted = context_catalogue.ensure_unlisted(
+        root, freshness_stamp=freshness_stamp, visible=caller.visible,
+        registry_visible=caller.projects_admitted,
     )
     return _Prepared(root, target, ref, key, registries, caller, state, catalogue, unlisted)
 

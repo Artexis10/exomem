@@ -873,6 +873,7 @@ def ensure_index(
     freshness_stamp: str = "",
     recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
     visible: Callable[[str], bool] | None = None,
+    registry_visible: bool = True,
 ) -> tuple[str, working_set_index.WorkingSetIndex | None, bool]:
     """Return a usable, current index — or say why there is not one yet.
 
@@ -883,7 +884,9 @@ def ensure_index(
 
     `recall_checkpoint` is the registry checkpoint `freshness_stamp` was derived
     from. For a reader other than the owner (`visible` given), a catalogue that
-    is behind only by pages that reader may not see is not stale for it.
+    is behind only by pages that reader may not see is not stale for it. A
+    project-registry edit is no page, so it stays a lag for every such reader
+    unless its view omits what the registry defines (`registry_visible=False`).
     """
     if working_set_index.disabled():
         return DISABLED, None, False
@@ -930,9 +933,14 @@ def ensure_index(
     if registry_changed or (freshness_stamp and index.freshness_stamp() != freshness_stamp):
         built_at = index.freshness_stamp()
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
-        # A project-registry edit is not a page, so it is stale for every reader.
-        if not refreshed and visible is not None and not registry_changed:
-            return READY, index, not lag_is_withheld(root, built_at, visible)
+        if not refreshed and visible is not None:
+            # The anchors packet serves the path-less project anchors to every reader
+            # (`anchor_visible`), so only a caller that omits them may ignore an edit.
+            registry_lag = registry_changed and registry_visible
+            pages_moved = bool(freshness_stamp) and built_at != freshness_stamp
+            return READY, index, registry_lag or (
+                pages_moved and not lag_is_withheld(root, built_at, visible)
+            )
         return READY, index, not refreshed
     if _managed():
         _schedule_reembed(root, index, freshness_stamp=freshness_stamp)
