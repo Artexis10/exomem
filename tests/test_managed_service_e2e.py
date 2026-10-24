@@ -543,7 +543,9 @@ def test_a_declared_migration_still_runs_between_the_two_workers(tmp_path):
     asyncio.run(scenario())
 
 
-def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(tmp_path):
+def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(
+    tmp_path, observe_managed_requests
+):
     from fastmcp import Client
 
     async def scenario():
