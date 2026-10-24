@@ -15,7 +15,7 @@ command registry, so a leaf can import its tables from here.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
@@ -49,6 +49,18 @@ class ModeAxis:
 
     argument: str
     key: str
+
+
+def selected_mode(
+    mode_axes: Mapping[str, ModeAxis], action: str, arguments: Mapping[str, object]
+) -> str | None:
+    """The mode a call carries for this selector value; None when absent or malformed."""
+    axis = mode_axes.get(action)
+    if axis is None:
+        return None
+    container = arguments.get(axis.argument)
+    mode = container.get(axis.key) if isinstance(container, Mapping) else None
+    return mode if isinstance(mode, str) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +102,35 @@ class Rendering:
         """Every field some variant of this tool accepts."""
         return frozenset().union(*(variant.fields for variant in self.variants))
 
+    @property
+    def kinds(self) -> tuple[str, ...]:
+        """The selector values this tool carries, in table order."""
+        return tuple(dict.fromkeys(variant.action for variant in self.variants))
+
+    def arguments_for(self, entry: OperationEntry) -> dict[str, object]:
+        """The grouped-command arguments that select this variant, and nothing else."""
+        arguments: dict[str, object] = {self.selector: entry.action}
+        if entry.mode is not None:
+            axis = self.mode_axes[entry.action]
+            arguments[axis.argument] = {axis.key: entry.mode}
+        return arguments
+
+    def modes_of(self, kind: str) -> tuple[str, ...]:
+        """The modes this tool carries for one selector value; empty when it has no mode axis."""
+        return tuple(
+            variant.mode for variant in self.variants if variant.action == kind and variant.mode
+        )
+
+    def variant_for(self, kind: object, arguments: Mapping[str, object]) -> OperationEntry | None:
+        """The variant this tool carries for a selector value and the mode in `arguments`."""
+        if not isinstance(kind, str):
+            return None
+        mode = selected_mode(self.mode_axes, kind, arguments)
+        return next(
+            (v for v in self.variants if v.action == kind and v.mode == mode),
+            None,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class CommandOperations:
@@ -125,23 +166,6 @@ class CommandOperations:
                     f"modes of one {self.command} operation disagree on {attribute}: {entry.action}"
                 )
         return table
-
-    def arguments_for(self, entry: OperationEntry) -> dict[str, object]:
-        """The selector arguments that make a grouped call resolve to this entry."""
-        arguments: dict[str, object] = {self.selector: entry.action}
-        if entry.mode is not None:
-            axis = self.mode_axes[entry.action]
-            arguments[axis.argument] = {axis.key: entry.mode}
-        return arguments
-
-    def mode_of(self, action: str, arguments: Mapping[str, object]) -> str | None:
-        """The mode a call carries for this selector value; None when absent or malformed."""
-        axis = self.mode_axes.get(action)
-        if axis is None:
-            return None
-        container = arguments.get(axis.argument)
-        mode = container.get(axis.key) if isinstance(container, Mapping) else None
-        return mode if isinstance(mode, str) else None
 
     def renderings_with_entries(
         self, tool_arguments: Mapping[str, tuple[str, ...]] | None = None
@@ -381,48 +405,41 @@ OPERATIONS: Mapping[str, CommandOperations] = MappingProxyType(
 
 
 def assert_coverage(
-    operations: CommandOperations,
+    command: str,
+    renderings: Sequence[Rendering],
     *,
     actions: Iterable[str],
     modes: Mapping[str, Iterable[str]],
-    is_read_only: Callable[[OperationEntry], bool],
+    is_read_only: Callable[[Rendering, OperationEntry], bool],
 ) -> None:
-    """Fail unless every operation maps to exactly one variant of exactly one tool.
+    """Fail unless every operation of `command` maps to exactly one variant of exactly one tool.
 
     `actions` and `modes` come from the registries that the lease and the importer
-    already own, so a selector value or import mode added there without an entry
-    fails here. `is_read_only` is the lease's own classifier: a read variant must
-    classify as read and a write variant as write, or a tool's annotation would
-    disagree with whether it takes writer authority.
+    already own, so a selector value or import mode added there without a variant
+    fails here. `is_read_only` is the lease's own classifier: a variant in a read
+    tool must classify as read and one in a write tool as a write, or the tool's
+    annotation would disagree with whether its calls take writer authority.
     """
     problems: list[str] = []
-    expected = {(action, None) for action in actions if action not in operations.mode_axes}
-    for action in operations.mode_axes:
+    moded = {action for rendering in renderings for action in rendering.mode_axes}
+    expected = {(action, None) for action in actions if action not in moded}
+    for action in moded:
         expected |= {(action, mode) for mode in modes.get(action, ())}
-    seen: dict[tuple[str, str | None], int] = {}
-    specs = {spec.name: spec for spec in operations.renderings}
-    for entry in operations.entries:
-        key = (entry.action, entry.mode)
-        seen[key] = seen.get(key, 0) + 1
-        spec = specs.get(entry.rendering)
-        if spec is None:
-            problems.append(f"{key} names unknown tool {entry.rendering}")
-        elif spec.effect != entry.effect:
-            problems.append(f"{key} is a {entry.effect} variant in {spec.effect} tool {spec.name}")
-        if (entry.mode is None) != (entry.action not in operations.mode_axes):
-            problems.append(f"{key} disagrees with the mode axis of its selector value")
-        if is_read_only(entry) != (entry.effect == "read"):
-            problems.append(f"{key} is declared {entry.effect} but the lease classifies it otherwise")
-    problems += [f"{key} has {count} variants" for key, count in seen.items() if count > 1]
-    problems += [f"{key} has no variant" for key in sorted(expected - seen.keys(), key=str)]
-    problems += [f"{key} is not a known operation" for key in sorted(seen.keys() - expected, key=str)]
-    try:
-        operations.action_fields()
-        operations.required_fields()
-    except ValueError as error:
-        problems.append(str(error))
+    count: dict[tuple[str, str | None], int] = {}
+    for rendering in renderings:
+        for variant in rendering.variants:
+            key = (variant.action, variant.mode)
+            count[key] = count.get(key, 0) + 1
+            if variant.effect != rendering.effect:
+                problems.append(f"{key} is a {variant.effect} variant in {rendering.name}")
+            if (variant.mode is None) == (variant.action in rendering.mode_axes):
+                problems.append(f"{key} disagrees with the mode axis of its selector value")
+            elif is_read_only(rendering, variant) != rendering.read_only:
+                problems.append(f"{key} in {rendering.name} classifies against the tool's effect")
+    problems += [f"{key} has {n} variants" for key, n in count.items() if n > 1]
+    problems += [f"{key} has no variant" for key in sorted(expected - count.keys(), key=str)]
+    problems += [f"{key} is not an operation" for key in sorted(count.keys() - expected, key=str)]
     if problems:
         raise RuntimeError(
-            f"operation entries for {operations.command} do not cover its selector: "
-            + "; ".join(problems)
+            f"operation entries for {command} do not cover its selector: " + "; ".join(problems)
         )

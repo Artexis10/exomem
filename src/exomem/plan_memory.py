@@ -285,6 +285,11 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("update requires at least one of: changes, body")
 
 
+def refuse_arguments(detail: str) -> Never:
+    """Raise this command's own argument refusal with `detail` as its explanation."""
+    _invalid_arguments(detail)
+
+
 def _invalid_arguments(detail: str | None = None, *, accepted: str | None = None) -> Never:
     message = "arguments do not match the selected Planning action"
     if detail:

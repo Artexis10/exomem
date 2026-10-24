@@ -298,6 +298,8 @@ _MODE_FIELDS = {
     "status": ({"continuation"}, set()),
     "cancel": ({"continuation"}, set()),
 }
+#: Every mode an import request may name; the Records tool entries must cover each one.
+MODES = frozenset(_MODE_FIELDS)
 
 
 def _parse_request(raw: Any) -> _Request:

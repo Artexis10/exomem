@@ -173,6 +173,12 @@ def _inline_schema_references(value: Any, definitions: dict[str, Any]) -> Any:
     }
 
 
+def inline_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return `schema` with every `$ref` replaced by its definition and no `$defs` left."""
+    body = {key: value for key, value in schema.items() if key != "$defs"}
+    return _inline_schema_references(body, schema.get("$defs", {}))
+
+
 def public_edit_operation_schema() -> dict[str, Any]:
     """Return a self-contained discriminator schema FastMCP can inline safely."""
     schema = EDIT_OPERATION_ADAPTER.json_schema()

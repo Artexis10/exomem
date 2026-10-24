@@ -636,6 +636,11 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("expand_children and expand_child are mutually exclusive")
 
 
+def refuse_arguments(detail: str) -> Never:
+    """Raise this command's own argument refusal with `detail` as its explanation."""
+    _invalid_arguments(detail)
+
+
 def _invalid_arguments(detail: str | None = None) -> Never:
     message = "arguments do not match the selected record action"
     if detail:

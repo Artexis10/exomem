@@ -433,6 +433,7 @@ def build_row(
     committed_targets: Sequence[str] | None = None,
     access: str | None = None,
     released_items: int | None = None,
+    rendering: str | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
     from .cloud_cell import canonical_app_id
@@ -514,6 +515,11 @@ def build_row(
         # A partial `spans` says so. Absent when nothing was dropped, so every
         # complete row keeps the shape it has always had.
         row["spans_truncated"] = len(shaped_spans) - _MAX_SPANS
+    if rendering:
+        # The public tool spelling the caller used when it differs from `tool`, which
+        # is always the command's execution identity. Absent on every direct call, so
+        # a row from before renderings existed keeps the shape it was hashed with.
+        row["rendering"] = _clip(rendering)
     from .activation_result import project_block
 
     observation = project_block(activation_result)
@@ -744,6 +750,7 @@ def record_call(
     spans: list[dict[str, Any]] | None = None,
     budget: Mapping[str, Any] | None = None,
     activation_result: Mapping[str, Any] | None = None,
+    rendering: str | None = None,
 ) -> dict[str, Any] | None:
     """Append exactly one ledger row. Never raises into the call path.
 
@@ -788,6 +795,7 @@ def record_call(
                 committed_targets=facts["paths"],
                 access=facts["access"],
                 released_items=facts["released"],
+                rendering=rendering,
             )
             append_row(row, path=path)
             _state.update(sequence=row["sequence"], prev_hash=row["row_hash"])

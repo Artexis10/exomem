@@ -27,7 +27,7 @@ import mimetypes
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -103,6 +103,7 @@ from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
+from . import operation_entries
 from . import overview as overview_module
 from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
@@ -148,6 +149,7 @@ from ._hooks.exomem_continuation_checkpoint import MEMORY_CITATION_GUIDANCE
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
     GUARDED_WRITE_FIELDS,  # noqa: F401 - re-exported for server.py
+    ArgumentRules,
     Command,
     Param,  # noqa: F401 - re-exported for server.py
     bind_vault,  # noqa: F401 - re-exported for server.py
@@ -13509,6 +13511,63 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
 )
 
 
+#: The argument rules each converted command's own leaf owns. A rendering validates
+#: against these, so a call through either spelling is accepted or refused identically.
+_ARGUMENT_RULES = MappingProxyType(
+    {
+        "record_memory": ArgumentRules(
+            record_memory_module.validate_arguments, record_memory_module.refuse_arguments
+        ),
+        "plan_memory": ArgumentRules(
+            plan_memory_module.validate_arguments, plan_memory_module.refuse_arguments
+        ),
+    }
+)
+
+
+def _renderings_for(
+    name: str, response_detail: str | None
+) -> tuple[operation_entries.Rendering, ...]:
+    """The MCP renderings of one command, from its operation entries."""
+    operations = operation_entries.OPERATIONS.get(name)
+    if operations is None:
+        return ()
+    # Success detail shapes a write's terminal response; a read response has no such level.
+    tool_arguments = {
+        spec.name: ("response_detail",)
+        for spec in operations.renderings
+        if spec.effect == "write" and response_detail is not None
+    }
+    return operations.renderings_with_entries(tool_arguments)
+
+
+def validate_operation_entries(commands: Iterable[Command] | None = None) -> None:
+    """Fail startup unless every operation of a converted command has exactly one variant.
+
+    The selector values come from the lease registry and the import modes from the
+    importer, so an operation added to either without a variant fails here. Each
+    variant is classified by the same read-only rule the lease applies to a call.
+    """
+    from .collection_store import importer
+
+    modes = {"record_memory": {"import": importer.MODES}}
+    for command in PRODUCT_COMMANDS if commands is None else commands:
+        if not command.renderings:
+            continue
+        selector = command.renderings[0].selector
+        if selector != egress_module.selector_for_command(command.name):
+            raise RuntimeError(f"rendering selector is not the lease selector: {command.name}")
+        operation_entries.assert_coverage(
+            command.name,
+            command.renderings,
+            actions=egress_module.selector_registry()[(command.name, selector)],
+            modes=modes.get(command.name, {}),
+            is_read_only=lambda rendering, variant, command=command: invocation_is_read_only(
+                command, rendering.arguments_for(variant)
+            ),
+        )
+
+
 def _build_product_commands() -> tuple[Command, ...]:
     cmds: list[Command] = []
     for name, leaf, tier, writes, needs_schema, positional, surfaces, routes, meta in _PRODUCT_SPEC:
@@ -13627,6 +13686,8 @@ def _build_product_commands() -> tuple[Command, ...]:
         cmds.append(
             Command(
                 name=name,
+                renderings=_renderings_for(name, response_detail),
+                argument_rules=_ARGUMENT_RULES.get(name),
                 preferred_name=meta.get("preferred_name"),
                 public_title=meta.get("public_title"),
                 leaf=leaf,
@@ -13727,7 +13788,11 @@ def product_commands_for(
 
 def validate_product_registry() -> dict:
     """Validate product route metadata against canonical implementation leaves."""
-    callable_names = [name for command in PRODUCT_COMMANDS for name in command.callable_names]
+    callable_names = [
+        name
+        for command in PRODUCT_COMMANDS
+        for name in (*command.callable_names, *(rendering.name for rendering in command.renderings))
+    ]
     if len(callable_names) != len(set(callable_names)):
         raise RuntimeError("product command spellings collide")
     canonical = {c.name for c in COMMANDS}
@@ -13749,6 +13814,7 @@ def validate_product_registry() -> dict:
 
 
 validate_product_registry()
+validate_operation_entries()
 
 #: Boot refusal for the ALIAS layer (P1), the companion to the leaf-registry
 #: assertion above. `validate_product_registry` proves each route names a real

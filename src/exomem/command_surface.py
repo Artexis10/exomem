@@ -19,7 +19,14 @@ from dataclasses import dataclass, field
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
 
-from . import activation_result, call_spans, capabilities, request_budget, reserved_paths
+from . import (
+    activation_result,
+    call_spans,
+    capabilities,
+    operation_entries,
+    request_budget,
+    reserved_paths,
+)
 from .call_spans import (  # noqa: F401 - re-exported for existing importers
     pop_call_spans,
     record_span,
@@ -321,6 +328,16 @@ class Param:
 
 
 @dataclass(frozen=True)
+class ArgumentRules:
+    """A grouped command's own argument checks, shared by every spelling of the command."""
+
+    #: Raises the command's refusal unless `arguments` suit the selected action.
+    validate: Callable[[object, Mapping[str, typing.Any]], None]
+    #: Raises the command's refusal with `detail` as its explanation.
+    refuse: Callable[[str], typing.NoReturn]
+
+
+@dataclass(frozen=True)
 class Command:
     name: str
     leaf: Callable
@@ -348,8 +365,17 @@ class Command:
     preferred_name: str | None = None
     public_title: str | None = None
     executor: str = "cell"
+    #: Public MCP tool spellings that split this command's selector across tools.
+    #: Each rendering resolves back to this command before authorization.
+    renderings: tuple[operation_entries.Rendering, ...] = field(
+        default=(), compare=False, hash=False
+    )
+    #: The command's own argument rules, which every spelling of it shares.
+    argument_rules: ArgumentRules | None = field(default=None, compare=False, hash=False)
 
     def __post_init__(self) -> None:
+        if self.renderings and self.argument_rules is None:
+            raise ValueError(f"a command with renderings needs argument rules: {self.name}")
         if self.executor not in EXECUTORS:
             raise ValueError(f"unknown command executor {self.executor!r}: {self.name}")
 
@@ -416,6 +442,141 @@ def gateway_required_error(name: str):
 def resolve_command(name: str, commands: Iterable[Command]) -> Command | None:
     """Resolve either spelling only within the adapter's already-filtered registry."""
     return next((command for command in commands if name in command.callable_names), None)
+
+
+#: How the MCP surface publishes a command that has renderings. `nested` carries the
+#: operation in one `operation` object, `flat` carries it as an `action` plus its fields,
+#: and `grouped` lists only the grouped command. EXPERIMENTAL: the single-purpose-tools
+#: pilot compares the three and then removes the losers.
+ToolShape = typing.Literal["nested", "flat", "grouped"]
+TOOL_SHAPES: tuple[str, ...] = typing.get_args(ToolShape)
+DEFAULT_TOOL_SHAPE: ToolShape = "nested"
+
+
+class UnresolvedInvocation(LookupError):
+    """A public tool name that neither a command spelling nor a rendering resolves."""
+
+
+def find_rendering(
+    public_name: str, commands: Iterable[Command], *, shape: str = DEFAULT_TOOL_SHAPE
+) -> tuple[Command, operation_entries.Rendering] | None:
+    """The command and rendering that `public_name` spells, when this shape lists renderings."""
+    if shape == "grouped":
+        return None
+    for command in commands:
+        for rendering in command.renderings:
+            if rendering.name == public_name:
+                return command, rendering
+    return None
+
+
+def resolve_invocation(
+    public_name: str,
+    arguments: Mapping[str, typing.Any],
+    commands: Iterable[Command],
+    *,
+    shape: str = DEFAULT_TOOL_SHAPE,
+    passthrough: frozenset[str] = frozenset(),
+) -> tuple[Command, dict[str, typing.Any]]:
+    """Resolve one public call to its command and the arguments a direct call would carry.
+
+    A command spelling resolves to itself with its arguments untouched. A rendering
+    resolves to its grouped command with the selector and fields flattened, after the
+    command's own argument rules accept them for the variant this rendering carries.
+    The caller then dispatches the command exactly as if it had been called directly.
+    `passthrough` names transport-owned top-level keys that cross untouched.
+
+    Raises the command's own refusal for arguments the rendering does not carry, and
+    `UnresolvedInvocation` for a name nothing resolves: a name that routes no call
+    must fail closed rather than reach a default.
+    """
+    command = resolve_command(public_name, commands)
+    if command is not None:
+        return command, dict(arguments)
+    found = find_rendering(public_name, commands, shape=shape)
+    if found is None:
+        raise UnresolvedInvocation(public_name)
+    command, rendering = found
+    rules = command.argument_rules
+    if rules is None:
+        raise UnresolvedInvocation(public_name)
+    carried = {key: value for key, value in arguments.items() if key in passthrough}
+    body = {key: value for key, value in arguments.items() if key not in passthrough}
+    tool_arguments = {key: body.pop(key) for key in rendering.tool_arguments if key in body}
+    if shape == "nested":
+        label = "operation.kind"
+        operation = body.pop("operation", None)
+        if body or not isinstance(operation, Mapping):
+            rules.refuse(f"{rendering.name} takes an operation object and nothing else")
+        kind = operation.get("kind")
+        fields = {key: value for key, value in operation.items() if key != "kind"}
+    else:
+        label = rendering.selector
+        kind = body.pop(rendering.selector, None)
+        fields = body
+    variant = rendering.variant_for(kind, fields)
+    if variant is None:
+        sibling = next(
+            (
+                other.name
+                for other in command.renderings
+                if other is not rendering and other.variant_for(kind, fields) is not None
+            ),
+            None,
+        )
+        if sibling is not None:
+            rules.refuse(f"{kind} is not a {rendering.effect} operation: send it to {sibling}")
+        modes = rendering.modes_of(kind) if isinstance(kind, str) else ()
+        if modes:
+            axis = rendering.mode_axes[str(kind)]
+            rules.refuse(f"{kind} needs {axis.argument}.{axis.key} to be one of: {', '.join(modes)}")
+        rules.refuse(f"{rendering.name} takes {label} as one of: {', '.join(rendering.kinds)}")
+    rules.validate(variant.action, fields)
+    return command, {rendering.selector: variant.action, **fields, **tool_arguments, **carried}
+
+
+_MCP_RENDERING: ContextVar[str | None] = ContextVar("exomem_mcp_rendering", default=None)
+_MCP_RENDERING_REFUSAL: ContextVar[BaseException | None] = ContextVar(
+    "exomem_mcp_rendering_refusal", default=None
+)
+
+
+@contextmanager
+def rendering_scope(name: str, refusal: BaseException | None = None):
+    """Carry the public spelling of one rendered call to the middleware inside the rewrite.
+
+    The rewrite hands FastMCP the grouped command's name, so tracing would otherwise lose
+    which tool the client called. `refusal` is the grouped command's refusal for a call
+    whose operation the rendering does not carry; the innermost middleware answers with it.
+    """
+    rendering_reset = _MCP_RENDERING.set(name)
+    refusal_reset = _MCP_RENDERING_REFUSAL.set(refusal)
+    try:
+        yield
+    finally:
+        _MCP_RENDERING_REFUSAL.reset(refusal_reset)
+        _MCP_RENDERING.reset(rendering_reset)
+
+
+def current_rendering() -> str | None:
+    """The rendering the client called for this request, or None for a direct call."""
+    return _MCP_RENDERING.get()
+
+
+def pending_rendering_refusal() -> BaseException | None:
+    """The refusal that translation recorded for this request, if it refused."""
+    return _MCP_RENDERING_REFUSAL.get()
+
+
+def rendering_annotations(rendering: operation_entries.Rendering) -> ToolAnnotations:
+    """Discovery hints for one rendering, from its own variants rather than its command's name."""
+    return ToolAnnotations(
+        title=rendering.title,
+        readOnlyHint=rendering.read_only,
+        destructiveHint=False if rendering.read_only else rendering.destructive,
+        idempotentHint=rendering.read_only,
+        openWorldHint=False,
+    )
 
 
 def bind_vault(
