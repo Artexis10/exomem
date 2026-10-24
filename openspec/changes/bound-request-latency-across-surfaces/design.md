@@ -291,4 +291,6 @@ For an actual live setting or runtime switch, record its owner, preconditions, u
 
 ## Open Questions
 
-Read, browse, deep, cold and background-freshness thresholds remain pending where no current applicable bar exists. Current measurements will support their recorded engineering choices. Residency selection remains conditional on the served profile's measured memory and cold/warm costs. Neither unknown grants a passing result or introduces another approval or release gate.
+Browse `list` takes no separate threshold. It falls under the programme-wide bar, which is p95 below 1,000 ms at the caller boundary for every operation. The installed request ledger supplies the evidence at the dispatch boundary. Before the bounded listing (2026-10-18 and 19), n=61, p50 1,975 ms and p95 114,448 ms. After it (2026-10-21 to 24), n=40, p50 608 ms and p95 7,072 ms. Browse therefore fails the bar. Browse shares the contended worker, so decision 9 is its repair path. The `browse-pending` entry stays pending for a browse-specific boundary.
+
+Read, deep, cold and background-freshness thresholds remain pending where no current applicable bar exists. Current measurements will support their recorded engineering choices. Residency selection remains conditional on the served profile's measured memory and cold/warm costs. Neither unknown grants a passing result or introduces another approval or release gate.

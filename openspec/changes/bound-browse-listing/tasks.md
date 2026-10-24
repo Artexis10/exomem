@@ -14,5 +14,6 @@
 
 ## 2. Release
 
-- [ ] 2.1 After the release is installed, report browse `list` p50 and p95 from the service call spans against the 2026-10-19 baseline. Record the browse latency bar's engineering choice in `bound-request-latency-across-surfaces`, or keep it pending with its reason.
+- [x] 2.1 After the release is installed, report browse `list` p50 and p95 from the service call spans against the 2026-10-19 baseline. Record the browse latency bar's engineering choice in `bound-request-latency-across-surfaces`, or keep it pending with its reason.
+      Evidence: the installed request ledger at the dispatch boundary, with browse `list` identified by the ledger's recorded argument digest. Baseline 2026-10-18 and 19: n=61, p50 1,975 ms, p95 114,448 ms, max 161,076 ms. With the bounded listing installed, 2026-10-21 to 24: n=40, p50 608 ms, p95 7,072 ms, max 10,822 ms, and 18 calls passed `limit` or `cursor`. The bar choice is recorded in `bound-request-latency-across-surfaces/design.md` under Open Questions: browse follows the programme-wide bar and currently fails it.
 - [ ] 2.2 Ask the operator to refresh the ChatGPT plugin, so that ChatGPT can send `cursor`.
