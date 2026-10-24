@@ -4520,6 +4520,15 @@ class LeaseManager:
             poll_interval_seconds=self._mutation_poll_interval_seconds,
         )
 
+    def holds_mutation_boundary(self, vault_root: os.PathLike[str] | str) -> bool:
+        """Whether this thread already holds this vault's mutation boundary.
+
+        A nested `mutation_guard` re-enters the lock but still advances the commit
+        generation on exit, so a seam that is reachable under an outer boundary
+        asks first and takes no second guard.
+        """
+        return self._mutation_coordinator_for(vault_root).current_thread_holds_boundary()
+
     def _log_lease_event(self, event: str, **fields: Any) -> None:
         try:
             from .log_events import log_event
@@ -5935,6 +5944,16 @@ class LeaseManager:
             and kwargs.get("mode") == "tag-variants"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # A curation proposal prepares read-only, then seals; `seal_proposal` takes
+        # the mutation boundary itself and re-checks every binding under it, so
+        # preparation can run without the lock. Apply, resume and compensation
+        # write step by step and keep the wide boundary.
+        narrow_curation_proposal = (
+            command.name == "maintain_memory"
+            and kwargs.get("mode") == "curation"
+            and kwargs.get("curation_action") == "propose"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         # Only record owns a short guard around fresh admission, revision
         # selection and ledger binding; the other episode actions still rely
         # on this command boundary. The action is a closed protocol enum.
@@ -5949,6 +5968,7 @@ class LeaseManager:
             or narrow_source_artifact_commit
             or narrow_relation_registry_commit
             or narrow_tag_variant_commit
+            or narrow_curation_proposal
             or narrow_episode_record
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
