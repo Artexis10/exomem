@@ -13,14 +13,24 @@ DESIGN = "openspec/changes/compile-context-maps-and-profiles/design.md"
 #: "Decision and arms": three arms.
 ARM_IDS: tuple[str, ...] = ("A", "M", "P")
 
-#: "Decision and arms": "The Exomem read tools are `activate_context`,
-#: `ask_memory`, `read_memory` and `browse_memory`." A closed set the protocol
-#: fixes, not vocabulary the data defines.
-READ_TOOLS: tuple[str, ...] = ("activate_context", "ask_memory", "read_memory", "browse_memory")
+
+def _read_tools() -> tuple[str, ...]:
+    from exomem.commands import product_commands_for
+
+    commands = {command.name: command for command in product_commands_for("mcp")}
+    # The protocol fixes these execution identities; the registry owns discovery names.
+    return tuple(
+        commands[name].public_name
+        for name in ("activate_context", "ask_memory", "read_memory", "browse_memory")
+    )
+
+
+#: "Decision and arms": the four read commands, in protocol order.
+READ_TOOLS: tuple[str, ...] = _read_tools()
 
 #: "Decision and arms": the tool that fetches an arm's packet. The hook's
 #: reminder is not a call; this call is, against the pull budget.
-ACTIVATION_TOOL = "activate_context"
+ACTIVATION_TOOL = READ_TOOLS[0]
 
 #: "Decision and arms": P lacks this tool through a client-side tool filter.
 P_FILTERED_TOOL = ACTIVATION_TOOL

@@ -14,13 +14,13 @@ captures from the server itself (see :mod:`.state`).
   told to read the map and pull before the answer. So A and M differ only in
   the packet and the instruction lines.
 - P runs the server in ``anchors`` mode, pushes nothing, sees the read tools
-  without ``activate_context`` and shares M's pull instruction without the map
+  without ``recall_context`` and shares M's pull instruction without the map
   line.
 
 The hook command is rendered by the product's own installer, from the build's
 own hook sources, so the push is the deployed shape and not a copy of it. In
 the deployed ``mcp`` hook mode the push is a reminder to activate: A and M
-fetch their packet with their own ``activate_context`` call, which the tap
+fetch their packet with their own ``recall_context`` call, which the tap
 counts against the pull budget and in the turn's calls like any other.
 """
 
