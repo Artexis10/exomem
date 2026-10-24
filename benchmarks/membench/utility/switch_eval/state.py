@@ -30,6 +30,7 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import REPO_ROOT, refuse_unsafe_out_dir
 
+from exomem import kbdir
 from exomem.governance import receipts
 from exomem.runtime_resources import CPU_THREADS_ENV, effective_online_cpus
 
@@ -93,17 +94,31 @@ def _write_json_atomically(receipt: Path, custody: Mapping) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def require_default_kb_dirname() -> None:
+    """Refuse an environment whose KB folder name differs from the servers' own."""
+
+    # _child_env strips EXOMEM_*, so every server writes under the default folder name;
+    # the harness would look for receipts in another folder and file none of them.
+    if kbdir.kb_dirname() != kbdir._DEFAULT:
+        raise StateError(
+            f"EXOMEM_KB_DIRNAME names {kbdir.kb_dirname()!r} in the harness environment but "
+            f"the servers run with {kbdir._DEFAULT!r}; unset it"
+        )
+
+
+def _events_root(path: Path) -> Path:
+    """The product's receipt events root under ``path``, refused when it leaves ``path``."""
+
+    try:
+        return receipts._validated_events_root(path)
+    except receipts.ReceiptError as error:
+        raise StateError(f"{error}: {path}") from error
+
+
 def _receipt_instances(vault: Path) -> list[str]:
     """Names of the receipt instance directories that a vault holds now."""
 
-    # The children run without EXOMEM_KB_DIRNAME (see _child_env), so a parent that sets it
-    # would read another directory than the servers wrote and file nothing.
-    if os.environ.get("EXOMEM_KB_DIRNAME", "").strip():
-        raise StateError(
-            "EXOMEM_KB_DIRNAME is set in the harness environment; unset it so that receipt "
-            "paths match the paths that the servers write"
-        )
-    root = receipts._events_root(vault)
+    root = _events_root(vault)
     if not root.is_dir():
         return []
     return sorted(entry.name for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink())
@@ -119,20 +134,26 @@ def _file_new_receipts(vault: Path, known: Collection[str], evidence: Path) -> d
     record under ``evidence``, which keeps the product's mirrored path layout.
     """
 
-    root = receipts._events_root(vault)
-    mirror = receipts._events_root(evidence)
+    root = _events_root(vault)
+    mirror = _events_root(evidence)
     moved = [name for name in _receipt_instances(vault) if name not in known]
     for name in moved:
         if (mirror / name).exists():
-            raise StateError(f"receipt instance {name} is already filed under {evidence}")
+            raise StateError(
+                f"receipt instance {name} is already filed under {evidence}; preserved vault at {vault}"
+            )
         mirror.mkdir(parents=True, exist_ok=True)
         shutil.move(str(root / name), str(mirror / name))
     try:
         records = receipts.event_records(evidence)
     except receipts.ReceiptError as error:
-        raise StateError(f"filed receipts under {evidence} failed chain verification: {error}") from error
+        raise StateError(
+            f"filed receipts under {evidence} failed chain verification: {error}; "
+            f"preserved vault at {vault}"
+        ) from error
     filed = [record for record in records if record["instance_id"] in moved]
     return {
+        "evidence": str(evidence),
         "instances": len(moved),
         "records": len(filed),
         "by_event_type": dict(sorted(Counter(record["event_type"] for record in filed).items())),
@@ -1129,6 +1150,7 @@ def build_arm(
         shutil.rmtree(target / "state")
     shutil.copytree(layout.shared_tree(tree) / "state", target / "state", symlinks=True)
     surface = shared.get("first_surface")
+    surface_receipts = None
     if surface is None:
         slot = _prepare_session_slot(layout, spec.arm_id, tree, f"surface-{spec.arm_id}", shared)
         try:
@@ -1136,10 +1158,12 @@ def build_arm(
                 slot, spec, env=_child_env(parent_env, slot, spec), out=target
             )
         finally:
-            recover_session_vault(layout)
+            surface_receipts = recover_session_custody(layout).receipts_filed
             slot.wipe()
     record = {**shared, "arm": spec.arm_id, "surface": surface}
     record.pop("first_surface", None)
+    if surface_receipts is not None:
+        record["surface_receipts_filed"] = surface_receipts
     (target / "state.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
 
@@ -1214,20 +1238,27 @@ def recover_session_custody(layout: Layout) -> Recovery:
     ) / "vault"
     held = Slot(layout.slot).vault
     location = held if held.exists() else source
+    advice = (
+        "Inspect the vault and any filed receipts, then remove the failed run at "
+        f"{layout.run} and rebuild state from the frozen snapshot in a new run."
+    )
     evidence = filed = None
     if "receipt_instances" in custody and location.is_dir():
         evidence = layout.receipts_dir(custody["session"])
-        filed = _file_new_receipts(location, custody["receipt_instances"], evidence)
+        try:
+            filed = _file_new_receipts(location, custody["receipt_instances"], evidence)
+        except StateError as error:
+            raise StateError(f"session {custody['session']}: {error}. {advice}") from error
     digest = tree_digest(location) if location.is_dir() else None
     signatures = signature_digest(location) if location.is_dir() else None
     if digest != custody["digest"] or (
         "signatures" in custody and signatures != custody["signatures"]
     ):
-        filing = "" if evidence is None else f" Filed receipts are at {evidence}."
+        # The evidence directory exists only once an instance has been filed into it.
+        filing = f" Filed receipts are at {evidence}." if evidence is not None and evidence.exists() else ""
         raise StateError(
             f"session {custody['session']}: vault digest changed (content or signatures); "
-            f"preserved at {location}.{filing} Inspect it, then remove the failed run at "
-            f"{layout.run} and rebuild state from the frozen snapshot in a new run."
+            f"preserved at {location}.{filing} {advice}"
         )
     if held.exists():
         if source.exists():

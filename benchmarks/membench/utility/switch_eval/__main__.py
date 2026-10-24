@@ -338,11 +338,13 @@ def cmd_state(args: argparse.Namespace) -> int:
         StateError,
         build_arm,
         require_checkpoint_selection,
+        require_default_kb_dirname,
         validate_build_cpu_threads,
     )
 
     try:
         validate_build_cpu_threads(args.cpu_threads)
+        require_default_kb_dirname()
     except StateError as error:
         raise SystemExit(f"refused: {error}") from error
 
@@ -444,11 +446,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_session,
         write_arm_files,
     )
+    from .state import StateError, require_default_kb_dirname
 
     layout, inputs, cases, plan, specs = _context(Path(args.run))
     _stage(layout, inputs, None if args.dry_run else "run")
     parent = dict(os.environ)
     _refuse_api_key(parent)
+    try:
+        require_default_kb_dirname()
+    except StateError as error:
+        raise SystemExit(f"refused: {error}") from error
     trees = sorted({case.tree for case in cases})
     hashes = _arm_hashes(layout, inputs, specs, trees)
 

@@ -1494,7 +1494,8 @@ def test_the_real_startup_proof_files_its_readiness_receipts_out_of_a_governed_v
 def test_a_governed_session_read_is_filed_and_the_next_session_starts(tmp_path: Path) -> None:
     """The first real session reads through the tap, which appends a receipt to the vault.
 
-    Without filing, recovery refuses the changed vault and stops the run.
+    Without filing, recovery refuses the changed vault and stops the run. A real
+    snapshot already holds receipt instances from earlier reads: they stay.
     """
     import os
     import shutil
@@ -1504,8 +1505,24 @@ def test_a_governed_session_read_is_filed_and_the_next_session_starts(tmp_path: 
     from exomem.governance import receipts
 
     layout = Layout(tmp_path / "run")
+    spec = replace(arm_specs()["P"], profile="neutral-lexical")
+
+    def environment(slot):
+        return state._child_env(os.environ, slot, spec)
+
+    events_path = Path("Knowledge Base") / "_Governance" / "events"
+    reads = tmp_path / "reads"
+    (reads / "earlier").mkdir(parents=True)
+    (reads / "session").mkdir()
+    # A real governed read before checkout leaves one receipt instance in the snapshot.
+    earlier = state.prepare_build_slot(layout, _governed_vault_source(tmp_path))
+    state._ask_surface(earlier, spec, env=environment(earlier), out=reads / "earlier", method="server/discover", startup_proof=True)
     shared = layout.shared_tree("snapshot") / "vault"
-    shutil.copytree(_governed_vault_source(tmp_path), shared)
+    shared.parent.mkdir(parents=True)
+    shutil.move(str(earlier.vault), str(shared))
+    earlier.wipe()
+    existing = sorted(entry.name for entry in (shared / events_path).iterdir())
+    assert len(existing) == 1
     machine_state = layout.arm_tree("P", "snapshot") / "state"
     machine_state.mkdir(parents=True)
     baseline = {"digest": state.tree_digest(shared), "signatures": state.signature_manifest(shared)}
@@ -1515,22 +1532,73 @@ def test_a_governed_session_read_is_filed_and_the_next_session_starts(tmp_path: 
         "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
         "vault_signature_digest": state.signature_digest(shared),
     }))
-    spec = replace(arm_specs()["P"], profile="neutral-lexical")
-    out = tmp_path / "session"
-    out.mkdir()
 
     slot = state.prepare_session_slot(layout, "P", "snapshot", "governed-session")
-    state._ask_surface(slot, spec, env=state._child_env(os.environ, slot, spec), out=out, method="server/discover", startup_proof=True)
-    events_path = Path("Knowledge Base") / "_Governance" / "events"
-    assert any((slot.vault / events_path).iterdir())  # the served read left a receipt in the vault
+    state._ask_surface(slot, spec, env=environment(slot), out=reads / "session", method="server/discover", startup_proof=True)
+    assert len(list((slot.vault / events_path).iterdir())) == 2  # the served read left a receipt instance
     recovery = state.recover_session_custody(layout)
 
     assert recovery.digest == baseline["digest"]
     assert state.signature_manifest(shared) == baseline["signatures"]
+    assert sorted(entry.name for entry in (shared / events_path).iterdir()) == existing
+    assert recovery.receipts_filed["instances"] == 1
     assert recovery.receipts_filed["by_event_type"].get("disclosure", 0) >= 1, recovery
-    filed = receipts.event_records(layout.receipts_dir("governed-session"))
-    assert {record["event_type"] for record in filed} >= {"disclosure"}
+    evidence = layout.receipts_dir("governed-session")
+    assert not set(existing) & {entry.name for entry in (evidence / events_path).iterdir()}
+    assert {record["event_type"] for record in receipts.event_records(evidence)} >= {"disclosure"}
     state.prepare_session_slot(layout, "P", "snapshot", "next-session")
+
+
+def test_a_filed_receipt_chain_that_fails_verification_names_the_vault_and_the_run(built_slot_tree: Layout) -> None:
+    from membench.utility.switch_eval.state import (
+        StateError,
+        prepare_session_slot,
+        recover_session_vault,
+    )
+
+    layout = built_slot_tree
+    slot = prepare_session_slot(layout, "P", "snapshot", "broken-chain")
+    instance = slot.vault / "Knowledge Base" / "_Governance" / "events" / ("b" * 32)
+    instance.mkdir(parents=True)
+    (instance / "2026-10.jsonl").write_text("not a receipt\n")
+
+    with pytest.raises(StateError, match="chain verification") as refused:
+        recover_session_vault(layout)
+
+    message = str(refused.value)
+    assert all(str(place) in message for place in (slot.vault, layout.receipts_dir("broken-chain"), layout.run))
+    assert (layout.run / "slot-vault.json").exists()
+
+
+def test_a_receipts_directory_that_leaves_the_vault_is_refused_not_followed(built_slot_tree: Layout, tmp_path: Path) -> None:
+    from membench.utility.switch_eval.state import (
+        StateError,
+        prepare_session_slot,
+        recover_session_vault,
+    )
+
+    layout = built_slot_tree
+    slot = prepare_session_slot(layout, "P", "snapshot", "linked-events")
+    outside = tmp_path / "outside"
+    (outside / ("c" * 32)).mkdir(parents=True)
+    events = slot.vault / "Knowledge Base" / "_Governance" / "events"
+    events.parent.mkdir(parents=True)
+    events.symlink_to(outside)
+
+    with pytest.raises(StateError, match="escaped the vault"):
+        recover_session_vault(layout)
+
+    assert (outside / ("c" * 32)).is_dir()
+
+
+def test_a_kb_folder_override_is_refused_unless_it_names_the_servers_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from membench.utility.switch_eval.state import StateError, require_default_kb_dirname
+
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Knowledge Base")
+    require_default_kb_dirname()
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Notes")
+    with pytest.raises(StateError, match="EXOMEM_KB_DIRNAME"):
+        require_default_kb_dirname()
 
 
 def test_state_cpu_threads_reach_only_the_builder(
