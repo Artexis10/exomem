@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.139.0](https://github.com/Artexis10/exomem/compare/v0.138.0...v0.139.0) (2026-10-24)
+
+
+### Features
+
+* preserve durable text capture identity ([#2041](https://github.com/Artexis10/exomem/issues/2041)) ([dede284](https://github.com/Artexis10/exomem/commit/dede284852de4f742a176d83880533f299347de8))
+
+
+### Bug Fixes
+
+* renew standalone writer grants during mutations ([#2047](https://github.com/Artexis10/exomem/issues/2047)) ([37ec332](https://github.com/Artexis10/exomem/commit/37ec332cd2de17a34a2733057778c045bab48a8a))
+* **startup:** keep watcher seeding outside catalogue publication waits ([#2043](https://github.com/Artexis10/exomem/issues/2043)) ([3dc33fe](https://github.com/Artexis10/exomem/commit/3dc33fe865d767325795e9d29a9ae1b886ac275b))
+
 ## [0.138.0](https://github.com/Artexis10/exomem/compare/v0.137.0...v0.138.0) (2026-10-24)
 
 
