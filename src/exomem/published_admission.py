@@ -20,10 +20,12 @@ class Admission:
     authorization session, a bound collection writer, a blocked policy); the
     catalogue then publishes nothing and the request decides every page itself.
 
-    `decide(path)` returns `(allowed, page_local)`. `page_local` is True only when
-    the verdict is a function of the identity and the page's own bytes, so the
-    catalogue's `(content_hash, mtime_ns)` for the page proves it still holds.
-    A verdict that reads another page or live state is returned, never kept.
+    `decide(path, publish)` returns `(allowed, page_local)`. `page_local` is True
+    only when `publish` is set and the verdict is a function of the identity and
+    the page's own bytes, so the catalogue's `(content_hash, mtime_ns)` for the
+    page proves it still holds. A verdict that reads another page, collection
+    state or live state is returned, never kept. A caller that only needs the
+    verdict leaves `publish` unset and pays nothing for the proof.
     """
 
     __slots__ = ("decide", "identity")
@@ -31,7 +33,7 @@ class Admission:
     def __init__(
         self,
         identity: Callable[[], Hashable | None],
-        decide: Callable[[str], tuple[bool, bool]],
+        decide: Callable[[str, bool], tuple[bool, bool]],
     ) -> None:
         self.identity = identity
         self.decide = decide
@@ -46,7 +48,7 @@ class AdmittedPredicate:
         self.admission = admission
 
     def __call__(self, path: str) -> bool:
-        return self.admission.decide(path)[0]
+        return self.admission.decide(path, False)[0]
 
 
 def admission_of(predicate: object) -> Admission | None:

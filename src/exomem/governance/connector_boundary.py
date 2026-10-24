@@ -238,6 +238,19 @@ def cache_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | 
             current.revision if current is not None else None)
 
 
+def admission_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | None = None) -> tuple:
+    """What the content floors read of a caller: the scopes denied to it, and the configuration revision.
+
+    `cache_identity` closes over the whole principal, one value per login. The
+    floors read the principal only through `Snapshot.denied_scopes`, so callers
+    that are denied the same scopes share a published verdict set.
+    """
+    current = snapshot(root, compiled)
+    if current is None:
+        return (frozenset(), None)
+    return (current.denied_scopes(who), current.revision)
+
+
 def unrestricted(root: Path, who: RequestPrincipal) -> bool:
     try:
         current = snapshot(root)

@@ -1986,13 +1986,19 @@ def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool
 
     Markdown only: a binary is classified from companions, which are other pages.
     A RAW-marked path reads a live authorization session and its companion. A
-    bound collection writer decides from its own operation. A withheld verdict
-    also needs a readable page: the content floors refuse a read error the same
-    way they refuse a restricted page, and a refusal that a retry could lift must
-    not outlast the retry.
+    bound collection writer decides from its own operation. A path in a
+    collection's placement layer is decided from the store's database while a
+    store owns it and is withheld outright while the store is down, and a file
+    page there can become store-owned without one byte changing, so no verdict
+    there is the page's own; `ownership.relevant` reads the path alone. A
+    withheld verdict also needs a readable page: the content floors refuse a
+    read error the same way they refuse a restricted page, and a refusal that a
+    retry could lift must not outlast the retry.
     """
+    from ..collection_store import ownership
+
     if (not _is_markdown_path(rel_path) or raw_protection.marked(rel_path)
-            or bound_writer(vault_root) is not None):
+            or bound_writer(vault_root) is not None or ownership.relevant(rel_path)):
         return False
     if withheld:
         try:
@@ -2030,14 +2036,14 @@ def content_admission(vault_root: Path, who: RequestPrincipal) -> AdmittedPredic
         if compiled.blocked or compiled.conflicted or bound_writer(root) is not None:
             return None
         try:
-            boundary = connector_boundary.cache_identity(root, who)
+            boundary = connector_boundary.admission_identity(root, who)
         except connector_boundary.BoundaryUnavailable:
             return None
         return ("content-floor", str(root), compiled.fingerprint, boundary)
 
-    def decide(rel_path: str) -> tuple[bool, bool]:
+    def decide(rel_path: str, publish: bool) -> tuple[bool, bool]:
         allowed = content_permits(root, rel_path, who)
-        return allowed, _page_local_path(root, rel_path, withheld=not allowed)
+        return allowed, publish and _page_local_path(root, rel_path, withheld=not allowed)
 
     return AdmittedPredicate(Admission(identity, decide))
 
@@ -7258,8 +7264,8 @@ def release_walk_filter(
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     verdicts: dict[tuple, tuple[bool, bool]] = {}
 
-    def judge(rel_path: str) -> tuple[bool, bool]:
-        """`(allowed, page_local)`, as `published_admission.Admission.decide`."""
+    def verdict(rel_path: str) -> tuple[bool, bool]:
+        """`(allowed, decided from the page, the policy and the caller alone)`."""
         # The set read above, like `policy`: the plane does not move while one
         # walk runs, and re-proving it per path stats every tombstone and event file.
         if lifecycle.is_tombstoned_in(tombstones, rel_path):
@@ -7268,7 +7274,7 @@ def release_walk_filter(
             _record_blocked_outcome(who.audience_id)
             return False, False
         if not content_ok(rel_path):
-            return False, _page_local_path(vault_root, rel_path, withheld=True)
+            return False, True
         boundary_key = connector_boundary.cache_identity(vault_root, who)
         cached = verdicts.get((rel_path, boundary_key))
         if cached is not None:
@@ -7294,11 +7300,17 @@ def release_walk_filter(
             outcome="released" if allowed else "withheld",
             purpose=declared_purpose,
         )
-        verdict = (allowed, decision is not None
-                   and _decision_is_page_local(decision)
-                   and _page_local_path(vault_root, rel_path, withheld=not allowed))
-        verdicts[(rel_path, boundary_key)] = verdict
-        return verdict
+        decided = (allowed, decision is not None and _decision_is_page_local(decision))
+        verdicts[(rel_path, boundary_key)] = decided
+        return decided
+
+    def judge(rel_path: str, publish: bool) -> tuple[bool, bool]:
+        """`(allowed, page_local)`, as `published_admission.Admission.decide`."""
+        allowed, local = verdict(rel_path)
+        # The path proof opens a withheld page, so only a walk that publishes pays it.
+        return allowed, publish and local and _page_local_path(
+            vault_root, rel_path, withheld=not allowed
+        )
 
     def identity() -> tuple | None:
         # A session decides from live grants and time, a bound writer from its own
@@ -7310,7 +7322,7 @@ def release_walk_filter(
                 or bound_writer(vault_root) is not None):
             return None
         try:
-            boundary = connector_boundary.cache_identity(vault_root, who)
+            boundary = connector_boundary.admission_identity(vault_root, who)
         except connector_boundary.BoundaryUnavailable:
             return None
         return ("release", str(vault_root), policy.fingerprint, grants_hash, who.audience_id,
@@ -7498,7 +7510,7 @@ def visible_page_filter(
     root = Path(vault_root)
     offered = admission_of(keep)
 
-    def decide(rel_path: str) -> tuple[bool, bool]:
+    def decide(rel_path: str, publish: bool = False) -> tuple[bool, bool]:
         rel = str(rel_path or "").strip()
         if not rel:
             return True, False
@@ -7509,7 +7521,7 @@ def visible_page_filter(
             except OSError:
                 return False, False
         if offered is not None:
-            return offered.decide(rel)
+            return offered.decide(rel, publish)
         return keep(rel), False
 
     if offered is None:

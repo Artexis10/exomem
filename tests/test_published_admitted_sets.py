@@ -19,6 +19,8 @@ import json
 from pathlib import Path
 
 import pytest
+from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
+from test_collection_store_writer import manifest_path
 from test_governance_egress import (
     EXTERNAL,
     SCOPE_ID,
@@ -224,11 +226,11 @@ def _eligible_page(index: int, project: str = "open-project") -> str:
     )
 
 
-def _limited_client() -> RequestPrincipal:
+def _limited_client(login: OriginSessionBinding | None = None) -> RequestPrincipal:
     return RequestPrincipal(
         audience_id="owner", surface="mcp", resolved=True, issuer_family="oauth",
         remote_owner=True, client_binding=ClientBinding(ISSUER, "limited"),
-        origin_session=OriginSessionBinding("login-1", "1", "audience"),
+        origin_session=login or OriginSessionBinding("login-1", "1", "audience"),
     )
 
 
@@ -278,9 +280,9 @@ def floors(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         predicate = real(vault_root, who)
         decide = predicate.admission.decide
 
-        def counted(rel_path):
+        def counted(rel_path, publish):
             decided.append(rel_path)
-            return decide(rel_path)
+            return decide(rel_path, publish)
 
         predicate.admission.decide = counted
         return predicate
@@ -293,7 +295,8 @@ def _insights(vault: Path, who: RequestPrincipal) -> set[str]:
     """The pages a structured `types` filter returns to this caller."""
     from exomem import find as find_module
 
-    find_module.clear_cache()
+    # Not `clear_cache`: it hands the published verdicts back with the rest of the idle RAM.
+    find_module.unload_ram_caches()
     with request_scope(who):
         result = commands.op_find(
             vault, query="", mode="keyword", scope="kb-only", graph=False,
@@ -359,6 +362,18 @@ def test_a_second_filtered_request_decides_no_page_and_an_edit_decides_only_that
     assert set(floors) == {RETAGGABLE}
 
 
+def test_two_logins_of_one_client_share_the_published_verdicts(
+    vault: Path, boundary: Path, floors: list[str]
+) -> None:
+    _insights(vault, _limited_client())
+    assert len(floors) >= 40, "the first login decides every candidate"
+
+    floors.clear()
+    _insights(vault, _limited_client(OriginSessionBinding("login-2", "7", "audience")))
+
+    assert floors == [], "the floors read the denied scopes, not which login asked"
+
+
 def test_a_boundary_change_decides_afresh_in_both_directions(vault: Path, boundary: Path) -> None:
     assert PRIVATE_PAGE not in _published(vault)
 
@@ -389,3 +404,43 @@ def test_a_checkpoint_the_catalogue_has_moved_past_abstains_instead_of_answering
     _edit_and_republish(vault, warm_managed_cell, RETAGGABLE, _eligible_page(27, "another-project"))
 
     assert _published(vault, old) is None
+
+
+# --------------------------------------------------------------------------
+# Collection placement: a store-owned page is not decided from its own bytes
+# --------------------------------------------------------------------------
+
+
+def _carried_pages(root: Path) -> tuple[str, set[str]]:
+    """The readiness and the pages the external audience's rarity counts over."""
+    with request_scope(_external()), state_paths.resolution_scope():
+        keep = egress.release_walk_filter(root)
+        result = lexstore.carry_term_statistics(
+            root, ["work"], visible=keep, status_basis=lifecycle_statuses.Basis(root),
+            path_limit=lambda pages: 5,
+        )
+    return result.readiness.status, set(result.value[3] or ())
+
+
+def test_a_page_withheld_while_the_collection_store_was_down_returns_when_it_is_back(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    from exomem.collection_store import runtime
+
+    root = service.root
+    write_scope(root, paths="Unrelated/**")
+    write_rule(root, ceiling=egress.LEVEL_FULL)
+    lexstore.ensure_fresh(root)
+    manifest = manifest_path()
+
+    with monkeypatch.context() as outage:
+        outage.setattr(runtime, "_server", lambda _root: None)
+        egress.clear_decision_memo()
+        state, during = _carried_pages(root)
+    assert state == "available" and manifest not in during, "the outage must withhold the page"
+
+    egress.clear_decision_memo()
+    state, after = _carried_pages(root)
+
+    assert state == "available"
+    assert manifest in after, "a refusal decided during the outage outlived it"

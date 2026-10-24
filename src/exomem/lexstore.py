@@ -65,6 +65,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -1956,12 +1957,14 @@ def _mark_active_repair_phase(vault_root: Path, phase: str) -> None:
 
 
 def release_admitted_recall_rows() -> None:
-    """Hand back every store's admitted recall rows; a miss selects them again."""
+    """Hand back every store's admitted recall rows and published verdicts; a miss decides them again."""
     with _STORES_LOCK:
         stores = tuple(_STORES.values())
     for store in stores:
         with store._term_frequency_cache_lock:
             store._admitted_recall_rows.clear()
+            store._published_verdicts.clear()
+            store._page_signature_maps.clear()
 
 
 def clear_stores() -> None:
@@ -2459,8 +2462,18 @@ _ADMITTED_STATISTICS_MAX = 4
 #: Admitted recall row sets retained per store: both scopes at the current
 #: catalogue revision, and the same two at the one a request may still pin.
 _ADMITTED_RECALL_ROWS_MAX = 4
-#: Published verdict sets retained per store: one per caller identity and scope.
-_PUBLISHED_VERDICTS_MAX = 4
+#: Published verdict sets retained per store, one per `(scope, caller identity)`,
+#: and the verdicts they hold in all. Callers that are denied the same scopes
+#: share an identity. An entry costs 40-80 bytes a verdict (two dictionary
+#: slots; measured on 1,500 to 50,000 rows), because its page-path strings and
+#: signature tuples are the catalogue-wide map's own objects. An entry left
+#: behind by a moved generation also keeps those objects alive, about 300 bytes
+#: more a verdict. So the verdict budget bounds the cache near 8 MiB while the
+#: entries are current and 70 MiB at worst, whatever the vault size. The
+#: catalogue-wide map costs about 350 bytes a row, once per generation. The
+#: entry count bounds the bookkeeping of a vault with many small callers.
+_PUBLISHED_VERDICTS_MAX = 32
+_PUBLISHED_VERDICTS_BUDGET = 200_000
 #: The closed reason logged when a request configured for catalogue ranking
 #: finds a withheld page row in its snapshot, and so ranks on admission.
 CATALOGUE_RANKING_CONTRACT_VIOLATION = "catalogue_ranking_withheld_row"
@@ -2484,11 +2497,14 @@ class _AdmittedRecallRows:
 
 @dataclass(frozen=True, slots=True)
 class _PublishedVerdicts:
-    """One caller identity's page-local verdicts, and the pages they were decided over.
+    """One caller identity's page-local verdicts, and the catalogue state they were decided at.
 
-    `signatures` holds each decided page's `(content_hash, mtime_ns)`. The
-    mappings are never changed after installation: a patch builds new ones, so
-    a request holding an older set reads a consistent snapshot.
+    `signatures` holds the `(content_hash, mtime_ns)` each verdict in `allowed`
+    was decided over, as the row stood at `generation`. Its keys and values are
+    the objects of the catalogue-wide signature map, so an entry costs a
+    dictionary slot per verdict and pins no row it holds no verdict for. The
+    mappings are never changed after installation: a patch builds new ones, so a
+    request holding an older set reads a consistent snapshot.
     """
 
     generation: tuple
@@ -2504,8 +2520,7 @@ class _PublishedPlan:
     generation: tuple
     current: bool
     allowed: Mapping[str, bool]
-    signatures: Mapping[str, tuple]
-    fresh: Mapping[str, tuple] | None
+    signatures: Mapping[str, tuple] | None
     missing: tuple[str, ...]
     live: Set[str]
     candidates: tuple[str, ...]
@@ -4077,9 +4092,11 @@ class LexicalStore:
         # See `_admitted_recall_rows`.
         self._admitted_recall_rows: OrderedDict[tuple, _AdmittedRecallRows] = OrderedDict()
         self._admitted_recall_row_fills: dict[tuple, threading.Lock] = {}
-        # (scope, caller identity) -> that caller's published page verdicts.
+        # (scope, caller identity) -> that caller's published page verdicts, and
+        # column -> (catalogue generation, every row's signature at it).
         # See `_published_plan`. Guarded by `_term_frequency_cache_lock`.
         self._published_verdicts: OrderedDict[tuple, _PublishedVerdicts] = OrderedDict()
+        self._page_signature_maps: dict[str, tuple[tuple, dict[str, tuple]]] = {}
 
     def _decline_rebuild(self, reason: str) -> bool:
         """Record one stable, content-free repair result and decline."""
@@ -8332,7 +8349,7 @@ class LexicalStore:
                 context.admitted_paths = {path for path in candidates if context.visible(path)}
             else:
                 plan = self._published_plan(
-                    (scope, identity), snapshot, tuple(candidates), frozenset(),
+                    (scope, identity), snapshot, col, tuple(candidates), frozenset(),
                     lambda: self._page_signatures(conn, col),
                 )
                 verdicts = self._publish_verdicts(plan, admission)
@@ -9190,8 +9207,8 @@ class LexicalStore:
                     return None
                 col = "in_vault" if scope == "vault" else "in_kb"
                 plan = self._published_plan(
-                    (scope, identity), self._snapshot_generation(conn), tuple(candidates), live,
-                    lambda: self._page_signatures(conn, col),
+                    (scope, identity), self._snapshot_generation(conn), col, tuple(candidates),
+                    live, lambda: self._page_signatures(conn, col),
                 )
         except sqlite3.Error as error:
             self._catalog_readiness_error(error, backend_name)
@@ -9201,58 +9218,77 @@ class LexicalStore:
 
     @staticmethod
     def _page_signatures(conn: sqlite3.Connection, col: str) -> dict[str, tuple]:
-        """`(content_hash, mtime_ns)` of every row of the scope that has a content hash."""
+        """`(content_hash, mtime_ns)` of every row of the scope that has a content hash.
+
+        Paths are interned so the verdict maps of every caller share one string per page.
+        """
         return {
-            str(path): (digest, mtime_ns)
+            sys.intern(str(path)): (digest, mtime_ns)
             for path, digest, mtime_ns in conn.execute(
                 f"SELECT path, content_hash, mtime_ns FROM pages WHERE {col} = 1"
             )
             if digest is not None
         }
 
+    def _generation_signatures(
+        self, col: str, generation: tuple, read: Callable[[], dict[str, tuple]]
+    ) -> dict[str, tuple]:
+        """The rows' signatures at this generation, read once and shared by every caller."""
+        with self._term_frequency_cache_lock:
+            held = self._page_signature_maps.get(col)
+        if held is not None and held[0] == generation:
+            return held[1]
+        signatures = read()
+        with self._term_frequency_cache_lock:
+            self._page_signature_maps[col] = (generation, signatures)
+        return signatures
+
     def _published_plan(
         self,
         key: tuple,
         generation: tuple,
+        col: str,
         candidates: tuple[str, ...],
         live: Set[str],
-        signatures: Callable[[], dict[str, tuple]],
+        read_signatures: Callable[[], dict[str, tuple]],
     ) -> _PublishedPlan:
         """Which published verdicts hold at this snapshot, and which pages still need one.
 
         `key` is `(scope, caller identity)`: policy, grants, audience, purpose,
-        connector boundary and tombstones all sit in the identity, so a change to
-        any of them reads a different key and finds nothing to reuse. The
-        catalogue generation is the only input a stored entry may be older than:
-        the entry is then patched by dropping each verdict whose page row changed
-        or left, which is the catalogue delta. `signatures` reads every row of
-        the scope and runs at most once, and only when the generation moved or a
-        page has no verdict.
+        the scopes the connector boundary denies the caller, and tombstones all
+        sit in the identity, so a change to any of them reads a different key and
+        finds nothing to reuse. The catalogue generation is the only input a
+        stored entry may be older than: the entry is then patched by dropping
+        each verdict whose page row changed or left, which is the catalogue
+        delta. The signatures read every row of the scope, once per generation
+        for all callers, and only when the generation moved or a page has no
+        verdict.
 
-        Lock order: `_term_frequency_cache_lock` is a leaf here. It guards the
-        dictionary lookup alone and is never held while a page is decided or a
-        row is read.
+        Lock order: `_term_frequency_cache_lock` is a leaf here. It guards
+        dictionary gets and puts alone and is never held while a page is decided
+        or a row is read.
         """
         with self._term_frequency_cache_lock:
             entry = self._published_verdicts.get(key)
             if entry is not None:
                 self._published_verdicts.move_to_end(key)
-        fresh: dict[str, tuple] | None = None
+        signatures: dict[str, tuple] | None = None
         current = entry is not None and entry.generation == generation
         if entry is None:
             allowed: Mapping[str, bool] = {}
-            held: Mapping[str, tuple] = {}
         elif current:
-            allowed, held = entry.allowed, entry.signatures
+            allowed = entry.allowed
         else:
-            fresh = signatures()
-            kept = [path for path, held_sig in entry.signatures.items() if fresh.get(path) == held_sig]
-            allowed = {path: entry.allowed[path] for path in kept}
-            held = {path: entry.signatures[path] for path in kept}
+            signatures = self._generation_signatures(col, generation, read_signatures)
+            held = entry.signatures
+            allowed = {
+                path: verdict for path, verdict in entry.allowed.items()
+                if (now := signatures.get(path)) is not None and now == held.get(path)
+            }
         missing = tuple(path for path in candidates if path in live or path not in allowed)
-        if missing and fresh is None:
-            fresh = signatures()
-        return _PublishedPlan(key, generation, current, allowed, held, fresh, missing, live, candidates)
+        if missing and signatures is None:
+            signatures = self._generation_signatures(col, generation, read_signatures)
+        return _PublishedPlan(key, generation, current, allowed, signatures, missing, live, candidates)
 
     def _publish_verdicts(self, plan: _PublishedPlan, admission: Admission) -> dict[str, bool]:
         """Every candidate's verdict: published where it holds, decided where it does not.
@@ -9264,36 +9300,51 @@ class LexicalStore:
         reader holding the previous mappings keeps a consistent snapshot. When
         two requests patch one key, the last install wins and the next request
         patches again.
+
+        Only the pages in `plan.missing` run the predicate, so a page served from
+        a published verdict records no released or withheld outcome of its own.
+        That is intended: an outcome from admission alone is not a disclosure,
+        and the receipt for what a caller reads comes from the hits it is given.
         """
         decided: dict[str, bool] = {}
-        stored: dict[str, tuple] = {}
+        stored: dict[str, bool] = {}
         for path in plan.missing:
-            allowed, page_local = admission.decide(path)
+            allowed, page_local = admission.decide(path, True)
             decided[path] = allowed
-            if page_local and path not in plan.live and plan.fresh is not None:
-                signature = plan.fresh.get(path)
+            if page_local and path not in plan.live and plan.signatures is not None:
+                signature = plan.signatures.get(path)
                 if signature is not None and self._page_unchanged_since(path, signature):
-                    stored[path] = (signature, allowed)
+                    stored[sys.intern(path)] = allowed
         if stored or not plan.current:
-            allowed_map: Mapping[str, bool] = {
-                **plan.allowed, **{path: verdict for path, (_sig, verdict) in stored.items()}
+            known = plan.signatures or {}
+            allowed_map = {
+                path: verdict for path, verdict in {**plan.allowed, **stored}.items()
+                if path in known
             }
             entry = _PublishedVerdicts(
-                plan.generation,
-                {**plan.signatures, **{path: sig for path, (sig, _verdict) in stored.items()}},
-                allowed_map,
+                plan.generation, {path: known[path] for path in allowed_map}, allowed_map
             )
             with self._term_frequency_cache_lock:
                 self._published_verdicts[plan.key] = entry
                 self._published_verdicts.move_to_end(plan.key)
-                while len(self._published_verdicts) > _PUBLISHED_VERDICTS_MAX:
-                    self._published_verdicts.popitem(last=False)
-        else:
-            allowed_map = plan.allowed
+                self._evict_published_verdicts()
+        # A candidate that was not decided here has a published verdict in the plan.
         return {
-            path: decided[path] if path in decided else allowed_map[path]
+            path: decided[path] if path in decided else plan.allowed[path]
             for path in plan.candidates
         }
+
+    def _evict_published_verdicts(self) -> None:
+        """Drop the least recently used entries past the entry and verdict budgets.
+
+        The caller holds `_term_frequency_cache_lock`. The newest entry is never
+        dropped: a single caller's verdicts always fit, whatever the budget.
+        """
+        held = self._published_verdicts
+        total = sum(len(entry.allowed) for entry in held.values())
+        while len(held) > 1 and (len(held) > _PUBLISHED_VERDICTS_MAX or total > _PUBLISHED_VERDICTS_BUDGET):
+            _key, dropped = held.popitem(last=False)
+            total -= len(dropped.allowed)
 
     def _page_unchanged_since(self, path: str, signature: tuple) -> bool:
         """Whether the file still carries the `mtime_ns` its catalogue row was built from."""
