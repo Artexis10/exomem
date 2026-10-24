@@ -137,9 +137,14 @@ def test_the_service_loads_a_cold_matrix_once_in_the_background_without_stalling
     ],
     ids=["within-catch-up-bound", "beyond-catch-up-bound"],
 )
-def test_a_matrix_behind_another_writer_catches_up_inline_or_loads_in_the_background(
+def test_a_matrix_behind_another_writer_is_served_while_it_catches_up_or_loads_in_the_background(
     managed_vault: Path, monkeypatch: pytest.MonkeyPatch, path_bound: int, expected: tuple
 ) -> None:
+    """Within the bound the request serves the lagging matrix and the background catches it up.
+
+    Beyond the bound the matrix is too far behind to serve, so the request warms and
+    the one background load reads the sidecar whole. Neither runs on the request thread.
+    """
     index = embeddings.get_embedding_index(managed_vault)
     index.all_vectors()
     # Another instance's write leaves the resident matrix one path behind.

@@ -31,7 +31,7 @@ from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 import yaml
 from slugify import slugify as _slugify
 
-from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths
+from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths, view_lag
 from .kbdir import kb_dirname, kb_prefix
 
 if TYPE_CHECKING:
@@ -5653,6 +5653,14 @@ def _batch_atomic_write_locked(
         if additive_guard is not None:
             additive_guard.abort()
 
+    if vault_root is not None:
+        # Before the write acknowledges, so the free-text census names every
+        # file this batch installed, whatever its kind and whichever fan-out
+        # route follows. The fast-receipt route skips the watcher registration.
+        from .governance import artifact_census
+
+        artifact_census.note_created(vault_root, replaced)
+
     if fast_receipt is not None:
         if canonical_commit_monotonic is None:  # pragma: no cover - receipt implies a batch
             raise RuntimeError("derived receipt has no canonical commit timestamp")
@@ -6540,6 +6548,15 @@ class InboundLink:
 # the digest-strength walk key from find._walk_freshness_key — deliberately
 # stronger than count/max-mtime because move_file/delete_file SAFETY checks
 # consume this and a pure rename changes neither count nor any mtime.
+#
+# Concurrency contract. A published index is mutated only by
+# `_InboundIndexData.apply`, in place, while the caller holds
+# `_INBOUND_INDEX_LOCK`; every reader copies the evidence it needs under that
+# same lock. A reader therefore sees the state before or after a patch, never a
+# bucket or a basename count in between. Patch writers also hold
+# `_INBOUND_PATCH_LOCK`, so one patch chains from the previous one. A patch
+# reads its files before it takes the index lock and holds that lock only for
+# work proportional to the change.
 
 
 @dataclass
@@ -6551,16 +6568,42 @@ class _InboundEntry:
     raw_target: str
 
 
+def _inbound_bucket_key(raw_target: str) -> str:
+    """The bucket for a raw link target: anchors are intra-page jumps, not path."""
+    return raw_target.split("#", 1)[0].rstrip().removesuffix(".md")
+
+
+@dataclass
+class _InboundEdit:
+    """One patch batch, read from disk and not yet applied to any index."""
+
+    # rel -> (line number, context, raw target, bucket key) for each link in the file now
+    reread: dict[str, list[tuple[int, str, str, str]]]
+    gone: frozenset[str]  # rels whose edges and basename contribution are dropped
+    # rel -> signature of the bytes this edit reflects; None for a file seen absent
+    applied: dict[str, freshness.FileSignature | None]
+
+
 @dataclass
 class _InboundIndexData:
     buckets: dict[str, list[_InboundEntry]]  # normalized target -> entries
     stem_counts: dict[str, int]  # basename -> occurrences in walk
     known_rels: set[str]  # vault-relative POSIX paths already
     # counted toward stem_counts — lets
-    # on_files_changed() tell a rename's
-    # "new" side from an in-place edit.
+    # apply() tell a rename's "new" side
+    # from an in-place edit.
+    # The last checkpoint at which this data was proven complete. A patch can
+    # advance data that has one; data without one can only be rebuilt.
     checkpoint: freshness.FreshnessCheckpoint | None = None
     stem_paths: dict[str, set[str]] = field(init=False)
+    # file -> the bucket keys holding its entries, so a patch visits only those.
+    file_targets: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    next_seq: int = 0
+    # Files patched since `checkpoint`, with the signature of the bytes applied.
+    # A later patch proves completeness only for paths whose applied bytes still
+    # match the registry, so an earlier patch cannot vouch for a file that has
+    # changed again.
+    applied: dict[str, freshness.FileSignature | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.stem_paths = {}
@@ -6580,114 +6623,152 @@ class _InboundIndexData:
             self.stem_paths.pop(stem)
             self.stem_counts.pop(stem)
 
-    def on_files_changed(
-        self,
-        vault_root: Path,
-        changed_rels: Iterable[str],
-        deleted_rels: Iterable[str],
-    ) -> None:
-        """Patch this index in place for one batch of file changes.
-
-        For every affected path: drop its existing edges from `buckets` and
-        its stem-count contribution, then — for paths that still exist on
-        disk — re-read just that file and re-add its edges + stem-count
-        contribution. New entries get `seq` values appended after the
-        current max `seq` (design D3): a patched file's relative order vs.
-        entries from OTHER files touched at a different time does not mirror
-        a fresh full-walk order, but the output SET per target always
-        matches a full rebuild.
-
-        A rel present in BOTH `changed_rels` and `deleted_rels` in the same
-        batch (two path-string forms of one file collapsing to the same rel
-        upstream — Windows 8.3 short names are the concrete vector, #126, but
-        this defends against ANY dual-form vector: case aliasing, symlinks,
-        a future one) is a same-batch conflict. Trust the filesystem to break
-        the tie: a rel whose file still exists is a change, not a delete —
-        dropping it would silently remove a live file's inbound-link edges.
-        """
-        changed = set(changed_rels)
-        deleted = set(deleted_rels)
-        conflict = changed & deleted
-        for rel in conflict:
-            if (vault_root / rel).is_file():
-                deleted.discard(rel)
-            else:
-                changed.discard(rel)
-        affected = changed | deleted
-        if not affected:
+    def _remember(self, rel: str) -> None:
+        if rel in self.known_rels:
             return
+        self.known_rels.add(rel)
+        stem = PurePosixPath(rel).stem
+        paths = self.stem_paths.setdefault(stem, set())
+        paths.add(rel)
+        self.stem_counts[stem] = len(paths)
 
-        # 1. Drop every affected file's existing edges from every bucket.
-        for target in list(self.buckets.keys()):
-            kept = [e for e in self.buckets[target] if e.path not in affected]
-            if kept:
-                self.buckets[target] = kept
-            else:
-                del self.buckets[target]
-
-        # 2. A "changed" path that vanished between the event firing and this
-        #    patch running behaves exactly like a delete.
-        still_exists: dict[str, Path] = {}
-        for rel in changed:
-            abs_path = vault_root / rel
-            if abs_path.is_file():
-                still_exists[rel] = abs_path
-            else:
-                deleted.add(rel)
-
-        # 3. Drop the stem-count contribution for every path that is now gone.
-        for rel in deleted:
-            self._forget(rel)
-
-        # 4. Re-read each still-existing changed file and re-add its edges +
-        #    stem-count contribution (only if it's a path we didn't already
-        #    know about — an in-place edit of a known path leaves the count
-        #    alone).
-        next_seq = 1 + max(
-            (e.seq for entries in self.buckets.values() for e in entries),
-            default=-1,
+    def count_after(self, edit: _InboundEdit) -> int:
+        """How many files this index would know after `edit`, without applying it."""
+        return (
+            len(self.known_rels)
+            + sum(1 for rel in edit.reread if rel not in self.known_rels)
+            - sum(1 for rel in edit.gone if rel in self.known_rels)
         )
-        for rel, abs_path in still_exists.items():
-            try:
-                text, _guard = read_guarded_text(vault_root, abs_path)
-            except (OSError, UnicodeDecodeError, PathGuardError):
-                self._forget(rel)
-                continue
-            if rel not in self.known_rels:
-                stem = Path(rel).stem
-                self.stem_counts[stem] = self.stem_counts.get(stem, 0) + 1
-                self.known_rels.add(rel)
-                self.stem_paths.setdefault(stem, set()).add(rel)
-            for lineno, context, raw in _scan_wikilinks(text):
-                normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
-                self.buckets.setdefault(normalized, []).append(
+
+    def apply(self, edit: _InboundEdit) -> None:
+        """Replace each affected file's edges and basename contribution.
+
+        The caller holds `_INBOUND_INDEX_LOCK`. The work is proportional to the
+        buckets the affected files link to, before and after the change. New
+        entries take `seq` values after every earlier one (design D3): a patched
+        file's order against files touched at another time does not mirror a
+        fresh walk, but the set of entries per target always matches a rebuild.
+        """
+        affected = edit.gone | frozenset(edit.reread)
+        stale_keys: set[str] = set()
+        for rel in affected:
+            stale_keys.update(self.file_targets.pop(rel, ()))
+        added: dict[str, list[_InboundEntry]] = {}
+        for rel, edges in edit.reread.items():
+            for lineno, context, raw, key in edges:
+                added.setdefault(key, []).append(
                     _InboundEntry(
-                        seq=next_seq,
+                        seq=self.next_seq,
                         path=rel,
                         line_number=lineno,
                         context=context,
                         raw_target=raw,
                     )
                 )
-                next_seq += 1
+                self.next_seq += 1
+            if edges:
+                self.file_targets[rel] = tuple(dict.fromkeys(edge[3] for edge in edges))
+        for key in stale_keys | added.keys():
+            kept = (
+                [e for e in self.buckets.get(key, ()) if e.path not in affected]
+                if key in stale_keys
+                else self.buckets.get(key, [])
+            )
+            merged = kept + added.get(key, [])
+            if merged:
+                self.buckets[key] = merged
+            else:
+                self.buckets.pop(key, None)
+        for rel in edit.gone:
+            self._forget(rel)
+        for rel in edit.reread:
+            self._remember(rel)
+
+
+def _plan_inbound_edit(
+    vault_root: Path,
+    changed_rels: Iterable[str],
+    deleted_rels: Iterable[str],
+) -> _InboundEdit:
+    """Read the files of one patch batch; touch no index.
+
+    A rel present in BOTH `changed_rels` and `deleted_rels` in the same
+    batch (two path-string forms of one file collapsing to the same rel
+    upstream — Windows 8.3 short names are the concrete vector, #126, but
+    this defends against ANY dual-form vector: case aliasing, symlinks,
+    a future one) is a same-batch conflict. Trust the filesystem to break
+    the tie: a rel whose file still exists is a change, not a delete —
+    dropping it would silently remove a live file's inbound-link edges.
+
+    A "changed" path that vanished between the event firing and this read
+    behaves exactly like a delete. A file that exists but cannot be read is
+    dropped without an applied signature: it never proves completeness.
+    """
+    changed = set(changed_rels)
+    deleted = set(deleted_rels)
+    for rel in changed & deleted:
+        if (vault_root / rel).is_file():
+            deleted.discard(rel)
+        else:
+            changed.discard(rel)
+    reread: dict[str, list[tuple[int, str, str, str]]] = {}
+    gone = set(deleted)
+    applied: dict[str, freshness.FileSignature | None] = {rel: None for rel in deleted}
+    for rel in changed:
+        abs_path = vault_root / rel
+        if not abs_path.is_file():
+            gone.add(rel)
+            applied[rel] = None
+            continue
+        try:
+            before = freshness.stat_signature(abs_path)
+            text, _guard = read_guarded_text(vault_root, abs_path)
+            after = freshness.stat_signature(abs_path)
+        except (OSError, UnicodeDecodeError, PathGuardError):
+            gone.add(rel)
+            continue
+        reread[rel] = [
+            (lineno, context, raw, _inbound_bucket_key(raw))
+            for lineno, context, raw in _scan_wikilinks(text)
+        ]
+        if before == after:  # bytes changed while read: apply them, never vouch for them
+            applied[rel] = after
+    return _InboundEdit(reread=reread, gone=frozenset(gone), applied=applied)
 
 
 @dataclass
 class _InboundGeneration:
     generation: int = 0
     demanded: threading.Event = field(default_factory=threading.Event)
+    owned: bool = False  # a watcher owner is registered to recover this vault's index
+    # Held by the one owner pass building this vault's index: the reconcile pass and a
+    # pack-demanded background build both call `prime_inbound_index` and must not overlap.
+    building: threading.Lock = field(default_factory=threading.Lock)
 
 
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
 _INBOUND_INDEX_GENERATIONS: dict[str, _InboundGeneration] = {}
 _INBOUND_INDEX_LOCK = threading.Lock()
+_INBOUND_PATCH_LOCK = threading.Lock()
 
 
 def register_inbound_index(vault_root: Path) -> None:
     """Prepare a stable demand signal before the existing watcher serves a vault."""
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
-        _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+        _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration()).owned = True
+
+
+def inbound_recovery_available(vault_root: Path) -> bool:
+    """Whether the existing watcher owner can restore this vault's index later.
+
+    A caller that only enriches its result may skip the build when this holds,
+    because demand it records reaches the owner. Without an owner (an offline
+    process, or event-maintained indexes disabled) nothing would ever recover
+    the index, so such a caller keeps the synchronous lookup.
+    """
+    state = _INBOUND_INDEX_GENERATIONS.get(str(vault_root.resolve()))
+    return state is not None and state.owned and freshness.event_indexes_enabled()
 
 
 def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
@@ -6714,6 +6795,7 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     buckets: dict[str, list[_InboundEntry]] = {}
     stem_counts: dict[str, int] = {}
     known_rels: set[str] = set()
+    file_targets: dict[str, tuple[str, ...]] = {}
     seq = 0
     for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root)):
         try:
@@ -6723,10 +6805,9 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
             continue
         stem_counts[md.stem] = stem_counts.get(md.stem, 0) + 1
         known_rels.add(md_rel)
+        keys: list[str] = []
         for lineno, context, raw in _scan_wikilinks(text):
-            # Strip `#anchor` before comparison — anchors are intra-page
-            # jumps, not part of the file path.
-            normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
+            normalized = _inbound_bucket_key(raw)
             buckets.setdefault(normalized, []).append(
                 _InboundEntry(
                     seq=seq,
@@ -6736,8 +6817,17 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
                     raw_target=raw,
                 )
             )
+            keys.append(normalized)
             seq += 1
-    return _InboundIndexData(buckets=buckets, stem_counts=stem_counts, known_rels=known_rels)
+        if keys:
+            file_targets[md_rel] = tuple(dict.fromkeys(keys))
+    return _InboundIndexData(
+        buckets=buckets,
+        stem_counts=stem_counts,
+        known_rels=known_rels,
+        file_targets=file_targets,
+        next_seq=seq,
+    )
 
 
 def _vault_freshness_key(vault_root: Path):
@@ -6756,7 +6846,7 @@ def _vault_freshness_key(vault_root: Path):
 def _inbound_index(vault_root: Path, *, require_current: bool = False) -> _InboundIndexData:
     """The cached index, rebuilt when the vault's freshness key moves."""
     key = _vault_freshness_key(vault_root)
-    checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
+    start = freshness.consumer_checkpoint(vault_root, "vault")
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
         state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
@@ -6765,48 +6855,161 @@ def _inbound_index(vault_root: Path, *, require_current: bool = False) -> _Inbou
         cached = _INBOUND_INDEX.get(root)
         if (
             cached and cached[0] == key
-            and (not require_current or cached[1].checkpoint == checkpoint)
+            and (not require_current or cached[1].checkpoint == start)
         ):
             return cached[1]
     data = _build_inbound_index(vault_root)
-    data.checkpoint = _inbound_checkpoint(vault_root, data, key, checkpoint)
+    if _catch_up_inbound(vault_root, data, start, key, state, generation):
+        return data
+    # Not proven current: a synchronous reader may still use it while the key holds.
     with _INBOUND_INDEX_LOCK:
         if state.generation == generation:
             _INBOUND_INDEX[root] = (key, data)
     return data
 
 
-def _inbound_checkpoint(
+#: Rounds in which a finished build replays the events that landed during it. A
+#: round reads only the paths of the new events, so a few rounds outpace a steady
+#: write stream; a burst beyond that leaves demand set for the owner's next pass.
+_INBOUND_CATCH_UP_ROUNDS = 8
+
+
+def _delta_rels(
+    vault_root: Path, delta: freshness.ConsumerDelta
+) -> tuple[list[str], list[str]] | None:
+    """The changed and deleted rels of a registry delta, or None if one lies outside the vault."""
+    changed = [freshness.registry_rel(vault_root, path) for path in delta.changed]
+    deleted = [freshness.registry_rel(vault_root, path) for path in delta.deleted]
+    rels = [*changed, *deleted]
+    if any(rel is None for rel in rels):
+        return None
+    return [rel for rel in changed if rel is not None], [rel for rel in deleted if rel is not None]
+
+
+def _catch_up_inbound(
     vault_root: Path,
     data: _InboundIndexData,
+    start: freshness.FreshnessCheckpoint,
     key: tuple[int, int, str],
-    checkpoint: freshness.FreshnessCheckpoint,
-) -> freshness.FreshnessCheckpoint | None:
-    # A skipped unreadable page cannot establish a complete link census.
-    if (
-        checkpoint.triple is not None
-        and checkpoint.triple == key
-        and len(data.known_rels) == key[0]
-        and freshness.consumer_checkpoint(vault_root, "vault") == checkpoint
-        and not freshness.external_pending(vault_root)
-    ):
-        return checkpoint
-    return None
+    state: _InboundGeneration,
+    generation: int,
+) -> bool:
+    """Bring a finished build up to the registry, then publish it if that is proven.
+
+    The build began at `start`, and files kept changing while it walked. Each
+    round replays the registry's delta from the last proven checkpoint through
+    the patch machinery, on the builder's own thread, and publishes only while
+    the registry has not moved since the proof. A write stream therefore no
+    longer discards a long build: every patch that ran while no index was
+    resident left its paths in the delta, and the delta is what is replayed.
+    """
+    from . import foreground_priority
+
+    # The registry must have described the disk the build walked, as the key did.
+    if start.triple is None or start.triple != key:
+        data.checkpoint = None
+        return False
+    data.checkpoint = start
+    root = str(vault_root.resolve())
+    for _ in foreground_priority.yielding_in_bulk(range(_INBOUND_CATCH_UP_ROUNDS)):
+        delta = freshness.delta_since(vault_root, "vault", data.checkpoint)
+        rels = _delta_rels(vault_root, delta) if delta.complete else None
+        if rels is None:
+            break
+        edit = _plan_inbound_edit(vault_root, *rels)
+        proven = _prove_inbound(vault_root, data, delta, edit)
+        data.apply(edit)
+        data.applied.update(edit.applied)
+        if not proven:
+            if freshness.consumer_checkpoint(vault_root, "vault") == delta.to:
+                break  # nothing more is coming: an unreadable page or a pending external change
+            continue
+        data.checkpoint, data.applied = delta.to, {}
+        with _INBOUND_INDEX_LOCK:
+            if state.generation != generation:
+                break
+            if freshness.consumer_checkpoint(vault_root, "vault") == delta.to:
+                _INBOUND_INDEX[root] = (delta.to.triple, data)
+                return True
+    data.checkpoint, data.applied = None, {}
+    return False
+
+
+def inbound_rebuild_needed(vault_root: Path) -> bool:
+    """Whether only an owner build can restore this vault's index.
+
+    True when nothing is resident, or the resident data has no proven checkpoint.
+    Data that is resident under a checkpoint merely behind the registry is
+    completed by the patch the watcher is about to run, so a rebuild would repeat
+    work the patch does for the cost of the change.
+    """
+    with _INBOUND_INDEX_LOCK:
+        cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
+    return cached is None or cached[1].checkpoint is None
 
 
 def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
-    """Rebuild requested link metadata on the existing background owner."""
+    """Rebuild requested link metadata on the existing background owner.
+
+    At most one pass builds a vault's index at a time: a caller that finds
+    another pass running returns False, because that pass restores the index.
+    """
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
         state = _INBOUND_INDEX_GENERATIONS.get(root)
         if not eager and (state is None or not state.demanded.is_set()):
             return False
+        if state is None:
+            state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
     if freshness.generation(vault_root, "vault") is None or freshness.external_pending(vault_root):
         return False
-    data = _inbound_index(vault_root, require_current=True)
+    if not state.building.acquire(blocking=False):
+        return False
+    try:
+        data = _inbound_index(vault_root, require_current=True)
+    finally:
+        state.building.release()
     with _INBOUND_INDEX_LOCK:
         cached = _INBOUND_INDEX.get(root)
         return cached is not None and cached[1] is data and data.checkpoint is not None
+
+
+def _delta_applied(
+    vault_root: Path,
+    delta: freshness.ConsumerDelta,
+    applied: dict[str, freshness.FileSignature | None],
+) -> bool:
+    """Whether the applied bytes of every path in `delta` are those the registry holds at its end."""
+    target = dict(delta.target_signatures)
+    for registry_path in delta.changed:
+        rel = freshness.registry_rel(vault_root, registry_path)
+        if rel is None or rel not in applied or applied[rel] != target[registry_path]:
+            return False
+    for registry_path in delta.deleted:
+        rel = freshness.registry_rel(vault_root, registry_path)
+        if rel is None or rel not in applied or applied[rel] is not None:
+            return False
+    return True
+
+
+def _prove_inbound(
+    vault_root: Path,
+    data: _InboundIndexData,
+    delta: freshness.ConsumerDelta,
+    edit: _InboundEdit,
+) -> bool:
+    """Whether `data` after `edit` is the vault at the end of `delta`.
+
+    It holds when the data knows as many files as the registry, no external
+    change is pending, and the bytes applied to every path of the delta, now or
+    in an earlier patch, are the bytes the registry holds for it.
+    """
+    return (
+        delta.to.triple is not None
+        and data.count_after(edit) == delta.to.triple[0]
+        and not freshness.external_pending(vault_root)
+        and _delta_applied(vault_root, delta, {**data.applied, **edit.applied})
+    )
 
 
 def on_inbound_files_changed(
@@ -6824,10 +7027,23 @@ def on_inbound_files_changed(
     correct, not just cheap. This is what makes the patch path "live-only":
     it only ever mutates an index that already exists.
 
-    After patching, re-syncs the cached freshness key to the patched state's
-    current on-disk key, so the next `_inbound_index` call sees a cache HIT
-    instead of redundantly re-triggering `_build_inbound_index`'s full
-    read-and-reparse pass — the entire point of this patch API (P3).
+    The batch is read from disk first, then applied in one short critical
+    section; the cost follows the change, not the vault. With resident data the
+    generation advances before the read, so a build that started earlier cannot
+    publish over it and an eviction during the read revokes this patch. With
+    none, nothing advances: a build in flight replays this event from the
+    registry's delta (`_catch_up_inbound`).
+
+    The patched data is proven complete at the registry checkpoint `to` that
+    its retained history bridges from the old one, provided every path in that
+    history holds in the data the bytes the registry holds for it. The data is
+    then republished under `to`; an event that lands later only lengthens the
+    next patch's bridge. While the history names a path that no patch has
+    covered yet (the watcher fans events out later than the registry announces
+    them), the data stays resident under its old checkpoint, which no borrower
+    accepts, and the patch for that path completes it. Data that its history
+    cannot bridge is withdrawn; its demand stays, so the existing owner
+    rebuilds it.
     """
     if not freshness.event_indexes_enabled():
         return
@@ -6836,39 +7052,38 @@ def on_inbound_files_changed(
     if not (changed_list or deleted_list):
         return
     root = str(vault_root.resolve())
-    with _INBOUND_INDEX_LOCK:
-        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
-        state.generation += 1
-        generation = state.generation
-        cached = _INBOUND_INDEX.pop(root, None)
-        if cached is None:
-            return
-    _, data = cached
-    checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
-    bridge = (
-        freshness.delta_since(vault_root, "vault", data.checkpoint)
-        if data.checkpoint is not None else None
-    )
-    # A later patch proves the whole index only when it covers the retained suffix.
-    covered = {str(Path(root) / rel) for rel in changed_list + deleted_list}
-    complete = (
-        bridge is not None
-        and bridge.complete
-        and bridge.to == checkpoint
-        and (bridge.changed | bridge.deleted).issubset(covered)
-    )
-    data.on_files_changed(vault_root, changed_list, deleted_list)
-    key = _vault_freshness_key(vault_root)
-    data.checkpoint = (
-        _inbound_checkpoint(vault_root, data, key, checkpoint) if complete else None
-    )
-    with _INBOUND_INDEX_LOCK:
-        if (
-            state.generation == generation
-            and _INBOUND_INDEX.get(root) is None
-            and data.checkpoint is not None
-        ):
-            _INBOUND_INDEX[root] = (key, data)
+    with _INBOUND_PATCH_LOCK:
+        with _INBOUND_INDEX_LOCK:
+            state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+            cached = _INBOUND_INDEX.get(root)
+            if cached is None:
+                return  # a build in flight replays this event from the registry itself
+            state.generation += 1
+            generation = state.generation
+        data = cached[1]
+        bridge = (
+            freshness.delta_since(vault_root, "vault", data.checkpoint)
+            if data.checkpoint is not None else None
+        )
+        edit = (
+            _plan_inbound_edit(vault_root, changed_list, deleted_list)
+            if bridge is not None and bridge.complete else None
+        )
+        proven = edit is not None and _prove_inbound(vault_root, data, bridge, edit)
+        with _INBOUND_INDEX_LOCK:
+            if state.generation != generation or _INBOUND_INDEX.get(root) is not cached:
+                return
+            # Without an announced event to wait for, unproven data would keep
+            # serving under a stamp that still matches the registry.
+            if edit is None or (not proven and bridge.to == data.checkpoint):
+                _INBOUND_INDEX.pop(root, None)
+                return
+            data.apply(edit)
+            data.applied.update(edit.applied)
+            if proven:
+                data.checkpoint = bridge.to
+                data.applied = {}
+                _INBOUND_INDEX[root] = (bridge.to.triple, data)
 
 
 def clear_inbound_index() -> None:
@@ -6886,6 +7101,26 @@ def evict_inbound_index(vault_root: Path) -> bool:
         state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
         state.generation += 1
         return _INBOUND_INDEX.pop(root, None) is not None
+
+
+def _inbound_target_forms(target_rel_path: str) -> tuple[str, str, str, str]:
+    """`(target, full, stripped, basename)`: the forms a link to this page can take."""
+    target = target_rel_path.replace("\\", "/").removesuffix(".md")
+    full = target if target.startswith(kb_prefix()) else kb_prefix() + target
+    return target, full, full.removeprefix(kb_prefix()), target.rsplit("/", 1)[-1]
+
+
+def _snapshot_inbound(data: _InboundIndexData, target_rel_path: str) -> _InboundIndexData:
+    """Copy only this target's evidence. The caller holds `_INBOUND_INDEX_LOCK`.
+
+    Visibility checks and ordering then run on the copy, outside the lock.
+    """
+    _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
+    return _InboundIndexData(
+        buckets={key: list(data.buckets.get(key, ())) for key in (full, stripped, basename)},
+        stem_counts={basename: data.stem_counts.get(basename, 0)},
+        known_rels=set(data.stem_paths.get(basename, ())),
+    )
 
 
 def find_inbound_wikilinks(
@@ -6908,12 +7143,17 @@ def find_inbound_wikilinks(
 
     Served from the process-cached inbound-link index (one read pass per
     vault revision) — results identical to scanning every file per call.
+    This is the complete lookup: it builds the index when it cannot prove the
+    cached one, so a caller on a read request uses `cached_inbound_wikilinks`.
 
     `visible` is a reader's view (see `egress.visible_page_filter`; `None`
     for the owner): uniqueness is then counted over the pages it admits, as
     in a vault without the others. Only a basename that is shared is decided.
     """
-    return _select_inbound_wikilinks(_inbound_index(vault_root), target_rel_path, visible)
+    data = _inbound_index(vault_root)
+    with _INBOUND_INDEX_LOCK:
+        snapshot = _snapshot_inbound(data, target_rel_path)
+    return _select_inbound_wikilinks(snapshot, target_rel_path, visible)
 
 
 def cached_inbound_wikilinks(
@@ -6922,7 +7162,12 @@ def cached_inbound_wikilinks(
     *,
     visible: Callable[[str], bool] | None = None,
 ) -> list[InboundLink] | None:
-    """Borrow complete current evidence without a walk, build or cache wait."""
+    """Borrow complete current evidence without a walk, build or cache wait.
+
+    For a reader other than the owner (`visible` given), data that lags the
+    registry only by pages that reader may not see is complete for it, so a
+    write to such a page does not turn the answer into `None`.
+    """
     root = str(vault_root.resolve())
     state = _INBOUND_INDEX_GENERATIONS.get(root)
     if state is None:
@@ -6938,37 +7183,38 @@ def cached_inbound_wikilinks(
         if cached is None:
             return None
         checkpoint = cached[1].checkpoint
+        if generation is None or checkpoint is None:
+            return None
         if (
-            generation is None
-            or checkpoint is None
-            or (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
+            visible is None
+            and (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
         ):
             return None
         cache_generation = state.generation
-        data = cached[1]
-        target = target_rel_path.replace("\\", "/").removesuffix(".md")
-        full = target if target.startswith(kb_prefix()) else kb_prefix() + target
-        basename = target.rsplit("/", 1)[-1]
-        # Copy only this target's evidence; visibility never holds the cache lock.
-        snapshot = _InboundIndexData(
-            buckets={
-                key: list(data.buckets.get(key, ()))
-                for key in (full, full.removeprefix(kb_prefix()), basename)
-            },
-            stem_counts={basename: data.stem_counts.get(basename, 0)},
-            known_rels=set(data.stem_paths.get(basename, ())),
-        )
+        snapshot = _snapshot_inbound(cached[1], target_rel_path)
     finally:
         _INBOUND_INDEX_LOCK.release()
-    if freshness.external_pending(vault_root):
+
+    def current() -> bool:
+        """The registry has nothing this reader could see that the data lacks."""
+        if (
+            (checkpoint.instance_id, checkpoint.generation) == (instance, generation)
+            and freshness.consumer_checkpoint_instance() == instance
+            and freshness.generation(vault_root, "vault") == generation
+            and not freshness.external_pending(vault_root)
+        ):
+            return True
+        return visible is not None and view_lag.only_withheld(
+            vault_root,
+            freshness.delta_since(vault_root, "vault", checkpoint),
+            visible,
+            pending=True,
+        )
+
+    if not current():
         return None
     result = _select_inbound_wikilinks(snapshot, target_rel_path, visible)
-    if (
-        freshness.consumer_checkpoint_instance() != instance
-        or freshness.generation(vault_root, "vault") != generation
-        or freshness.external_pending(vault_root)
-        or not _INBOUND_INDEX_LOCK.acquire(blocking=False)
-    ):
+    if not current() or not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
         if (
@@ -6986,10 +7232,9 @@ def _select_inbound_wikilinks(
     target_rel_path: str,
     visible: Callable[[str], bool] | None,
 ) -> list[InboundLink]:
-    target = target_rel_path.replace("\\", "/").removesuffix(".md")
-    target_full = target if target.startswith(kb_prefix()) else kb_prefix() + target
-    target_stripped = target_full.removeprefix(kb_prefix())
-    target_basename = target.rsplit("/", 1)[-1]
+    _target, target_full, target_stripped, target_basename = _inbound_target_forms(
+        target_rel_path
+    )
 
     stem_count = data.stem_counts.get(target_basename, 0)
     if visible is not None and stem_count > 1:
@@ -7192,7 +7437,7 @@ class WikilinkResolver:
     ) -> None:
         """Patch this resolver in place for one batch of file changes.
 
-        Mirrors `_InboundIndexData.on_files_changed`: drop every affected
+        Mirrors `_InboundIndexData.apply`: drop every affected
         path's edges, then re-read + re-add path/stem/title for the changed
         paths that still exist on disk. The resulting maps equal a full
         rebuild's for the same on-disk state — so wikilink resolution (and thus

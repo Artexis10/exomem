@@ -230,6 +230,47 @@ Disabled observation or continuous changes can leave inbound information unknown
 The correctness cost is explicit delayed link completeness; the benefit is preserving the page response during index recovery.
 No new numerical latency bar or production performance claim follows from the isolated workflow proof.
 
+### 9. Read requests use published generations
+
+Evidence, for tasks 3.2 and 3.3, comes from the installed service's request ledger on a large personal vault. The window is 2026-10-24 03:48 to 10:45 UTC, the boundary is MCP dispatch, and the traffic is natural agent use. `ask_memory` had n=184, p50 2,019 ms and p95 17,882 ms. `activate_context` had n=140, p50 1,289 ms and p95 9,794 ms. `read_memory` had n=113, p50 187 ms and p95 3,028 ms.
+
+Latency grows with the other requests in flight in the same worker. The `ask_memory` p50 is 1,578 ms with no other request in flight, 4,790 ms with 1.5 to 3, and 10,848 ms with 3 to 6. Fixed-work stages slow about tenfold together: fusion goes from 54 to 589 ms, and the lexical query from 88 to 870 ms. The host had idle cores, and tools run as synchronous functions in one worker's thread pool, so CPU work in concurrent requests serializes. Other recall requests hold 78% of the overlapping time; writes hold less than 5%.
+
+A request that runs alone still spends most of its time on work that grows with the vault, not with the request:
+
+- The free-text artifact census walks every vault directory in 57% of calls, p50 358 ms, once per postfilter pass.
+- The embedding matrix catches up in 17% of calls, p50 1,099 ms.
+- The due-state block rebuilds after a key change in 8% of calls, p50 1,079 ms.
+- The recall projection selects every admitted path, at up to 6 s.
+
+The tails come from the same class: the inbound-link rebuild in context-pack neighbourhoods takes up to 112 s, and the identity census on reads up to 11 s. A request that overlaps one of these spans in another request has an `ask_memory` p50 of 8,335 ms, against 3,822 ms when it overlaps only lighter requests.
+
+An activated server read request does no work whose cost grows with the vault. It runs no directory walk, no whole-vault scan, and no rebuild or catch-up of a whole derived structure. Each structure's publisher advances it: the write path, the watcher, the derived drain or the existing background owner. A request reads the last published generation. The freshness contract is:
+
+- A caller sees its own committed service write on its next read. The write path updates the structure in proportion to the change, or the existing pending-visibility overlay shadows the changed paths.
+- Changes from other sources, such as external edits, appear within the publisher's bound. The existing periodic reconciliation bounds missed events.
+- A structure without a published generation never reads as empty. It either keeps today's synchronous path or reports incomplete coverage.
+- Explicit offline callers, deployments with event-maintained indexes disabled, explicit inbound operations and mutation safety keep their synchronous paths.
+- Release, revocation and access-policy decisions stay live in each request. Only the lookup structures move.
+
+| Site | Publisher | Request reads | Own write | Stale effect |
+|---|---|---|---|---|
+| Free-text artifact census | Background base rebuild from event-named directories, plus a periodic walk; an add-only overlay updated by self-write registration and watcher events | Base plus overlay, with no filesystem enumeration | Overlay add before the write acknowledges | An external create that is named bare stays unresolved until its event; a path-shaped unresolved token gets one direct check; a removed name stays until a base rebuild, which withholds more but leaks nothing |
+| Admitted recall path set | Catalogue publication | The set cached per admitted checkpoint, shadowed by set difference | Pending overlay | None, because the cache key is the checkpoint |
+| Embedding matrix | The derived drain catches up after a batch commits | A lagging matrix with the same epoch, instance, space and policy; the single-flight catch-up starts in the background | The pending overlay shadows changed paths; the chunk proof refuses text for changed paths | Another source's new rows rank after the catch-up |
+| Due-state block | Existing single-flight refresh | The newest build for the same vault, audience, resolution and purpose, after the existing re-checks | Dismissals and removals apply at once | Additions appear after the refresh; a build never crosses audiences |
+| Context-pack neighbourhood | Existing inbound index and its watcher recovery | Non-building lookup; on a miss, outbound neighbours with inbound marked incomplete | The write-path patch republishes the index | Inbound neighbours are missing until recovery |
+| Reference resolution | Identity projection, with owners under the knowledge-base trash folder in a table used only for references | The projection, also when stale | The write path updates the projection | A reference resolves to its last known owner until the refresh; the path decision stays live |
+| Pending visibility | Proven rows kept from publication | Rows re-read only for changed bodies | Unchanged | None |
+
+A flag that reports a lag is relative to the caller's view. A vault-wide flag such as `index_stale`, `inbound: null` or an incomplete neighbourhood flips on any write, including a write to a page the caller may not see. That gives a restricted caller a one-bit write signal, which the context-activation rule withholding `freshness_key` and `index_generation` exists to prevent. Removing the flags would instead present a partial result as complete. For a restricted caller, a lag counts only when a changed path since the published generation is one the caller may see. A lag made only of withheld paths cannot change what that caller receives, so its response is complete and stays the same. The check costs the freshness delta and one release decision per changed path. A bound on the decided paths keeps that cost fixed: a longer or unbridgeable lag reports the lag undecided. A burst of withheld writes therefore still flips the flag until the structure is published. Publishers usually keep the lag far below the bound, so the remaining signal is coarse.
+
+The census overlay only adds names. With leftmost-longest matching, deleting a longer alias could expose a shorter withheld name inside it, so removals wait for a base rebuild that proves them.
+
+Published admitted sets for structured eligibility and the activation carry are a separate slice. They share one new mechanism, and a stale set could leak through ranking or rarity. Serving from several processes and free-threaded CPython stay out of scope: each extra reader process duplicates the in-process caches and adds an estimated 1.3 to 2.5 GB. The per-request CPU work in `accelerate-governed-recall` section 6 continues.
+
+Proof compares the installed request ledger before and after the change, on the same concurrency buckets: alone, 1.5 to 3, and 3 to 6. Each tool needs at least 100 calls per arm, with the write count per window and a bootstrap 95% interval. Each site also has a span check: its span leaves request calls, or its p90 falls. Model-free tests guard each freshness and release guarantee above.
+
 
 ## Risks / Trade-offs
 
@@ -252,4 +293,6 @@ For an actual live setting or runtime switch, record its owner, preconditions, u
 
 ## Open Questions
 
-Read, browse, deep, cold and background-freshness thresholds remain pending where no current applicable bar exists. Current measurements will support their recorded engineering choices. Residency selection remains conditional on the served profile's measured memory and cold/warm costs. Neither unknown grants a passing result or introduces another approval or release gate.
+Browse `list` takes no separate threshold. It falls under the programme-wide bar, which is p95 below 1,000 ms at the caller boundary for every operation. The installed request ledger supplies the evidence at the dispatch boundary. Before the bounded listing (2026-10-18 and 19), n=61, p50 1,975 ms and p95 114,448 ms. After it (2026-10-21 to 24), n=40, p50 608 ms and p95 7,072 ms. Browse therefore fails the bar. Browse shares the contended worker, so decision 9 is its repair path. The `browse-pending` entry stays pending for a browse-specific boundary.
+
+Read, deep, cold and background-freshness thresholds remain pending where no current applicable bar exists. Current measurements will support their recorded engineering choices. Residency selection remains conditional on the served profile's measured memory and cold/warm costs. Neither unknown grants a passing result or introduces another approval or release gate.

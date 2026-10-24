@@ -31,6 +31,7 @@ from exomem import (
     derived_drain,
     derived_receipts,
     epistemic_graph,
+    freshness,
     graph_sync,
     lexstore,
     pending_recall,
@@ -68,7 +69,14 @@ def _manager(tmp_path: Path) -> writer_lease.LeaseManager:
     )
 
 
-def _governed_write(tmp_path: Path, root: Path, *, rel_path: str, source: str) -> dict:
+def _governed_write(
+    tmp_path: Path,
+    root: Path,
+    *,
+    rel_path: str,
+    source: str,
+    mutation_request_id: str = "33333333-3333-4333-8333-333333333333",
+) -> dict:
     """One governed canonical batch through the real lease and batch seams."""
     target = root / rel_path
 
@@ -88,7 +96,7 @@ def _governed_write(tmp_path: Path, root: Path, *, rel_path: str, source: str) -
         (root,),
         {"response_detail": "compact"},
         idempotency_key=None,
-        mutation_request_id="33333333-3333-4333-8333-333333333333",
+        mutation_request_id=mutation_request_id,
     )
 
 
@@ -419,3 +427,85 @@ def test_standalone_callers_keep_their_join_budget(
         graph_sync.standalone_join_budget_seconds()
         == graph_sync.STANDALONE_JOIN_BUDGET_SECONDS
     )
+
+
+# --------------------------------------------------------------------------- #
+# The resident matrix lags the drain: the caller's own write stays visible
+# --------------------------------------------------------------------------- #
+
+def test_a_fast_acked_write_stays_visible_through_the_overlay_while_the_matrix_lags(
+    live_catalogue: Path, tmp_path: Path, model_free_encoder: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lagging matrix is served, and the caller's pending page still answers.
+
+    The drain has published another page's rows after the resident matrix was
+    built, and the catch-up has not run. A managed hybrid recall serves the
+    matrix as lagging (the vector lane participates, it is not warming) without
+    that page's rows, and the caller's own acknowledged-but-undrained page is
+    found, with its new content, through the pending overlay.
+    """
+    from exomem import embeddings, readiness
+    from exomem.retrieval_explain import RetrievalTrace
+
+    vault = live_catalogue
+    base_rel = "Knowledge Base/Notes/Insights/lag-base.md"
+    other_rel = "Knowledge Base/Notes/Insights/lag-other.md"
+    own_rel = "Knowledge Base/Notes/Insights/lag-own.md"
+    _governed_write(tmp_path, vault, rel_path=base_rel, source=_compiled_page("Lag base", "lagbasemarker"))
+    _one_pass(vault)
+    index = embeddings.get_embedding_index(vault)
+    index.all_vectors()
+    assert index.resident_matrix() is not None
+
+    # Another page's rows land in the sidecar; the background catch-up has not run,
+    # and none starts for the rest of this test, so the lag outlives the request.
+    monkeypatch.setattr(index, "start_corpus_matrix_load", lambda: None)
+    _governed_write(
+        tmp_path, vault, rel_path=other_rel, source=_compiled_page("Lag other", "lagothermarker"),
+        mutation_request_id="44444444-4444-4444-8444-444444444444",
+    )
+    _one_pass(vault)
+
+    # The caller's own write is acknowledged and not drained.
+    _governed_write(
+        tmp_path, vault, rel_path=own_rel, source=_compiled_page("Lag own", "lagownmarker"),
+        mutation_request_id="55555555-5555-4555-8555-555555555555",
+    )
+    assert pending_recall.overlay(vault).covers(own_rel)
+    # Managed admission without a live warm, as the server answers a request.
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    monkeypatch.setattr(
+        readiness, "retrieval_admission", lambda _root=None: {"state": "ready", "admitted": True}
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_admission",
+        lambda root, **_kwargs: lexstore.RecallProjectionAdmission(
+            {scope: freshness.recall_checkpoint(root, scope) for scope in freshness.SCOPES}, ()
+        ),
+    )
+    assert index.resident_matrix() is None
+    served: list[frozenset[str] | None] = []
+    real_require = index.require_resident_matrix
+
+    def recording_require(*args, **kwargs):
+        resident = real_require(*args, **kwargs)
+        served.append(resident.stale_paths)
+        return resident
+
+    monkeypatch.setattr(index, "require_resident_matrix", recording_require)
+
+    trace = RetrievalTrace("hybrid", "page", False, False)
+    hits = find_module.find(
+        vault, query="lagownmarker", mode="hybrid", scope="kb-only", limit=5,
+        rerank=False, retrieval_trace=trace,
+    )
+
+    assert served and set(served) == {frozenset({other_rel})}, served
+    assert trace.lane_profiles["vector"]["status"] == "participated"
+    assert own_rel in [hit.path for hit in hits]
+    # The page whose rows are withheld from the lagging matrix is still recalled by its text.
+    other_hits = find_module.find(
+        vault, query="lagothermarker", mode="hybrid", scope="kb-only", limit=5, rerank=False,
+    )
+    assert other_rel in [hit.path for hit in other_hits]

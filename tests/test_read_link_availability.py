@@ -101,14 +101,14 @@ def test_incremental_patch_withdraws_data_before_mutating_it(vault, monkeypatch)
     (vault / SOURCE).write_text("# Source\n\nThe link was removed.\n", encoding="utf-8")
     freshness.on_files_changed(vault, changed=[vault / SOURCE])
     entered, release = threading.Event(), threading.Event()
-    patch = vault_module._InboundIndexData.on_files_changed
+    plan = vault_module._plan_inbound_edit
 
-    def held_patch(self, root, changed, deleted):
+    def held_patch(root, changed, deleted):
         entered.set()
         assert release.wait(5)
-        return patch(self, root, changed, deleted)
+        return plan(root, changed, deleted)
 
-    monkeypatch.setattr(vault_module._InboundIndexData, "on_files_changed", held_patch)
+    monkeypatch.setattr(vault_module, "_plan_inbound_edit", held_patch)
     with ThreadPoolExecutor(max_workers=1) as pool:
         writer = pool.submit(vault_module.on_inbound_files_changed, vault, [SOURCE], [])
         try:

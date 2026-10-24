@@ -962,23 +962,83 @@ def test_the_projection_and_the_scan_resolve_upper_case_and_cr_only_pages_alike(
     assert memory_refs.paths_for_ids_read_only(tmp_path, [upper, carriage]) == expected
 
 
-def test_a_vault_with_a_trash_directory_resolves_through_the_scan(
+def test_a_trash_owned_reference_resolves_from_the_projection_without_a_scan(
     tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A page under `Knowledge Base/trash/` keeps the ref it is handed today.
+    """A page under `Knowledge Base/trash/` keeps the ref the scan hands out.
 
-    The identity census never admits that directory, while the scan reads it
-    and a read by path returns the page's ref. A current projection would read
-    that ref as absent, so the vault takes the scan even with one available.
+    The identity census prunes that directory, while the scan reads it and a
+    read by path returns the page's ref. The projection keeps those owners in a
+    table that only reference resolution reads, so the vault answers from it.
     """
     live = memory_refs.new_id()
     trashed = memory_refs.new_id()
+    shared = memory_refs.new_id()
     _write_page(tmp_path, "Knowledge Base/Notes/live.md", _page(live))
     _write_page(tmp_path, "Knowledge Base/trash/gone.md", _page(trashed))
+    _write_page(tmp_path, "Knowledge Base/Notes/twin.md", _page(shared))
+    _write_page(tmp_path, "Knowledge Base/trash/twin.md", _page(shared))
+    expected = {
+        live: ("Knowledge Base/Notes/live.md",),
+        trashed: ("Knowledge Base/trash/gone.md",),
+        shared: ("Knowledge Base/Notes/twin.md", "Knowledge Base/trash/twin.md"),
+    }
+    through_scan = memory_refs.paths_for_ids_read_only(tmp_path, list(expected))
     freshness.rebaseline(tmp_path)
     semantic_contract.build_corpus_context(tmp_path)
-    assert semantic_contract.current_reference_identity_snapshot(tmp_path) is not None
 
+    def no_scan(vault_root: Path) -> list:
+        raise AssertionError("a trash owner must resolve from the projection")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    through_projection = memory_refs.paths_for_ids_read_only(tmp_path, list(expected))
+
+    assert through_scan == through_projection == expected
+
+
+def test_a_page_moved_into_trash_keeps_resolving_after_the_projection_is_patched(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reference-only table follows the watcher's patch, in and out of trash."""
+    identity = memory_refs.new_id()
+    live = tmp_path / "Knowledge Base/Notes/page.md"
+    trashed = tmp_path / "Knowledge Base/trash/page.md"
+    _write_page(tmp_path, "Knowledge Base/Notes/page.md", _page(identity))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+
+    def no_scan(vault_root: Path) -> list:
+        raise AssertionError("a patched projection must answer without a scan")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    trashed.parent.mkdir(parents=True)
+    live.rename(trashed)
+    semantic_contract.publish_corpus_files_changed(tmp_path, changed=[trashed], deleted=[live])
+    assert memory_refs.paths_for_ids_read_only(tmp_path, [identity]) == {
+        identity: ("Knowledge Base/trash/page.md",)
+    }
+
+    trashed.rename(live)
+    semantic_contract.publish_corpus_files_changed(tmp_path, changed=[live], deleted=[trashed])
+    assert memory_refs.paths_for_ids_read_only(tmp_path, [identity]) == {
+        identity: ("Knowledge Base/Notes/page.md",)
+    }
+
+
+def test_a_stale_projection_resolves_a_read_without_a_scan(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read answers from the last published projection while the watcher catches up.
+
+    A caller that writes from the answer keeps the default and scans until the
+    projection is current again.
+    """
+    known = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/known.md", _page(known))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    _write_page(tmp_path, "Knowledge Base/Notes/other.md", _page(memory_refs.new_id()))
+    freshness.mark_external_pending(tmp_path)
     scans: list[str] = []
     real = memory_refs._scan_pages
 
@@ -987,13 +1047,156 @@ def test_a_vault_with_a_trash_directory_resolves_through_the_scan(
         return real(vault_root)
 
     monkeypatch.setattr(memory_refs, "_scan_pages", counted)
-    resolved = memory_refs.paths_for_ids_read_only(tmp_path, [live, trashed])
 
-    assert resolved == {
-        live: ("Knowledge Base/Notes/live.md",),
-        trashed: ("Knowledge Base/trash/gone.md",),
-    }
+    stale = memory_refs.paths_for_ids_read_only(tmp_path, [known], serve_stale=True)
+    assert stale == {known: ("Knowledge Base/Notes/known.md",)}
+    assert scans == []
+
+    strict = memory_refs.paths_for_ids_read_only(tmp_path, [known])
+    assert strict == stale
     assert len(scans) == 1
+
+
+def test_a_stale_read_still_decides_release_live(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The release decision over a stale owner is taken at read time.
+
+    The page is released when the projection is built. A rule written after that
+    withholds it, and the read answers as it would for a page that never was.
+    """
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    identity = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/Hidden/withheld.md", _page(identity))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    external = RequestPrincipal(audience_id="external", surface="mcp")
+    ref = memory_refs.memory_ref(identity)
+
+    def no_scan(vault_root: Path) -> list:
+        raise AssertionError("a stale read must answer from the projection")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    freshness.mark_external_pending(tmp_path)
+    assert (
+        egress.resolve_visible_identifier(tmp_path, ref, principal=external, serve_stale=True)
+        == "Knowledge Base/Notes/Hidden/withheld.md"
+    )
+
+    _withhold_hidden_notes_from_external(tmp_path)
+    with pytest.raises(memory_refs.ReferenceError) as caught:
+        egress.resolve_visible_identifier(tmp_path, ref, principal=external, serve_stale=True)
+    assert caught.value.as_dict() == {
+        "code": "REFERENCE_NOT_FOUND",
+        "reason": f"memory id not found: {identity}",
+    }
+
+
+@pytest.mark.parametrize("edit", ["deleted", "id_changed"])
+def test_a_stale_read_never_returns_a_page_that_no_longer_holds_the_id(
+    tmp_path: Path, corpus_cache_on: None, edit: str
+) -> None:
+    """A removal or a re-identification made behind the server applies at once.
+
+    The stale projection still names the page. The read checks the page's own id
+    before it returns the path, and otherwise takes the strict lookup.
+    """
+    from exomem.governance import egress
+
+    identity = memory_refs.new_id()
+    page = tmp_path / "Knowledge Base/Notes/page.md"
+    _write_page(tmp_path, "Knowledge Base/Notes/page.md", _page(identity))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    if edit == "deleted":
+        page.unlink()
+    else:
+        page.write_text(_page(memory_refs.new_id()), encoding="utf-8")
+    freshness.mark_external_pending(tmp_path)
+
+    with pytest.raises(memory_refs.ReferenceError) as caught:
+        egress.resolve_visible_identifier(
+            tmp_path, memory_refs.memory_ref(identity), serve_stale=True
+        )
+    assert caught.value.code == "REFERENCE_NOT_FOUND"
+
+
+def test_a_stale_read_rechecks_every_visible_owner_before_calling_it_ambiguous(
+    tmp_path: Path, corpus_cache_on: None
+) -> None:
+    """Two pages held the id and an outside edit took it off one of them.
+
+    The stale projection still names both. The read answers what the strict
+    lookup answers, the one page that holds the id, not an ambiguity.
+    """
+    from exomem.governance import egress
+
+    identity = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/one.md", _page(identity))
+    _write_page(tmp_path, "Knowledge Base/Notes/two.md", _page(identity))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    (tmp_path / "Knowledge Base/Notes/two.md").write_text(
+        _page(memory_refs.new_id()), encoding="utf-8"
+    )
+    freshness.mark_external_pending(tmp_path)
+
+    stale = egress.resolve_visible_identifier(
+        tmp_path, memory_refs.memory_ref(identity), serve_stale=True
+    )
+    assert stale == "Knowledge Base/Notes/one.md"
+
+
+def test_a_stale_lookup_does_the_same_work_whether_or_not_the_id_exists(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An id that is held, held only by a withheld page, or absent costs the same.
+
+    The batch takes one source, chosen from vault state, so what a caller can
+    time or count does not tell them whether a page they cannot see holds the id.
+    """
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    shown, withheld, absent = (memory_refs.new_id() for _ in range(3))
+    _write_page(tmp_path, "Knowledge Base/Notes/Open/shown.md", _page(shown))
+    _write_page(tmp_path, "Knowledge Base/Notes/Hidden/withheld.md", _page(withheld))
+    _withhold_hidden_notes_from_external(tmp_path)
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    freshness.mark_external_pending(tmp_path)
+    scans: list[str] = []
+
+    def counted(vault_root: Path) -> list:
+        scans.append(str(vault_root))
+        raise AssertionError("a stale lookup must not scan for any id")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", counted)
+    external = RequestPrincipal(audience_id="external", surface="mcp")
+    spans = {}
+    for name, identity in (("shown", shown), ("withheld", withheld), ("absent", absent)):
+        token = f"stale-neutrality-{name}"
+        handle = call_spans.MCP_CALL_TOKEN.set(token)
+        try:
+            try:
+                egress.resolve_visible_identifier(
+                    tmp_path, memory_refs.memory_ref(identity), principal=external,
+                    serve_stale=True,
+                )
+            except memory_refs.ReferenceError:
+                pass
+            rows = call_spans.pop_call_spans(token)
+        finally:
+            call_spans.pop_call_spans(token)
+            call_spans.MCP_CALL_TOKEN.reset(handle)
+        fields = next(r["fields"] for r in rows if r["name"] == "memory_refs.identity_census")
+        timings = {"cpu_ms", "thread_cpu_us", "process_cpu_us"}
+        spans[name] = {key: value for key, value in fields.items() if key not in timings}
+
+    assert scans == []
+    assert spans["shown"] == spans["withheld"] == spans["absent"] == {"snapshot": 1}
 
 
 @pytest.mark.parametrize(
@@ -1004,7 +1207,6 @@ def test_a_vault_with_a_trash_directory_resolves_through_the_scan(
         ("cold", "corpus_absent"),
         ("pending", "external_pending"),
         ("moved", "checkpoint_differs"),
-        ("namespace", "namespace_differs"),
         ("revalidation", "snapshot_changed"),
     ],
 )
@@ -1026,8 +1228,6 @@ def test_identity_resolution_names_the_reason_for_a_full_scan(
     elif state == "moved":
         page.write_text(_page(identity, "# Changed\n"), encoding="utf-8")
         freshness.on_files_changed(tmp_path, changed=(page,))
-    elif state == "namespace":
-        (tmp_path / "Knowledge Base/trash").mkdir()
     elif state == "revalidation":
         acquire = semantic_contract.current_reference_identity_snapshot
 

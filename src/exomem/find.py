@@ -43,6 +43,7 @@ from . import (
     request_budget,
     runtime_resources,
     structured_filters,
+    view_lag,
 )
 from . import ranking_config as _ranking_config
 from .find_types import (
@@ -547,6 +548,7 @@ class FreshnessSnapshot:
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
+        self._visible_recall_paths: dict[str, frozenset[str]] = {}
         self._pending_recall_paths: frozenset[str] | None = None
         self._admitted: dict[tuple[str, Callable[[str], bool]], frozenset[str]] = {}
 
@@ -611,11 +613,16 @@ class FreshnessSnapshot:
         freshness registry supplies it without a walk; CLI/cold callers rebuild
         the same projection from the human-owned Markdown files.
         """
-        cached = self._recall_paths.get(scope)
-        if cached is None:
-            self._load_recall_projection(scope)
-            cached = self._recall_paths[scope]
-        return self._with_pending(cached)
+        visible = self._visible_recall_paths.get(scope)
+        if visible is None:
+            cached = self._recall_paths.get(scope)
+            if cached is None:
+                self._load_recall_projection(scope)
+                cached = self._recall_paths[scope]
+            # One request has one pending custody, so the shadowed set is
+            # built once per scope rather than once per consumer.
+            visible = self._visible_recall_paths[scope] = self._with_pending(cached)
+        return visible
 
     def admitted_paths(
         self, scope: str, admit_path: Callable[[str], bool],
@@ -692,7 +699,8 @@ class FreshnessSnapshot:
                 for rel_path in pending.current_paths()
                 if recall_policy.is_recall_candidate(self._root, self._root / rel_path)
             )
-        return frozenset(pending.shadow(projected)) | admitted
+        shadowed = pending.shadow_set(projected)
+        return shadowed | admitted if admitted else shadowed
 
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
@@ -719,16 +727,16 @@ class FreshnessSnapshot:
                         raise freshness.RecallProjectionUnavailable(
                             "admitted catalogue checkpoint is absent"
                         )
-                    published_entries = lexstore.get_store(self._root).recall_resolver_entries(
+                    published_paths = lexstore.get_store(self._root).recall_admitted_paths(
                         scope, expected
                     )
-                    if published_entries is None:
+                    if published_paths is None:
                         lexstore.request_repair(self._root)
                         raise freshness.RecallProjectionUnavailable(
                             "admitted catalogue projection is no longer available"
                         )
                     self._recall[scope] = expected
-                    self._recall_paths[scope] = frozenset(rel for rel, _title in published_entries)
+                    self._recall_paths[scope] = published_paths
                     _set_recall_projection_timing_outcome(self._timings, "admitted")
                     return
                 require_live = self._require_live_recall and not stale
@@ -6939,7 +6947,7 @@ def _keyword_match_paths(
             if persistent_k is not None:
                 persistent_k += len(pending.paths)
         else:
-            allowed_paths = set(pending.shadow(allowed_paths))
+            allowed_paths = set(pending.shadow_set(allowed_paths))
 
     def _merged(paths: list[str]) -> list[str]:
         if not merge_pending:
@@ -7158,6 +7166,10 @@ _RECALL_RESOLVER_BUILD_WAIT_SECONDS = 120.0
 #: either blocking or duplicating the leader's whole-vault walk.
 _RECALL_RESOLVER_FOLLOWER_WAIT_SECONDS = 3.0
 _RECALL_RESOLVER_REBUILDS: set[Path] = set()
+#: Vaults with a broad-resolver background build running; same lock as above.
+_QUERY_RESOLVER_REBUILDS: set[Path] = set()
+#: Vaults with an inbound-index background build running; same lock as above.
+_INBOUND_INDEX_REBUILDS: set[Path] = set()
 
 
 def _follower_wait_seconds(*, allow_fallback: bool) -> float:
@@ -7216,42 +7228,86 @@ def _schedule_recall_resolver_rebuild(root: Path) -> None:
     be built by whoever needs it, exactly as before. Never blocks the caller,
     which may be holding `_RESOLVER_LOCK` or serving a request.
     """
+    _schedule_resolver_warm(
+        root,
+        _RECALL_RESOLVER_REBUILDS,
+        recall_resolver_snapshot,
+        "exomem-recall-resolver-warm",
+    )
+
+
+def _schedule_query_resolver_rebuild(root: Path) -> None:
+    """Start at most one background broad-resolver build per vault.
+
+    The owner that restores the resolver a server's context pack borrowed and
+    found missing (`borrow_query_resolver`). Nothing else rebuilds a broad
+    resolver that was evicted or never primed, and the pack must not build it.
+    """
+    _schedule_resolver_warm(
+        root,
+        _QUERY_RESOLVER_REBUILDS,
+        _get_query_resolver,
+        "exomem-query-resolver-warm",
+    )
+
+
+def schedule_inbound_rebuild(vault_root: Path) -> None:
+    """Start at most one background inbound-index build per vault.
+
+    The immediate owner for a server's context pack that borrowed the index and
+    found none: the pack must not build it, and the watcher's reconcile pass
+    (minutes away) stays the backstop. `prime_inbound_index` is single-flight per
+    vault, so this thread and that pass never build concurrently.
+    """
+    from . import vault as vault_module
+
+    _schedule_resolver_warm(
+        vault_root,
+        _INBOUND_INDEX_REBUILDS,
+        vault_module.prime_inbound_index,
+        "exomem-inbound-index-warm",
+    )
+
+
+def _schedule_resolver_warm(
+    root: Path,
+    inflight: set[Path],
+    build: Callable[[Path], object],
+    thread_name: str,
+) -> None:
+    """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`."""
     if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
         return
     key = Path(root)
     with _RECALL_REBUILD_LOCK:
-        if key in _RECALL_RESOLVER_REBUILDS:
+        if key in inflight:
             return
-        _RECALL_RESOLVER_REBUILDS.add(key)
+        inflight.add(key)
 
     def _run() -> None:
         try:
             with foreground_priority.bulk():
-                recall_resolver_snapshot(key)
+                build(key)
         except Exception as error:  # noqa: BLE001 - a daemon must not escape
-            log.warning("projected resolver background rebuild skipped (%s)", error)
+            log.warning("background rebuild skipped (%s)", error)
         finally:
             with _RECALL_REBUILD_LOCK:
-                _RECALL_RESOLVER_REBUILDS.discard(key)
+                inflight.discard(key)
 
     # A literal thread name, like every other exomem thread: names reach the
     # log through `JsonLinesFormatter`, and hosted-cell redaction blanks a
     # record's fields rather than rebuilding it from an allowlist, so a vault
     # path encoded in a thread name would survive that boundary.
-    thread = threading.Thread(
-        target=_run,
-        name="exomem-recall-resolver-warm",
-        daemon=True,
-    )
+    thread = threading.Thread(target=_run, name=thread_name, daemon=True)
     try:
         thread.start()
     except RuntimeError:
         with _RECALL_REBUILD_LOCK:
-            _RECALL_RESOLVER_REBUILDS.discard(key)
+            inflight.discard(key)
 
 
 def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
-    """Block until no background projected-resolver build is running.
+    """Block until no background resolver or inbound-index build is running.
 
     A quiesce seam, not a convergence helper: it says nothing about whether a
     resolver is now cached, only that no daemon thread is still walking a
@@ -7263,7 +7319,11 @@ def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while True:
         with _RECALL_REBUILD_LOCK:
-            if not _RECALL_RESOLVER_REBUILDS:
+            if not (
+                _RECALL_RESOLVER_REBUILDS
+                or _QUERY_RESOLVER_REBUILDS
+                or _INBOUND_INDEX_REBUILDS
+            ):
                 return True
         if time.monotonic() >= deadline:
             return False
@@ -7315,6 +7375,39 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
         else:
             _RESOLVER_CHECKPOINTS.pop(root, None)
     return resolver
+
+
+def borrow_query_resolver(
+    vault_root: Path, visible: Callable[[str], bool] | None = None
+):
+    """The broad resolver if one is resident and current, else None. Never builds.
+
+    For a server read that only enriches its answer (the context pack): a miss
+    costs that read its outbound links, not a vault-sized build. The miss
+    schedules the one background rebuild that restores it. "Current" is the
+    registry's own checkpoint triple, as `_get_query_resolver` keys it, so a
+    cache the watcher's patch has not yet advanced is a miss, never a stale hit.
+    For a reader other than the owner (`visible` given), a cache that lags only
+    by pages that reader may not see is current for it and is not a miss.
+    Writers and explicit operations keep `_get_query_resolver`.
+    """
+    root = Path(vault_root)
+    triple = freshness.consumer_checkpoint(root, "vault").triple
+    cached = _RESOLVER_CACHE.get(root)
+    if triple is not None and cached is not None and cached[0] == triple:
+        return cached[1]
+    if visible is not None and cached is not None:
+        checkpoint = _RESOLVER_CHECKPOINTS.get(root)
+        if (
+            checkpoint is not None
+            and cached[0] == checkpoint.triple
+            and view_lag.only_withheld(
+                root, freshness.delta_since(root, "vault", checkpoint), visible
+            )
+        ):
+            return cached[1]
+    _schedule_query_resolver_rebuild(root)
+    return None
 
 
 def shared_resolver(vault_root: Path):
@@ -7883,6 +7976,11 @@ def unload_ram_caches(
         # noise into the number that says whether a governed write discarded
         # receipt-covered work.
         _CACHE.release()
+        # Keyed by the catalogue snapshot, so a correctness eviction cannot make
+        # it stale; only a caller handing memory back drops it.
+        from . import lexstore
+
+        lexstore.release_admitted_recall_rows()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()

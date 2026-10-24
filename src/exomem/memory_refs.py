@@ -849,6 +849,7 @@ def paths_for_ids_read_only(
     vault_root: Path, ids: Iterable[Any], *,
     admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
     _optional: Literal[False] = False,
+    serve_stale: bool = False,
 ) -> dict[str, tuple[str, ...]]: ...
 
 
@@ -857,6 +858,7 @@ def paths_for_ids_read_only(
     vault_root: Path, ids: Iterable[Any], *,
     admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
     _optional: bool,
+    serve_stale: bool = False,
 ) -> dict[str, tuple[str, ...]] | None: ...
 
 
@@ -864,6 +866,7 @@ def paths_for_ids_read_only(
     vault_root: Path, ids: Iterable[Any], *,
     admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
     _optional: bool = False,
+    serve_stale: bool = False,
 ) -> dict[str, tuple[str, ...]] | None:
     """Resolve many memory ids to every page holding each, writing nothing.
 
@@ -897,12 +900,21 @@ def paths_for_ids_read_only(
     them never choose the source, because work that varies with those lets a
     caller infer, from the work performed, that some page carries an id it is
     not allowed to see. Both sources apply one membership rule, so the answer
-    does not depend on which of them ran. A vault whose Knowledge Base root
-    holds a directory that the identity census prunes but the scan reads
-    (`trash/`) always takes the scan, so its answers stay the scan's.
+    does not depend on which of them ran: the projection keeps the owners under
+    a directory that its identity census prunes but the scan reads (`trash/`)
+    in a table that only reference resolution reads.
+
+    A read request passes `serve_stale` to answer from the projection while the
+    watcher publishes an edit made outside the server. A caller that writes
+    from the answer keeps the default, which scans until the projection is
+    current.
     """
     view = _reference_owner_view_read_only(
-        vault_root, ids, admit_pending_paths=admit_pending_paths, _optional=_optional,
+        vault_root,
+        ids,
+        admit_pending_paths=admit_pending_paths,
+        _optional=_optional,
+        serve_stale=serve_stale,
     )
     return (
         view.optional_current_paths(Path(vault_root)) if _optional
@@ -969,9 +981,8 @@ class _ReferenceOwners:
     def snapshot_is_current(self) -> bool:
         from . import semantic_contract
 
-        return self.snapshot is None or (
-            not semantic_contract.identity_census_omits_scanned_pages(self.root)
-            and semantic_contract.reference_identity_snapshot_is_current(self.root, self.snapshot)
+        return self.snapshot is None or semantic_contract.reference_identity_snapshot_is_current(
+            self.root, self.snapshot
         )
 
 
@@ -984,8 +995,14 @@ def _normalized_reference_ids(ids: Iterable[Any]) -> tuple[str, ...]:
 def _reference_owners_read_only(
     vault_root: Path, ids: Iterable[Any], *,
     _optional: bool = False,
+    serve_stale: bool = False,
 ) -> _ReferenceOwners:
-    """Acquire raw owners for the entire batch without pending or policy decisions."""
+    """Acquire raw owners for the entire batch without pending or policy decisions.
+
+    `serve_stale` is for a read request. It answers from the projection's last
+    published state while the watcher publishes an edit made outside the server,
+    where a caller that goes on to write needs the current state or the scan.
+    """
     wanted = _normalized_reference_ids(ids)
     root = Path(vault_root)
     if not wanted and not _optional:
@@ -1005,36 +1022,37 @@ def _reference_owners_read_only(
     # absent, which is most of an ordinary vault.
     #
     # The identity projection has neither defect. Governed writes patch it as
-    # they publish their changes, and an edit made behind the server stops it
-    # being current once the watcher reports that edit; until then the read
-    # answers from the projection's last observed state. Whether it is
-    # current is one fact about the vault, the same for every id in every
-    # batch. It answers every id; if it stopped being current during the
-    # lookup, the whole batch falls back to the scan. Either way the work is a
-    # function of vault state and of the batch's size, never of which ids
-    # exist or who may see them. The read only borrows a projection the
-    # server already holds: it never builds, fills, or refreshes one.
+    # they publish their changes, and the watcher patches it for an edit made
+    # behind the server. Whether it is current is one fact about the vault, the
+    # same for every id in every batch. It answers every id; if it stopped
+    # being current during the lookup, the whole batch falls back to the scan.
+    # A read request (`serve_stale`) also answers while the watcher holds an
+    # edit it has seen and not yet published: the answer is the last published
+    # owner, and each read decides release and path live. That one pending mark
+    # is a fact about the vault too, so it never depends on the ids asked for.
+    # Either way the work is a function of vault state and of the batch's size,
+    # never of which ids exist or who may see them. The read only borrows a
+    # projection the server already holds: it never builds, fills, or
+    # refreshes one.
     #
-    # The census never admits a page under the Knowledge Base `trash/`
-    # directory, while the scan reads it and the sidecar hands out its refs.
-    # A vault that holds that directory therefore always scans: its presence
-    # is one more vault-wide fact, and the scan keeps those refs resolving.
+    # The census does not walk the Knowledge Base `trash/` directory, while the
+    # scan reads it and the sidecar hands out its refs. The projection keeps the
+    # owners there in a table that only this lookup reads, so a vault that holds
+    # that directory resolves those refs from the projection as the scan does.
     with call_spans.span("memory_refs.identity_census", {}) as measured:
         started = time.thread_time_ns()
         resolved: dict[str, tuple[str, ...]] | None = None if wanted else {}
         snapshot = None
         if wanted:
-            if semantic_contract.identity_census_omits_scanned_pages(root):
-                if measured is not None:
-                    measured["declined_namespace_differs"] = 1
-            else:
-                snapshot = semantic_contract.current_reference_identity_snapshot(
-                    root, declined=measured
-                )
+            snapshot = semantic_contract.current_reference_identity_snapshot(
+                root, declined=measured, tolerate_external_pending=serve_stale
+            )
         if snapshot is not None:
             owners = snapshot.reference_owners
             answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
-            if semantic_contract.reference_identity_snapshot_is_current(root, snapshot):
+            if semantic_contract.reference_identity_snapshot_is_current(
+                root, snapshot, tolerate_external_pending=serve_stale
+            ):
                 resolved = answered
             else:
                 snapshot = None
@@ -1064,12 +1082,15 @@ def _reference_owner_view_read_only(
     admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None,
     _optional: bool = False,
     _prepared_owners: _ReferenceOwners | None = None,
+    serve_stale: bool = False,
 ) -> _ReferenceOwnerView:
     """Apply fresh pending custody to exactly this root and normalized batch."""
     root = Path(vault_root)
     wanted = _normalized_reference_ids(ids)
     if _prepared_owners is None:
-        _prepared_owners = _reference_owners_read_only(root, wanted, _optional=_optional)
+        _prepared_owners = _reference_owners_read_only(
+            root, wanted, _optional=_optional, serve_stale=serve_stale
+        )
     elif _prepared_owners.root != root.resolve() or set(_prepared_owners.owners) != set(wanted):
         raise ValueError("prepared reference owners do not cover this root and batch")
     if not wanted and not _optional:
@@ -1368,15 +1389,44 @@ def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, 
 
 
 def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]:
+    return _scan_directory(vault_root, Path(vault_root) / kb_dirname())
+
+
+def _scan_directory(
+    vault_root: Path, directory: Path
+) -> list[tuple[str, str | None, str, str, str]]:
     entries: list[tuple[str, str | None, str, str, str]] = []
-    kb = Path(vault_root) / kb_dirname()
-    if not kb.is_dir():
+    if not directory.is_dir():
         return entries
     # Any-case suffix, as `_relative_markdown` and the identity census accept:
     # `rglob("*.md")` matches case-sensitively on POSIX and skipped `.MD` pages.
-    markdown = (path for path in kb.rglob("*") if path.suffix.lower() == ".md")
+    markdown = (path for path in directory.rglob("*") if path.suffix.lower() == ".md")
     for path in sorted(markdown):
         row = _read_identity(vault_root, path)
         if row is not None:
             entries.append(row)
     return entries
+
+
+def scan_reference_owners(vault_root: Path, directory: Path) -> tuple[tuple[str, str], ...]:
+    """The `(path, id)` of every page under `directory` that holds a well-formed id.
+
+    Reads a directory with the reference scan's own membership rule, so a table
+    built from it resolves a reference as the scan does. The identity projection
+    uses it for the Knowledge Base directories its census prunes and the scan reads.
+    """
+    return tuple(
+        (path, exomem_id)
+        for path, exomem_id, _raw, _hash, status in _scan_directory(vault_root, directory)
+        if status == "valid" and exomem_id is not None
+    )
+
+
+def read_reference_owner(vault_root: Path, path: Path) -> str | None:
+    """The well-formed id the reference scan reads from one page, else None.
+
+    None covers a page the scan does not read, an unreadable page, a missing
+    page and a missing or malformed id, because the scan maps each to no owner.
+    """
+    row = _read_identity(vault_root, path)
+    return row[1] if row is not None and row[4] == "valid" else None

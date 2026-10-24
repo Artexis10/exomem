@@ -763,6 +763,10 @@ def register_self_write(
     be suppressed). Also publishes the change to the freshness/inbound
     registries, since the suppressed watcher echo won't."""
     paths = list(paths)
+    # Every file the service writes joins the free-text census, Markdown or not.
+    from .governance import artifact_census
+
+    artifact_census.note_created(vault_root, paths)
     now = time.monotonic()
     signatures: list[tuple[tuple[str, str], int, int, _PublicationIntent | None]] = []
     notifications: list[tuple[_PublicationIntent, list[_PublicationObservation]]] = []
@@ -846,6 +850,9 @@ def register_self_delete(vault_root: Path, rel_paths: Iterable[str]) -> None:
     signature-match. Also publishes the removal to the freshness/inbound
     registries, since the suppressed watcher echo won't."""
     rel_paths = list(rel_paths)
+    from .governance import artifact_census
+
+    artifact_census.note_touched(vault_root, rel_paths)
     root = _canon_root(vault_root)
     now = time.monotonic()
     with _SUPPRESS_LOCK:
@@ -1153,6 +1160,13 @@ class FileWatcher:
         except Exception:  # noqa: BLE001 - a failed hint must not stop the existing index publishers
             log.debug("collection view notification failed", exc_info=True)
 
+    def _note_directories(self, *paths: str | bytes) -> None:
+        """Name directories that an event touched, for the next census rebuild."""
+        from .governance import artifact_census
+
+        rels = [rel for rel in (self._rel(Path(os.fsdecode(path))) for path in paths) if rel]
+        artifact_census.note_touched(self._vault_root, rels)
+
     def _record(self, path: Path, *, deleted: bool, notify_views: bool = True) -> None:
         """Record a Markdown or supported-media change, coalesced by path."""
         from .vault import in_excluded_scan_dir
@@ -1161,6 +1175,15 @@ class FileWatcher:
             # A same-stat external save can match index suppression; edit-back still needs its hint.
             self._notify_view_change(path)
         rel = self._rel(path)
+        if rel is not None:
+            # Any file event reaches the free-text census, ahead of the filters
+            # below that keep only Markdown and media for the indexes.
+            from .governance import artifact_census
+
+            if deleted:
+                artifact_census.note_touched(self._vault_root, [rel])
+            else:
+                artifact_census.note_created(self._vault_root, [rel])
         if rel == f"{kb_prefix()}_access.yaml":
             # Access policy changes are a publication boundary despite not
             # being Markdown.  Do this before the generic non-Markdown return
@@ -1470,6 +1493,7 @@ class FileWatcher:
             log.exception("file watcher: deferred index drain failed")
         if baselines_current:
             self._prime_inbound_if_needed()
+            self._publish_census_if_needed()
         if not drifted:
             return baselines_current
         if policy.defer_expensive_indexes:
@@ -1506,6 +1530,29 @@ class FileWatcher:
             return
         except Exception:  # noqa: BLE001 - optional links cannot stop recovery
             log.exception("file watcher: optional inbound warm failed")
+
+    def _publish_census_if_needed(self) -> None:
+        """Rebuild the free-text census that requests read, off the request path."""
+        from . import foreground_priority, readiness
+        from .governance import artifact_census
+
+        if (
+            not self._optional_recovery_armed
+            or self._stop.is_set()
+            or readiness.is_warming()
+        ):
+            return
+        try:
+            with foreground_priority.bulk(stop=self._stop):
+                artifact_census.rebuild_published(
+                    self._vault_root,
+                    eager=mode.preload_cpu_caches(),
+                    between=foreground_priority.yield_to_foreground,
+                )
+        except foreground_priority.BulkCancelled:
+            return
+        except Exception:  # noqa: BLE001 - requests keep walking the vault
+            log.exception("file watcher: free-text census rebuild failed")
 
     def finish_startup_recovery(self) -> None:
         """Drain deferred whole-index work after required admission.
@@ -2260,6 +2307,7 @@ class FileWatcher:
             def on_created(self, event):  # noqa: ANN001
                 if event.is_directory:
                     watcher._notify_view_change(Path(event.src_path), directory=True)
+                    watcher._note_directories(event.src_path)
                 else:
                     watcher._record(Path(event.src_path), deleted=False)
 
@@ -2272,12 +2320,15 @@ class FileWatcher:
             def on_deleted(self, event):  # noqa: ANN001
                 if event.is_directory:
                     watcher._notify_view_change(Path(event.src_path), directory=True)
+                    watcher._note_directories(event.src_path)
                 else:
                     watcher._record(Path(event.src_path), deleted=True)
 
             def on_moved(self, event):  # noqa: ANN001
                 watcher._notify_view_change(Path(event.src_path), destination=Path(event.dest_path),
                                             directory=event.is_directory)
+                if event.is_directory:
+                    watcher._note_directories(event.src_path, event.dest_path)
                 if not event.is_directory:
                     watcher._record(Path(event.src_path), deleted=True, notify_views=False)
                     watcher._record(Path(event.dest_path), deleted=False, notify_views=False)
@@ -2317,6 +2368,10 @@ class FileWatcher:
         self._wake.set()
         self._seed_published.set()
         self._seed_complete.set()
+        # No owner keeps the published census current once the watcher stops.
+        from .governance import artifact_census
+
+        artifact_census.withdraw(self._vault_root)
         if self._observer is not None:
             try:
                 self._observer.stop()

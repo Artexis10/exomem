@@ -56,7 +56,7 @@ def _spy(
 
     def fake(
         vault_root, *, today, now, principal=None, purpose=None,
-        payload=None, review_payload=None,
+        payload=None, review_payload=None, sources=None,
     ):
         calls.append({"today": today, "now": now, "purpose": purpose, "payload": payload})
         rows = [{"ref": f"exomem://memory/{len(calls)}", "kind": "open", "path": PAGE}]

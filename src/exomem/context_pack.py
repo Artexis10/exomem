@@ -58,6 +58,12 @@ _monotonic = time.monotonic
 #: recall path reads it back to decide whether to name `pack` as truncated.
 DEADLINE_TRUNCATION = "pack assembly stopped at the request deadline"
 GRAPH_ENRICH_BUDGET_SKIP = "graph enrichment skipped for the request budget"
+INBOUND_INCOMPLETE_TRUNCATION = (
+    "inbound neighbours incomplete: the link index is being refreshed in the background"
+)
+OUTBOUND_INCOMPLETE_TRUNCATION = (
+    "outbound neighbours incomplete: the link resolver is being refreshed in the background"
+)
 
 # --- bounds (env-overridable at call time so tests can monkeypatch) ---
 _DEFAULT_MAX_HITS = 5
@@ -482,12 +488,19 @@ class _UnitPackPlan:
 
 def _neighborhood(
     vault_root: Path, packed_pages: list[ParsedPage], max_neighbors: int
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, list[str]]:
     """1-hop inbound+outbound wikilink neighbours of the packed notes, packed notes
     excluded, ranked by co-citation (distinct packed notes linked), capped.
+    The third value names each side whose neighbours are unknown (empty when none).
 
     For a reader other than the owner, links resolve over the pages it may see
     and a neighbour it may not see is decided before ranking and the cap.
+
+    A server request never builds the inbound index or the link resolver: it
+    borrows the published ones, and on a miss leaves that side's neighbours out
+    and records demand for the background owner. A stale edge costs nothing here,
+    because every neighbour is re-checked live below and no link context leaves
+    this function.
     """
     from .governance import egress
 
@@ -512,11 +525,35 @@ def _neighborhood(
 
     # The owner's calls are made exactly as before.
     view: dict = {} if visible is None else {"visible": visible}
+    # Without a watcher owner (an offline caller) nothing would recover the
+    # index or the resolver, so that caller keeps the synchronous lookups.
+    borrow = vault_module.inbound_recovery_available(vault_root)
+    resolver = find_module.borrow_query_resolver(vault_root, **view) if borrow else None
+    incomplete: list[str] = []
     for page in packed_pages:
-        for target in find_module._outbound_wikilink_paths(page, vault_root, **view):
-            _touch(target, page.rel_path, "out")
-        for link in vault_module.find_inbound_wikilinks(vault_root, page.rel_path, **view):
+        if borrow and resolver is None:
+            if OUTBOUND_INCOMPLETE_TRUNCATION not in incomplete:
+                incomplete.append(OUTBOUND_INCOMPLETE_TRUNCATION)
+        else:
+            for target in find_module._outbound_wikilink_paths(
+                page, vault_root, resolver, **view
+            ):
+                _touch(target, page.rel_path, "out")
+        inbound = (
+            vault_module.cached_inbound_wikilinks(vault_root, page.rel_path, **view)
+            if borrow
+            else vault_module.find_inbound_wikilinks(vault_root, page.rel_path, **view)
+        )
+        if inbound is None:
+            if INBOUND_INCOMPLETE_TRUNCATION not in incomplete:
+                incomplete.append(INBOUND_INCOMPLETE_TRUNCATION)
+            continue
+        for link in inbound:
             _touch(link.path, page.rel_path, "in")
+    if INBOUND_INCOMPLETE_TRUNCATION in incomplete and vault_module.inbound_rebuild_needed(
+        vault_root
+    ):
+        find_module.schedule_inbound_rebuild(vault_root)
 
     items = sorted(
         neigh.values(),
@@ -554,7 +591,7 @@ def _neighborhood(
                 "lede": lede,
             }
         )
-    return out, dropped
+    return out, dropped, incomplete
 
 
 # ----------------------------- contradictions -----------------------------
@@ -1050,7 +1087,10 @@ def assemble_pack(
                 )
 
     with find_module._span(timings, "pack.neighborhood"):
-        neighborhood, n_dropped = _neighborhood(vault_root, packed_pages, max_neighbors)
+        neighborhood, n_dropped, incomplete = _neighborhood(
+            vault_root, packed_pages, max_neighbors
+        )
+    truncation.extend(incomplete)
     if n_dropped > 0:
         truncation.append(
             f"neighborhood capped at {max_neighbors} "

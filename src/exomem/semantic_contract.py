@@ -115,21 +115,52 @@ def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bo
     return False
 
 
-def identity_census_omits_scanned_pages(vault_root: Path) -> bool:
-    """Whether the Knowledge Base root holds a directory the census prunes but a scan reads.
+def _reference_only_directory_names() -> tuple[str, ...]:
+    """Reserved Knowledge Base directories that the census prunes but the reference scan reads.
 
     `trash/` is the one such name today: the identity census never admits a
     page there, while `vault.in_excluded_scan_dir` keeps it, so the memory
-    reference scan and sidecar still read its pages. A reader that must answer
-    as the scan does checks this vault-wide fact before it reads the census.
-    Any entry by that name counts, because taking the scan is always correct.
+    reference scan and sidecar still read its pages. Pages there own references
+    but take no part in identity uniqueness, so the census keeps them in a table
+    that only reference resolution reads.
     """
-    kb = vault.kb_root(Path(vault_root))
-    return any(
-        os.path.lexists(kb / name)
-        for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
-        if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+    return tuple(
+        sorted(
+            name
+            for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
+            if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+        )
     )
+
+
+def _is_reference_only_path(rel_path: str) -> bool:
+    """Whether a vault-relative path lies under a reference-only directory."""
+    segments = PurePosixPath(rel_path).parts
+    return (
+        len(segments) > 2
+        and segments[0] == kb_dirname()
+        and segments[1] in _reference_only_directory_names()
+    )
+
+
+def _reference_only_entries(root: Path) -> tuple[StableIdentityEntry, ...]:
+    """Every owner under a reference-only directory, read as the reference scan reads it."""
+    kb = vault.kb_root(root)
+    entries: list[StableIdentityEntry] = []
+    for name in _reference_only_directory_names():
+        directory = kb / name
+        # `rglob` does not descend a linked directory below the root, so the scan
+        # never reads a linked `trash/`; the table must not read it either.
+        if directory.is_symlink():
+            continue
+        try:
+            owners = memory_refs.scan_reference_owners(root, directory)
+        except OSError:
+            # A deleted page's folder must never block a live write, and a
+            # listing that fails mid-walk is a race the watcher's next patch heals.
+            continue
+        entries.extend(StableIdentityEntry(path, exomem_id) for path, exomem_id in owners)
+    return tuple(entries)
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
@@ -295,10 +326,15 @@ class StableIdentityEntry:
 @dataclass(frozen=True, slots=True)
 class StableIdentityCensus:
     entries: tuple[StableIdentityEntry, ...]
+    # Owners under the reference-only directories (`trash/`): they resolve a
+    # reference exactly as the scan does, and take no part in identity
+    # uniqueness, canonical refs or `entries`.
+    reference_only_entries: tuple[StableIdentityEntry, ...] = ()
     paths_by_identity: Mapping[str, tuple[str, ...]] = field(init=False)
     _reference_paths: frozenset[str] = field(init=False, repr=False, compare=False)
-    # Every reference path holding each identity, duplicates included: the
-    # projection a reference read answers from without walking the vault.
+    # Every reference path holding each identity, duplicates included, with the
+    # reference-only owners: the projection a reference read answers from
+    # without walking the vault.
     _reference_owners: Mapping[str, tuple[str, ...]] = field(
         init=False, repr=False, compare=False
     )
@@ -313,7 +349,13 @@ class StableIdentityCensus:
                 key=lambda item: (item.path, item.page_identity or ""),
             )
         )
-        paths = [entry.path for entry in entries]
+        reference_only = tuple(
+            sorted(
+                tuple(self.reference_only_entries),
+                key=lambda item: (item.path, item.page_identity or ""),
+            )
+        )
+        paths = [entry.path for entry in (*entries, *reference_only)]
         if len(paths) != len(set(paths)):
             raise ValueError("stable identity census contains a duplicate path")
         grouped: dict[str, list[str]] = {}
@@ -321,6 +363,7 @@ class StableIdentityCensus:
             if entry.page_identity is not None:
                 grouped.setdefault(entry.page_identity, []).append(entry.path)
         object.__setattr__(self, "entries", entries)
+        object.__setattr__(self, "reference_only_entries", reference_only)
         object.__setattr__(
             self,
             "paths_by_identity",
@@ -349,13 +392,19 @@ class StableIdentityCensus:
             "_reference_paths",
             frozenset(entry.path for entry in reference_entries),
         )
+        resolving_owners = {
+            identity: list(owners) for identity, owners in reference_owners.items()
+        }
+        for entry in reference_only:
+            if entry.page_identity is not None:
+                resolving_owners.setdefault(entry.page_identity, []).append(entry.path)
         object.__setattr__(
             self,
             "_reference_owners",
             MappingProxyType(
                 {
                     identity: tuple(sorted(owners))
-                    for identity, owners in reference_owners.items()
+                    for identity, owners in resolving_owners.items()
                 }
             ),
         )
@@ -375,18 +424,23 @@ class StableIdentityCensus:
         may address the same physical file differently, so dropping only the
         byte-equal entry would manufacture a phantom second owner in memory.
         """
-        if casefold_paths:
-            folded = page.path.casefold()
-            entries = [entry for entry in self.entries if entry.path.casefold() != folded]
-        else:
-            entries = [entry for entry in self.entries if entry.path != page.path]
-        entries.append(
-            StableIdentityEntry(
-                page.path,
-                page.identity if page.identity_kind == "exomem_id" else None,
-            )
+        def other(entry: StableIdentityEntry) -> bool:
+            if casefold_paths:
+                return entry.path.casefold() != page.path.casefold()
+            return entry.path != page.path
+
+        replacement = StableIdentityEntry(
+            page.path,
+            page.identity if page.identity_kind == "exomem_id" else None,
         )
-        return StableIdentityCensus(tuple(entries))
+        if _is_reference_only_path(page.path):
+            return StableIdentityCensus(
+                self.entries,
+                (*filter(other, self.reference_only_entries), replacement),
+            )
+        return StableIdentityCensus(
+            (*filter(other, self.entries), replacement), self.reference_only_entries
+        )
 
     @classmethod
     def from_states(
@@ -1155,7 +1209,9 @@ class SemanticCorpusContext:
             Path(vault_root),
             by_path,
             _copy_registry(registry),
-            StableIdentityCensus(tuple(identity_census.entries)),
+            StableIdentityCensus(
+                tuple(identity_census.entries), identity_census.reference_only_entries
+            ),
             writer_visibility=vault.writer_link_visibility(Path(vault_root)),
         )
 
@@ -1731,10 +1787,17 @@ def current_reference_identity_snapshot(
     vault_root: Path,
     *,
     declined: dict[str, int] | None = None,
+    tolerate_external_pending: bool = False,
 ) -> ReferenceIdentitySnapshot | None:
     """Return the current cached identity authority without filesystem corpus work.
 
     ``declined`` receives the first proof failure for the caller's existing span.
+
+    ``tolerate_external_pending`` is for a read that may answer from the last
+    published projection while the watcher, which has already seen an edit made
+    outside the server, publishes it. It excuses only that pending mark. The
+    projection must still be live, captioned at the registry's checkpoint and
+    unreplaced, so a projection that nothing is going to refresh stays declined.
     """
     # Decline keys name this proof's closed branches, never source content.
     def decline(reason: str) -> None:
@@ -1743,7 +1806,7 @@ def current_reference_identity_snapshot(
 
     root = Path(vault_root)
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        if freshness.external_pending(root):
+        if not tolerate_external_pending and freshness.external_pending(root):
             return decline("external_pending")
         if not freshness.is_live(root, "vault"):
             return decline("events_not_live")
@@ -1769,18 +1832,27 @@ def current_reference_identity_snapshot(
                 identity._reference_owners,
                 entry[1],
             )
-        if freshness.external_pending(root):
+        if not tolerate_external_pending and freshness.external_pending(root):
             return decline("changed_during_proof")
         return snapshot
 
 
 def reference_identity_snapshot_is_current(
-    vault_root: Path, snapshot: ReferenceIdentitySnapshot
+    vault_root: Path,
+    snapshot: ReferenceIdentitySnapshot,
+    *,
+    tolerate_external_pending: bool = False,
 ) -> bool:
-    """Revalidate an exact cached identity snapshot without walking or parsing."""
+    """Revalidate an exact cached identity snapshot without walking or parsing.
+
+    ``tolerate_external_pending`` has the meaning it has on
+    :func:`current_reference_identity_snapshot`.
+    """
     root = Path(vault_root)
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
+        if (
+            not tolerate_external_pending and freshness.external_pending(root)
+        ) or not freshness.is_live(root, "vault"):
             return False
         if freshness.consumer_checkpoint(root, "vault") != snapshot.checkpoint:
             return False
@@ -2532,8 +2604,22 @@ def _reconcile_markdown_delta(
     states = dict(context.pages)
     previous_identities = {entry.path: entry for entry in context.identity_census.entries}
     identities = dict(previous_identities)
+    previous_reference_only = {
+        entry.path: entry for entry in context.identity_census.reference_only_entries
+    }
+    reference_only = dict(previous_reference_only)
     kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
     for rel_path in changed_paths:
+        reference_only_path = _is_reference_only_path(rel_path)
+        if reference_only_path:
+            # Read as the reference scan reads it and as leniently: a deleted
+            # page's frontmatter must never block a live write, so an
+            # unreadable or malformed page is no owner rather than a refusal.
+            owner = memory_refs.read_reference_owner(root, root / rel_path)
+            if owner is None:
+                reference_only.pop(rel_path, None)
+            else:
+                reference_only[rel_path] = StableIdentityEntry(rel_path, owner)
         source_path = root / rel_path
         in_kb = rel_path == kb_rel or rel_path.startswith(kb_rel + "/")
         included = not vault.in_excluded_scan_dir(rel_path) and (
@@ -2562,7 +2648,7 @@ def _reconcile_markdown_delta(
             states[rel_path] = state
         else:
             states.pop(rel_path, None)
-        if in_kb:
+        if in_kb and not reference_only_path:
             # The reference census admits every canonical Markdown path while
             # treating missing or malformed IDs as path-fallback identities,
             # exactly like ``memory_refs.ReferenceIndex``.
@@ -2581,13 +2667,21 @@ def _reconcile_markdown_delta(
             and identities.get(rel_path) == previous_identities.get(rel_path)
             and _stable_topology_replacement(context, state)
         ):
-            return _context_with_stable_topology_candidate(context, state)
+            candidate = _context_with_stable_topology_candidate(context, state)
+            if reference_only == previous_reference_only:
+                return candidate
+            return replace(
+                candidate,
+                identity_census=StableIdentityCensus(
+                    candidate.identity_census.entries, tuple(reference_only.values())
+                ),
+            )
 
     return _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
-        StableIdentityCensus(tuple(identities.values())),
+        StableIdentityCensus(tuple(identities.values()), tuple(reference_only.values())),
     )
 
 
@@ -3722,7 +3816,10 @@ def _build_identity_census(
             "Knowledge Base root is unsafe for identity census",
         )
     walk(kb)
-    return StableIdentityCensus(tuple(entries)), MappingProxyType({})
+    return (
+        StableIdentityCensus(tuple(entries), _reference_only_entries(root)),
+        MappingProxyType({}),
+    )
 
 
 def build_stable_identity_census(vault_root: Path) -> StableIdentityCensus:

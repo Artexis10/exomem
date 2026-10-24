@@ -1080,6 +1080,21 @@ def external_pending_epoch(vault_root: Path) -> int | None:
         return _external_pending.get(_canon(vault_root))
 
 
+def registry_rel(vault_root: Path, registry_path: str) -> str | None:
+    """A registry path as vault-relative POSIX, whichever spelling the root had.
+
+    The registry keys paths the way its publishers spelled the vault root, which
+    can cross a symlink that `resolve()` removes.
+    """
+    path = Path(registry_path)
+    for root in (Path(vault_root).absolute(), Path(vault_root).resolve()):
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return None
+
+
 def instance_id() -> str:
     """This process's registry instance id: what makes a checkpoint foreign."""
     return _instance_id

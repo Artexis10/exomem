@@ -43,14 +43,16 @@ stable reference or query term.
 from __future__ import annotations
 
 import hashlib
+import stat
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from . import call_spans, derived_receipts
+from . import call_spans, derived_receipts, freshness
 from .find_types import ParsedPage
 
 #: Bound content hydration, while the complete custody footprint stays available.
@@ -90,6 +92,10 @@ _UNREADABLE: Final = object()
 _STATE_LOCK = threading.RLock()
 _STATES: dict[str, _VaultState] = {}
 _OBSERVED_CUSTODY: set[str] = set()
+#: Bodies already proven against their receipt, by vault key and path. Every
+#: publication and retirement fences `_STATES` out, and the rehydration after it
+#: would otherwise read, hash and parse every pending body again.
+_PROVEN: dict[str, dict[str, _ProvenBody]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +112,16 @@ class PendingRow:
     @property
     def updated(self) -> str:
         return "" if self.page is None else (self.page.updated or "")
+
+
+@dataclass(frozen=True, slots=True)
+class _ProvenBody:
+    """One body whose bytes hashed to `after_hash` while the file had `signature`."""
+
+    after_hash: str
+    signature: freshness.FileSignature
+    page: ParsedPage
+    page_ref: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +169,10 @@ class PendingOverlay:
         """
         shadowed = self.paths
         return [rel_path for rel_path in rel_paths if rel_path not in shadowed]
+
+    def shadow_set(self, rel_paths: AbstractSet[str]) -> frozenset[str]:
+        """`shadow` for a whole path set: one set difference, not a Python loop."""
+        return frozenset(rel_paths - self.paths)
 
     def page(self, rel_path: str) -> ParsedPage | None:
         """The proven current page for a covered identity; None for a tombstone."""
@@ -255,6 +275,7 @@ def _digest(content: bytes) -> str:
 
 def _prove_row(
     vault_root: Path,
+    key: str,
     rel_path: str,
     *,
     after_hash: str | None,
@@ -265,8 +286,10 @@ def _prove_row(
     """Prove one changed path against its intended after state, then parse it.
 
     Reading and parsing happen only after the exact intended hash or tombstone
-    is proven, so no unproven generation ever enters the projection. Returns
-    None when the path cannot be proven; its custody still suppresses old rows.
+    is proven, so no unproven generation ever enters the projection. A body
+    already proven at the same hash and file identity (`freshness` signature)
+    is not read again. Returns None when the path cannot be proven; its custody
+    still suppresses old rows.
     """
     target = Path(vault_root).joinpath(*rel_path.split("/"))
     if after_hash is None:
@@ -283,11 +306,32 @@ def _prove_row(
             page=None,
             stable_memory_ref=stable_memory_ref,
         )
+    # The identity is taken before the read: an edit between the two leaves a
+    # newer signature than the one remembered, so the next proof reads again.
     try:
-        if target.is_symlink() or not target.is_file():
+        before = target.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(before.st_mode):
+        return None
+    signature = freshness.signature_from_stat(before)
+    with _STATE_LOCK:
+        known = _PROVEN.get(key, {}).get(rel_path)
+    if known is not None and known.signature == signature:
+        # The bytes are the ones hashed to `known.after_hash`; a receipt that
+        # intends another hash (a superseded batch) cannot be proven by them.
+        if known.after_hash != after_hash:
             return None
+        return PendingRow(
+            rel_path=rel_path,
+            canonical_generation=canonical_generation,
+            batch_id=batch_id,
+            after_hash=after_hash,
+            page=known.page,
+            stable_memory_ref=stable_memory_ref or known.page_ref,
+        )
+    try:
         content = target.read_bytes()
-        mtime = target.stat().st_mtime
     except OSError:
         return None
     if _digest(content) != after_hash:
@@ -296,19 +340,55 @@ def _prove_row(
     from . import find_corpus
 
     try:
-        page = find_corpus.parse_page(target, mtime, Path(vault_root), content=content)
+        page = find_corpus.parse_page(
+            target, before.st_mtime, Path(vault_root), content=content
+        )
     except (OSError, UnicodeError, ValueError):
         return None
     if page is None:
         return None
+    page_ref = _page_memory_ref(page)
+    _remember_body(
+        key, rel_path, target, signature,
+        _ProvenBody(after_hash=after_hash, signature=signature, page=page, page_ref=page_ref),
+    )
     return PendingRow(
         rel_path=rel_path,
         canonical_generation=canonical_generation,
         batch_id=batch_id,
         after_hash=after_hash,
         page=page,
-        stable_memory_ref=stable_memory_ref or _page_memory_ref(page),
+        stable_memory_ref=stable_memory_ref or page_ref,
     )
+
+
+def _remember_body(
+    key: str, rel_path: str, target: Path, signature: freshness.FileSignature, body: _ProvenBody
+) -> None:
+    """Keep a proven body only if the file still has the identity it was read at."""
+    try:
+        unchanged = freshness.signature_from_stat(target.lstat()) == signature
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        return
+    with _STATE_LOCK:
+        bodies = _PROVEN.setdefault(key, {})
+        bodies.pop(rel_path, None)
+        bodies[rel_path] = body
+        # A bound for a process that publishes without ever hydrating (which is
+        # where the retired rows are pruned): evict the oldest proven body.
+        while len(bodies) > PENDING_HYDRATION_LIMIT:
+            del bodies[next(iter(bodies))]
+
+
+def _retain_proven(key: str, custody_paths: Iterable[str]) -> None:
+    """Drop the bodies of paths that no longer have pending custody."""
+    with _STATE_LOCK:
+        bodies = _PROVEN.get(key)
+        if bodies:
+            kept = {rel: bodies[rel] for rel in custody_paths if rel in bodies}
+            _PROVEN[key] = kept
 
 
 def _page_memory_ref(page: ParsedPage) -> str | None:
@@ -327,7 +407,7 @@ class _Projection:
     unprovable: frozenset[str]
 
 
-def _project_batches(vault_root: Path, batches: Sequence[object]) -> _Projection:
+def _project_batches(vault_root: Path, key: str, batches: Sequence[object]) -> _Projection:
     """Project every snapshot row, resolving supersession by exact proof.
 
     Two batches may cover one path when a later write lands before the earlier
@@ -351,6 +431,7 @@ def _project_batches(vault_root: Path, batches: Sequence[object]) -> _Projection
                 continue
             candidate = _prove_row(
                 vault_root,
+                key,
                 row.rel_path,
                 after_hash=path.after_hash,
                 canonical_generation=row.canonical_generation,
@@ -511,7 +592,8 @@ def readonly_visibility(vault_root: Path) -> tuple[str, str | None]:
         return "warming", "pending_visibility_unprovable"
     if snapshot.outcome != "complete":
         return "warming", snapshot.failure_code or f"pending_visibility_{snapshot.outcome}"
-    projection = _project_batches(root, snapshot.batches)
+    key = _key(root)
+    projection = _project_batches(root, key, snapshot.batches)
     if projection.unprovable:
         cleared = {
             batch.receipt.batch_id
@@ -520,7 +602,7 @@ def readonly_visibility(vault_root: Path) -> tuple[str, str | None]:
         remaining = [
             batch for batch in snapshot.batches if batch.receipt.batch_id not in cleared
         ]
-        if _project_batches(root, remaining).unprovable:
+        if _project_batches(root, key, remaining).unprovable:
             return "warming", "pending_visibility_unprovable"
     return "ready", None
 
@@ -548,10 +630,11 @@ def publish(vault_root: Path, receipt: object) -> bool:
     than marking custody live over an unprovable delta.
     """
     root = Path(vault_root)
-    rows: dict[str, PendingRow] = {}
+    key = _key(root)
     for path in receipt.paths:
         row = _prove_row(
             root,
+            key,
             path.rel_path,
             after_hash=path.after_hash,
             canonical_generation=receipt.canonical_generation,
@@ -560,14 +643,14 @@ def publish(vault_root: Path, receipt: object) -> bool:
         )
         if row is None:
             return False
-        rows[path.rel_path] = row
     with _STATE_LOCK:
         # Publishing advances the store's pending generation, so any cached
         # projection is already fenced out and the next request re-hydrates from
-        # durable custody. Nothing else is remembered here: whether a persistent
-        # lane holds an identity is asked of that lane, never cached.
-        _STATES.pop(_key(root), None)
-        _OBSERVED_CUSTODY.add(_key(root))
+        # durable custody. The bodies proved above stay in `_PROVEN`, so that
+        # rehydration reads only what changed. Whether a persistent lane holds
+        # an identity is asked of that lane, never cached.
+        _STATES.pop(key, None)
+        _OBSERVED_CUSTODY.add(key)
     return True
 
 
@@ -602,7 +685,7 @@ def overlay(vault_root: Path) -> PendingOverlay:
         if not _accept_custody_snapshot(key, snapshot) or snapshot.outcome == "unprovable":
             _forget(key)
             return _warming("pending_visibility_unprovable", snapshot.snapshot_generation)
-        projection = _project_batches(root, snapshot.batches)
+        projection = _project_batches(root, key, snapshot.batches)
         if not derived_receipts.pending_visibility_snapshot_is_current(
             root, snapshot.snapshot_generation
         ):
@@ -621,6 +704,7 @@ def overlay(vault_root: Path) -> PendingOverlay:
     except (OSError, RuntimeError, TypeError, ValueError):
         _forget(key)
         return _warming("pending_visibility_unprovable")
+    _retain_proven(key, snapshot.paths)
     # Cache parsed coverage under its custody fence, never a result list. A
     # degraded projection still disables every consumer's shared result cache.
     with _STATE_LOCK:
@@ -770,8 +854,10 @@ def reset(vault_root: Path | None = None) -> None:
     with _STATE_LOCK:
         if vault_root is None:
             _STATES.clear()
+            _PROVEN.clear()
             _OBSERVED_CUSTODY.clear()
         else:
             key = _key(Path(vault_root))
             _STATES.pop(key, None)
+            _PROVEN.pop(key, None)
             _OBSERVED_CUSTODY.discard(key)

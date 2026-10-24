@@ -40,6 +40,42 @@
 - [ ] 3.5 Localize overdue activation intervals through a bounded isolated reproduction; record the responsible work, including packet finalization. Reuse `RequestBudget` checks in controllable loops/waits and existing safe deferral paths; retain managed index rebuild deferral. Verify packet or existing budget abstention returns within the absolute deadline; classify every overrun as failed and unresolved. Preserve canonical mutation immunity and exact terminal/component custody; keep an unsafe-to-bound repair open while independent work continues.
 - [ ] 3.6 Establish pending bars from current measurements where justified; verify recorded choices and keep remaining thresholds null and pending.
 - [ ] 3.7 Keep optional direct-read links off the foreground build path. Verify cold and evicted reads release permitted bodies with unknown inbound links, existing watcher recovery restores exact links, and mutation safety remains complete.
+- [ ] 3.8 Publish the free-text artifact census as a base and an add-only overlay (design decision 9).
+  - Add aliases from self-write registration and from watcher events, before their Markdown filters.
+  - Rebuild the base in the background from event-named directories, plus a periodic walk.
+  - Read the base and overlay without enumeration. Check path-shaped unresolved tokens once.
+  - Keep the synchronous walk while unpublished. Cache tombstone aliases by lifecycle generation.
+  - Verify: a service-written withheld artifact with the owner stopped; an external create after its event; a path-shaped token; removed-name shadowing; the unpublished fallback; no request-thread enumeration.
+- [ ] 3.9 Cache the admitted recall path set per admitted checkpoint, filled by catalogue publication. Shadow pending paths by set difference.
+  - Verify: identity with a fresh selection at the same checkpoint; a cache miss on a policy change; pending-overlay visibility.
+- [ ] 3.10 Catch up the embedding matrix on the derived drain after a batch commits.
+  - A request serves a lagging matrix only when its epoch, instance, space and policy match. It starts the single-flight catch-up in the background.
+  - Verify: a stale serve never returns a changed path's text; own writes stay visible; a policy-identity change still refuses; the request thread runs no catch-up.
+- [ ] 3.11 On a due-state key miss, serve the newest build for the same vault, audience, resolution and purpose, after the existing re-checks. Schedule the refresh for the new key.
+  - Verify: dismissals and removals apply at once; no reuse across audiences; served content equals a fresh build after the refresh.
+- [ ] 3.12 Use the non-building inbound lookup in context-pack neighbourhoods. On a miss, mark inbound neighbours incomplete and record demand.
+  - When a patch bridge is incomplete, republish the patched index instead of emptying the cache.
+  - Keep a reverse map from file to targets, so that a patch costs the change.
+  - Verify: a self-written link appears without a rebuild; the explicit inbound command keeps its synchronous lookup; the patched index equals a full rebuild.
+- [ ] 3.13 Resolve references from the identity projection while it is stale. Keep owners under the knowledge-base trash folder in a table used only for references, outside the uniqueness checks.
+  - Verify: a trash-owned reference resolves with the census scan disabled; the path decision stays live.
+- [ ] 3.14 Keep proven pending rows from publication by path, after-hash, mtime and size, so that a rehydrate re-reads only changed bodies.
+  - Verify: pending edits and deletes still hide stale rows.
+- [ ] 3.17 Compute coverage flags relative to the caller's view: the activation `index_stale` and `lexical_evidence`, the direct-read `inbound: null`, and the context-pack inbound and outbound incomplete entries.
+  - For a restricted caller, report a lag only when a changed path since the published generation is one the caller may see. Use the freshness delta and the existing release decision. The cost follows the lag, not the vault.
+  - Verify: an owner write to a withheld page leaves a restricted caller's response unchanged; a write to a visible page is reported; owner responses are unchanged.
+  - Still open in the same class:
+    - The activation `lexical_evidence` follows the lexical store's readiness proof, which gates the served evidence, so a hidden write can still read as "stale" until the lexical catalogue catches up.
+    - `context_catalogue.ensure_unlisted` folds the vault-wide `index_stale` into `unlisted`.
+    - A project-registry change reports stale to every caller.
+    - A deleted or moved withheld page counts as visible.
+    - A lag longer than the decision bound (16 paths), or an unbridgeable change history, reports the lag without deciding each path, so a burst of withheld writes can still flip a restricted caller's flag until the structure is published.
+- [ ] 3.15 Publish admitted sets for structured eligibility and the activation carry. Key them by audience, purpose, grants, tombstone generation and catalogue generation. Patch them from catalogue deltas, and abstain on a key mismatch.
+  - Verify: a revoked or retagged page leaves the next request's eligibility and rarity.
+  - This is a separate slice from 3.8-3.14.
+- [ ] 3.16 After installation, compare `ask_memory`, `activate_context` and `read_memory` dispatch timings in the request ledger by concurrency bucket: alone, 1.5 to 3, and 3 to 6.
+  - Use at least 100 calls per tool per arm, report the write count per window, and give bootstrap 95% intervals.
+  - Record each site's span check from 3.8-3.14.
 
 ## 4. Verify installed behavior and deliver
 

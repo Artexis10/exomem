@@ -2833,6 +2833,16 @@ def served_entries(
     (`_schedule_served_refresh`), so a reader that returns within that age does
     not pay the build.
 
+    A request whose key matches no build is answered the same way from the
+    newest build of its slot (`_serve_slot`: vault, audience, resolution,
+    purpose), a build another conversation or an earlier projection made, and
+    the refresh is scheduled for the new key. A new conversation, a write that
+    changes the projection, a dismissal and the day rolling over therefore do
+    not rebuild inline. The older build's rows are cut to what the current
+    projection and review state still hold (`_rows_still_due`), so a finished,
+    changed or dismissed item leaves at once; an item the older build never
+    saw appears when the refresh lands. The build never crosses audiences.
+
     What the build reads live, a hit re-checks live, at the cost the profile
     showed to be milliseconds against the build's seconds: the release plane
     is asked again for every verdict the build asked for, and one changed
@@ -2885,13 +2895,23 @@ def served_entries(
         review_token,
     )
     monotonic = time.monotonic()
+    # The suite's inline seam runs a refresh inside the call that scheduled it,
+    # so a stale answer there would only hide a write from the read after it.
+    reuse_stale = not _sync_due_state_warm()
     with _SERVE_LOCK:
         hit = _SERVE_CACHE.get(key)
+        borrowed = hit is None and reuse_stale
+        if borrowed:
+            hit = _newest_served_build(key)
+            borrowed = hit is not None
     age = monotonic - hit["built"] if hit is not None else None
+    horizon_passed = (
+        hit is not None and hit["horizon"] is not None and effective_now >= hit["horizon"]
+    )
     if (
         hit is not None
         and age < _SERVE_CACHE_STALE_SECONDS
-        and (hit["horizon"] is None or effective_now < hit["horizon"])
+        and (not horizon_passed or reuse_stale)
     ):
         with call_spans.span("recall.due_state.verdicts", {"paths": len(hit["asked"])}):
             try:
@@ -2913,13 +2933,20 @@ def served_entries(
             with call_spans.span("recall.due_state.role", {}):
                 unchanged = _role_token(vault_root, keep) == hit["role_token"]
         if unchanged:
-            with call_spans.span("recall.due_state.exists", {"rows": len(hit["rows"])}):
+            held = hit["rows"]
+            if borrowed:
+                with call_spans.span("recall.due_state.reuse", {"rows": len(held)}):
+                    held = _rows_still_due(vault_root, hit, payload, today=today)
+                if held is None:
+                    # The build's rule: unreadable review state serves nothing.
+                    return []
+            with call_spans.span("recall.due_state.exists", {"rows": len(held)}):
                 rows = [
                     dict(row)
-                    for row in hit["rows"]
+                    for row in held
                     if not row.get("path") or _page_exists(vault_root, row["path"])
                 ]
-            if age >= _SERVE_CACHE_TTL_SECONDS:
+            if borrowed or horizon_passed or age >= _SERVE_CACHE_TTL_SECONDS:
                 _schedule_served_refresh(
                     vault_root, key, today=today, now=now, principal=who, purpose=purpose
                 )
@@ -2929,6 +2956,72 @@ def served_entries(
         purpose=purpose, payload=payload, built=monotonic,
     )
     return rows
+
+
+def _serve_slot(key: tuple[Any, ...]) -> tuple[Any, ...]:
+    """What a served build may be reused for: vault, audience, resolution and purpose.
+
+    The authorization session, the day and the two content tokens are left out.
+    A build reused under another session is safe because a reuse re-asks the
+    release plane every verdict the build asked, as the requesting principal.
+    """
+    return key[0], key[1], key[3], key[4]
+
+
+def _newest_served_build(key: tuple[Any, ...]) -> dict[str, Any] | None:
+    """The most recent build that shares `key`'s slot. The caller holds `_SERVE_LOCK`."""
+    slot = _serve_slot(key)
+    newest = None
+    for other, entry in _SERVE_CACHE.items():
+        if _serve_slot(other) == slot and (newest is None or entry["built"] > newest["built"]):
+            newest = entry
+    return newest
+
+
+def _rows_still_due(
+    vault_root: Path, build: dict[str, Any], payload: dict[str, Any] | None, *, today: dt.date
+) -> list[dict[str, Any]] | None:
+    """The rows of an older build that the current projection and review state still hold.
+
+    A row stays only while every stored item behind it is still in the current
+    projection under the same fingerprint and the current review state leaves it
+    open, and its family is not quiet. A finished, changed or dismissed item
+    therefore leaves at once; an item the older build never saw waits for the
+    refresh. None when the review state cannot be read.
+    """
+    store = review_state_module.ReviewStateStore(vault_root)
+    try:
+        state_payload = store.load()
+    except ValueError:
+        return None
+    excluded = _excluded_families(state_payload)
+    categories = (payload or {}).get("categories") or {}
+
+    def held(category: str, page_key: str, item_id: str, fingerprint: str) -> bool:
+        entries = (categories.get(category) or {}).get(page_key)
+        return isinstance(entries, dict) and any(
+            isinstance(entry, dict)
+            and str(entry.get("item_id") or "") == item_id
+            and str(entry.get("fingerprint") or "") == fingerprint
+            for bucket in ("open", "pending")
+            for entry in entries.get(bucket) or ()
+        )
+
+    kept = []
+    for row in build["rows"]:
+        category = row["category"]
+        origins = build["sources"].get((category, row["ref"], row["fingerprint"]))
+        if category in excluded or origins is None:
+            continue
+        if all(
+            held(category, page_key, stored_id, stored_fingerprint)
+            and store.effective_state(
+                served_id, row["fingerprint"], today=today, payload=state_payload
+            )[0] == "open"
+            for page_key, stored_id, stored_fingerprint, served_id in origins
+        ):
+            kept.append(row)
+    return kept
 
 
 def _served_identity(
@@ -2964,6 +3057,7 @@ def _build_served(
         # Bind the memo to the review snapshot the build consumes, including a
         # replacement between the initial identity lookup and this read.
         key = (*key[:-1], _payload_content_token(review_payload, "surfaced"))
+        sources: dict[tuple[str, str, str], list[tuple[str, str, str, str]]] = {}
         rows, horizon, asked, role_token = _served_entries_uncached(
             vault_root,
             today=today,
@@ -2972,6 +3066,7 @@ def _build_served(
             purpose=purpose,
             payload=payload,
             review_payload=review_payload,
+            sources=sources,
         )
     with _SERVE_LOCK:
         if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
@@ -2982,6 +3077,7 @@ def _build_served(
             "built": built,
             "asked": asked,
             "role_token": role_token,
+            "sources": sources,
         }
     return rows, key
 
@@ -3067,6 +3163,17 @@ def _refresh_served(
     """
     projection_token, payload, review_token = _served_identity(vault_root)
     stored = None
+    current = (*key[:-2], projection_token, review_token)
+    with _SERVE_LOCK:
+        known = _SERVE_CACHE.get(current)
+    if (
+        known is not None
+        and time.monotonic() - known["built"] < _SERVE_CACHE_TTL_SECONDS
+        and (known["horizon"] is None or (now or dt.datetime.now(dt.UTC)) < known["horizon"])
+    ):
+        # An earlier refresh already built these inputs; a burst of writes
+        # schedules one refresh per key, and they all land on the same build.
+        return
     if projection_token is not None and review_token is not None:
         _rows, stored = _build_served(
             vault_root, (*key[:-2], projection_token, review_token),
@@ -3220,6 +3327,7 @@ def _served_entries_uncached(
     review_payload: dict[str, Any] | None = None,
     paths: frozenset[str] | None = None,
     recover: bool = True,
+    sources: dict[tuple[str, str, str], list[tuple[str, str, str, str]]] | None = None,
 ) -> tuple[list[dict[str, Any]], dt.datetime | None, dict[str, bool], str | None]:
     """The build behind `served_entries`, and what a memo of it must re-check.
 
@@ -3227,6 +3335,12 @@ def _served_entries_uncached(
     verdict it asked for (path -> allowed), and a fingerprint of the artifact
     role findings it served (None when the projection has no role index,
     "unavailable" when their evidence could not be read).
+
+    `sources`, when given, receives where each row came from, keyed by the
+    row's `(category, ref, fingerprint)`: one `(page, stored item id, stored
+    fingerprint, served item id)` per stored item behind it, and none for an
+    artifact-role finding, which no stored item backs. A memo of the build
+    uses it to drop a row whose item a newer projection no longer holds.
 
     The order of operations is the contract, not an implementation detail:
     re-bucket against today, drop what this audience may not see, drop what the
@@ -3319,8 +3433,11 @@ def _served_entries_uncached(
     rows: list[dict[str, Any]] = []
     categories = dict(payload.get("categories") or {})
     role_index = payload.get("role_state")
+    role_families: frozenset[str] = frozenset()
     if isinstance(role_index, dict):
         from . import artifact_role_review, artifact_role_state
+
+        role_families = frozenset(artifact_role_review.FAMILIES)
         try:
             findings, _ = (
                 artifact_role_state.served(vault_root, keep, paths=paths)
@@ -3349,7 +3466,7 @@ def _served_entries_uncached(
         pages = categories.get(category) or {}
         if not isinstance(pages, dict):
             continue
-        for entries in pages.values():
+        for page_key, entries in pages.items():
             if not isinstance(entries, dict):
                 continue
             for bucket_key, date_key in (("open", "due_since"), ("pending", "due_on")):
@@ -3371,6 +3488,7 @@ def _served_entries_uncached(
                     ) == "collection_candidate"
                     if keep is not None and path and not candidate_component and not keep(path):
                         continue  # withheld: contributes to nothing, anywhere
+                    stored = entry
                     if keep is not None:
                         entry = _survivors_only(vault_root, entry, keep, routing, refs)
                         if entry is None:
@@ -3400,6 +3518,17 @@ def _served_entries_uncached(
                         "fingerprint": str(entry.get("fingerprint") or ""),
                         "path": path,
                     }
+                    if sources is not None:
+                        origins = sources.setdefault(
+                            (category, row["ref"], row["fingerprint"]), []
+                        )
+                        if category not in role_families:
+                            origins.append((
+                                str(page_key),
+                                str(stored.get("item_id") or ""),
+                                str(stored.get("fingerprint") or ""),
+                                str(entry.get("item_id") or ""),
+                            ))
                     if category == "collection_candidate":
                         candidate_rows.append((_candidate_rank(entry, row), row))
                         continue

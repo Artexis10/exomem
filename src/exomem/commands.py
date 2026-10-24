@@ -3121,9 +3121,20 @@ def _citation_url(_path: str) -> str:
     return ""
 
 
-def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
+def _resolve_memory_identifier(
+    vault_root: Path, value: str, *, serve_stale: bool = False
+) -> str:
+    """Resolve a path or memory reference to the page a caller may see.
+
+    A command that goes on to write from the answer keeps the default. A read
+    passes `serve_stale`, so the lookup answers from the identity projection
+    even while the watcher publishes an outside edit, rather than scanning
+    the vault.
+    """
     try:
-        resolved = egress_module.resolve_visible_identifier(vault_root, value)
+        resolved = egress_module.resolve_visible_identifier(
+            vault_root, value, serve_stale=serve_stale
+        )
     except memory_refs_module.ReferenceError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     if reserved_paths_module.classify_logical(resolved).blocked:
@@ -4312,7 +4323,7 @@ def op_get(
         ) as resolution_counts,
         call_spans_module.span("read.resolve_identifier", resolution_counts),
     ):
-        path = _resolve_memory_identifier(vault_root, path)
+        path = _resolve_memory_identifier(vault_root, path, serve_stale=True)
     try:
         with call_spans_module.span("read.prepare"):
             prepared = get_page_module.prepare_page_read(vault_root, path=path)
@@ -7010,8 +7021,13 @@ def _op_activate_context_body(
     with find_types.timing_span(timings, "working_set.readiness"):
         try:
             state, index, _stale = working_set_runtime_module.ensure_index(
-                vault_root, freshness_stamp=working_set_runtime_module._key_text(freshness_key)
+                vault_root,
+                freshness_stamp=working_set_runtime_module._key_text(freshness_key),
+                recall_checkpoint=snapshot.recall_checkpoint("kb") if snapshot else None,
             )
+            # The stamp first: it can then only be older than the token's catalogue,
+            # so the lag counted from it covers everything the token moved by.
+            evidence_stamp = index.freshness_stamp() if index is not None else None
             evidence_token = index.token() if index is not None else None
             anchor_rows = index.anchors() if index is not None else ()
         except Exception:  # noqa: BLE001 - unreadable derived state abstains
@@ -7204,6 +7220,7 @@ def _op_activate_context_body(
         retrieval_paths=frozenset(hit.path for hit in release.hits),
         lexical_state=lexical_state,
         evidence_token=evidence_token,
+        evidence_stamp=evidence_stamp,
         freshness_snapshot=snapshot,
         lexical_seconds=lexical_seconds,
         attribution=attribution,
@@ -7449,7 +7466,7 @@ def op_read_memory(
                 "INVALID_UNIT_READ_OPTIONS: unit_ref cannot be combined with "
                 "frontmatter_only, links, or include_raw"
             )
-        resolved_path = _resolve_memory_identifier(vault_root, path)
+        resolved_path = _resolve_memory_identifier(vault_root, path, serve_stale=True)
         try:
             prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:

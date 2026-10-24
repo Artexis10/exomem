@@ -15,9 +15,11 @@ import sys
 import threading
 import time
 import uuid
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from itertools import chain
+from operator import itemgetter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NamedTuple, NoReturn, cast
@@ -105,6 +107,10 @@ CHUNK_PATH_LOG = sidecar_store.PathChangeLog(
 # answer.
 CATCHUP_MAX_PATHS = 32
 CATCHUP_MAX_GENERATIONS = 64
+# Rounds in which the background catch-up carries the matrix over the writes
+# that committed during the previous round. A round reads only the changed
+# paths, so a few rounds outpace a steady write stream.
+CATCHUP_MAX_ROUNDS = 8
 # After a background corpus-matrix load fails, a managed recall reports the
 # dense lane failed, not warming, and starts no load for this long. A load that
 # fails late has read the whole corpus, so retrying on every recall would repeat
@@ -145,6 +151,10 @@ class _EmbCache(NamedTuple):
     metadata: list[tuple[str, int]]
     matrix: np.ndarray
     space: recall_space.SpaceIdentity | None = None
+    #: Set only on the request-local view of a matrix that lags the sidecar,
+    #: never on the stored cache: the paths whose rows changed after this
+    #: matrix's generation. None means the matrix is the current publication.
+    stale_paths: frozenset[str] | None = None
 
 
 class ChunkProof(NamedTuple):
@@ -759,16 +769,30 @@ class EmbeddingIndex:
         self._mask_cache: _MaskCache | None = None
         # The resident semantic-unit matrix (see `_unit_vectors`).
         self._unit_cache: _UnitCache | None = None
+        # Lock order, outermost first: `_catch_up_lock`, `_lock`, the
+        # embeddings-store coordination scope that `_connect` holds while it
+        # opens a connection, then `_identity_lock`. A thread that holds one
+        # may take a later one, never an earlier one: `_connect` may run under
+        # `_lock`, and nothing inside `_connect` waits for `_lock`.
+        # `_unit_lock` and `_matrix_load_lock` are leaves. The background
+        # loader takes the four ordered locks, so no thread waits for it while
+        # it holds one of them.
+        #
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        # Guards `_identity` and `_identity_token`, so observations stay ordered.
+        self._identity_lock = threading.Lock()
         # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
         # stalls a chunk write's `_patch_cache`.
         self._unit_lock = threading.Lock()
-        # Guards `_matrix_load`, the one background corpus-matrix load. A leaf:
-        # it is taken under `_lock` but never waits on it.
+        # Guards `_matrix_load`, the one background corpus-matrix load.
         self._matrix_load_lock = threading.Lock()
         self._matrix_load: threading.Thread | None = None
+        # Serializes the off-lock catch-ups the background load thread runs, so
+        # two never build a replacement matrix at once. Its holder takes `_lock`
+        # only for the final swap.
+        self._catch_up_lock = threading.Lock()
         self._matrix_load_failed_at: float | None = None
         self._matrix_load_failures = 0
         #: Matrix served or loaded: the use signal the idle reaper watches.
@@ -920,15 +944,26 @@ class EmbeddingIndex:
             self._vec_quant_synced = False
 
     def _observe_identity(
-        self, identity: recall_space.SpaceIdentity | None, token: tuple[int, int, int, int]
+        self,
+        identity: recall_space.SpaceIdentity | None,
+        token: tuple[int, int, int, int],
+        *,
+        same_instance: bool = False,
     ) -> bool:
-        """Remember a serving snapshot unless a newer observation already won."""
-        with self._lock:
+        """Remember a serving snapshot unless a newer observation already won.
+
+        `same_instance` also refuses a snapshot of another sidecar instance
+        than the one observed. Takes only `_identity_lock`, because `_connect`
+        calls this inside the coordination scope (see the lock order).
+        """
+        with self._identity_lock:
             observed = self._identity_token
-            if observed is not None and observed[2] == token[2] and (
-                observed[0], observed[1], observed[3]
-            ) > (token[0], token[1], token[3]):
-                return False
+            if observed is not None:
+                if observed[2] != token[2]:
+                    if same_instance:
+                        return False
+                elif (observed[0], observed[1], observed[3]) > (token[0], token[1], token[3]):
+                    return False
             self._set_identity(identity)
             self._identity_token = token
             return True
@@ -938,9 +973,7 @@ class EmbeddingIndex:
     ) -> None:
         """Fence identity and retained caches together after the SQL commit."""
         with self._lock:
-            observed = self._identity_token
-            if observed is None or observed[2] == token[2]:
-                self._observe_identity(identity, token)
+            self._observe_identity(identity, token, same_instance=True)
             self._invalidate_before((self._identity_token or token)[:3])
 
     def _vec_prepare(self, conn: sqlite3.Connection) -> bool:
@@ -1102,9 +1135,12 @@ class EmbeddingIndex:
             if not current and (
                 cached is None or cached.instance != instance or cached.epoch != epoch
             ):
-                self._cache = None
+                self._cache = cached = None
             mask = self._mask_cache
-            if mask is not None and (not current or mask.metadata is not cached.metadata):
+            # The memo names the metadata list it was computed over, so a
+            # retained lagging matrix keeps its mask: requests served from it
+            # and the catch-up that replaces it both reuse it.
+            if mask is not None and (cached is None or mask.metadata is not cached.metadata):
                 self._mask_cache = None
 
     def upsert_batch(
@@ -1179,6 +1215,10 @@ class EmbeddingIndex:
         finally:
             conn.close()
         self._complete_publication(stored, own_token)
+        # Write-request threads reach here too (`index_sync.upsert_after_write`),
+        # so the splice never runs on this thread: it is handed to the
+        # background loader, and the next read finds the matrix current.
+        self._hand_off_matrix_advance()
         return own_token
 
     def parent_publication_current(
@@ -1614,24 +1654,33 @@ class EmbeddingIndex:
         served = self._serve_resident(policy_identity)
         if served is not None:
             return served
+        # The loader takes `_lock` to swap its matrix in, so a caller whose
+        # thread already holds `_lock` never waits for the loader: it runs the
+        # bounded catch-up or the load itself. `_is_owned` is the RLock's owner
+        # test, which `threading.Condition` also uses.
+        may_wait = not self._lock._is_owned()
         while True:
             loading = self._matrix_loading()
-            if loading is not None:
+            if loading is not None and may_wait:
                 # Wait off the lock for the load already running, never a second one.
                 loading.join()
             with self._lock:
                 served = self._serve_or_catch_up_locked(policy_identity)
                 if served is not None:
                     return served
-                if self._matrix_loading() is not None:
+                if may_wait and self._matrix_loading() is not None:
                     continue
                 loaded = self._full_load_locked()
                 return loaded
 
-    def _serve_resident(
+    def _resident_current(
         self, policy_identity: tuple[str, str], *, nonblocking: bool = False
     ) -> _EmbCache | None:
-        """The cache when it serves the current publication, read without the lock."""
+        """The cache when it is the current publication, read without the lock.
+
+        Counts no use: the idle reaper must not read a publisher's check as a
+        reader.
+        """
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         c = self._cache
@@ -1641,9 +1690,17 @@ class EmbeddingIndex:
             else None
         )
         if served is not None and _cache_covers_publication(served, self._identity_token, self._identity):
-            self._hits += 1
             return served
         return None
+
+    def _serve_resident(
+        self, policy_identity: tuple[str, str], *, nonblocking: bool = False
+    ) -> _EmbCache | None:
+        """The cache when it serves the current publication, read without the lock."""
+        served = self._resident_current(policy_identity, nonblocking=nonblocking)
+        if served is not None:
+            self._hits += 1
+        return served
 
     def resident_matrix(self) -> _EmbCache | None:
         """The matrix cache when it already serves the current publication, else None.
@@ -1664,7 +1721,11 @@ class EmbeddingIndex:
     def require_resident_matrix(self) -> _EmbCache | None:
         """The matrix that serves now, or a background load and a raise.
 
-        A matrix that serves, or catches up within the bound, is returned.
+        A current matrix is returned as it is. A matrix that lags the sidecar
+        within the catch-up bound is returned too, as a view that names the
+        paths changed since it (`stale_paths`); its rows and text for those
+        paths must not be served. The catch-up it needs runs on the publisher's
+        thread or on the one background thread, never on this request's.
         Otherwise this starts the one background load and raises
         `recall_space.CorpusMatrixCold`, or a plain error while a failed load
         backs off. None means no resident matrix applies (no sidecar, or the
@@ -1679,16 +1740,140 @@ class EmbeddingIndex:
         served = self._serve_resident(policy_identity)
         if served is not None:
             return served
+        lagging = self._serve_lagging(policy_identity)
+        if lagging is not None:
+            return lagging
         if self._matrix_loading() is not None:
             raise recall_space.CorpusMatrixCold("corpus matrix is loading")
         with self._lock:
-            served = self._serve_or_catch_up_locked(policy_identity)
+            served = self._serve_or_catch_up_locked(policy_identity, catch_up=False)
             if served is not None:
                 return served
             self._defer_matrix_load()
 
-    def _serve_or_catch_up_locked(self, policy_identity: tuple[str, str]) -> _EmbCache | None:
-        """The cache that serves the current publication, else None. Hold `self._lock`."""
+    def _serve_lagging(self, policy_identity: tuple[str, str]) -> _EmbCache | None:
+        """A view of the resident matrix while it lags the sidecar, else None.
+
+        Served only when the matrix has this policy and the sidecar's space,
+        epoch and instance, and the change log names every path changed since
+        it within the catch-up bound: the same test the catch-up applies. The
+        view's `stale_paths` are those paths. A lagging matrix is never
+        reported as current, and a changed path is never read from it: the
+        scan masks those rows and the chunk proof (token = this matrix's
+        generation) refuses their text. Starts, or joins, the single-flight
+        catch-up in the background.
+        """
+        c = self._cache
+        if c is None or c.recall_policy_identity != policy_identity:
+            return None
+        try:
+            changed = self._paths_changed_since(c)
+        except Exception as e:  # noqa: BLE001 — an unreadable log means the cold path
+            log.warning("embedding matrix lag check failed (%s); taking the load path", e)
+            return None
+        if changed is None:
+            return None
+        self._start_matrix_catch_up()
+        self._hits += 1
+        return c._replace(stale_paths=changed)
+
+    def _paths_changed_since(self, c: _EmbCache) -> frozenset[str] | None:
+        """The paths changed after `c`'s generation, or None if `c` cannot be carried forward."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            try:
+                delta = self._sidecar_delta(conn, c)
+            finally:
+                conn.rollback()
+        finally:
+            conn.close()
+        return None if delta is None else frozenset(delta[1])
+
+    def _hand_off_matrix_advance(self) -> None:
+        """After a batch commits, start the background catch-up for a resident matrix it left behind.
+
+        Starts nothing for a cold matrix or one beyond the catch-up bound: a
+        write must not begin a vault-sized read, and the next read request
+        starts that load. Reads two small tables and returns; never raises.
+        """
+        c = self._cache
+        if c is None:
+            return
+        try:
+            if self._paths_changed_since(c) is None:
+                return
+        except Exception as e:  # noqa: BLE001 — the rows are committed; a read starts the load
+            log.warning("embedding matrix lag check failed (%s); a read will start the load", e)
+            return
+        self._start_matrix_catch_up()
+
+    def _start_matrix_catch_up(self) -> None:
+        """Start the one background thread that catches the matrix up, unless a load just failed."""
+        if not self._load_backing_off():
+            self.start_corpus_matrix_load()
+
+    def _load_backing_off(self) -> bool:
+        failed_at = self._matrix_load_failed_at
+        if failed_at is None:
+            return False
+        backoff = MATRIX_LOAD_RETRY_SECONDS * 2 ** min(self._matrix_load_failures - 1, 6)
+        return time.monotonic() - failed_at < backoff
+
+    def _advance_matrix(self) -> bool:
+        """Carry the resident matrix to the sidecar's publication, off `self._lock`.
+
+        The publisher's catch-up: the background load thread runs it before any
+        full load, started by `upsert_batch` after a batch commits or by the
+        first request that finds the matrix lagging. It builds the replacement from the immutable matrix the cache holds
+        and takes `_lock` only to swap it in, and only when no writer patch,
+        purge, reload or unload replaced that matrix meanwhile. Requests and
+        writers therefore never wait on the splice, which grows with the vault.
+        Returns whether it swapped a replacement in. Does nothing for a cold
+        matrix or one outside the catch-up bound. Never raises: the rows are
+        already committed, and a lagging matrix is served as lagging.
+        """
+        from . import recall_policy
+
+        swapped: tuple[_EmbCache, _EmbCache] | None = None
+        try:
+            with self._catch_up_lock:
+                policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+                for _attempt in range(3):
+                    c = self._cache
+                    if c is None or c.recall_policy_identity != policy_identity:
+                        return False
+                    fields: dict[str, int] = {}
+                    with call_spans.span("embeddings.matrix_catch_up", fields):
+                        patched = self._catch_up_cache(c, fields)
+                    if patched is None:
+                        return False
+                    with self._lock:
+                        if self._cache is c:
+                            self._cache = patched
+                            swapped = (c, patched)
+                            break
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            log.warning("embedding matrix catch-up failed (%s); requests take the load path", e)
+            return False
+        if swapped is None:
+            return False
+        # The patched metadata is a new list, so the mask memo would miss on
+        # the first request. Rebuild it for the same allowed set here.
+        before, after = swapped
+        memo = self._mask_cache
+        if memo is not None and memo.metadata is before.metadata:
+            self._eligibility_mask(after.metadata, memo.allowed_paths)
+        return True
+
+    def _serve_or_catch_up_locked(
+        self, policy_identity: tuple[str, str], *, catch_up: bool = True
+    ) -> _EmbCache | None:
+        """The cache that serves the current publication, else None. Hold `self._lock`.
+
+        `catch_up=False` is for a request thread: it only re-checks currency,
+        and never runs the bounded catch-up.
+        """
         # Re-check under the lock: another thread may have loaded while we
         # waited, or the fast-path token read may have failed transiently.
         c = self._cache
@@ -1704,7 +1889,7 @@ class EmbeddingIndex:
         # generations behind (the common case — another instance wrote, or a
         # patch was refused as non-contiguous) is patched from the changed
         # paths' rows alone, instead of paying the O(vault) SELECT + stack.
-        if c is not None and c.recall_policy_identity == policy_identity:
+        if catch_up and c is not None and c.recall_policy_identity == policy_identity:
             try:
                 # These four measurements are the span's closed numeric protocol.
                 fields: dict[str, int] = {}
@@ -1778,6 +1963,36 @@ class EmbeddingIndex:
         started = time.perf_counter()
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+            # A resident matrix within the catch-up bound needs only its changed
+            # paths. A write that commits during a round leaves the swapped
+            # matrix behind again, and the next round carries that write too.
+            # Every row is read again only when a round cannot advance it.
+            advanced, caught_up = False, None
+            for _round in range(CATCHUP_MAX_ROUNDS):
+                advanced = self._advance_matrix()
+                caught_up = self._resident_current(policy_identity)
+                if caught_up is not None or not advanced:
+                    break
+            if caught_up is not None or advanced:
+                self._matrix_load_failed_at = None
+                self._matrix_load_failures = 0
+                if caught_up is None:
+                    # Writes outpaced every round, and each round stayed within
+                    # the bound. The matrix stays served as lagging, and the next
+                    # batch or lagging read starts this catch-up again. A full
+                    # read here could end under `_lock` and stall every writer.
+                    log.info(
+                        "embedding matrix background catch-up still lags after %d rounds",
+                        CATCHUP_MAX_ROUNDS,
+                    )
+                    return
+                log.info(
+                    "embedding matrix background catch-up: rows=%d gen=%d in %.0f ms",
+                    len(caught_up.metadata),
+                    caught_up.generation,
+                    (time.perf_counter() - started) * 1000.0,
+                )
+                return
             loaded = self._load_all_rows()
             with self._lock:
                 reason = sidecar_store.reload_reason(self._cache, loaded.epoch, loaded.generation)
@@ -1838,13 +2053,41 @@ class EmbeddingIndex:
             status["generation"] = c.generation
         return status
 
+    def _sidecar_delta(
+        self, conn: sqlite3.Connection, c: _EmbCache
+    ) -> tuple[tuple[int, int, int], list[str]] | None:
+        """`(sidecar token, paths changed since c)`, or None if `c` cannot be carried forward.
+
+        Reads inside the caller's open read transaction. The one rule for "this
+        matrix may catch up": the catch-up, and a request that serves the
+        matrix while it lags, both apply it.
+        """
+        token = sidecar_store.read_meta_token(conn)
+        if recall_space.read_identity(conn, tables=_VECTOR_TABLES) != c.space:
+            return None
+        if not sidecar_store.catchup_is_eligible(
+            c,
+            *token,
+            run=sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG),
+            max_generations=CATCHUP_MAX_GENERATIONS,
+        ):
+            return None
+        changed = sidecar_store.changed_paths_since(
+            conn, CHUNK_PATH_LOG, c.generation, limit=CATCHUP_MAX_PATHS
+        )
+        if len(changed) > CATCHUP_MAX_PATHS:
+            return None  # wider than the bound — one clean reload is cheaper
+        return token, changed
+
     def _catch_up_cache(self, c: _EmbCache, fields: dict[str, int]) -> _EmbCache | None:
         """Patch a slightly-stale warm cache forward from the changed paths only.
 
         Returns the patched cache, or None when this delta is not eligible (the
-        caller then takes the full reload). Call under `self._lock` with `c` the
-        cache that was just found stale and already known to match the current
-        recall-policy identity.
+        caller then takes the full reload). `c` is the cache that was just found
+        stale and already known to match the current recall-policy identity.
+        This reads only `c`, which is immutable, so a publisher builds the
+        result off `self._lock` and swaps it in only if `self._cache` is still
+        `c`. An offline caller may still hold the lock around it.
 
         Everything the decision rests on — the meta token, the change log, the
         replacement rows, and the row count that cross-checks them — is read
@@ -1865,24 +2108,10 @@ class EmbeddingIndex:
             try:
                 conn.execute("BEGIN")
                 try:
-                    epoch, gen, instance = sidecar_store.read_meta_token(conn)
-                    if recall_space.read_identity(conn, tables=_VECTOR_TABLES) != c.space:
+                    delta = self._sidecar_delta(conn, c)
+                    if delta is None:
                         return None
-                    run = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
-                    if not sidecar_store.catchup_is_eligible(
-                        c,
-                        epoch,
-                        gen,
-                        instance,
-                        run=run,
-                        max_generations=CATCHUP_MAX_GENERATIONS,
-                    ):
-                        return None
-                    changed = sidecar_store.changed_paths_since(
-                        conn, CHUNK_PATH_LOG, c.generation, limit=CATCHUP_MAX_PATHS
-                    )
-                    if len(changed) > CATCHUP_MAX_PATHS:
-                        return None  # wider than the bound — one clean reload is cheaper
+                    (epoch, gen, instance), changed = delta
                     replacements: dict[
                         str, tuple[list[tuple[str, int]], np.ndarray | None]
                     ] = {}
@@ -2082,6 +2311,12 @@ class EmbeddingIndex:
         k_ceiling = len(metadata)
         if allowed_paths is not None:
             mask, k_ceiling = self._eligibility_mask(metadata, allowed_paths)
+        lagging = resident is not None and resident.stale_paths is not None
+        if lagging and resident.stale_paths:
+            # A lagging matrix still holds the old rows of a path the sidecar has
+            # since rewritten. Eligibility is a governance boundary, so those
+            # rows score -inf exactly like an inadmissible path's.
+            mask, k_ceiling = self._without_paths(metadata, mask, resident.stale_paths)
         k_eff = min(k, k_ceiling)
         if k_eff <= 0:
             return []
@@ -2110,6 +2345,16 @@ class EmbeddingIndex:
             proof = ChunkProof(self, (resident.epoch, resident.generation, resident.instance), resident.space)
             return [(fp, ci, ChunkRef(proof, fp, ci), score) for fp, ci, score in top]
         # numpy-lite: hydrate only the winners' texts (PK point-lookups).
+        if lagging and resident.generation > 0:
+            # The proof refuses text for a path rewritten after this matrix, and a
+            # hit without proven text is dropped: its row is not this path's now.
+            proof = ChunkProof(self, (resident.epoch, resident.generation, resident.instance), resident.space)
+            try:
+                texts = self._texts_for([(fp, ci) for fp, ci, _ in top], proof=proof)
+            except Exception as e:  # noqa: BLE001 — unproven rows are not served
+                log.warning("chunk-text fetch failed (%s); dropping unproven hits", e)
+                texts = {}
+            return [(fp, ci, texts[(fp, ci)], score) for fp, ci, score in top if (fp, ci) in texts]
         try:
             texts = self._texts_for([(fp, ci) for fp, ci, _ in top])
         except Exception as e:  # noqa: BLE001 — text hydration must never break search
@@ -2173,12 +2418,15 @@ class EmbeddingIndex:
         if not metadata or k <= 0:
             return [[] for _ in range(len(queries))]
         verdicts: dict[str, bool] = {}
+        # A lagging matrix still holds the old rows of a path the sidecar has
+        # since rewritten; no such row is a candidate.
+        stale = resident.stale_paths if resident is not None and resident.stale_paths else ()
 
         def admitted(row: int) -> bool:
             file_path = metadata[row][0]
             verdict = verdicts.get(file_path)
             if verdict is None:
-                verdict = verdicts[file_path] = bool(admits(file_path))
+                verdict = verdicts[file_path] = file_path not in stale and bool(admits(file_path))
             return verdict
 
         answers: list[list[tuple[str, int, float]]] = []
@@ -2341,6 +2589,25 @@ class EmbeddingIndex:
         finally:
             conn.rollback()
             conn.close()
+
+    @staticmethod
+    def _without_paths(
+        metadata: list[tuple[str, int]], mask: np.ndarray | None, paths: AbstractSet[str]
+    ) -> tuple[np.ndarray, int]:
+        """`(row_mask, eligible_count)` with every row of `paths` removed from `mask`.
+
+        `mask` None admits every row. Returns a new array: a memoized mask is
+        shared between requests and must not change. Each block is located by
+        bisection because `metadata` is sorted by file_path (see
+        `_splice_path_blocks`), so the Python work is per changed path; the
+        only per-row cost is one array copy.
+        """
+        kept = np.ones(len(metadata), dtype=bool) if mask is None else mask.copy()
+        for path in paths:
+            kept[bisect_left(metadata, path, key=itemgetter(0)) : bisect_right(
+                metadata, path, key=itemgetter(0)
+            )] = False
+        return kept, int(np.count_nonzero(kept))
 
     def _eligibility_mask(
         self, metadata: list[tuple[str, int]], allowed_paths: AbstractSet[str]
