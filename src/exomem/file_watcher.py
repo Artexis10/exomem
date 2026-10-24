@@ -1436,7 +1436,11 @@ class FileWatcher:
             if seeded:
                 from . import lexstore
 
-                lexstore.rebase_inherited_catalog_lineage(self._vault_root)
+                # Seeding must not wait for catalog publication. A busy skip
+                # leaves any later repair to the serving worker.
+                lexstore.rebase_current_catalog_lineage(
+                    self._vault_root, publication_timeout=0.0
+                )
             return seeded
         policy = self._watcher_policy()
         drift_admission = 0

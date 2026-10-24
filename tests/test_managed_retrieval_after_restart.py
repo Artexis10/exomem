@@ -20,13 +20,15 @@ vault in temporary state. A process restart is a fresh `freshness` registry
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from exomem import file_watcher, freshness, lexstore, readiness, warmup
 from exomem import find as find_module
-from exomem import freshness, lexstore, readiness, warmup
+from exomem import reconcile as reconcile_module
 from exomem import vault as vault_module
 
 NOTE = "Knowledge Base/Notes/Insights/after-restart-probe.md"
@@ -58,12 +60,13 @@ def _seed_live_scopes(root: Path) -> None:
     )
 
 
-def _start_managed_process(root: Path) -> None:
+def _start_managed_process(root: Path, *, seed_before_warmup: bool = True) -> None:
     """Start a serving process the way activation does, against inherited state."""
     lexstore.clear_stores()
     freshness.clear()
     readiness.reset()
-    _seed_live_scopes(root)
+    if seed_before_warmup:
+        _seed_live_scopes(root)
     readiness.manage_runtime()
     readiness.begin_warm()
     try:
@@ -107,9 +110,12 @@ def inherited_catalog(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
         freshness.clear()
 
 
-def test_first_write_after_restart_keeps_retrieval_admitted(inherited_catalog: Path) -> None:
+@pytest.mark.parametrize("seed_before_warmup", [True, False])
+def test_first_write_after_restart_keeps_retrieval_admitted(
+    inherited_catalog: Path, seed_before_warmup: bool
+) -> None:
     root = inherited_catalog
-    _start_managed_process(root)
+    _start_managed_process(root, seed_before_warmup=seed_before_warmup)
     assert readiness.retrieval_admission(root)["admitted"], (
         "the inherited catalog is exactly current, so warm-up admits it"
     )
@@ -121,7 +127,87 @@ def test_first_write_after_restart_keeps_retrieval_admitted(inherited_catalog: P
     assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
     # And the write stayed O(delta): both scopes were blessed at this process's
     # live checkpoint by the write itself, with no repair owner involved.
-    assert _scopes_published_by(root, freshness.instance_id()) == {"kb", "vault"}
+    store = lexstore.get_store(root)
+    assert all(
+        store.published_recall_checkpoint(scope) == freshness.recall_checkpoint(root, scope)
+        for scope in freshness.SCOPES
+    )
+    assert lexstore.repair_progress(root) is None, "no catalog repair was needed"
+    assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
+
+
+def test_watcher_seed_completes_while_catalog_publication_is_busy(
+    inherited_catalog: Path,
+) -> None:
+    """A busy catalog publisher must not hold the watcher seed open."""
+    root = inherited_catalog
+    store = lexstore.get_store(root)
+    before = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
+    watcher = file_watcher.FileWatcher(root)
+    completed = threading.Event()
+    seeded: list[bool] = []
+
+    def seed() -> None:
+        try:
+            seeded.append(watcher._reconcile_once(seed=True))
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=seed)
+    try:
+        with store._publication_lock():
+            worker.start()
+            assert completed.wait(timeout=1.0)
+            assert seeded == [True]
+            assert all(freshness.recall_is_live(root, scope) for scope in freshness.SCOPES)
+            assert {
+                scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES
+            } == before
+    finally:
+        worker.join(timeout=1.0)
+    assert not worker.is_alive()
+
+
+def test_first_write_after_watcher_reseed_needs_no_catalog_repair(
+    inherited_catalog: Path,
+) -> None:
+    root = inherited_catalog
+    _start_managed_process(root)
+    store = lexstore.get_store(root)
+    before = {scope: store.published_recall_checkpoint(scope) for scope in freshness.SCOPES}
+
+    assert file_watcher.FileWatcher(root)._reconcile_once(seed=True)
+    assert all(
+        store.published_recall_checkpoint(scope) != before[scope] for scope in freshness.SCOPES
+    )
+    _governed_write(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert all(
+        store.published_recall_checkpoint(scope) == freshness.recall_checkpoint(root, scope)
+        for scope in freshness.SCOPES
+    )
+    assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
+    assert lexstore.repair_progress(root) is None, "no catalog repair was needed"
+    assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
+
+
+def test_first_write_after_reconcile_reseed_needs_no_catalog_repair(
+    inherited_catalog: Path,
+) -> None:
+    root = inherited_catalog
+    _start_managed_process(root)
+    store = lexstore.get_store(root)
+
+    reconcile_module.reconcile(root)
+    _governed_write(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert all(
+        store.published_recall_checkpoint(scope) == freshness.recall_checkpoint(root, scope)
+        for scope in freshness.SCOPES
+    )
+    assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
     assert lexstore.repair_progress(root) is None, "no catalog repair was needed"
     assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
 
@@ -162,7 +248,7 @@ def test_a_write_that_cannot_bless_a_scope_hands_it_to_the_repair_owner(
     current catalog and readmission must follow, with no restart.
     """
     root = inherited_catalog
-    monkeypatch.setattr(lexstore, "rebase_inherited_catalog_lineage", lambda _root: ())
+    monkeypatch.setattr(lexstore, "rebase_current_catalog_lineage", lambda _root: ())
     _start_managed_process(root)
     assert readiness.retrieval_admission(root)["admitted"]
 
@@ -187,7 +273,7 @@ def test_a_healed_scope_is_not_handed_to_repair_again(
     rebuild the whole catalogue on that stale record.
     """
     root = inherited_catalog
-    monkeypatch.setattr(lexstore, "rebase_inherited_catalog_lineage", lambda _root: ())
+    monkeypatch.setattr(lexstore, "rebase_current_catalog_lineage", lambda _root: ())
     _start_managed_process(root)
 
     real_lock = lexstore.LexicalStore._publication_lock

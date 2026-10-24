@@ -31,10 +31,19 @@ from test_governance_egress import _external, write_rule
 from test_latency_gate import _seed_freshness_live
 from test_working_set_withheld_twins import _withhold
 
-from exomem import commands, file_watcher, freshness, lexstore, pending_recall, readiness, working_set
-from exomem import vault as vault_module
+from exomem import (
+    commands,
+    file_watcher,
+    freshness,
+    lexstore,
+    pending_recall,
+    readiness,
+    working_set,
+)
 from exomem import context_catalogue as cc
 from exomem import context_views as cv
+from exomem import reconcile as reconcile_module
+from exomem import vault as vault_module
 from exomem.activation_result import INDEX_WARMING
 from exomem.governance import egress, principal
 from exomem.writer_lease import invoke_command
@@ -67,7 +76,7 @@ def _items(pages: list[dict]) -> list[dict]:
     return [item for page in pages for item in page["items"]]
 
 
-@pytest.mark.parametrize("reseed", ["rebaseline", "watcher-resume"])
+@pytest.mark.parametrize("reseed", ["reconcile", "watcher-resume"])
 def test_a_reseed_keeps_current_profile_rows_usable_after_a_governed_write(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reseed: str
 ) -> None:
@@ -81,8 +90,8 @@ def test_a_reseed_keeps_current_profile_rows_usable_after_a_governed_write(
     readiness.manage_runtime()
     watcher = file_watcher.FileWatcher(vault)
     try:
-        if reseed == "rebaseline":
-            assert all(freshness.rebaseline(vault).values())
+        if reseed == "reconcile":
+            reconcile_module.reconcile(vault)
         else:
             assert watcher.start()
             assert watcher.wait_until_seeded(15)
