@@ -1123,6 +1123,32 @@ def test_a_stale_read_never_returns_a_page_that_no_longer_holds_the_id(
     assert caught.value.code == "REFERENCE_NOT_FOUND"
 
 
+def test_a_stale_read_rechecks_every_visible_owner_before_calling_it_ambiguous(
+    tmp_path: Path, corpus_cache_on: None
+) -> None:
+    """Two pages held the id and an outside edit took it off one of them.
+
+    The stale projection still names both. The read answers what the strict
+    lookup answers, the one page that holds the id, not an ambiguity.
+    """
+    from exomem.governance import egress
+
+    identity = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/one.md", _page(identity))
+    _write_page(tmp_path, "Knowledge Base/Notes/two.md", _page(identity))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    (tmp_path / "Knowledge Base/Notes/two.md").write_text(
+        _page(memory_refs.new_id()), encoding="utf-8"
+    )
+    freshness.mark_external_pending(tmp_path)
+
+    stale = egress.resolve_visible_identifier(
+        tmp_path, memory_refs.memory_ref(identity), serve_stale=True
+    )
+    assert stale == "Knowledge Base/Notes/one.md"
+
+
 def test_a_stale_lookup_does_the_same_work_whether_or_not_the_id_exists(
     tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

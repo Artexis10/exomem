@@ -2231,6 +2231,17 @@ def resolve_visible_identifier(
         principal=principal,
         purpose=purpose,
     )
+    if serve_stale and any(
+        memory_refs.read_reference_owner(vault_root, vault_root / path) != memory_id
+        for path in visible
+    ):
+        # An outside edit moved the id off a page and the projection lags it.
+        # Every page checked is one this caller may see, so the strict lookup
+        # that follows runs for a fact the caller can already observe, never
+        # for a hidden page.
+        return resolve_visible_identifier(
+            vault_root, value, principal=principal, purpose=purpose
+        )
     if len(visible) > 1:
         raise memory_refs.ReferenceError(
             "AMBIGUOUS_REFERENCE",
@@ -2239,13 +2250,6 @@ def resolve_visible_identifier(
     if not visible:
         raise memory_refs.ReferenceError(
             "REFERENCE_NOT_FOUND", f"memory id not found: {memory_id}"
-        )
-    if serve_stale and memory_refs.read_reference_owner(vault_root, vault_root / visible[0]) != memory_id:
-        # An outside edit moved the id off this page and the projection lags it.
-        # The page is one this caller may see, so the strict lookup that follows
-        # runs for a fact the caller can already observe, never for a hidden page.
-        return resolve_visible_identifier(
-            vault_root, value, principal=principal, purpose=purpose
         )
     return visible[0]
 
