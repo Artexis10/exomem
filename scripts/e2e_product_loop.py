@@ -2793,7 +2793,16 @@ def _orchestrate(args: argparse.Namespace) -> int:
         bin_dir = venv / ("Scripts" if WINDOWS else "bin")
         python = bin_dir / ("python.exe" if WINDOWS else "python")
         executable = bin_dir / ("exomem.exe" if WINDOWS else "exomem")
-        run_phase("environment creation", ["uv", "venv", str(venv)], env=env, cwd=work, timeout=30)
+        run_phase("environment creation", ["uv", "venv", "--python", args.python, str(venv)],
+                  env=env, cwd=work, timeout=30)
+        runtime = run_phase(
+            "installed runtime",
+            [str(python), "-c", "import gc,json,sqlite3,sys; print(json.dumps({"
+             "'python':sys.version,'executable':sys.executable,"
+             "'sqlite':sqlite3.sqlite_version,'gc_threshold':gc.get_threshold()}))"],
+            env=env, cwd=work, timeout=10,
+        )
+        print(f"product-e2e: installed runtime={runtime.stdout.strip()}", flush=True)
         run_phase(
             "wheel installation",
             [
@@ -2930,7 +2939,7 @@ def _orchestrate(args: argparse.Namespace) -> int:
                     cwd=s1,
                     timeout=max(180.0, args.request_timeout * 14),
                 )
-                print(s1_journey.stdout.strip().splitlines()[-1])
+                print(s1_journey.stdout.strip())
             finally:
                 print(
                     f"product-e2e: S1 branch wall seconds={time.monotonic() - branch_started:.1f}",

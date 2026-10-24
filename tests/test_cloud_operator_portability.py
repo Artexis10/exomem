@@ -338,6 +338,12 @@ def test_replica_deadline_interrupts_private_sql_and_chain_without_changing_byte
     original_head = chain.tokens.store_head_hash
 
     class ObservedConnection(sqlite3.Connection):
+        def set_progress_handler(self, callback, n):
+            # Deliver the injected interruption inside SQLite without depending on VM batching.
+            if phase == "integrity" and callback is not None:
+                n = 1
+            return super().set_progress_handler(callback, n)
+
         def execute(self, sql, *args, **kwargs):
             nonlocal inside_sql
             inside_sql = sql == "PRAGMA integrity_check"
