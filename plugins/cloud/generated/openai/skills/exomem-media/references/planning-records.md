@@ -30,6 +30,10 @@ an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Simple front door
 
+These are the MCP tool names. REST and the CLI keep one grouped Records command
+and one grouped Planning command, listed in their own help, with `action` set to
+the operation's `kind` and its fields at the top level.
+
 For recall or correction of an observed event or state, inspect Records
 independently of ordinary Note recall. Raw Records items do not appear there.
 Call `read_records(operation={"kind": "inspect"})` to list admitted collections, then inspect
