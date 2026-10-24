@@ -40,9 +40,9 @@ MEDIA_POLL_S = 3.0
 # (src/exomem/vocabulary/packs/core), applied to whichever of these folders the collection has.
 RULE_PROBE = {
     "reading/books": ("book", "media"),
-    "reading/papers": ("paper", "research"),
-    "recipes": ("article", "food"),
-    "areas/travel": ("article", "travel"),
+    "reading/papers": ("research-report", "research"),
+    "recipes": ("manual-documentation", "food"),
+    "areas/travel": ("manual-documentation", "travel"),
 }
 PROFILE_ENV = {"personal": {}, "cloud-like": {"EXOMEM_MEDIA_ENGINES": "documents,ocr"}}
 
@@ -91,6 +91,8 @@ def run_object(data: Any) -> dict[str, Any]:
     """The run document: ``response_detail=full`` carries it under ``diagnostics``."""
     if isinstance(data, dict):
         inner = data.get("diagnostics")
+        if isinstance(inner, dict) and isinstance(inner.get("leaf_result"), dict):
+            inner = inner["leaf_result"]
         return inner if isinstance(inner, dict) else data
     return {}
 

@@ -11,22 +11,30 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import (
+    adoption_plan,
+    context_refs,
+    indexes,
+    knowledge_packs,
+    semantic_census,
+    source_taxonomy,
+)
 from . import compile_proposal as compile_proposal_module
-from . import context_refs, indexes, knowledge_packs, semantic_census, source_taxonomy
 from . import overview as overview_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
+    MISSING_CONTENT_HASH,
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
     kb_root,
     prepend_log_entry,
     resolve_under_vault,
-    slugify_with_truncation_check,
     unique_path,
     yaml_scalar,
 )
@@ -285,14 +293,6 @@ def _save_manifest(
     return {"path": rel, "ref": context_refs.manifest_ref(rel), "warnings": warnings}
 
 
-def _title_from_text(path: Path, text: str) -> str:
-    for line in text.splitlines()[:40]:
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            return stripped[2:].strip() or path.stem
-    return path.stem.replace("-", " ").replace("_", " ").strip() or path.stem
-
-
 def _fence_for(text: str) -> str:
     run = 3
     while "`" * run in text:
@@ -300,47 +300,134 @@ def _fence_for(text: str) -> str:
     return "`" * run
 
 
-def _render_imported_source(
-    *,
-    title: str,
-    rel_original: str,
-    sha256: str,
-    size: int,
-    date_iso: str,
-    content: str,
+def _clean_inline(value: str) -> str:
+    """A value for an inline-code span: no backtick or line break can end it early."""
+    return " ".join(value.replace("`", "'").split())
+
+
+def _links_section(planned: Mapping[str, Any]) -> list[str]:
+    """The generated `## Links` section, which sits outside the verbatim fence.
+
+    A wikilink in a Source body becomes a graph edge, so each resolved target is
+    one plain wikilink to that target's frozen Source page. An unresolved target
+    is listed as text: a guessed edge would be worse than a missing one.
+    """
+    links = planned.get("links") or {}
+    resolved = links.get("resolved") or []
+    unresolved = links.get("unresolved") or []
+    if not resolved and not unresolved:
+        return []
+    lines = ["## Links", ""]
+    seen: set[str] = set()
+    for link in resolved:
+        target = adoption_plan.wikilink_for(link["target_path"])
+        if target not in seen:
+            seen.add(target)
+            lines.append(f"- [[{target}]]")
+    for link in unresolved:
+        lines.append(f"- unresolved ({link['reason']}): `{_clean_inline(link['raw'])}`")
+    lines.append("")
+    return lines
+
+
+def _provenance_lines(planned: Mapping[str, Any], collection: str | None) -> list[str]:
+    """Front-matter lines that say where an imported Source came from."""
+    lines = [f"imported_from: {yaml_scalar(planned['original_path'])}"]
+    if collection is not None:
+        lines.append(f"import_collection: {yaml_scalar(adoption_plan.nfc(collection))}")
+        lines.append(f"collection_path: {yaml_scalar(planned['collection_path'])}")
+    lines.append(f"original_sha256: {planned['original_sha256']}")
+    lines.append(f"original_bytes: {planned['original_bytes']}")
+    if planned.get("previous_import"):
+        lines.append(f"previous_import: {yaml_scalar(planned['previous_import'])}")
+    return lines
+
+
+def _kind_lines(planned: Mapping[str, Any]) -> tuple[str, list[str]]:
+    """``(source_type, domain lines)`` from the item's classification."""
+    classification = planned.get("classification") or {}
+    kind = classification.get("source_kind") or source_taxonomy.UNCLASSIFIED_KIND
+    domain = classification.get("domain")
+    return kind, [f"domain: {domain}"] if domain else []
+
+
+def render_text_source(
+    planned: Mapping[str, Any], text: str, *, date_iso: str, collection: str | None
 ) -> str:
-    fence = _fence_for(content)
-    return "\n".join(
-        [
-            "---",
-            "type: source",
-            f"title: {yaml_scalar(title)}",
-            f"source_type: {source_taxonomy.UNCLASSIFIED_KIND}",
-            f"captured: {date_iso}",
-            f"imported_from: {yaml_scalar(rel_original)}",
-            f"original_sha256: {sha256}",
-            f"original_bytes: {size}",
-            "tags: [imported]",
-            "ingested_into: []",
-            "---",
-            "",
-            f"# {title}",
-            "",
-            f"> Copied from `{rel_original}` by `adopt(mode=\"copy-as-sources\")`. The original remains unchanged.",
-            "",
-            "## Original Metadata",
-            "",
-            f"- Original path: `{rel_original}`",
-            f"- SHA-256: `{sha256}`",
-            f"- Bytes: {size}",
-            "",
-            "## Capture",
-            "",
-            fence,
-            content.rstrip(),
-            fence,
-            "",
-        ]
+    """The imported-Source page of a text original.
+
+    The original text sits in its fence exactly as read: the opening fence, a
+    newline, the text, a newline, the closing fence. Nothing is trimmed, so the
+    text between the fences encodes to bytes whose SHA-256 is ``original_sha256``.
+    """
+    title = planned["title"]
+    rel_original = planned["original_path"]
+    kind, domain_lines = _kind_lines(planned)
+    lines = [
+        "---",
+        "type: source",
+        f"title: {yaml_scalar(title)}",
+        f"source_type: {kind}",
+        *domain_lines,
+        f"captured: {date_iso}",
+        *_provenance_lines(planned, collection),
+    ]
+    if planned.get("aliases"):
+        lines.append("aliases: [" + ", ".join(yaml_scalar(a) for a in planned["aliases"]) + "]")
+    tags = ["imported", *planned.get("tags", [])]
+    lines += [
+        "tags: [" + ", ".join(yaml_scalar(t) for t in tags) + "]",
+        "ingested_into: []",
+        "---",
+        "",
+        f"# {title}",
+        "",
+        f"> Copied from `{_clean_inline(rel_original)}` by Exomem adoption. The original remains unchanged.",
+        "",
+        "## Original Metadata",
+        "",
+        f"- Original path: `{_clean_inline(rel_original)}`",
+        f"- SHA-256: `{planned['original_sha256']}`",
+        f"- Bytes: {planned['original_bytes']}",
+        "",
+        *_links_section(planned),
+        "## Capture",
+        "",
+    ]
+    fence = _fence_for(text)
+    return "\n".join([*lines, fence, text, fence, ""])
+
+
+def render_artifact_source(
+    planned: Mapping[str, Any], *, date_iso: str, collection: str | None
+) -> str:
+    """The Source page of an artifact original, in capture's own page format."""
+    from . import add as add_module
+    from . import memory_refs
+    from .preserve import _sanitize_filename
+
+    kind, domain_lines = _kind_lines(planned)
+    name = _sanitize_filename(Path(planned["original_path"]).name)
+    return add_module._render_source(
+        title=planned["title"],
+        source_type=kind,
+        date_iso=date_iso,
+        url=None,
+        tags=["imported"],
+        why_captured=(
+            f"Copied from `{_clean_inline(planned['original_path'])}` by Exomem adoption. "
+            "The original remains unchanged."
+        ),
+        content=add_module._describe_artifact(
+            name, planned["original_sha256"], planned["original_bytes"]
+        ),
+        exomem_id=memory_refs.new_id(),
+        domain=(planned.get("classification") or {}).get("domain"),
+        artifact_name=name,
+        artifact_rel=planned["artifact_path"],
+        artifact_digest=planned["original_sha256"],
+        artifact_size=planned["original_bytes"],
+        extra_lines=_provenance_lines(planned, collection),
     )
 
 
@@ -366,37 +453,68 @@ def _resolve_selected_text_file(root: Path, raw: str) -> tuple[Path, str] | dict
     return abs_path, rel
 
 
-def _unique_import_path(folder: Path, stem: str, reserved: set[Path]) -> Path:
-    """Return a path unique on disk and within the pending batch."""
-    i = 1
-    while True:
-        suffix = "" if i == 1 else f"-{i}"
-        candidate = folder / f"{stem}{suffix}.md"
-        if not candidate.exists() and candidate not in reserved:
-            reserved.add(candidate)
-            return candidate
-        i += 1
+@dataclass
+class ImportArtifact:
+    """The original bytes an artifact Source keeps, and where they are published."""
 
+    source: Path  # the untouched original
+    target: Path  # absolute destination beside the page
+    digest: str
+    size: int
 
 
 @dataclass
 class ImportItem:
     """One resolved legacy file staged for a governed Sources import.
 
-    Produced by ``plan_import_items`` (pure: read + hash + render, no writes) and
-    consumed by ``commit_import_items`` (the single batch write). The two halves
-    let the stateless ``copy-as-sources`` mode and the durable adoption run share
-    one code path with identical behavior.
+    Built from a plan item once its bytes are verified, and consumed by
+    ``commit_import_items`` (the single batch write). The stateless
+    ``copy-as-sources`` mode and the durable adoption run share that commit.
     """
 
     original_path: str  # vault-relative path of the untouched original
-    target_rel: str  # vault-relative path of the governed Sources copy
-    target: Path  # absolute destination
+    target_rel: str  # vault-relative path of the governed Sources page
+    target: Path  # absolute page destination
     sha256: str
     bytes: int
     title: str
     content: str  # fully rendered imported-Source markdown
     slug_warning: str | None = None
+    artifact: ImportArtifact | None = None  # set for an artifact original
+
+
+def import_item(
+    root: Path,
+    planned: Mapping[str, Any],
+    *,
+    text: str | None,
+    date_iso: str,
+    collection: str | None,
+) -> ImportItem:
+    """Render one plan item. ``text`` is the verified original for a text item."""
+    artifact = None
+    if planned["form"] == "artifact":
+        content = render_artifact_source(planned, date_iso=date_iso, collection=collection)
+        artifact = ImportArtifact(
+            source=root / planned["original_path"],
+            target=root / planned["artifact_path"],
+            digest=planned["original_sha256"],
+            size=planned["original_bytes"],
+        )
+    else:
+        assert text is not None
+        content = render_text_source(planned, text, date_iso=date_iso, collection=collection)
+    return ImportItem(
+        original_path=planned["original_path"],
+        target_rel=planned["target_path"],
+        target=root / planned["target_path"],
+        sha256=planned["original_sha256"],
+        bytes=planned["original_bytes"],
+        title=planned["title"],
+        content=content,
+        slug_warning=planned.get("slug_warning"),
+        artifact=artifact,
+    )
 
 
 def plan_import_items(
@@ -405,53 +523,79 @@ def plan_import_items(
     *,
     today: dt.date,
 ) -> tuple[list[ImportItem], list[dict]]:
-    """Resolve, read, hash, and render each selected legacy file. Pure (no writes).
+    """Resolve, read, hash, link and render each selected legacy text file. No writes.
 
-    Returns ``(items, skipped)`` where ``skipped`` carries per-path resolution
-    failures (``UNSUPPORTED_IMPORT_TYPE`` / ``ALREADY_GOVERNED`` / vault-path
-    errors). Unique target reservation checks the live disk plus the in-batch
-    reservation set, so a target already present out-of-band is re-resolved to a
-    fresh unique name — the same collision handling ``_copy_as_sources`` used.
+    Returns ``(items, skipped)``. ``skipped`` carries per-path refusals
+    (``UNSUPPORTED_IMPORT_TYPE``, ``ALREADY_GOVERNED``, vault-path errors,
+    ``NOT_VALID_UTF8``) and an ``ALREADY_IMPORTED`` row, with the earlier
+    Source's ref, for a file whose bytes an earlier import already holds.
     """
-    kb = kb_root(root)
-    folder = kb / "Sources" / IMPORTED_SOURCE_FOLDER
+    from . import client_artifacts
+
     date_iso = today.isoformat()
-    items: list[ImportItem] = []
     skipped: list[dict] = []
-    reserved_targets: set[Path] = set()
+    index = adoption_plan.read_import_index(root)
+    destinations = adoption_plan.Destinations(root)
+    ceiling = client_artifacts.fetch_budget().max_file_bytes
+    planned: list[dict] = []
+    texts: dict[str, str] = {}
 
     for raw in selected_paths or []:
         resolved = _resolve_selected_text_file(root, raw)
         if isinstance(resolved, dict):
             skipped.append(resolved)
             continue
-        abs_path, rel = resolved
-        data = abs_path.read_bytes()
-        sha = hashlib.sha256(data).hexdigest()
-        text = data.decode("utf-8", errors="replace")
-        title = _title_from_text(abs_path, text)
-        slug, slug_warning = slugify_with_truncation_check(title)
-        target = _unique_import_path(folder, f"{date_iso}-{slug}", reserved_targets)
+        _abs_path, rel = resolved
+        result = adoption_plan.plan_item(
+            root, rel, collection=None, collection_root="", classification=None,
+            taxonomy=None, text_hint=True, date_iso=date_iso, destinations=destinations,
+            index=index, ceiling=ceiling,
+        )
+        if isinstance(result, dict):
+            skipped.append(result)
+            continue
+        item, text = result
+        if item["form"] != "text":
+            skipped.append(
+                {"path": rel, "code": "NOT_VALID_UTF8",
+                 "reason": "copy-as-sources imports valid UTF-8 text only; Adoption Studio imports other files as artifacts"}
+            )
+            continue
+        planned.append(item)
+        if text is not None:
+            texts[rel] = text
+
+    adoption_plan.resolve_links(planned, index, collection=None)
+    items: list[ImportItem] = []
+    for item in planned:
+        if item["action"] == "already-imported":
+            skipped.append(
+                {
+                    "path": item["original_path"],
+                    "code": "ALREADY_IMPORTED",
+                    "reason": "an earlier import already holds these bytes",
+                    "source_path": item["target_path"],
+                    "source_ref": item["existing_ref"],
+                    "original_sha256": item["original_sha256"],
+                    "original_bytes": item["original_bytes"],
+                }
+            )
+            continue
         items.append(
-            ImportItem(
-                original_path=rel,
-                target_rel=target.relative_to(root).as_posix(),
-                target=target,
-                sha256=sha,
-                bytes=len(data),
-                title=title,
-                content=_render_imported_source(
-                    title=title,
-                    rel_original=rel,
-                    sha256=sha,
-                    size=len(data),
-                    date_iso=date_iso,
-                    content=text,
-                ),
-                slug_warning=slug_warning,
+            import_item(
+                root, item, text=texts[item["original_path"]], date_iso=date_iso, collection=None
             )
         )
+        if item.get("slug_warning"):
+            skipped.append(
+                {"path": item["original_path"], "code": "SLUG_TRUNCATED", "reason": item["slug_warning"]}
+            )
     return items, skipped
+
+
+def _top_folder(rel: str) -> str:
+    """The Sources folder a page is counted under: its first segment below `Sources/`."""
+    return Path(rel).relative_to(Path(kb_dirname()) / "Sources").parts[0]
 
 
 def commit_import_items(
@@ -459,110 +603,141 @@ def commit_import_items(
     items: list[ImportItem],
     *,
     today: dt.date,
+    extra_writes: Sequence[PlannedWrite] = (),
 ) -> dict:
     """Write every planned import plus the Sources/top indexes and log in ONE batch.
 
-    Returns ``{"copied_sources": [...], "warnings": [...]}``. Raises nothing when
-    ``items`` is empty (callers decide whether that is an error).
+    Index counts and the log come from where each item actually lands, so a
+    classified item counts under its own kind. ``extra_writes`` ride in the same
+    batch (the run object, so outcomes commit with the items they describe).
+    Returns ``{"copied_sources": [...], "warnings": [...]}``.
     """
     if not items:
+        if extra_writes:
+            batch_atomic_write(list(extra_writes), vault_root=root)
         return {"copied_sources": [], "warnings": []}
+
+    from .add import artifact_binary_write
 
     kb = kb_root(root)
     date_iso = today.isoformat()
     writes: list[PlannedWrite] = []
     copied: list[dict] = []
-    for item in items:
-        writes.append(PlannedWrite(path=item.target, content=item.content))
-        copied.append(
-            {
-                "original_path": item.original_path,
-                "original_ref": context_refs.vault_ref(item.original_path),
-                "source_path": item.target_rel,
-                "source_ref": context_refs.source_ref(item.target_rel),
-                "original_sha256": item.sha256,
-                "original_bytes": item.bytes,
-            }
-        )
+    streams = []
+    try:
+        for item in items:
+            writes.append(
+                PlannedWrite(
+                    path=item.target, content=item.content,
+                    create_only=True, expected_hash=MISSING_CONTENT_HASH,
+                )
+            )
+            if item.artifact is not None:
+                binary, stream = artifact_binary_write(
+                    item.artifact.source, item.artifact.target,
+                    item.artifact.digest, item.artifact.size,
+                )
+                streams.append(stream)
+                writes.append(binary)
+            copied.append(
+                {
+                    "original_path": item.original_path,
+                    "original_ref": context_refs.vault_ref(item.original_path),
+                    "source_path": item.target_rel,
+                    "source_ref": context_refs.source_ref(item.target_rel),
+                    "artifact_path": (
+                        item.artifact.target.relative_to(root).as_posix() if item.artifact else None
+                    ),
+                    "original_sha256": item.sha256,
+                    "original_bytes": item.bytes,
+                }
+            )
 
-    sources_dir = kb / "Sources"
-    post_counts = indexes._count_sources(sources_dir)
-    post_counts[IMPORTED_SOURCE_FOLDER] = post_counts.get(IMPORTED_SOURCE_FOLDER, 0) + len(copied)
+        sources_dir = kb / "Sources"
+        post_counts = indexes._count_sources(sources_dir)
+        folders: list[str] = []
+        for row in copied:
+            folder = _top_folder(row["source_path"])
+            post_counts[folder] = post_counts.get(folder, 0) + 1
+            if folder not in folders:
+                folders.append(folder)
 
-    sources_index = sources_dir / "index.md"
-    warnings: list[str] = []
-    if sources_index.exists():
-        sources_text = indexes._replace_by_type_section(
-            sources_index.read_text(encoding="utf-8"),
-            folder_title=IMPORTED_SOURCE_FOLDER,
-            folder_description="copied legacy-vault material with provenance",
-            counts=post_counts,
-        )
-        for item in reversed(copied):
-            rel_no_ext = item["source_path"][:-3]
-            sources_text = indexes._prepend_recent_capture(
-                sources_text,
+        sources_index = sources_dir / "index.md"
+        warnings: list[str] = []
+        if sources_index.exists():
+            sources_text = indexes._replace_by_type_section(
+                sources_index.read_text(encoding="utf-8"),
+                folder_title=folders[0],
+                folder_description="copied legacy-vault material with provenance",
+                counts=post_counts,
+                vault_root=root,
+            )
+            for row in reversed(copied):
+                sources_text = indexes._prepend_recent_capture(
+                    sources_text, date_iso=date_iso, rel_source_path=row["source_path"][:-3]
+                )
+            writes.append(PlannedWrite(path=sources_index, content=sources_text))
+        else:
+            warnings.append(f"{kb_prefix()}Sources/index.md missing; skipped Sources index update")
+
+        where = ", ".join(f"Sources/{folder}/" for folder in folders)
+        top_index = kb / "index.md"
+        if top_index.exists():
+            summary = (
+                f"{where} (imported sources) - copied "
+                f"{len(copied)} selected file(s) with original path/hash provenance"
+            )
+            top_text, trim_note = indexes._update_top_index(
+                top_index.read_text(encoding="utf-8"),
+                counts=post_counts,
                 date_iso=date_iso,
-                rel_source_path=rel_no_ext,
+                activity_summary=summary,
             )
-        writes.append(PlannedWrite(path=sources_index, content=sources_text))
-    else:
-        warnings.append(f"{kb_prefix()}Sources/index.md missing; skipped Sources index update")
-
-    top_index = kb / "index.md"
-    if top_index.exists():
-        summary = (
-            f"`Sources/{IMPORTED_SOURCE_FOLDER}/` (imported sources) - copied "
-            f"{len(copied)} selected legacy file(s) with original path/hash provenance"
-        )
-        top_text, trim_note = indexes._update_top_index(
-            top_index.read_text(encoding="utf-8"),
-            counts=post_counts,
-            date_iso=date_iso,
-            activity_summary=summary,
-        )
-        sub_writes, top_text = indexes.compute_subindex_writes(
-            root,
-            top_index_text=top_text,
-            pending_paths=[item["source_path"] for item in copied],
-        )
-        sub_writes = [
-            write for write in sub_writes
-            if write.path != sources_index
-        ]
-        writes.append(PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8")))
-        writes.extend(sub_writes)
-        if trim_note:
-            warnings.append(trim_note)
-    else:
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
-
-    log_file = kb / "log.md"
-    if log_file.exists():
-        body_lines = [
-            f"Copied {len(copied)} selected legacy file(s) into Sources/{IMPORTED_SOURCE_FOLDER}/. Originals remain unchanged.",
-            "",
-        ]
-        for item in copied:
-            body_lines.append(
-                f"- {item['original_path']} -> {item['source_path']} sha256={item['original_sha256']}"
+            sub_writes, top_text = indexes.compute_subindex_writes(
+                root,
+                top_index_text=top_text,
+                pending_paths=[row["source_path"] for row in copied],
             )
-        writes.append(
-            PlannedWrite(
-                path=log_file,
-                content=prepend_log_entry(
-                    log_file.read_text(encoding="utf-8"),
-                    date_iso=date_iso,
-                    op="adopt-copy",
-                    rel_path_no_ext=f"{kb_prefix()}Sources/{IMPORTED_SOURCE_FOLDER}",
-                    body="\n".join(body_lines),
-                ),
+            sub_writes = [write for write in sub_writes if write.path != sources_index]
+            writes.append(
+                PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8"))
             )
-        )
-    else:
-        warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+            writes.extend(sub_writes)
+            if trim_note:
+                warnings.append(trim_note)
+        else:
+            warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
-    batch_atomic_write(writes, vault_root=root)
+        log_file = kb / "log.md"
+        if log_file.exists():
+            body_lines = [
+                f"Copied {len(copied)} selected file(s) into {where}. Originals remain unchanged.",
+                "",
+            ]
+            for row in copied:
+                body_lines.append(
+                    f"- {row['original_path']} -> {row['source_path']} sha256={row['original_sha256']}"
+                )
+            writes.append(
+                PlannedWrite(
+                    path=log_file,
+                    content=prepend_log_entry(
+                        log_file.read_text(encoding="utf-8"),
+                        date_iso=date_iso,
+                        op="adopt-copy",
+                        rel_path_no_ext=f"{kb_prefix()}Sources",
+                        body="\n".join(body_lines),
+                    ),
+                )
+            )
+        else:
+            warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+
+        writes.extend(extra_writes)
+        batch_atomic_write(writes, vault_root=root)
+    finally:
+        for stream in streams:
+            stream.close()
     return {"copied_sources": copied, "warnings": warnings}
 
 
@@ -580,11 +755,6 @@ def _copy_as_sources(
         )
 
     items, skipped = plan_import_items(root, selected_paths, today=today)
-    for item in items:
-        if item.slug_warning:
-            skipped.append(
-                {"path": item.original_path, "code": "SLUG_TRUNCATED", "reason": item.slug_warning}
-            )
     if not items:
         return {"copied_sources": [], "skipped": skipped, "warnings": ["no importable files copied"]}
 
@@ -762,7 +932,20 @@ def _compile_selected(
     if legacy_paths:
         copy_result = _copy_as_sources(root, selected_paths=legacy_paths, today=today)
         copied_sources = copy_result.get("copied_sources") or []
-        skipped.extend(copy_result.get("skipped") or [])
+        for row in copy_result.get("skipped") or []:
+            if row.get("code") == "ALREADY_IMPORTED":
+                # The earlier Source is the material to compile; nothing is copied again.
+                copied_sources.append(
+                    {
+                        "original_path": row["path"],
+                        "source_path": row["source_path"],
+                        "source_ref": row["source_ref"],
+                        "original_sha256": row["original_sha256"],
+                        "original_bytes": row["original_bytes"],
+                    }
+                )
+            else:
+                skipped.append(row)
         warnings.extend(copy_result.get("warnings") or [])
         for item in copied_sources:
             source_path = item["source_path"]

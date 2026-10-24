@@ -9234,19 +9234,12 @@ def _refuse_pairless_stance(ref: str, action: str) -> None:
 
 
 def _adoption_run_paths(result: Any) -> list[str]:
-    """Governed pages one Adoption Studio apply just wrote, from its outcomes."""
+    """Governed pages one Adoption Studio apply call just wrote, as that call reports them."""
     if not isinstance(result, dict):
         return []
-    outcomes = result.get("outcomes")
-    rows = outcomes.get("items") if isinstance(outcomes, dict) else outcomes
-    out: list[str] = []
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        written = row.get("source_path") or row.get("destination") or row.get("path")
-        if written:
-            out.append(str(written))
-    return list(dict.fromkeys(out))
+    applied = result.get("apply_result")
+    written = applied.get("written") if isinstance(applied, dict) else None
+    return list(dict.fromkeys(str(path) for path in written or []))
 
 
 def _adopted_paths(result: Any) -> list[str]:
@@ -10198,11 +10191,13 @@ def op_adoption_studio(
     path: str = "",
     include_hidden: bool = False,
     initialize_kb: bool = False,
-    include: list[str] | None = None,
+    collection: str | None = None,
+    include: list[str | dict[str, str]] | None = None,
     exclude: list[str] | None = None,
     overrides: list[str] | None = None,
     include_junk: bool = False,
     plan_id: str | None = None,
+    continuation: str | None = None,
     retry_failed: bool = False,
     only_paths: list[str] | None = None,
     why: str | None = None,
@@ -10215,15 +10210,16 @@ def op_adoption_studio(
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
 ) -> dict:
-    """Review and import existing material in a resumable run.
+    """Review and import an existing collection of notes, documents, images, audio and video in a resumable run.
 
     Never rewrite, move or delete originals. Status/work-item read; other actions
     save run state or material. Plan previews exact imports; apply commits that plan or refuses.
 
-    start scans; select chooses files; plan previews; apply atomically copies
-    into Sources; cancel closes pre-apply; finish proves recall. Then work-item
-    reads context, propose submits proposals, apply-proposal approves one.
-    Details: references/operations.md.
+    start scans; select chooses files; plan previews; apply copies each file
+    into Sources; cancel closes pre-apply; finish proves recall and reports
+    coverage. Repeat plan or apply with a returned `continuation`. Then
+    work-item reads context, propose submits proposals, apply-proposal
+    approves one. Details: references/operations.md.
 
     Args:
         action: Lifecycle step.
@@ -10232,12 +10228,15 @@ def op_adoption_studio(
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base
             (otherwise KB_NOT_INITIALIZED).
-        include: For `select`, paths whose eligible files are selected.
+        collection: For `start`, a name kept across re-imports.
+        include: For `select`, paths whose files are selected, or
+            {path, source_kind, domain} to file a folder under registered keys.
         exclude: For `select`, paths to deselect.
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
         plan_id: For `apply`, from `plan`/`status`; a mismatch or changed
             selection refuses with PLAN_STALE.
+        continuation: For `plan` and `apply`, from the previous result.
         retry_failed: For `apply`, re-apply only failures.
         only_paths: For `apply`, restrict to these originals.
         why: Required for `apply-proposal`; also the `cancel` reason.
@@ -10257,7 +10256,8 @@ def op_adoption_studio(
     try:
         if action == "start":
             return adoption_run_module.start(
-                vault_root, path=path, include_hidden=include_hidden, initialize_kb=initialize_kb
+                vault_root, path=path, include_hidden=include_hidden,
+                initialize_kb=initialize_kb, collection=collection,
             )
         if action == "status":
             return adoption_run_module.status(vault_root, run_id=run_id)
@@ -10271,17 +10271,18 @@ def op_adoption_studio(
                 include_junk=include_junk,
             )
         if action == "plan":
-            return adoption_run_module.plan(vault_root, run_id=run_id)
+            return adoption_run_module.plan(vault_root, run_id=run_id, continuation=continuation)
         if action == "apply":
             from . import due_state as due_state_module
 
-            # One apply commits the whole selected plan, so it is a batch by
+            # One apply call commits a bounded share of the plan, so it is a batch by
             # definition: one counters block at its terminal, not one per page.
             with due_state_module.batch_scope(vault_root):
                 applied = adoption_run_module.apply(
                     vault_root,
                     run_id=run_id,
                     plan_id=plan_id,
+                    continuation=continuation,
                     retry_failed=retry_failed,
                     only_paths=only_paths,
                 )

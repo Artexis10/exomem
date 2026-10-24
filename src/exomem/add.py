@@ -23,6 +23,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import IO
 
 from . import (
     call_spans,
@@ -199,15 +200,47 @@ def _describe_artifact(filename: str, digest: str, size: int) -> str:
     )
 
 
-def _artifact_identity(path: Path) -> tuple[str, int]:
-    """SHA-256 and byte count of a staged file, read in chunks."""
+def artifact_identity(path: Path, *, ceiling: int | None = None) -> tuple[str, int]:
+    """SHA-256 and byte count of a staged file, read in chunks.
+
+    With a `ceiling` the read stops, and `AddError` `TOO_LARGE` is raised, once
+    the file passes it: the bound holds even for a file that grew after a stat.
+    """
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
             size += len(chunk)
+            if ceiling is not None and size > ceiling:
+                raise AddError(
+                    code="TOO_LARGE",
+                    missing=["artifact"],
+                    reason=f"artifact exceeds the {ceiling:,} byte ceiling",
+                )
     return digest.hexdigest(), size
+
+
+def artifact_binary_write(
+    staged_path: Path, artifact_path: Path, digest: str, size: int
+) -> tuple[PlannedWrite, IO[bytes]]:
+    """The create-only write that publishes staged bytes at `artifact_path`.
+
+    The one place a Source artifact becomes a batch member, for capture and for
+    adoption alike. The stream is the caller's to close once the batch ends. The
+    batch checks the bytes against `digest` and `size`, so a file that changed
+    after the identity read fails the whole batch instead of publishing.
+    """
+    stream = staged_path.open("rb")
+    return (
+        PlannedWrite(
+            path=artifact_path,
+            content=PreparedBinaryContent(stream, size, digest),
+            create_only=True,
+            expected_hash=MISSING_CONTENT_HASH,
+        ),
+        stream,
+    )
 
 
 def add(
@@ -299,7 +332,7 @@ def add(
                 reason="artifact filename is empty or only invalid characters",
             )
         artifact_suffix = Path(safe_name).suffix
-        artifact_digest, artifact_size = _artifact_identity(artifact.staged_path)
+        artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
 
@@ -620,19 +653,10 @@ def add(
     artifact_stream = None
     if artifact is not None and artifact_path is not None:
         assert artifact_digest is not None and artifact_size is not None
-        artifact_stream = artifact.staged_path.open("rb")
-        writes.append(
-            PlannedWrite(
-                path=artifact_path,
-                content=PreparedBinaryContent(
-                    artifact_stream,
-                    artifact_size,
-                    artifact_digest,
-                ),
-                create_only=True,
-                expected_hash=MISSING_CONTENT_HASH,
-            )
+        binary_write, artifact_stream = artifact_binary_write(
+            artifact.staged_path, artifact_path, artifact_digest, artifact_size
         )
+        writes.append(binary_write)
 
     # The registry the domain resolved against must still be the one on disk.
     # A registration rewrites it in this batch under its own content guard.

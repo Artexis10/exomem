@@ -101,9 +101,11 @@ def test_start_snapshots_candidate_inventory_and_fingerprint(tmp_path: Path) -> 
     inv = {row["path"]: row for row in run_a["inventory"]}
     assert inv["Old Notes/quarterly-planning.md"]["eligible"] is True
     assert inv["Old Notes/standup.txt"]["eligible"] is True
+    # Every regular file is a candidate: a non-text file imports as an artifact.
     png = inv["Old Notes/diagram.png"]
-    assert png["eligible"] is False
-    assert png["reason"] == "UNSUPPORTED_IMPORT_TYPE"
+    assert png["eligible"] is True
+    assert png["form"] == "artifact"
+    assert png["reason"] is None
     # Governed KB files are never adoption candidates.
     assert not any(p.startswith("Knowledge Base/") for p in inv)
     # Deterministic stat fingerprint across two scans of an unchanged subtree.
@@ -121,6 +123,7 @@ def test_select_validates_paths_and_invalidates_plan(tmp_path: Path) -> None:
 
     ok = adoption_run.select(vault, run_id=run_id, include=["Old Notes"])
     assert set(ok["selection"]["paths"]) == {
+        "Old Notes/diagram.png",
         "Old Notes/quarterly-planning.md",
         "Old Notes/standup.txt",
     }
@@ -132,13 +135,11 @@ def test_select_validates_paths_and_invalidates_plan(tmp_path: Path) -> None:
         run_id=run_id,
         include=["Old Notes"],
         overrides=[
-            "Old Notes/diagram.png",  # unsupported
             "Old Notes/missing.md",  # not in inventory
             "Knowledge Base/index.md",  # already governed
         ],
     )
     codes = {row["path"]: row["code"] for row in rejected["rejected"]}
-    assert codes["Old Notes/diagram.png"] == "UNSUPPORTED_IMPORT_TYPE"
     assert codes["Old Notes/missing.md"] == "NOT_IN_INVENTORY"
     assert codes["Knowledge Base/index.md"] == "ALREADY_GOVERNED"
 
@@ -226,7 +227,7 @@ def test_apply_copies_with_provenance_and_updates_indexes(tmp_path: Path) -> Non
     assert _snapshot(vault, subdir="Old Notes") == originals_before
     # Post-apply verification is honest and complete.
     assert applied["verified_unchanged"] == applied["verified_total"]
-    assert applied["verified_total"] == 2
+    assert applied["verified_total"] == 3
 
     imported = vault / "Knowledge Base/Sources/Imported/2026-07-14-quarterly-planning-notes.md"
     assert imported.exists()
@@ -433,9 +434,13 @@ def test_staged_cloud_folder_resumes_into_searchable_sources_without_replacing_n
     run = adoption_run.start(vault, path=folder, today=TODAY)
     run_id = run["run_id"]
     inventory = {row["path"]: row for row in run["inventory"]}
-    assert inventory[f"{folder}/diagram.png"]["reason"] == "UNSUPPORTED_IMPORT_TYPE"
+    assert inventory[f"{folder}/diagram.png"]["form"] == "artifact"
     selected = adoption_run.select(vault, run_id=run_id, include=[folder])
-    assert set(selected["selection"]["paths"]) == {original, f"{folder}/procedure.txt"}
+    assert set(selected["selection"]["paths"]) == {
+        original,
+        f"{folder}/procedure.txt",
+        f"{folder}/diagram.png",
+    }
     planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
     plan_id = planned["plan"]["plan_id"]
 
@@ -457,6 +462,8 @@ def test_staged_cloud_folder_resumes_into_searchable_sources_without_replacing_n
     remaining_page = get_page.get_page(vault, path=remaining["target_path"])
     assert "Repeat the observation after sunset." in remaining_page.body
     assert remaining_page.frontmatter["imported_from"] == f"{folder}/procedure.txt"
+    image = applied["outcomes"][f"{folder}/diagram.png"]
+    assert (vault / image["artifact_path"]).read_bytes() == originals[f"{folder}/diagram.png"]
 
     hits = find.find(vault, query="libration", mode="keyword", graph=False)
     assert first_path in {hit.path for hit in hits}
@@ -543,13 +550,13 @@ def test_apply_persists_verify_block_and_status_reuses_recorded_counts(
     plan_id = planned["plan"]["plan_id"]
 
     applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
-    assert applied["verified_unchanged"] == 2
-    assert applied["verified_total"] == 2
+    assert applied["verified_unchanged"] == 3
+    assert applied["verified_total"] == 3
 
     store = adoption_run.AdoptionRunStore(vault)
     persisted = store.load(run_id)
-    assert persisted["verify"]["verified_unchanged"] == 2
-    assert persisted["verify"]["verified_total"] == 2
+    assert persisted["verify"]["verified_unchanged"] == 3
+    assert persisted["verify"]["verified_total"] == 3
     assert persisted["verify"]["at"]
 
     # Mutate an already-applied original AFTER apply committed. A later status()
@@ -559,15 +566,15 @@ def test_apply_persists_verify_block_and_status_reuses_recorded_counts(
         "# Quarterly Planning Notes\n\nEdited after apply.\n", encoding="utf-8"
     )
     status = adoption_run.status(vault, run_id=run_id)
-    assert status["verified_unchanged"] == 2
-    assert status["verified_total"] == 2
+    assert status["verified_unchanged"] == 3
+    assert status["verified_total"] == 3
 
     # finish reuses the same recorded counts rather than a fresh re-hash.
     finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
-    assert finished["verified_unchanged"] == 2
-    assert finished["verified_total"] == 2
-    assert finished["finish"]["verified_unchanged"] == 2
-    assert finished["finish"]["verified_total"] == 2
+    assert finished["verified_unchanged"] == 3
+    assert finished["verified_total"] == 3
+    assert finished["finish"]["verified_unchanged"] == 3
+    assert finished["finish"]["verified_total"] == 3
 
 
 def test_verify_counts_absent_before_any_apply(tmp_path: Path) -> None:
@@ -622,6 +629,7 @@ def test_select_rules_apply_by_specificity(tmp_path: Path) -> None:
         exclude=["Old Notes/standup.txt"],
     )
     assert set(ok["selection"]["paths"]) == {
+        "Old Notes/diagram.png",
         "Old Notes/quarterly-planning.md",
         "Old Notes/work/goals.md",
     }

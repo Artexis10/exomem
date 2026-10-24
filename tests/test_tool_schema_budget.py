@@ -29,8 +29,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # then by 80 for browse_memory's page fields (`limit`, `cursor`), then by 650 for the
 # registry selector enums on six selector tools, then by 150 for read_memory's derived
 # view refs and `continuation` field, then by 225 for create_note's `summary` and `topics` fields,
-# then by 150 for connect_memory's typed create-entity `relations`.
-TOTAL_BUDGET = 92_905
+# then by 150 for connect_memory's typed create-entity `relations`, then by 450 for
+# adoption_studio's `collection`, `continuation` and per-folder `include` rules.
+TOTAL_BUDGET = 93_355
 
 #: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
 # Registry selector enums (close-mcp-tool-selectors) raise six selector tools' ceilings.
@@ -47,7 +48,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "schema_memory": 4200,
     "observe_memory": 4400,
     "maintain_memory": 3725,
-    "adoption_studio": 3325,
+    "adoption_studio": 3775,
     "capture_source": 3325,
     "review_memory": 3475,
     "recall_context": 2950,

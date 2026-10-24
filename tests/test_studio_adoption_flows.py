@@ -70,7 +70,9 @@ def _ok(client: TestClient, command: str, body: dict) -> dict:
     payload = _post(client, command, request_body)
     assert payload["success"] is True, payload
     data = payload["data"]
-    return data.get("diagnostics", data)
+    diagnostics = data.get("diagnostics", data)
+    # An imported media artifact adds derived custody around the run document.
+    return diagnostics.get("leaf_result", diagnostics)
 
 
 def _write(root: Path, rel: str, content: str) -> Path:
@@ -213,15 +215,10 @@ def test_partial_apply_reports_coded_skips_while_others_succeed(
     started = _ok(
         client, "adoption_studio", {"action": "start", "path": "Old Notes", "include_hidden": False}
     )
-    # img.png's coded skip lives on the INVENTORY row (eligible=false + reason),
-    # not on `plan.skipped`: folder-rule `select` materializes only ELIGIBLE
-    # files, so an ineligible sibling under an included folder is silently
-    # excluded from the selection — it never reaches `plan` at all, and is
-    # therefore never "skipped" by plan either. This is the real coded-skip
-    # signal for an unsupported file type.
+    # A non-text file is imported as an artifact, so it is eligible like a note.
     img_row = next(row for row in started["inventory"] if row["path"] == "Old Notes/img.png")
-    assert img_row["eligible"] is False
-    assert img_row["reason"] == "UNSUPPORTED_IMPORT_TYPE"
+    assert img_row["eligible"] is True
+    assert img_row["form"] == "artifact"
 
     _ok(
         client,
@@ -238,10 +235,10 @@ def test_partial_apply_reports_coded_skips_while_others_succeed(
     planned = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
     plan = planned["plan"]
     plan_id = plan["plan_id"]
-    # img.png was never selected (ineligible), so only a.md/b.md are planned.
     assert {item["original_path"] for item in plan["items"]} == {
         "Old Notes/a.md",
         "Old Notes/b.md",
+        "Old Notes/img.png",
     }
     # Delete one selected file after planning to force a per-item NOT_FOUND at apply.
     (source_root / "b.md").unlink()
