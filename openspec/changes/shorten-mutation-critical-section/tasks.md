@@ -261,3 +261,20 @@ authority and can be rolled back independently.
       Evidence: PR #1504 merged after independent review, privacy, strict OpenSpec checks and green CI.
 - [ ] 11.4 Verify live committed receipts and graph convergence after managed
       upgrade before closing the graph incident or friend-readiness hold.
+
+## 12. Curation proposals prepare outside the boundary
+
+- [x] 12.1 Narrow a curation proposal to the writer fence in `LeaseManager.invoke`
+      and make `curation.seal_proposal` take the mutation boundary, verify every
+      binding under it and refuse a stale plan before it writes. Capture registry
+      identities at the start of `prepare_proposal`. Apply, resume and
+      compensation stay wide.
+- [x] 12.2 Red-first
+      `test_curation_proposal_preparation_leaves_the_boundary_free_and_the_seal_rechecks`
+      in `tests/test_shorten_critical_section.py`: a real proposal parked after
+      preparation does not block a real `edit_memory` on an unrelated page or on
+      the bound page; the unrelated case seals under a held boundary, and the
+      bound case fails with `CURATION_BINDING_STALE` and creates no run.
+- [ ] 12.3 Live: after deploy, an installed curation proposal on a large vault
+      no longer makes concurrent governed writes wait or fail with
+      `MUTATION_BUSY`.

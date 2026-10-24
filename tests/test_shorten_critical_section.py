@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    curation,
     metrics,
     mutation_lock,
     relation_review,
@@ -21,6 +22,7 @@ from exomem import (
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.commands import op_remember, product_commands_for
+from exomem.vault import content_hash
 
 TODAY_KWARGS = {
     "content": (
@@ -511,3 +513,101 @@ def test_wide_boundary_kill_switch_observes_validation_inside_the_hold(
 
     assert (vault / result["path"]).is_file()
     assert observed_states and set(observed_states) == {"held"}
+
+
+@pytest.mark.parametrize("edited", ["unrelated", "bound"])
+def test_curation_proposal_preparation_leaves_the_boundary_free_and_the_seal_rechecks(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, edited: str
+) -> None:
+    """A proposal parked in preparation blocks no governed write, and its seal
+    refuses a plan whose bound page a write changed in the meantime."""
+    rel_a = "Knowledge Base/Notes/Insights/propose-edit-a.md"
+    rel_b = "Knowledge Base/Notes/Insights/propose-edit-b.md"
+    _write_existing_page(vault, rel_a, page_id="00000000-0000-4000-8000-0000000000d1")
+    _write_existing_page(vault, rel_b, page_id="00000000-0000-4000-8000-0000000000e1")
+    plan = {
+        "version": 1,
+        "title": "Reword page A",
+        "steps": [
+            {
+                "step_id": "reword-a",
+                "kind": "edit",
+                "args": {
+                    "path": rel_a,
+                    "why": "Apply the reviewed wording.",
+                    "operation": {
+                        "kind": "replace_string",
+                        "old_string": "Before.",
+                        "new_string": "Reworded.",
+                        "expected_hash": content_hash((vault / rel_a).read_text(encoding="utf-8")),
+                        "relation_disposition": "reviewed_none",
+                        "relation_review_reason": "No relation changes.",
+                    },
+                },
+            }
+        ],
+    }
+
+    prepared = threading.Event()
+    release = threading.Event()
+    real_prepare_step = curation._prepare_step
+
+    def park_after_preparation(*args, **kwargs):
+        result = real_prepare_step(*args, **kwargs)
+        prepared.set()
+        assert release.wait(30.0)
+        return result
+
+    boundary_at_seal: list[str] = []
+    real_batch_atomic_write = curation.batch_atomic_write
+
+    def observe_seal_write(*args, **kwargs):
+        boundary_at_seal.append(str(mutation_lock.active_mutation_snapshot()["state"]))
+        return real_batch_atomic_write(*args, **kwargs)
+
+    monkeypatch.setattr(curation, "_prepare_step", park_after_preparation)
+    monkeypatch.setattr(curation, "batch_atomic_write", observe_seal_write)
+
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    maintain = next(c for c in product_commands_for("mcp") if c.name == "maintain_memory")
+    outcome: dict[str, object] = {}
+
+    def propose() -> None:
+        try:
+            outcome["result"] = manager.invoke(
+                maintain,
+                (vault,),
+                {"mode": "curation", "curation_action": "propose", "plan": plan},
+                implicit_idempotency_scope="principal:test",
+            )
+        except BaseException as error:  # noqa: BLE001 - inspect the thread outcome
+            outcome["error"] = error
+
+    proposer = threading.Thread(target=propose)
+    proposer.start()
+    try:
+        assert prepared.wait(30.0)
+        rel_edited = rel_b if edited == "unrelated" else rel_a
+        _invoke_edit_memory(
+            vault,
+            manager,
+            path=rel_edited,
+            why="Write while a proposal is being prepared.",
+            operation={"kind": "replace_body", "new_body": "Written during preparation."},
+        )
+        assert "Written during preparation." in (vault / rel_edited).read_text(encoding="utf-8")
+    finally:
+        release.set()
+        proposer.join(timeout=30.0)
+
+    assert not proposer.is_alive()
+    runs = curation.CurationStore(vault).root
+    if edited == "unrelated":
+        assert "error" not in outcome
+        assert (runs / outcome["result"]["run_id"]).is_dir()
+        assert boundary_at_seal and set(boundary_at_seal) == {"held"}
+    else:
+        error = outcome["error"]
+        assert getattr(error, "code", None) == "CURATION_BINDING_STALE", error
+        assert boundary_at_seal == []
+        assert not runs.exists() or not any(runs.iterdir())

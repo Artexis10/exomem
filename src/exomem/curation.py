@@ -1626,13 +1626,46 @@ def propose(
 def seal_proposal(
     vault_root: Path, prepared: PreparedProposal, *, allow_records: bool = False
 ) -> dict[str, Any]:
-    """Publish a prepared plan into the run store; it re-validates the plan."""
-    return CurationStore(Path(vault_root)).create_forward(
-        prepared.plan,
-        binding_manifest=prepared.binding_manifest,
-        registry_ids=prepared.registry_ids,
-        allow_records=allow_records,
-    )
+    """Publish a prepared plan into the run store; it re-validates the plan.
+
+    Preparation runs outside the vault mutation boundary (the dispatcher narrows
+    a proposal to the writer fence), so the seal takes the boundary itself and
+    refuses a plan whose bound pages or registries changed since preparation.
+    Under an outer boundary (the episode workflow, the wide-boundary kill switch)
+    it takes no second guard: that boundary already serializes the seal, and a
+    nested guard would advance the commit generation a second time.
+    """
+    from . import writer_lease
+
+    root = Path(vault_root)
+    sealed = {
+        **prepared.plan,
+        "binding_manifest": prepared.binding_manifest,
+        "registry_ids": prepared.registry_ids,
+    }
+    # A lease lost during preparation is this invocation's fence, not a new
+    # writer's absence: answer WRITER_FENCED before the guard re-acquires.
+    writer_lease.validate_active_write_fence()
+    manager = writer_lease.active_manager()
+    with (
+        nullcontext()
+        if manager.holds_mutation_boundary(root)
+        else manager.mutation_guard(
+            root,
+            request_id=writer_lease.active_mutation_request_id(),
+            operation="curation_propose_commit",
+            holder_kind="command",
+        )
+    ):
+        blockers = _binding_blockers(root, sealed, registry_identities(root))
+        if blockers:
+            raise _error(blockers[0]["code"], blockers[0]["reason"])
+        return CurationStore(root).create_forward(
+            prepared.plan,
+            binding_manifest=prepared.binding_manifest,
+            registry_ids=prepared.registry_ids,
+            allow_records=allow_records,
+        )
 
 
 def prepare_proposal(
@@ -1641,6 +1674,9 @@ def prepare_proposal(
     """Every check `propose` makes, without sealing anything. Read-only, so a
     caller preparing several plans can refuse them all before sealing one."""
     root = Path(vault_root)
+    # Captured before anything is read, so a registry change during preparation
+    # differs from the seal-time recheck instead of being absorbed into the plan.
+    registry_ids = registry_identities(root)
     validated = validate_forward_plan(plan, allow_records=allow_records)
     # Candidate identity and state are re-read before any plan artifact is
     # published.  A stale review must not leave an inert but misleading plan in
@@ -1675,9 +1711,7 @@ def prepare_proposal(
                     "hydration relation target is outside the reviewed Entity targets",
                 )
     _require_plan_relocation_history(root, validated)
-    return PreparedProposal(
-        plan=validated, binding_manifest=manifest, registry_ids=registry_identities(root)
-    )
+    return PreparedProposal(plan=validated, binding_manifest=manifest, registry_ids=registry_ids)
 
 
 def _binding_blockers(

@@ -347,3 +347,29 @@ read availability MUST still require proof for the current canonical checkpoint.
   batch lacks generation-current receipts covering every affected graph path
 - **THEN** the index report remains incomplete and durable batch repair is kept
 - **AND** a newer global checkpoint cannot substitute for the missing evidence
+
+### Requirement: Curation Proposal Preparation Does Not Hold the Canonical Boundary
+
+A curation proposal (`maintain_memory` with `mode="curation"` and
+`curation_action="propose"`) SHALL prepare its plan outside the canonical
+mutation boundary. Its seal SHALL take the boundary itself and, under it, verify
+every content, absence and registry binding of the prepared plan before it
+writes the run store; a binding that changed since preparation MUST refuse the
+seal with that binding's code and write nothing. Registry identities SHALL be
+captured before preparation reads the vault. Apply, resume, compensation and
+every other maintenance mode keep the wide boundary, and
+`EXOMEM_WIDE_MUTATION_BOUNDARY` restores the wide boundary for proposals.
+
+#### Scenario: An unrelated write commits while a proposal is being prepared
+
+- **WHEN** a proposal for a page edit is paused after it prepared its step
+- **AND** another governed write commits to an unrelated page
+- **THEN** that write commits without `MUTATION_BUSY`
+- **AND** the proposal is then sealed with the mutation boundary held
+
+#### Scenario: A write to a bound page refuses the seal
+
+- **WHEN** a proposal for a page edit is paused after it prepared its step
+- **AND** another governed write changes the page that the plan binds
+- **THEN** that write commits without `MUTATION_BUSY`
+- **AND** the proposal fails with `CURATION_BINDING_STALE` and creates no run

@@ -372,3 +372,31 @@ retain their no-checkpoint behavior. This does not weaken graph read admission:
 availability still requires proof for the exact current canonical checkpoint.
 The repair follows the frozen release separately, alongside the independently
 verified background-hold test clock correction; neither changes 0.102 source.
+
+## Curation proposal preparation
+
+`maintain_memory(mode="curation", curation_action="propose")` prepares each
+step with the leaf's read-only, validate-only preparation. On a large vault that
+took about a minute while the wide command boundary was held, and every other
+governed write meanwhile waited and then failed with `MUTATION_BUSY`. The
+dispatcher now narrows this one invocation to the writer fence, using the same
+per-invocation predicate as `tag-variants`. The narrowing is safe only because
+`curation.seal_proposal` takes the vault mutation boundary itself. Under it, the
+seal builds the sealed view (plan, binding manifest and registry identities),
+runs the existing `_binding_blockers` check, refuses with the first blocker's
+code, and only then writes the plan through `create_forward`. When an outer
+boundary is already held (the episode workflow, or the kill switch), the seal
+takes no second guard, because a nested guard would advance the commit
+generation twice. The check reads the bound pages and registry files only;
+it does not use the commit generation, which moves on every write, and it does
+not repeat the whole-vault entity-candidate validation.
+
+`prepare_proposal` now captures registry identities before it reads anything,
+so a registry change during unguarded preparation differs from the seal-time
+recheck instead of being absorbed into the plan.
+
+The revised invariant: bound inputs are current at seal. Every page, absence
+and registry that the plan binds is verified under the boundary. Derived
+verdicts, such as the entity-candidate validation, are current as of
+preparation, and apply re-proves them under its own boundary before it approves
+or writes anything. A sealed plan is inert until apply.
