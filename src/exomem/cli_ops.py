@@ -32,6 +32,12 @@ if TYPE_CHECKING:
 # A leaf-contract error string is "CODE: human reason …" (uppercase code prefix).
 _CODE_PREFIX = re.compile(r"^([A-Z][A-Z0-9_]+):\s*(.*)$", re.DOTALL)
 
+RELATION_REVIEW_STABLE_ID_REMEDIATION = (
+    'For reviewed-none, preview maintain_memory(mode="backfill-ids"). '
+    "Resolve reported identity issues before confirmation for CLI backfill of "
+    "missing IDs, then re-read and validate."
+)
+
 # Stable, machine-readable codes → a one-line remediation. Only the codes worth a
 # pointer are listed; everything else carries `remediation: null`.
 _REMEDIATION: dict[str, str] = {
@@ -53,6 +59,7 @@ _REMEDIATION: dict[str, str] = {
         "Re-read the exact unit and retry with its current reference/fingerprint."
     ),
     "AMBIGUOUS_UNIT_REFERENCE": ("Re-read the parent and select one exact current unit reference."),
+    "RELATION_REVIEW_STABLE_ID_REQUIRED": RELATION_REVIEW_STABLE_ID_REMEDIATION,
     "COMPACT_RELATIONS_REQUIRE_RICH_KIND": (
         "Select an explicit governed rich kind or author a canonical note-level relation."
     ),
