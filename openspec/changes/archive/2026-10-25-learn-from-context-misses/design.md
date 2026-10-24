@@ -88,11 +88,11 @@ The server performs no generative model call. The active agent remains the seman
 
 The workflow shipped in 0.142.0 as the scaffold reference `references/context-learning.md`, its skill route, and an optional example collection.
 
-- Correction: blind-judged real sessions on an invented vault answered the diagnosed miss wrongly before a source-backed correction and correctly after it. The unrelated-topic control stayed correct. One session per cell, so these are per-case observations, not an effect size.
+- Correction: blind-judged real sessions on an invented vault answered the diagnosed miss wrongly before a source-backed correction and correctly after it. The unrelated-topic control stayed correct. One session per cell, so these are per-case observations, not an effect size. The run records are held outside this repository.
 - Fresh transfer: inconclusive. The baseline already answered the fresh case.
 - Incident filing: an engaged session filed an incident mapped onto a differently named collection schema. Filing stays with the engagement policy, as decided above.
 - Stale target: `tests/test_drift_guard.py::test_edit_with_stale_hash_refuses_and_leaves_file_untouched` and `tests/test_records_bulk_upsert.py::test_a_stale_guard_refuses_the_whole_batch`.
-- Restricted reader: `tests/test_origin_disclosure_sweep.py`; incident records use the same disclosure doors as their sources.
+- Restricted reader: `tests/test_origin_disclosure_sweep.py` covers the page-level disclosure doors. Incident records are served through the same doors, but no test exercises an incident record directly.
 - Unavailable check and held-out exclusion: the shipped reference requires both, and no server-side component exists to test. The proof runs froze each key before any answer and used no held-out material.
 
 Remaining limits:
