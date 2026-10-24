@@ -528,7 +528,7 @@ def _neighborhood(
     # Without a watcher owner (an offline caller) nothing would recover the
     # index or the resolver, so that caller keeps the synchronous lookups.
     borrow = vault_module.inbound_recovery_available(vault_root)
-    resolver = find_module.borrow_query_resolver(vault_root) if borrow else None
+    resolver = find_module.borrow_query_resolver(vault_root, **view) if borrow else None
     incomplete: list[str] = []
     for page in packed_pages:
         if borrow and resolver is None:

@@ -7021,8 +7021,13 @@ def _op_activate_context_body(
     with find_types.timing_span(timings, "working_set.readiness"):
         try:
             state, index, _stale = working_set_runtime_module.ensure_index(
-                vault_root, freshness_stamp=working_set_runtime_module._key_text(freshness_key)
+                vault_root,
+                freshness_stamp=working_set_runtime_module._key_text(freshness_key),
+                recall_checkpoint=snapshot.recall_checkpoint("kb") if snapshot else None,
             )
+            # The stamp first: it can then only be older than the token's catalogue,
+            # so the lag counted from it covers everything the token moved by.
+            evidence_stamp = index.freshness_stamp() if index is not None else None
             evidence_token = index.token() if index is not None else None
             anchor_rows = index.anchors() if index is not None else ()
         except Exception:  # noqa: BLE001 - unreadable derived state abstains
@@ -7215,6 +7220,7 @@ def _op_activate_context_body(
         retrieval_paths=frozenset(hit.path for hit in release.hits),
         lexical_state=lexical_state,
         evidence_token=evidence_token,
+        evidence_stamp=evidence_stamp,
         freshness_snapshot=snapshot,
         lexical_seconds=lexical_seconds,
         attribution=attribution,

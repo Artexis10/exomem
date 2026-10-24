@@ -43,6 +43,7 @@ from . import (
     request_budget,
     runtime_resources,
     structured_filters,
+    view_lag,
 )
 from . import ranking_config as _ranking_config
 from .find_types import (
@@ -7376,7 +7377,9 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     return resolver
 
 
-def borrow_query_resolver(vault_root: Path):
+def borrow_query_resolver(
+    vault_root: Path, visible: Callable[[str], bool] | None = None
+):
     """The broad resolver if one is resident and current, else None. Never builds.
 
     For a server read that only enriches its answer (the context pack): a miss
@@ -7384,6 +7387,8 @@ def borrow_query_resolver(vault_root: Path):
     schedules the one background rebuild that restores it. "Current" is the
     registry's own checkpoint triple, as `_get_query_resolver` keys it, so a
     cache the watcher's patch has not yet advanced is a miss, never a stale hit.
+    For a reader other than the owner (`visible` given), a cache that lags only
+    by pages that reader may not see is current for it and is not a miss.
     Writers and explicit operations keep `_get_query_resolver`.
     """
     root = Path(vault_root)
@@ -7391,6 +7396,16 @@ def borrow_query_resolver(vault_root: Path):
     cached = _RESOLVER_CACHE.get(root)
     if triple is not None and cached is not None and cached[0] == triple:
         return cached[1]
+    if visible is not None and cached is not None:
+        checkpoint = _RESOLVER_CHECKPOINTS.get(root)
+        if (
+            checkpoint is not None
+            and cached[0] == checkpoint.triple
+            and view_lag.only_withheld(
+                root, freshness.delta_since(root, "vault", checkpoint), visible
+            )
+        ):
+            return cached[1]
     _schedule_query_resolver_rebuild(root)
     return None
 

@@ -60,8 +60,10 @@ from typing import Any, NamedTuple
 from . import (
     activation_conventions,
     context_roles,
+    freshness,
     lifecycle_statuses,
     sidecar_store,
+    view_lag,
     working_set,
     working_set_conversation,
     working_set_heat,
@@ -861,11 +863,16 @@ def reset_caches_for_tests(*, packets_only: bool = False) -> None:
         _BUILD_SHUTDOWNS.clear()
         _REEMBED_SCHEDULED.clear()
         _INLINE_LOCKS.clear()
+        _STAMP_CHECKPOINTS.clear()
     working_set_index.reset_collection_manifests_for_tests()
 
 
 def ensure_index(
-    vault_root: Path, *, freshness_stamp: str = ""
+    vault_root: Path,
+    *,
+    freshness_stamp: str = "",
+    recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, working_set_index.WorkingSetIndex | None, bool]:
     """Return a usable, current index — or say why there is not one yet.
 
@@ -873,10 +880,16 @@ def ensure_index(
     request's freshness key and this runtime could not bring it forward inside
     the request. The packet then SAYS so rather than implying it was built from
     the current vault state.
+
+    `recall_checkpoint` is the registry checkpoint `freshness_stamp` was derived
+    from. For a reader other than the owner (`visible` given), a catalogue that
+    is behind only by pages that reader may not see is not stale for it.
     """
     if working_set_index.disabled():
         return DISABLED, None, False
     root = Path(vault_root)
+    if recall_checkpoint is not None and freshness_stamp:
+        _remember_stamp(root, freshness_stamp, recall_checkpoint)
     index = working_set_index.WorkingSetIndex(root)
     if not index.available():
         return DISABLED, None, False
@@ -915,11 +928,59 @@ def ensure_index(
         index.project_registry_hash() != project_keys.load_project_registry(root).content_hash
     )
     if registry_changed or (freshness_stamp and index.freshness_stamp() != freshness_stamp):
+        built_at = index.freshness_stamp()
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
+        # A project-registry edit is not a page, so it is stale for every reader.
+        if not refreshed and visible is not None and not registry_changed:
+            return READY, index, not lag_is_withheld(root, built_at, visible)
         return READY, index, not refreshed
     if _managed():
         _schedule_reembed(root, index, freshness_stamp=freshness_stamp)
     return READY, index, False
+
+
+#: The registry checkpoint each freshness stamp was derived from, oldest first.
+#: The catalogue records only the stamp it was built at, a digest, so the paths
+#: changed since that build cannot be read from it. The request that computed
+#: a stamp knows its checkpoint, and a build records a stamp that a request
+#: computed. A stamp that is not here (after a restart, or evicted) leaves the
+#: lag unknown, and an unknown lag is reported.
+_STAMP_CHECKPOINTS: OrderedDict[tuple[str, str], freshness.RecallFreshnessCheckpoint] = OrderedDict()
+#: PROVISIONAL: the stamps a build can still hold while requests move on. A
+#: busy vault computes a new stamp per write, and a build outlives a few.
+STAMP_CHECKPOINT_LIMIT = 64
+
+
+def _remember_stamp(
+    root: Path, stamp: str, checkpoint: freshness.RecallFreshnessCheckpoint
+) -> None:
+    key = (str(root.absolute()), stamp)
+    with _CACHE_LOCK:
+        _STAMP_CHECKPOINTS[key] = checkpoint
+        _STAMP_CHECKPOINTS.move_to_end(key)
+        while len(_STAMP_CHECKPOINTS) > STAMP_CHECKPOINT_LIMIT:
+            _STAMP_CHECKPOINTS.popitem(last=False)
+
+
+def lag_is_withheld(root: Path, built_at: str, visible: Callable[[str], bool]) -> bool:
+    """Whether a catalogue built at `built_at` is behind only by pages `visible` rejects.
+
+    The lag is read from the live registry and never walks. It counts as visible
+    when the stamp is unknown, the scope is not live, the access policy moved, or
+    the delta is not bridged, because each leaves what changed unknown.
+    """
+    with _CACHE_LOCK:
+        built = _STAMP_CHECKPOINTS.get((str(root.absolute()), built_at))
+    current = freshness.live_recall_checkpoint(root, "kb")
+    if built is None or current is None:
+        return False
+    # A policy change moves what every page releases, whichever pages were written.
+    if (built.policy_version, built.access_policy_fingerprint) != (
+        current.policy_version,
+        current.access_policy_fingerprint,
+    ):
+        return False
+    return view_lag.only_withheld(root, freshness.recall_delta_since(root, "kb", built), visible)
 
 
 #: (vault, fingerprint) pairs a re-embed was already scheduled for in this process.
@@ -2266,6 +2327,7 @@ def serve(
     anchor: str | None = None,
     lexical_state: str = "not_requested",
     evidence_token: tuple[int, int, int] | None = None,
+    evidence_stamp: str | None = None,
     freshness_snapshot: Any = None,
     lexical_seconds: float = 0.0,
     attribution: working_set_heat.Attribution | None = None,
@@ -2298,8 +2360,20 @@ def serve(
     registry = context_roles.load_roles(root)
     conventions_registry = activation_conventions.load_conventions(root)
     stamp = _key_text(freshness_key)
+    from .governance import egress
+
+    # `None` for the owner, whose flags stay vault-wide; a restricted reader's
+    # flags count only the lag in pages it may see (`view_lag`).
+    view = egress.visible_page_filter(root, purpose=purpose)
     with working_set._span(timings, "working_set.index"):
-        state, index, stale = ensure_index(root, freshness_stamp=stamp)
+        state, index, stale = ensure_index(
+            root,
+            freshness_stamp=stamp,
+            recall_checkpoint=(
+                freshness_snapshot.recall_checkpoint("kb") if freshness_snapshot is not None else None
+            ),
+            visible=view,
+        )
     index_stale = index_stale or stale
     if state != READY or index is None:
         return working_set.abstained_packet(
@@ -2316,6 +2390,15 @@ def serve(
 
     def evidence_changed() -> dict | None:
         if evidence_token is None or index.token() == evidence_token:
+            return None
+        if (
+            view is not None
+            and evidence_stamp is not None
+            and index.freshness_stamp() != evidence_stamp
+            and lag_is_withheld(root, evidence_stamp, view)
+        ):
+            # The catalogue moved only by pages this reader may not see, so the
+            # evidence it read and the rows it compiles agree for it.
             return None
         if intent_resolution is not None:
             intent_resolution["status"] = "unavailable"
@@ -2446,10 +2529,8 @@ def serve(
     # from nor stored in this cache: keying it by audience and purpose would be
     # a second copy of the release plane, and purpose never enters a cache key.
     # The owner's identity and hits are exactly what they were.
-    from .governance import egress
-
     cacheable = (
-        egress.restricted_release_filter(root, purpose=purpose) is None
+        view is None
         and not with_conversation
         and not index_stale
         and trigger == "user_turn"

@@ -31,7 +31,7 @@ from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 import yaml
 from slugify import slugify as _slugify
 
-from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths
+from . import call_ledger, call_spans, freshness, held_fs, privacy_log, reserved_paths, view_lag
 from .kbdir import kb_dirname, kb_prefix
 
 if TYPE_CHECKING:
@@ -6870,8 +6870,8 @@ def _delta_rels(
     vault_root: Path, delta: freshness.ConsumerDelta
 ) -> tuple[list[str], list[str]] | None:
     """The changed and deleted rels of a registry delta, or None if one lies outside the vault."""
-    changed = [_registry_rel(vault_root, path) for path in delta.changed]
-    deleted = [_registry_rel(vault_root, path) for path in delta.deleted]
+    changed = [freshness.registry_rel(vault_root, path) for path in delta.changed]
+    deleted = [freshness.registry_rel(vault_root, path) for path in delta.deleted]
     rels = [*changed, *deleted]
     if any(rel is None for rel in rels):
         return None
@@ -6966,21 +6966,6 @@ def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
         return cached is not None and cached[1] is data and data.checkpoint is not None
 
 
-def _registry_rel(vault_root: Path, registry_path: str) -> str | None:
-    """A freshness-registry path as vault-relative POSIX, whichever spelling the root had.
-
-    The registry keys paths the way its publishers spelled the vault root, which
-    can cross a symlink that `resolve()` removes.
-    """
-    path = Path(registry_path)
-    for root in (Path(vault_root).absolute(), Path(vault_root).resolve()):
-        try:
-            return path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-    return None
-
-
 def _delta_applied(
     vault_root: Path,
     delta: freshness.ConsumerDelta,
@@ -6989,11 +6974,11 @@ def _delta_applied(
     """Whether the applied bytes of every path in `delta` are those the registry holds at its end."""
     target = dict(delta.target_signatures)
     for registry_path in delta.changed:
-        rel = _registry_rel(vault_root, registry_path)
+        rel = freshness.registry_rel(vault_root, registry_path)
         if rel is None or rel not in applied or applied[rel] != target[registry_path]:
             return False
     for registry_path in delta.deleted:
-        rel = _registry_rel(vault_root, registry_path)
+        rel = freshness.registry_rel(vault_root, registry_path)
         if rel is None or rel not in applied or applied[rel] is not None:
             return False
     return True
@@ -7169,7 +7154,12 @@ def cached_inbound_wikilinks(
     *,
     visible: Callable[[str], bool] | None = None,
 ) -> list[InboundLink] | None:
-    """Borrow complete current evidence without a walk, build or cache wait."""
+    """Borrow complete current evidence without a walk, build or cache wait.
+
+    For a reader other than the owner (`visible` given), data that lags the
+    registry only by pages that reader may not see is complete for it, so a
+    write to such a page does not turn the answer into `None`.
+    """
     root = str(vault_root.resolve())
     state = _INBOUND_INDEX_GENERATIONS.get(root)
     if state is None:
@@ -7185,25 +7175,38 @@ def cached_inbound_wikilinks(
         if cached is None:
             return None
         checkpoint = cached[1].checkpoint
+        if generation is None or checkpoint is None:
+            return None
         if (
-            generation is None
-            or checkpoint is None
-            or (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
+            visible is None
+            and (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
         ):
             return None
         cache_generation = state.generation
         snapshot = _snapshot_inbound(cached[1], target_rel_path)
     finally:
         _INBOUND_INDEX_LOCK.release()
-    if freshness.external_pending(vault_root):
+
+    def current() -> bool:
+        """The registry has nothing this reader could see that the data lacks."""
+        if (
+            (checkpoint.instance_id, checkpoint.generation) == (instance, generation)
+            and freshness.consumer_checkpoint_instance() == instance
+            and freshness.generation(vault_root, "vault") == generation
+            and not freshness.external_pending(vault_root)
+        ):
+            return True
+        return visible is not None and view_lag.only_withheld(
+            vault_root,
+            freshness.delta_since(vault_root, "vault", checkpoint),
+            visible,
+            pending=True,
+        )
+
+    if not current():
         return None
     result = _select_inbound_wikilinks(snapshot, target_rel_path, visible)
-    if (
-        freshness.consumer_checkpoint_instance() != instance
-        or freshness.generation(vault_root, "vault") != generation
-        or freshness.external_pending(vault_root)
-        or not _INBOUND_INDEX_LOCK.acquire(blocking=False)
-    ):
+    if not current() or not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
         if (
