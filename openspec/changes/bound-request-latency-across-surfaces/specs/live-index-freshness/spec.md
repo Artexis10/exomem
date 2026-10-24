@@ -71,7 +71,11 @@ SHALL keep its synchronous path or report incomplete coverage. Release, revocati
 access-policy decisions SHALL remain per request. A response flag that reports a structure as stale,
 lagging, warming or incomplete SHALL be computed relative to the caller's view: for a restricted
 caller, it SHALL report the lag only when a changed path that the caller may see is missing, so
-that writes to material the caller may not see do not change the response. Explicit offline
+that writes to material the caller may not see do not change the response. To keep the
+per-request cost bounded, a flag SHALL report the lag without deciding each path when more changed
+paths than a fixed bound separate the published generation from the current state, or when the
+change history between them cannot be bridged; a burst of writes to withheld material can then
+change a restricted caller's response until the structure is published. Explicit offline
 callers and deployments with event-maintained indexes disabled MAY keep their synchronous paths.
 
 #### Scenario: A caller's own write is visible on its next read
@@ -115,6 +119,8 @@ callers and deployments with event-maintained indexes disabled MAY keep their sy
 - **THEN** the caller's response reports that structure's coverage as complete
 - **AND** the response is the same as it would be with no such change
 - **AND** a lag that includes a path the caller may see is reported as incomplete or stale
+- **AND** a lag longer than the decision bound, or one whose change history cannot be bridged,
+  is reported as incomplete or stale without a decision per path
 
 #### Scenario: Offline callers keep their synchronous paths
 

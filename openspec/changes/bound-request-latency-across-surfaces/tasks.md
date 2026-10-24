@@ -69,6 +69,7 @@
     - `context_catalogue.ensure_unlisted` folds the vault-wide `index_stale` into `unlisted`.
     - A project-registry change reports stale to every caller.
     - A deleted or moved withheld page counts as visible.
+    - A lag longer than the decision bound (16 paths), or an unbridgeable change history, reports the lag without deciding each path, so a burst of withheld writes can still flip a restricted caller's flag until the structure is published.
 - [ ] 3.15 Publish admitted sets for structured eligibility and the activation carry. Key them by audience, purpose, grants, tombstone generation and catalogue generation. Patch them from catalogue deltas, and abstain on a key mismatch.
   - Verify: a revoked or retagged page leaves the next request's eligibility and rarity.
   - This is a separate slice from 3.8-3.14.
