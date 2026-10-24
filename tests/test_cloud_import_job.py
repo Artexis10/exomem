@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -305,3 +306,24 @@ def test_command_refuses_digest_or_late_decryptor_failure_without_committing(vau
     public_output = output.out + output.err + caplog.text + message.read_text()
     assert "refused-member-canary.md" not in public_output and content.decode().strip() not in public_output
     assert "AGE-SECRET-KEY-" not in public_output
+
+
+def test_a_wrong_key_reads_as_undecryptable_however_slowly_age_exits(vault, tmp_path, monkeypatch):
+    """Defect: a decryptor that closes its output before it exits makes a wrong key read as a malformed archive."""
+    real_age = shutil.which("age")
+    slow = tmp_path / "bin" / "age"
+    slow.parent.mkdir()
+    slow.write_text(f'#!/bin/sh\n"{real_age}" "$@"\ncode=$?\nexec 1>&-\nsleep 1\nexit $code\n')
+    slow.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{slow.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    import_id, other_id = str(uuid.uuid4()), str(uuid.uuid4())
+    cloud_import_job.prepare(vault.parent, import_id, CELL)
+    ciphertext = _encrypted(tmp_path, cloud_import_job.prepare(vault.parent, other_id, CELL), b"member")
+    request = cloud_import_job.CloudImportRequest(import_id=import_id, cell_id=CELL, kind="adopt",
+        declared_files=2, declared_bytes=999, ciphertext_bytes=len(ciphertext),
+        ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest())
+    with pytest.raises(cloud_import_job.ArchiveRefused) as refused:
+        cloud_import_job.run_import(request, vault, lambda: io.BytesIO(ciphertext))
+    assert refused.value.code == "ARCHIVE_UNDECRYPTABLE"
