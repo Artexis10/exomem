@@ -126,6 +126,7 @@ from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
+from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import state_paths as state_paths_module
@@ -1738,8 +1739,7 @@ def op_bootstrap(
                     "bind its supported canonical write through vocabulary_workflow.application"
                 ),
                 (
-                    "Address post-write link/duplicate warnings. write_feedback needs "
-                    "response_detail='full'; suggestions need create_note(suggestions=true)."
+                    "Address write_feedback."
                     if profile == "compact" else
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
@@ -1770,6 +1770,7 @@ def op_bootstrap(
             "canonical_loop": [
                 "search_memory for prior notes and sources",
                 "read_memory for context; search_memory(deep=true) for synthesis",
+                semantic_authoring_module.AUTHORING_CONTRACT.routes["destination_fitness"],
                 "draft the smallest durable compiled conclusion",
                 "identify supporting Sources/ or Evidence/ pages for `sources:`; each receives an `ingested_into:` back-reference",
                 "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
@@ -1897,29 +1898,12 @@ def op_bootstrap(
                     if profile == "compact"
                     else "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due"
                 ),
-                # Carried by EVERY profile. It was full-only while compact sat 24
-                # bytes under its ceiling; the queued compact-bootstrap trim has
-                # since paid for it out of redundancy elsewhere in the payload, and
-                # compact is the payload a hookless client receives, which is the
-                # surface with no detector-aware skill behind it. Compact states
-                # the same rule in fewer words -- both halves, the write-time
-                # routing act and the advisory as the net rather than the
-                # mechanism; full keeps its own wording unchanged.
                 "destination_choice": (
-                    "choose the destination at write time: when a coherent durable thread "
-                    "emerges outside the current page's declared scope, search for a focused "
-                    "existing destination, or create one, and link it. Post-write structural "
-                    "advisories are the safety net for missed routing, never the primary "
-                    "mechanism"
-                    if profile == "compact"
-                    else "choosing the destination is part of writing, not a reaction to an "
-                    "advisory. When a coherent durable thread emerges in conversation that "
-                    "sits outside the current page's declared scope, search for a focused "
-                    "existing destination and link it, or create one, at write time. "
-                    "Post-write structural advisories are the safety net for routing that "
-                    "was missed, never the primary mechanism: a page left to accumulate "
-                    "structural debt until a detector speaks has already cost the reader "
-                    "what the routing would have given them."
+                    "Link homes before writing; structural advisories are only a safety net."
+                    if profile == "compact" else
+                    f"{authoring_contract.routes['destination_fitness']} "
+                    "Choose and link the home before writing; post-write structural advisories are the "
+                    "safety net for missed routing, never the primary mechanism."
                 ),
             },
             "note_type_recipes": {
@@ -5402,53 +5386,67 @@ def op_note(
         validation failure, raises a structured error with code=INVALID_NOTE,
         the missing fields, and the reason.
     """
+    return _invoke_note(
+        vault_root,
+        content=content,
+        note_type=note_type,
+        title=title,
+        slug=slug,
+        project=project,
+        projects=projects,
+        sources=sources,
+        tags=tags,
+        status=status,
+        severity=severity,
+        pattern_type=pattern_type,
+        domain=domain,
+        started=started,
+        duration=duration,
+        hypothesis=hypothesis,
+        n=n,
+        concluded=concluded,
+        medium=medium,
+        recorded=recorded,
+        published=published,
+        host=host,
+        editor=editor,
+        bridge_of=bridge_of,
+        bridge_scope=bridge_scope,
+        bridge_review=bridge_review,
+        suggestions=suggestions,
+        project_category=project_category,
+        validate_only=validate_only,
+        draft_id=draft_id,
+        draft_hash=draft_hash,
+        draft_token=draft_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
+        vocabulary_decision=vocabulary_decision,
+        summary=summary,
+        topics=topics,
+    ).as_dict()
+
+
+def _invoke_note(
+    vault_root: Path, **kwargs: Any
+) -> (
+    note_module.NoteResult
+    | semantic_writes_module.CreationPreflight
+    | vocabulary_resolution.VocabularyPreparation
+):
+    """Keep the prepared result behind the same public note argument contract."""
+    arguments = inspect.signature(op_note).bind(vault_root, **kwargs)
+    arguments.apply_defaults()
     try:
-        result = note_module.note(
-            vault_root,
-            content=content,
-            note_type=note_type,
-            title=title,
-            slug=slug,
-            project=project,
-            projects=projects,
-            sources=sources,
-            tags=tags,
-            status=status,
-            severity=severity,
-            pattern_type=pattern_type,
-            domain=domain,
-            started=started,
-            duration=duration,
-            hypothesis=hypothesis,
-            n=n,
-            concluded=concluded,
-            medium=medium,
-            recorded=recorded,
-            published=published,
-            host=host,
-            editor=editor,
-            bridge_of=bridge_of,
-            bridge_scope=bridge_scope,
-            bridge_review=bridge_review,
-            suggestions=suggestions,
-            project_category=project_category,
-            validate_only=validate_only,
-            draft_id=draft_id,
-            draft_hash=draft_hash,
-            draft_token=draft_token,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
-            vocabulary_decision=vocabulary_decision,
-            summary=summary,
-            topics=topics,
-        )
+        result = note_module.note(**arguments.arguments)
     except note_module.NoteError as e:
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "path", None):
+        sources = arguments.arguments["sources"]
         query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
         working_set_heat_module.note_citations(vault_root, sources or ())
-    return result.as_dict()
+    return result
 
 
 def op_query_data(

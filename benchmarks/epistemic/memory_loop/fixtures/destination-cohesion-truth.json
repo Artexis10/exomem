@@ -1,0 +1,287 @@
+{
+  "artifact_type": "destination-evaluator-key.v1",
+  "schema_version": 1,
+  "visibility": "Source truth and judging rubric. Never actor-facing. Contains no arm mapping.",
+  "source_cases_sha256": "0043b5c81d369bced3f14051408c8ac95b7373dd905cd95baa89ce4e24a6e0bf",
+  "source_truth_status": "Authoritative invented fixture truth, authored independently of all actor outputs; not empirical evidence about real users.",
+  "global_rubric": {
+    "judging_unit": "One case-arm workflow, from the original ordinary turn to a later fresh-session answer.",
+    "observable_evidence_only": "Judge observable messages, tool calls, receipts and full-body page readbacks. Do not infer private reasoning or claim an unread note was inspected.",
+    "required_object_meaning": "A canonical object is the retrievable home of a coherent subject, not a prescribed title, path, heading count, unit count or page type.",
+    "grouping": "Group related facts when the same subject, retrieval purpose, episode and epistemic role remain coherent. A new fact does not require a new note.",
+    "fragmentation": "Separate objects only when they have an independent retrieval purpose. Splitting a rule from its rationale, one step from its single workflow, or table rows from one manifest is unjustified here.",
+    "prior_state_preservation": "Retain unaffected prior facts and their uncertainty. Do not invent tests, actors, dates, agreements or evidence. Supersede obsolete active claims when the original turn resolves them.",
+    "scope_of_repair": "Do not require global cleanup of seeded historical notes. A narrow pointer or supersession for a duplicated obsolete rule is sufficient.",
+    "attribution": "New compiled claims must have recoverable provenance to the original turn or its product episode using the installed supported writer. Do not require a separate Source note if native provenance provides that link.",
+    "first_home": "The first agent-proposed compiled destination for a candidate. Exclude immutable raw evidence, episode records and transport receipts. Record rejected proposals and repairs separately.",
+    "search_reads": "Record query text, returned candidates, pages actually read, order, and whether each read precedes the first destination proposal. Do not require a magic query or fixed number of searches.",
+    "ordinary_capture": "No explicit save request occurs. No capture is an observed capture omission for these four durable turns, so missing required objects fail semantic coverage. Preserve the existing ordinary_initiation verdict: an agent-led no_capture decision can satisfy initiation while failing required capture.",
+    "full_body": "Inspect tables and prose outside structural units. A lexical or geometry audit passing does not establish destination fitness.",
+    "semantic_grades": {
+      "pass": "All case requirements are met by the full visible evidence, with acceptable grouping and attribution.",
+      "fail": "A requirement is violated, including an omitted required canonical object, unsupported active contradiction or unjustified fragmentation.",
+      "unmeasured": "A required stage has no usable evidence. Do not convert missing evidence into a semantic pass or ordinary initiation success."
+    },
+    "later_grades": {
+      "useful": "The fresh answer supplies every required later fact accurately, with no material contradiction, and the trace shows useful activation through the ordinary product path.",
+      "partial": "The answer supplies some required facts but misses or distorts at least one, without making the whole response unusable.",
+      "not_useful": "The answer gives the obsolete rule, invents a material rule, cannot answer, or leaves the practical decision unresolved.",
+      "ungraded": "The answer or necessary reference evidence is unavailable."
+    },
+    "blindness": "A judge receives identical source truth and item evidence for every arm under opaque item IDs, without arm names, treatment diff, product version labels, other judgments or code. The source author never judges this run."
+  },
+  "cases": [
+    {
+      "case_id": "D01",
+      "diagnostic_role": "Overbroad accumulated catch-all with an existing focused alternative.",
+      "source_truth": [
+        "The new turn resolves the route export trial; it supersedes style-only hiding.",
+        "The visitor edition needs a separate route-layer copy with access gates and staff-only shortcuts removed.",
+        "The maintenance edition keeps the full route layer.",
+        "Later styling changes can reveal paths that are merely hidden, so one shared layer is unsafe.",
+        "D01-N02 already covers this exact export boundary. D01-N01 spans many independent retrieval purposes."
+      ],
+      "required_canonical_objects": [
+        {
+          "object_id": "D01-O1",
+          "identity": "The existing atlas route export contract, D01-N02, updated with the resolved boundary and its reason.",
+          "facts": [
+            "separate visitor copy",
+            "access gates and staff-only shortcuts removed",
+            "maintenance full layer retained",
+            "style-only hiding can leak after styling changes",
+            "trial resolved"
+          ],
+          "attribution": "The resolved rule and rationale come from D01 original_turn, not from the unresolved prior notes."
+        }
+      ],
+      "acceptable_grouped_variants": [
+        "Keep the inclusion rule, export split and rationale together in D01-N02, using any suitable supported unit structure.",
+        "D01-N01 may retain its historical pending-trial row, gain a concise progress update, or gain a pointer to D01-N02. It does not become the new rule's canonical home.",
+        "A supported rename of D01-N02 preserves the same canonical object if existing references resolve."
+      ],
+      "unacceptable_outcomes": [
+        "Put the new rule only in D01-N01 or make D01-N01 its first compiled home despite the suitable existing D01-N02.",
+        "Create a duplicate export contract while leaving the existing one current and contradictory.",
+        "Split the visitor rule, maintenance rule and common rationale into separate notes without independent retrieval purposes.",
+        "Expand this turn into a global reorganization of the notebook or create objects for every inventory row.",
+        "Keep style-only hiding as the active safe approach in the route export contract."
+      ],
+      "first_home_success": "First proposed compiled destination is D01-N02 or its resolved canonical identity; agent inspection of the focused contract occurs before committing its replacement rule.",
+      "required_later_facts": [
+        "Visitor export uses its own route-layer copy with access gates and staff-only shortcuts removed.",
+        "Maintenance export uses the full route layer.",
+        "A shared layer relying on styling can expose hidden paths after a style change."
+      ],
+      "allowed_omissions_later": [
+        "Event, caption, index and other unrelated notebook facts."
+      ],
+      "wrong_attribution_examples": [
+        "Present the resolved rule as a prior established fact rather than the trial result.",
+        "Say a later styling change actually caused a real leak; the turn gives a risk rationale, not an incident."
+      ]
+    },
+    {
+      "case_id": "D02",
+      "diagnostic_role": "Independently useful new knowledge needs one coherent new home.",
+      "source_truth": [
+        "The new turn establishes an editorial convention after the parallel-text pilot.",
+        "Keep an untranslatable source word in the body with an inline marker.",
+        "Explain it in a numbered note and reuse that number for repeats within the chapter.",
+        "Restart numbering in the next chapter.",
+        "The convention preserves ambiguity that a forced replacement lost.",
+        "Neither prior note provides an existing focused home for published-text conventions."
+      ],
+      "required_canonical_objects": [
+        {
+          "object_id": "D02-O1",
+          "identity": "One new coherent note for untranslatable words or parallel-text editorial conventions.",
+          "facts": [
+            "source word retained",
+            "inline marker",
+            "numbered explanation",
+            "same number for chapter repeats",
+            "numbering restarts each chapter",
+            "preserve ambiguity"
+          ],
+          "attribution": "The adopted convention and rationale come from D02 original_turn."
+        }
+      ],
+      "acceptable_grouped_variants": [
+        "A focused note for untranslatable words groups the full convention and rationale.",
+        "A new note for parallel-text editorial conventions is acceptable if its actual content stays coherent and does not absorb contributor scheduling or the whole project inventory.",
+        "The notebook may gain a concise link or progress update; it does not become the sole canonical home."
+      ],
+      "unacceptable_outcomes": [
+        "Append the convention only to the broad edition notebook or to contributor introductions.",
+        "Create one note for word retention, one for markers, one for numbering and one for rationale.",
+        "Infer that the source word should be replaced, that numbering is global across chapters, or that every repeated word gets a new note.",
+        "Register an entity type or relation solely for this one convention when an ordinary note suffices."
+      ],
+      "first_home_success": "First proposed compiled destination is a new coherent editorial convention home after examining ordinary search results for existing homes; no exact title is required.",
+      "required_later_facts": [
+        "Retain the source word in the body with an inline marker and numbered explanation.",
+        "Reuse the note number for repeats inside the chapter.",
+        "Restart numbering when the next chapter begins."
+      ],
+      "allowed_omissions_later": [
+        "The rationale may be omitted if the practical convention is complete."
+      ],
+      "wrong_attribution_examples": [
+        "Invent a contributor vote or a publication incident.",
+        "Claim the prior onboarding note established this publication convention."
+      ]
+    },
+    {
+      "case_id": "D03",
+      "diagnostic_role": "Minor in-scope refinement belongs in its existing coherent home.",
+      "source_truth": [
+        "The first reviewer still checks arrow directions against the map.",
+        "The second reviewer now explicitly checks destination names against the approved route list.",
+        "Both reviewers still record corrections on the draft.",
+        "The editor resolves recorded corrections after both checks, then publishes.",
+        "The turn resolves one unspecified reference within D03-N01; it does not introduce another workflow."
+      ],
+      "required_canonical_objects": [
+        {
+          "object_id": "D03-O1",
+          "identity": "The existing trail sign review workflow, D03-N01, with the second reviewer reference clarified.",
+          "facts": [
+            "first reviewer map and arrows unchanged",
+            "second reviewer approved route list and destination names",
+            "two-person review unchanged",
+            "editor resolves corrections before publication"
+          ],
+          "attribution": "Only the added reference clarification comes from D03 original_turn; unchanged workflow facts remain prior content."
+        }
+      ],
+      "acceptable_grouped_variants": [
+        "Update the existing review unit or step in D03-N01.",
+        "Add a subordinate clarification within D03-N01 while keeping the current step unambiguous.",
+        "A supported rename keeps the same canonical object and workflow."
+      ],
+      "unacceptable_outcomes": [
+        "Create a separate note or entity for the second reviewer, destination-name check or approved-list clarification.",
+        "Move the sign workflow into the descriptive reading-session note.",
+        "Swap the reviewers, replace the map check, or publish before correction resolution.",
+        "Rewrite unrelated workflow details or treat the clarification as a new review stage."
+      ],
+      "first_home_success": "First proposed compiled destination is D03-N01 or its resolved canonical identity, with the existing workflow inspected before the change.",
+      "required_later_facts": [
+        "First reviewer checks arrow directions against the map.",
+        "Second reviewer checks destination names against the approved route list.",
+        "After both checks the editor resolves recorded corrections, then publishes."
+      ],
+      "allowed_omissions_later": [
+        "The later-change re-review rule is outside the question."
+      ],
+      "wrong_attribution_examples": [
+        "Say the two-person workflow was newly adopted in this turn.",
+        "Invent a third reviewer or a new approval authority."
+      ]
+    },
+    {
+      "case_id": "D04",
+      "diagnostic_role": "A long coherent manifest and protocol should remain one retrievable workflow.",
+      "source_truth": [
+        "D04-N01 is long because its manifest, stages and exceptions serve one batch-handoff retrieval purpose.",
+        "Capture sequence, not printed page number, is the existing ordering authority.",
+        "An unnumbered leaf already keeps its capture position and opening phrase.",
+        "Two distinct leaves with the same printed number must both remain, in capture sequence order.",
+        "Both repeated-number leaves need their opening phrases in the manifest.",
+        "The new turn adds one exception; the rest of the protocol remains unchanged."
+      ],
+      "required_canonical_objects": [
+        {
+          "object_id": "D04-O1",
+          "identity": "The existing transcription batch handoff protocol, D04-N01, remains one coherent home and gains the repeated-page-number exception.",
+          "facts": [
+            "retain both repeated-number leaves",
+            "capture sequence governs order",
+            "record both opening phrases",
+            "unnumbered leaf position and opening phrase retained",
+            "manifest text and review sheet stay associated"
+          ],
+          "attribution": "The repeated-number exception comes from D04 original_turn; capture-order and unnumbered-leaf rules come from the prior protocol."
+        }
+      ],
+      "acceptable_grouped_variants": [
+        "Add the exception to the existing exceptions section or to the relevant manifest and order guidance within D04-N01.",
+        "Revise the opening-phrase field description within the same note to cover unnumbered and repeated-number leaves.",
+        "Internal headings, units or table formatting may change if all operative content and the single workflow remain intact."
+      ],
+      "unacceptable_outcomes": [
+        "Split the manifest fields, stages, blank-leaf rules or new exception into separate notes merely because the protocol is long.",
+        "Create one canonical object per printed page number, leaf or manifest row.",
+        "Treat duplicate printed numbers as duplicate leaves to remove, or order the batch by printed number.",
+        "Drop unrelated operative checks from the existing protocol while adding the exception.",
+        "Move the exception into the reading-session format note."
+      ],
+      "first_home_success": "First proposed compiled destination is D04-N01 or its resolved canonical identity, after reading the existing protocol; length does not trigger splitting.",
+      "required_later_facts": [
+        "Keep both leaves marked page 18 and the unnumbered leaf.",
+        "Order them by capture sequence, preserving the unnumbered leaf in its capture position.",
+        "Record each repeated-number leaf opening phrase so the next shift can distinguish them.",
+        "Record the unnumbered leaf opening phrase and keep the manifest with the corresponding text and review state."
+      ],
+      "allowed_omissions_later": [
+        "Edition fields, unreadable passages and punctuation sessions need not be recited."
+      ],
+      "wrong_attribution_examples": [
+        "Claim capture sequence ordering began only with this rehearsal.",
+        "Invent a rule that repeated printed numbers always indicate a scanning error."
+      ]
+    }
+  ],
+  "judgment_output_shape": {
+    "item_id": "opaque case-arm workflow item ID, never an arm name",
+    "case_id": "D01|D02|D03|D04",
+    "first_home": {
+      "outcome": "pass|fail|unmeasured",
+      "evidence_refs": [
+        "trace sequence or raw artifact reference"
+      ],
+      "reason": "brief evidence-backed reason"
+    },
+    "destination_fitness": {
+      "outcome": "pass|fail|unmeasured",
+      "evidence_refs": [
+        "full-body readback reference"
+      ],
+      "reason": "brief reason"
+    },
+    "canonical_objects": {
+      "outcome": "pass|fail|unmeasured",
+      "required_present": [
+        "object IDs"
+      ],
+      "missing": [
+        "object IDs"
+      ],
+      "unjustified_extra_objects": [
+        "observed IDs or paths"
+      ]
+    },
+    "attribution": {
+      "outcome": "pass|fail|unmeasured",
+      "evidence_refs": [
+        "supported provenance reference"
+      ],
+      "reason": "brief reason"
+    },
+    "later_usefulness": {
+      "grade": "useful|partial|not_useful|ungraded",
+      "required_facts_supported": [
+        "case key fact numbers"
+      ],
+      "required_facts_missing_or_wrong": [
+        "case key fact numbers"
+      ],
+      "evidence_refs": [
+        "later trace reference"
+      ]
+    },
+    "unjudgeable": "null or reason; an unjudgeable item is a failed item for completion counts, never an inferred verdict",
+    "overall_semantic": "pass only when destination_fitness, canonical_objects and attribution pass; fail when any fails; otherwise unmeasured. first_home is reported separately so a successful repair cannot erase an initial unsuitable choice."
+  }
+}

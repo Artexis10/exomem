@@ -17,7 +17,7 @@ from typing import Any
 
 from . import note_types, semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 8
+AUTHORING_CONTRACT_VERSION = 9
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 STATUS_CLASSIFICATION_RULE = (
@@ -345,8 +345,8 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
     }
     minimum_semantic_unit = {
         "rule": (
-            "Every new, replaced, or activated compiled note in the live class needs at least one "
-            "valid, non-empty semantic unit."
+            "Live compiled creates, replacements and transitions to live need a valid "
+            "nonempty semantic unit; pending pages may remain unit-free."
         ),
         "form_rule": (
             "Either compact or rich form satisfies the minimum; compact is preferred, "
@@ -408,6 +408,10 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         ),
     }
     routes = {
+        "destination_fitness": (
+            "Choose homes by future use and accumulated content, not mentions or broad scope. "
+            "Keep coherent long notes; reuse or create a home for independent material."
+        ),
         "new_compiled_note": "create_note",
         "replacement": "supersede_note",
         "single_semantic_unit": "observe_memory",
@@ -519,19 +523,19 @@ def render_tool_guidance(
     missing = findings["missing_semantic_unit"]
     # observe_memory takes the unit's fields separately and edit_memory takes
     # operations, so neither needs the selection rule or the worked example
-    # that a whole-page writer does; both keep the minimum, the lifecycle and
-    # final-unit rules, and the refusal remediation.
+    # that a whole-page writer does. The minimum rule also states the lifecycle,
+    # so carry it once beside the final-unit rule and refusal remediation.
     whole_page = tool in {"remember", "replace_memory"}
     guidance = " ".join(
         part
         for part in (
+            routes["destination_fitness"],
             minimum["rule"],
-            minimum["lifecycle_rule"],
             minimum["final_unit_rule"],
             rich["correction_rule"],
-            f"Under `{compact['canonical_section']}`, write `{compact['syntax']}` with one "
-            f"primary {compact['category']['vocabulary']}-vocabulary category; "
-            f"rich form is `{rich['heading_syntax']}` with a substantive body.",
+            f"Compact: `{compact['canonical_section']}` then `{compact['syntax']}`; "
+            f"one {compact['category']['vocabulary']} category. "
+            f"Rich: `{rich['heading_syntax']}`.",
             portable["short_selection_rule"] if whole_page else "",
             f"Role example: {portable['examples']['role']}" if whole_page else "",
             f"`missing_semantic_unit`: {missing['compact_remediation']}",
@@ -635,6 +639,7 @@ def render_concise(
         f"<!-- exomem-semantic-authoring:v{contract.version} "
         f"{contract.content_digest} -->\n"
         "## Semantic authoring contract\n\n"
+        f"{routes['destination_fitness']}\n\n"
         f"{minimum['rule']} {minimum['form_rule']}\n\n"
         "Semantic roles:\n\n"
         f"- Category: {roles['category']}\n"

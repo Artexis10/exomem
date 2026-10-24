@@ -57,6 +57,53 @@ def test_unsafe_database_ace_is_refused_before_sqlite_or_pickle(
     assert called is False
 
 
+def test_unsafe_initialization_lock_ace_is_refused_before_sqlite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import mutation_lock, writer_lease
+    from exomem.writer_lease import IdempotencyStore
+
+    database = tmp_path / "state" / "idempotency.sqlite"
+    IdempotencyStore(database)
+    lock = database.with_name(f"{database.name}.init.lock")
+    mutation_lock._windows_apply_dacl_sddl(lock, "D:P(A;OICI;FA;;;WD)")
+
+    def sqlite_open(*_args: object, **_kwargs: object):
+        pytest.fail("unsafe initialization lock reached sqlite")
+
+    monkeypatch.setattr(writer_lease.sqlite3, "connect", sqlite_open)
+    blocked = IdempotencyStore(database)
+
+    with pytest.raises(RuntimeError, match="unsafe Windows DACL"):
+        blocked._connect()
+
+
+def test_reparse_initialization_lock_is_refused_before_sqlite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import writer_lease
+    from exomem.writer_lease import IdempotencyStore
+
+    database = tmp_path / "state" / "idempotency.sqlite"
+    IdempotencyStore(database)
+    lock = database.with_name(f"{database.name}.init.lock")
+    outside = tmp_path / "outside.lock"
+    outside.write_bytes(b"\0")
+    lock.unlink()
+    try:
+        lock.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"Windows symlink creation is unavailable: {error}")
+
+    def sqlite_open(*_args: object, **_kwargs: object):
+        pytest.fail("reparse initialization lock reached sqlite")
+
+    monkeypatch.setattr(writer_lease.sqlite3, "connect", sqlite_open)
+
+    with pytest.raises(OSError, match="reparse"):
+        IdempotencyStore(database)
+
+
 def test_reparse_runtime_directory_is_refused_before_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from exomem import writer_lease
     from exomem.writer_lease import IdempotencyStore

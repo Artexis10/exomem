@@ -85,10 +85,10 @@ def _prepare_semantic_catalog(root: Path, paths: list[Path]) -> None:
 
 
 @pytest.mark.parametrize("result_level", ["unit", "mixed"])
-def test_public_cold_and_warm_recall_keeps_unit_identity_and_bounds_unit_only_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_level: str,
+def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_level: str, warm_managed_cell,
 ) -> None:
-    """Warm unit and mixed calls preserve identity; unit-only calls bound canonical parent reads."""
+    """Managed unit and mixed calls preserve identity and bound canonical parent reads."""
     from test_governance_egress import _reset_caches, write_rule, write_scope
 
     from exomem import bm25, memory_refs, semantic_units
@@ -109,7 +109,7 @@ def test_public_cold_and_warm_recall_keeps_unit_identity_and_bounds_unit_only_re
     write_scope(tmp_path, paths="Notes/hidden-gauges.md", name="Restricted gauges")
     write_rule(tmp_path, ceiling=0)
     _reset_caches()
-    _prepare_semantic_catalog(tmp_path, paths)
+    warm_managed_cell(tmp_path)
     canonical = {
         unit.unit_ref: unit for path in paths
         for unit in semantic_index.build_parent_index_state(tmp_path, path).document.units
@@ -150,12 +150,8 @@ def test_public_cold_and_warm_recall_keeps_unit_identity_and_bounds_unit_only_re
             hits = response["hits"] if isinstance(response, dict) else response
             assert hits
             parents = {hit.get("parent_path", hit.get("path")) for hit in hits}
-            # The unit-only response owns this proof. Whole mixed hydration
-            # remains unmet under task 6.14's page-lane work and task 6.6 acceptance.
-            if result_level == "unit":
-                overfetch = egress.pool_limit(3) - len(hits)
-                assert len(set(reads) - parents) <= overfetch
-                assert len(reads) <= len(parents) + overfetch
+            # The hit pool stays fixed when several hits share one parent.
+            assert len(reads) <= egress.pool_limit(3)
             for hit in hits:
                 if hit.get("result_type") == "semantic_unit":
                     expected = canonical[hit["unit_ref"]]
@@ -169,6 +165,79 @@ def test_public_cold_and_warm_recall_keeps_unit_identity_and_bounds_unit_only_re
         if who.audience_id == "external":
             assert builds[0] == 1
             assert hidden.relative_to(tmp_path).as_posix() not in parents
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+@pytest.mark.parametrize("drop_first", [False, True])
+def test_managed_mixed_recall_bounds_reads_for_disjoint_page_and_unit_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell, mode: str, drop_first: bool,
+) -> None:
+    """Older matching units must not add reads beyond the frozen mixed hit pool."""
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal, request_scope
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    pages = []
+    for number in range(6):
+        pages.append(_write_page(
+            tmp_path, f"emberlamp-{number}", body="Routine maintenance stays documented.",
+        ))
+    older = _write_page(
+        tmp_path, "older-decisions", updated="2026-06-01",
+        body="\n".join(_rich(
+            kind="decision", category="config", anchor=f"calibration-{number}",
+            content=f"Emberlamp calibration keeps the reading stable {number}.",
+        ) for number in range(3)),
+    )
+    write_scope(tmp_path)
+    write_rule(tmp_path, ceiling=0)
+    _reset_caches()
+    warm_managed_cell(tmp_path)
+    find_module.reset_page_and_result_caches()
+    raw_get = find_module._CACHE.get
+    reads: list[str] = []
+    dropped: list[str] = []
+
+    def counted_get(path, root):
+        reads.append(path.relative_to(root).as_posix())
+        if drop_first and not dropped and path in pages:
+            path.unlink()
+            dropped.append(path.relative_to(root).as_posix())
+        return raw_get(path, root)
+
+    monkeypatch.setattr(find_module._CACHE, "get", counted_get)
+    with request_scope(owner_principal()):
+        response = commands.op_find(
+            tmp_path, query="emberlamp", mode=mode, scope="kb-only",
+            graph=False, rerank=False, result_level="mixed", limit=3, explain=True,
+        )
+    hits = response["hits"] if isinstance(response, dict) else response
+    assert any(
+        hit.get("result_type") == "semantic_unit"
+        and hit["parent_path"] == older.relative_to(tmp_path).as_posix()
+        for hit in hits
+    ), (response, reads)
+    assert len(reads) <= egress.pool_limit(3), reads
+    if mode == "keyword":
+        # Three page slots and three units share four canonical parents. A
+        # missing selected page must not bring a fourth page into those slots.
+        assert set(reads) == {
+            page.relative_to(tmp_path).as_posix() for page in pages[-3:] + [older]
+        }
+        ranks = {page.relative_to(tmp_path).as_posix(): rank
+                 for rank, page in enumerate(reversed(pages), start=1)}
+        for hit in hits:
+            if hit.get("result_type") == "page":
+                explanation = hit["ranking_explanation"]
+                assert explanation["lanes"]["keyword"]["rank"] == ranks[hit["path"]]
+                assert {"stage": "keyword", "rank": ranks[hit["path"]]} in explanation["ordering_path"]
+    if drop_first:
+        assert len(dropped) == 1
+        assert all(hit.get("path") != dropped[0] for hit in hits)
 
 
 @pytest.mark.parametrize("coverage", [

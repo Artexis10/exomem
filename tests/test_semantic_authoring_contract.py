@@ -23,8 +23,8 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    8,
-    "sha256:37ea3562675c3a811d1aa6ba5c895c7a2232644d38a9dfae49c4f86f747934b2",
+    9,
+    "sha256:5c51c091751dfca2645a71fa607dd16eb23a6a68b16fb55b37df18c9503f6949",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -71,7 +71,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 8
+    assert contract["version"] == 9
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -232,7 +232,9 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     assert route["args"]["subject"] == "statuses"
     assert route["args"]["operation"] == "inspect"
 
-    assert contract["routes"] == {
+    routes = dict(contract["routes"])
+    assert routes.pop("destination_fitness")
+    assert routes == {
         "new_compiled_note": "create_note",
         "replacement": "supersede_note",
         "single_semantic_unit": "observe_memory",
@@ -405,7 +407,6 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         "`observation`",
         "`## <Governed Kind>`",
         "next non-fenced heading at level N or shallower",
-        "one valid, non-empty semantic unit",
         "`missing_semantic_unit`",
         "`empty_rich_unit`",
         "`create_note`",
@@ -416,6 +417,7 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
     ):
         assert required in concise
     for exact_rule in (
+        contract.minimum_semantic_unit["rule"],
         contract.compact["parser_compatibility"],
         contract.compact["canonical_authoring"],
         contract.compact["suffix_parse_rule"],
@@ -508,6 +510,7 @@ def test_tool_write_guidance_is_bounded_and_routes_to_full_bootstrap() -> None:
         # Bounded: identity + short selection rule + exactly one compact example +
         # an explicit route to the full bootstrap projection.
         assert semantic_authoring.contract_identity() in guidance
+        assert contract.routes["destination_fitness"] in guidance
         # Whole-page writers carry the selection rule and one example; the
         # single-unit and operation tools carry the minimum and the remediation.
         whole_page = tool in {"remember", "replace_memory"}

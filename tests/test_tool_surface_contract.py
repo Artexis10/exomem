@@ -108,9 +108,8 @@ def test_registry_content_and_operation_guidance_covers_every_write_shape() -> N
         for needle in (
             "## Observations",
             compact,
-            "open-vocabulary category",
-            "at least one valid, non-empty semantic unit",
-            "rich form",
+            semantic_authoring.AUTHORING_CONTRACT.minimum_semantic_unit["rule"],
+            semantic_authoring.AUTHORING_CONTRACT.rich["heading_syntax"],
         ):
             assert needle in command.description, (name, needle)
         content_help = _param(command, "content").help

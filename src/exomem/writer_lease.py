@@ -112,6 +112,7 @@ _NARROW_BOUNDARY_COMMANDS = frozenset(
 _EXPLICIT_RETRY_TTL_SECONDS = 24 * 60 * 60.0
 _IDEMPOTENCY_WAIT_SECONDS = 5.0
 _IDEMPOTENCY_POLL_INTERVAL_SECONDS = 0.025
+_IDEMPOTENCY_SQLITE_TIMEOUT_SECONDS = 10.0
 _COMMITTED_FAILURE_CODE = "BATCH_CLEANUP_INCOMPLETE"
 _COMMITTED_FAILURE_MESSAGE = "The batch workspace cleanup is incomplete."
 _COMMITTED_FAILURE_REMEDIATION = (
@@ -2761,6 +2762,86 @@ def _probe_owner_liveness(state_dir: Path, owner: str) -> bool:
     return False
 
 
+@contextmanager
+def _idempotency_initialization_guard(path: Path) -> Iterator[None]:
+    """Serialize private runtime preparation and SQLite schema initialization."""
+    configured_root = path.parent.expanduser().absolute()
+    if os.name == "nt":
+        mutation_lock.prepare_windows_private_state_root(configured_root)
+        root = configured_root
+    else:
+        configured_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        info = configured_root.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise RuntimeError("idempotency runtime state path cannot be upgraded safely")
+        # Resolve ancestor aliases without hiding an untrusted leaf symlink.
+        root = configured_root.parent.resolve() / configured_root.name
+    directory = mutation_lock._acquire_trusted_runtime_root(root)
+    try:
+        if os.name != "nt":
+            assert directory.fd is not None
+            os.fchmod(directory.fd, 0o700)
+
+        def namespace_unchanged() -> bool:
+            if not mutation_lock._same_directory_path(directory):
+                return False
+            if os.name == "nt":
+                return True
+            assert directory.fd is not None
+            return os.path.samestat(configured_root.lstat(), os.fstat(directory.fd))
+
+        if not namespace_unchanged():
+            raise OSError("idempotency initialization directory changed")
+        # This persistent protocol lock covers SQLite creation, privacy checks, and migration together.
+        lock = path.with_name(f"{path.name}.init.lock")
+        descriptor = mutation_lock._open_owned_runtime_lock_file(directory, lock.name)
+        try:
+            handle = os.fdopen(descriptor, "a+b")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with handle:
+            if os.name == "nt":
+                import msvcrt
+
+                mutation_lock._validate_windows_runtime_entry(
+                    directory.path / lock.name,
+                    directory=False,
+                    sid=mutation_lock._windows_current_user_sid(),
+                    handle=msvcrt.get_osfhandle(handle.fileno()),
+                )
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if not namespace_unchanged() or not mutation_lock._same_file_entry(
+                directory, lock.name, handle.fileno()
+            ):
+                raise OSError("idempotency initialization namespace changed before acquisition")
+            locked = mutation_lock._acquire_os_lock_until(
+                handle,
+                time.monotonic() + _IDEMPOTENCY_SQLITE_TIMEOUT_SECONDS,
+                _IDEMPOTENCY_POLL_INTERVAL_SECONDS,
+            )
+            if not locked:
+                raise TimeoutError("idempotency initialization lock timed out")
+            try:
+                if not namespace_unchanged() or not mutation_lock._same_file_entry(
+                    directory, lock.name, handle.fileno()
+                ):
+                    raise OSError("idempotency initialization namespace changed during acquisition")
+                yield
+            finally:
+                mutation_lock._release_os_lock(handle)
+    finally:
+        directory.close()
+
+
 class _ClosingConnection(sqlite3.Connection):
     """A connection whose `with` block commits or rolls back, then closes.
 
@@ -2822,80 +2903,80 @@ class IdempotencyStore:
             "limit_reached": False,
         }
         self.owner_id: str | None = None
-        state_dir_existed = path.parent.exists()
-        owners_dir = _owner_lock_path(path.parent, "bootstrap").parent
-        owners_dir_existed = owners_dir.exists()
-        private_paths = (
-            path,
-            path.with_name(f"{path.name}-wal"),
-            path.with_name(f"{path.name}-shm"),
-        )
-        preexisting_private_paths = {item for item in private_paths if item.exists()}
-        if os.name != "nt":
-            path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-            owners_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-            if not state_dir_existed:
-                os.chmod(path.parent, 0o700)
-            if not owners_dir_existed:
-                os.chmod(owners_dir, 0o700)
-        else:
-            from .mutation_lock import prepare_windows_idempotency_runtime_paths
-
-            prepare_windows_idempotency_runtime_paths(path.parent, owners_dir)
+        self._owner_lock_handle = None
+        if os.name == "nt":
+            mutation_lock.prepare_windows_idempotency_runtime_paths(
+                path.parent, _owner_lock_path(path.parent, "bootstrap").parent
+            )
         try:
-            self._harden_legacy_runtime_paths()
-            self._validate_existing_runtime_paths()
+            with _idempotency_initialization_guard(path):
+                owners_dir = _owner_lock_path(path.parent, "bootstrap").parent
+                owners_dir_existed = owners_dir.exists()
+                private_paths = (
+                    path,
+                    path.with_name(f"{path.name}-wal"),
+                    path.with_name(f"{path.name}-shm"),
+                )
+                preexisting_private_paths = {item for item in private_paths if item.exists()}
+                if os.name != "nt":
+                    owners_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+                    if not owners_dir_existed:
+                        os.chmod(owners_dir, 0o700)
+                self._harden_legacy_runtime_paths()
+                self._validate_existing_runtime_paths()
+                # Kept only to recognize rows written by the preceding store-lifetime
+                # owner protocol. New executions use an attempt lock below and release
+                # it on every exit.
+                owner_id = _generate_owner_id()
+                self.owner_id = owner_id
+                # Held for this store's lifetime (process lifetime, in practice —
+                # stores are cached singletons keyed by vault+replica); never
+                # explicitly released. See `_probe_owner_liveness`.
+                self._owner_lock_handle = _acquire_own_owner_lock(self.state_dir, owner_id)
+                if self._owner_lock_handle is None:
+                    # Fail closed on the REGISTRATION side too: advertising an owner id
+                    # whose lock file could not be created/held would let any peer
+                    # probe it as dead and abandon a LIVE mutation. A NULL owner rides
+                    # the legacy grace path instead (abandoned only after
+                    # _IMPLICIT_RETRY_TTL_SECONDS), which cannot abandon a running
+                    # write inside its window.
+                    logger.warning(
+                        "idempotency owner lock unavailable; falling back to the "
+                        "legacy ownerless grace period for this store"
+                    )
+                    self.owner_id = None
+                with self._connect() as conn:
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS mutations ("
+                        "key TEXT PRIMARY KEY, digest TEXT NOT NULL, state TEXT NOT NULL, "
+                        "result BLOB, updated_at REAL NOT NULL)"
+                    )
+                    columns = {row[1] for row in conn.execute("PRAGMA table_info(mutations)").fetchall()}
+                    if "owner" not in columns:
+                        conn.execute("ALTER TABLE mutations ADD COLUMN owner TEXT")
+                    if "attempt_id" not in columns:
+                        conn.execute("ALTER TABLE mutations ADD COLUMN attempt_id TEXT")
+                    if "commit_token" not in columns:
+                        conn.execute("ALTER TABLE mutations ADD COLUMN commit_token TEXT")
+                    if "commit_secret" not in columns:
+                        conn.execute("ALTER TABLE mutations ADD COLUMN commit_secret BLOB")
+                if not path.exists():  # pragma: no cover - sqlite always creates the database
+                    raise RuntimeError("idempotency runtime database was not created")
+                if os.name != "nt":
+                    for item in private_paths:
+                        if item.exists() and item not in preexisting_private_paths:
+                            os.chmod(item, 0o600)
+                self._ensure_private_runtime_state()
         except RuntimeError as error:
             # Construction is also used by read/graph readiness paths. Keep
             # the unsafe runtime root inert there; every SQLite/claim use
             # below still fails closed before untrusted state is opened.
             self._runtime_state_error = error
             self.owner_id = None
-            self._owner_lock_handle = None
+            if self._owner_lock_handle is not None:
+                self._owner_lock_handle.close()
+                self._owner_lock_handle = None
             return
-        # Kept only to recognize rows written by the preceding store-lifetime
-        # owner protocol. New executions use an attempt lock below and release
-        # it on every exit.
-        owner_id = _generate_owner_id()
-        self.owner_id = owner_id
-        # Held for this store's lifetime (process lifetime, in practice —
-        # stores are cached singletons keyed by vault+replica); never
-        # explicitly released. See `_probe_owner_liveness`.
-        self._owner_lock_handle = _acquire_own_owner_lock(self.state_dir, owner_id)
-        if self._owner_lock_handle is None:
-            # Fail closed on the REGISTRATION side too: advertising an owner id
-            # whose lock file could not be created/held would let any peer
-            # probe it as dead and abandon a LIVE mutation. A NULL owner rides
-            # the legacy grace path instead (abandoned only after
-            # _IMPLICIT_RETRY_TTL_SECONDS), which cannot abandon a running
-            # write inside its window.
-            logger.warning(
-                "idempotency owner lock unavailable; falling back to the "
-                "legacy ownerless grace period for this store"
-            )
-            self.owner_id = None
-        with self._connect() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS mutations ("
-                "key TEXT PRIMARY KEY, digest TEXT NOT NULL, state TEXT NOT NULL, "
-                "result BLOB, updated_at REAL NOT NULL)"
-            )
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(mutations)").fetchall()}
-            if "owner" not in columns:
-                conn.execute("ALTER TABLE mutations ADD COLUMN owner TEXT")
-            if "attempt_id" not in columns:
-                conn.execute("ALTER TABLE mutations ADD COLUMN attempt_id TEXT")
-            if "commit_token" not in columns:
-                conn.execute("ALTER TABLE mutations ADD COLUMN commit_token TEXT")
-            if "commit_secret" not in columns:
-                conn.execute("ALTER TABLE mutations ADD COLUMN commit_secret BLOB")
-        if not path.exists():  # pragma: no cover - sqlite always creates the database
-            raise RuntimeError("idempotency runtime database was not created")
-        if os.name != "nt":
-            for item in private_paths:
-                if item.exists() and item not in preexisting_private_paths:
-                    os.chmod(item, 0o600)
-        self._ensure_private_runtime_state()
         self.start_sweep = self._sweep_dead_non_terminal_rows()
 
     def _sweep_dead_non_terminal_rows(self) -> dict[str, Any]:
@@ -3105,7 +3186,9 @@ class IdempotencyStore:
             self.path.with_name(f"{self.path.name}-shm"),
         )
         existed = {item for item in private_paths if item.exists()}
-        conn = sqlite3.connect(self.path, timeout=10, factory=_ClosingConnection)
+        conn = sqlite3.connect(
+            self.path, timeout=_IDEMPOTENCY_SQLITE_TIMEOUT_SECONDS, factory=_ClosingConnection
+        )
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             if os.name == "nt":
