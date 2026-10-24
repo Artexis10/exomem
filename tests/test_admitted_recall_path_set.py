@@ -1,15 +1,17 @@
-"""The admitted recall path set is selected once per published catalogue snapshot.
+"""The admitted recall rows are selected once per published catalogue snapshot.
 
 A request that recalls under the admitted catalogue used to select every
-in-scope path from the sidecar on each call (1 to 6 s on a large vault under
-load). The set is now cached per snapshot, so these tests pin what that cache
-must never change: the set equals a fresh selection, a policy or row change
-reads a new set, and concurrent requests at one snapshot select once.
+in-scope path, and the resolver build every path with its title, from the
+sidecar on each call (1 to 8 s on a large vault under load). Both now read one
+row set cached per snapshot, so these tests pin what that cache must never
+change: the rows equal a fresh selection, a policy, title or row change reads
+new rows, and concurrent requests at one snapshot select once.
 """
 
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -30,6 +32,21 @@ def _warm(vault: Path) -> lexstore.LexicalStore:
     store = lexstore.get_store(vault)
     assert store.rebuild_atomic() is True
     return store
+
+
+def _fresh_rows(store: lexstore.LexicalStore, scope: str) -> list[tuple[str, str | None]]:
+    """The scope's admitted `(path, title)` rows read straight from the sidecar."""
+    column = "in_vault" if scope == "vault" else "in_kb"
+    conn = sqlite3.connect(store.path)
+    try:
+        return [
+            (path, title)
+            for path, title in conn.execute(
+                f"SELECT path, title FROM pages WHERE {column} = 1 ORDER BY path"
+            )
+        ]
+    finally:
+        conn.close()
 
 
 def _count_selects(monkeypatch: pytest.MonkeyPatch, *, hold: float = 0.0) -> list[int]:
@@ -63,8 +80,7 @@ def test_cached_set_equals_a_fresh_selection_and_is_selected_once(
         assert len(selects) - selected == 1
         assert again is first
 
-        fresh = {path for path, _title in store.recall_resolver_entries(scope, checkpoint)}
-        assert first == fresh
+        assert first == {path for path, _title in _fresh_rows(store, scope)}
 
 
 def test_policy_change_never_serves_the_older_set(
@@ -109,7 +125,62 @@ def test_a_published_row_change_reads_a_new_set(vault: Path) -> None:
 
     assert after != before
     assert rel not in published
-    assert published == {path for path, _title in store.recall_resolver_entries("vault", after)}
+    assert published == {path for path, _title in _fresh_rows(store, "vault")}
+
+
+def test_resolver_entries_are_selected_once_and_share_the_path_set_selection(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _warm(vault)
+    checkpoint = store.published_recall_checkpoint("vault")
+    selects = _count_selects(monkeypatch)
+
+    paths = store.recall_admitted_paths("vault", checkpoint)
+    first = store.recall_resolver_entries("vault", checkpoint)
+    again = store.recall_resolver_entries("vault", checkpoint)
+
+    assert len(selects) == 1, "the path set and the entries are one selection"
+    assert first == again == _fresh_rows(store, "vault")
+    assert paths == {path for path, _title in first}
+    first.clear()
+    assert store.recall_resolver_entries("vault", checkpoint) == again, (
+        "a caller emptying its copy must not change the next caller's entries"
+    )
+
+
+def test_rebuilding_the_resolver_at_one_snapshot_selects_no_entries(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The workflow: the resolver is rebuilt, as after a correctness eviction."""
+    _warm(vault)
+    selects = _count_selects(monkeypatch)
+
+    first = find_module.recall_resolver_snapshot(vault)
+    after_first = len(selects)
+    find_module._RECALL_RESOLVER_CACHE.clear()
+    second = find_module.recall_resolver_snapshot(vault)
+
+    assert after_first == 1, "the first build selects the admitted entries"
+    assert len(selects) == after_first, "the rebuild reuses them"
+    assert second.full_paths == first.full_paths
+
+
+def test_a_title_change_at_the_same_checkpoint_reads_fresh_entries(vault: Path) -> None:
+    store = _warm(vault)
+    checkpoint = store.published_recall_checkpoint("vault")
+    before = store.recall_resolver_entries("vault", checkpoint)
+    path = before[0][0]
+
+    conn = sqlite3.connect(store.path)
+    try:
+        with conn:
+            conn.execute("UPDATE pages SET title = ? WHERE path = ?", ("Retitled once", path))
+    finally:
+        conn.close()
+    after = store.recall_resolver_entries("vault", checkpoint)
+
+    assert dict(after)[path] == "Retitled once"
+    assert after == _fresh_rows(store, "vault")
 
 
 def test_concurrent_requests_at_a_new_snapshot_select_once(

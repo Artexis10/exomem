@@ -7894,7 +7894,7 @@ def unload_ram_caches(
         # it stale; only a caller handing memory back drops it.
         from . import lexstore
 
-        lexstore.release_admitted_recall_paths()
+        lexstore.release_admitted_recall_rows()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()

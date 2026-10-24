@@ -1950,13 +1950,13 @@ def _mark_active_repair_phase(vault_root: Path, phase: str) -> None:
             _set_repair_progress(key, phase)
 
 
-def release_admitted_recall_paths() -> None:
-    """Hand back every store's admitted recall path sets; a miss selects them again."""
+def release_admitted_recall_rows() -> None:
+    """Hand back every store's admitted recall rows; a miss selects them again."""
     with _STORES_LOCK:
         stores = tuple(_STORES.values())
     for store in stores:
         with store._term_frequency_cache_lock:
-            store._admitted_recall_paths.clear()
+            store._admitted_recall_rows.clear()
 
 
 def clear_stores() -> None:
@@ -2451,9 +2451,9 @@ def _term_units(units) -> list[list[object]]:
 _TERM_FREQUENCY_CACHE_MAX = 50_000
 #: Admitted corpora retained per store: one per distinct admitted page set.
 _ADMITTED_STATISTICS_MAX = 4
-#: Admitted recall path sets retained per store: both scopes at the current
+#: Admitted recall row sets retained per store: both scopes at the current
 #: catalogue revision, and the same two at the one a request may still pin.
-_ADMITTED_RECALL_PATHS_MAX = 4
+_ADMITTED_RECALL_ROWS_MAX = 4
 #: The closed reason logged when a request configured for catalogue ranking
 #: finds a withheld page row in its snapshot, and so ranks on admission.
 CATALOGUE_RANKING_CONTRACT_VIOLATION = "catalogue_ranking_withheld_row"
@@ -2465,6 +2465,14 @@ class _AdmittedStatisticsEntry:
     statistics: Any
     representatives: Mapping[int, str] | None = None
     occurrences: Mapping[str, tuple[tuple[int, str, str], ...]] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmittedRecallRows:
+    """One snapshot's admitted `(path, title)` rows and the path set they hold."""
+
+    entries: tuple[tuple[str, str | None], ...]
+    paths: frozenset[str]
 
 
 @dataclass
@@ -4029,10 +4037,10 @@ class LexicalStore:
         # SQL input check. Each entry holds one vocabulary-sized mapping.
         self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
         # (scope, catalogue snapshot generation) -> that snapshot's admitted
-        # recall path set, and the lock a miss holds while one request fills it.
-        # See `recall_admitted_paths`.
-        self._admitted_recall_paths: OrderedDict[tuple, frozenset[str]] = OrderedDict()
-        self._admitted_recall_path_fills: dict[tuple, threading.Lock] = {}
+        # recall rows, and the lock a miss holds while one request fills it.
+        # See `_admitted_recall_rows`.
+        self._admitted_recall_rows: OrderedDict[tuple, _AdmittedRecallRows] = OrderedDict()
+        self._admitted_recall_row_fills: dict[tuple, threading.Lock] = {}
 
     def _decline_rebuild(self, reason: str) -> bool:
         """Record one stable, content-free repair result and decline."""
@@ -9088,41 +9096,32 @@ class LexicalStore:
         that policy before any row receives its scope flag. The sidecar test
         pins the resulting `in_vault` row set against a fresh full policy walk.
         """
-        backend_name = backend()
-        if backend_name == "python":
-            return None
-        if self._failed:
-            return None
-        if not self.path.exists():
-            return None
-        try:
-            with self._query_connection() as conn:
-                if not self._recall_checkpoint_current(conn, scope, checkpoint):
-                    return None
-                col = "in_vault" if scope == "vault" else "in_kb"
-                with call_spans.span("lexical.resolver_entries", {}) as measured:
-                    rows = conn.execute(
-                        f"SELECT path, title FROM pages WHERE {col} = 1 ORDER BY path"
-                    ).fetchall()
-                    measured["rows"] = len(rows)
-                return [(str(path), title) for path, title in rows]
-        except sqlite3.Error as error:
-            self._catalog_readiness_error(error, backend_name)
-            return None
+        rows = self._admitted_recall_rows_for(scope, checkpoint)
+        return None if rows is None else list(rows.entries)
 
     def recall_admitted_paths(
         self, scope: str, checkpoint: Any | None
     ) -> frozenset[str] | None:
         """The admitted recall path set of the sidecar `checkpoint` names, or None.
 
-        Same refusal as `recall_resolver_entries`, proven on every call. The
-        path set then comes from a cache keyed by the snapshot generation
+        Same refusal as `recall_resolver_entries`; both read one cached row set.
+        """
+        rows = self._admitted_recall_rows_for(scope, checkpoint)
+        return None if rows is None else rows.paths
+
+    def _admitted_recall_rows_for(
+        self, scope: str, checkpoint: Any | None
+    ) -> _AdmittedRecallRows | None:
+        """The admitted rows of the sidecar `checkpoint` names, selected once per snapshot.
+
+        The sidecar is proven on every call (`_recall_checkpoint_current`). The
+        rows then come from a cache keyed by the snapshot generation
         (`_snapshot_generation`): the catalogue revision that every row write
         rotates, the stored recall checkpoints with their policy and access
-        identity, and the catalogue identity. A policy, access or row change
-        therefore reads a different key and never an older set. The request
-        that misses selects the set once; concurrent requests at the same key
-        wait for that fill instead of each selecting every admitted path.
+        identity, and the catalogue identity. A policy, access, title or row
+        change therefore reads a different key and never an older set. The
+        request that misses selects the rows once; concurrent requests at the
+        same key wait for that fill instead of each selecting every admitted row.
         """
         backend_name = backend()
         if backend_name == "python" or self._failed or not self.path.exists():
@@ -9133,34 +9132,38 @@ class LexicalStore:
                     return None
                 key = (scope, *self._snapshot_generation(conn))
                 with self._term_frequency_cache_lock:
-                    paths = self._admitted_recall_paths.get(key)
-                    if paths is not None:
-                        self._admitted_recall_paths.move_to_end(key)
-                        return paths
-                    fill = self._admitted_recall_path_fills.setdefault(key, threading.Lock())
+                    rows = self._admitted_recall_rows.get(key)
+                    if rows is not None:
+                        self._admitted_recall_rows.move_to_end(key)
+                        return rows
+                    fill = self._admitted_recall_row_fills.setdefault(key, threading.Lock())
                 try:
                     with fill:
                         with self._term_frequency_cache_lock:
-                            paths = self._admitted_recall_paths.get(key)
-                        if paths is None:
+                            rows = self._admitted_recall_rows.get(key)
+                        if rows is None:
                             col = "in_vault" if scope == "vault" else "in_kb"
                             with call_spans.span("lexical.resolver_entries", {}) as measured:
-                                paths = frozenset(
-                                    row[0]
-                                    for row in conn.execute(
-                                        f"SELECT path FROM pages WHERE {col} = 1"
+                                entries = tuple(
+                                    (str(path), title)
+                                    for path, title in conn.execute(
+                                        f"SELECT path, title FROM pages WHERE {col} = 1 "
+                                        "ORDER BY path"
                                     )
                                 )
-                                measured["rows"] = len(paths)
+                                rows = _AdmittedRecallRows(
+                                    entries, frozenset(path for path, _title in entries)
+                                )
+                                measured["rows"] = len(entries)
                             with self._term_frequency_cache_lock:
-                                self._admitted_recall_paths[key] = paths
-                                while len(self._admitted_recall_paths) > _ADMITTED_RECALL_PATHS_MAX:
-                                    self._admitted_recall_paths.popitem(last=False)
-                        return paths
+                                self._admitted_recall_rows[key] = rows
+                                while len(self._admitted_recall_rows) > _ADMITTED_RECALL_ROWS_MAX:
+                                    self._admitted_recall_rows.popitem(last=False)
+                        return rows
                 finally:
                     with self._term_frequency_cache_lock:
-                        if self._admitted_recall_path_fills.get(key) is fill:
-                            del self._admitted_recall_path_fills[key]
+                        if self._admitted_recall_row_fills.get(key) is fill:
+                            del self._admitted_recall_row_fills[key]
         except sqlite3.Error as error:
             self._catalog_readiness_error(error, backend_name)
             return None
