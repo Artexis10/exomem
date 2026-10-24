@@ -43,7 +43,7 @@ _INDEX_HEAD_BYTES = 32 * 1024
 _MARKDOWN_SUFFIXES = (".md", ".markdown")
 # A rule may name only a key the registry already holds: these are the closed
 # `Resolution.status` values (see source_taxonomy) that mean it does.
-ACCEPTED_STATUSES = frozenset({"builtin", "alias", "registered"})
+ACCEPTED_STATUSES = frozenset({"builtin", "alias", "registered"})  # nosemgrep: ep-word-set -- `Resolution.status` values that source_taxonomy._resolve assigns.
 _UNRESOLVED_NOT_FOUND = "not-found"
 _UNRESOLVED_AMBIGUOUS = "ambiguous"
 

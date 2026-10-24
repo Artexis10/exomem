@@ -1551,6 +1551,7 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
             raise AdoptionRunError(
                 "ALREADY_APPLIED", "run already applied; applied Sources survive (append-only)"
             )
+        # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
         if phase not in ("selecting", "planned", "applying", "partial", "failed"):
             raise AdoptionRunError("INVALID_PHASE", f"cancel is not allowed from phase {phase!r}")
         run["cancel"] = {"at": _now_iso(), "why": (why or "").strip() or None}
