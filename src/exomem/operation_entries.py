@@ -11,6 +11,11 @@ entries.
 
 The module is data and pure functions with no import of the leaves or the
 command registry, so a leaf can import its tables from here.
+
+The selector and mode values are the closed selector of these two commands (their
+`Literal` signatures and the egress selector registry), not vocabulary that a vault
+or a customer defines. `assert_coverage` fails startup when the entries and that
+registry drift apart.
 """
 
 from __future__ import annotations

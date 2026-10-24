@@ -152,7 +152,7 @@ async def _call(client, name, arguments, *, key=None):
 def _kinds(tool) -> set[str]:
     return {
         branch["properties"]["kind"]["const"]
-        for branch in tool.inputSchema["properties"]["operation"]["oneOf"]
+        for branch in tool.input_schema["properties"]["operation"]["oneOf"]
     }
 
 
@@ -172,8 +172,8 @@ def test_nested_shape_lists_the_four_renderings_and_hides_the_grouped_names(buil
     assert _kinds(tools["read_plans"]) == READ_PLANS_KINDS
     assert _kinds(tools["change_plans"]) == CHANGE_PLANS_KINDS
     for name in RENDERED:
-        assert "operation" in tools[name].inputSchema["required"]
-        assert "$defs" not in tools[name].inputSchema
+        assert "operation" in tools[name].input_schema["required"]
+        assert "$defs" not in tools[name].input_schema
 
 
 def test_a_branch_declares_only_its_own_fields_and_forbids_the_rest(build) -> None:
@@ -183,7 +183,7 @@ def test_a_branch_declares_only_its_own_fields_and_forbids_the_rest(build) -> No
     tools = _session(build(), scenario)
     branches = {
         branch["properties"]["kind"]["const"]: branch
-        for branch in tools["change_records"].inputSchema["properties"]["operation"]["oneOf"]
+        for branch in tools["change_records"].input_schema["properties"]["operation"]["oneOf"]
     }
 
     assert set(branches["append"]["properties"]) >= {"kind", "collection", "item", "why"}
@@ -203,12 +203,12 @@ def test_annotations_follow_the_effect_of_each_tool(build) -> None:
 
     for name in ("read_records", "read_plans"):
         hints = annotations[name]
-        assert (hints.readOnlyHint, hints.destructiveHint, hints.idempotentHint) == (True, False, True)
-        assert hints.openWorldHint is False
+        assert (hints.read_only_hint, hints.destructive_hint, hints.idempotent_hint) == (True, False, True)
+        assert hints.open_world_hint is False
     for name in ("change_records", "change_plans"):
         hints = annotations[name]
-        assert (hints.readOnlyHint, hints.destructiveHint) == (False, True)
-        assert hints.openWorldHint is False
+        assert (hints.read_only_hint, hints.destructive_hint) == (False, True)
+        assert hints.open_world_hint is False
 
 
 def test_the_hidden_grouped_name_stays_callable_with_its_own_annotation(build) -> None:
@@ -221,7 +221,7 @@ def test_the_hidden_grouped_name_stays_callable_with_its_own_annotation(build) -
 
     grouped, described = _session(mcp, scenario)
 
-    assert grouped.annotations.readOnlyHint is False
+    assert grouped.annotations.read_only_hint is False
     assert "contract_version" in described
 
 
@@ -419,13 +419,13 @@ def test_each_shape_lists_its_tools_and_schemas(build) -> None:
         ("read_plans", READ_PLANS_KINDS),
         ("change_plans", CHANGE_PLANS_KINDS),
     ):
-        schema = flat[name].inputSchema
+        schema = flat[name].input_schema
         assert set(schema["properties"]["action"]["enum"]) == kinds
         assert "operation" not in schema["properties"]
         assert "action" in schema["required"]
-    assert "item" not in flat["read_records"].inputSchema["properties"]
-    assert "manifest_text" in flat["change_records"].inputSchema["properties"]
-    assert grouped["record_memory"].annotations.readOnlyHint is False
+    assert "item" not in flat["read_records"].input_schema["properties"]
+    assert "manifest_text" in flat["change_records"].input_schema["properties"]
+    assert grouped["record_memory"].annotations.read_only_hint is False
 
 
 def test_every_shape_resolves_one_logical_call_to_the_same_dispatch(build, seams) -> None:
