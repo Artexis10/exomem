@@ -35,6 +35,7 @@ from ..governance import (
 )
 from ..governance.decisions import Decision, decide
 from ..governance.principal import RequestPrincipal, effective_principal
+from ..planning_values import PlanningValues
 from . import tokens, types
 
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
@@ -212,6 +213,24 @@ _METADATA_SEAL = object()
 
 
 @dataclass(frozen=True, slots=True)
+class _InspectionState:
+    manifest: CanonicalSubject
+    contributors: tuple[CanonicalSubject, ...]
+    # None carries an inventory's unknown counts, never a numeric row claim.
+    snapshot: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _QueryHistoryState:
+    collection_id: str
+    manifest_path: str
+    profile: str
+    snapshot: str
+    history_hash: str
+    owners: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _CanonicalInspectionEvidence:
     """Producer provenance with an opaque handle identity, never a resource."""
 
@@ -220,12 +239,12 @@ class _CanonicalInspectionEvidence:
     store_identity: tuple[tuple[str, str], ...]
     principal: RequestPrincipal
     purpose: str | None
-    manifest: CanonicalSubject
-    contributors: tuple[CanonicalSubject, ...]
-    snapshot: str
+    selections: tuple[_InspectionState, ...]
     references: tuple[tuple[tuple[str | int, ...], str], ...]
     payload_hash: str
     _seal: object
+    inventory: bool = False
+    history: _QueryHistoryState | None = None
 
     def __reduce__(self) -> object:
         raise TypeError("canonical inspection evidence is process-local")
@@ -328,11 +347,35 @@ def _coverage_references(value, contributors):
                  if (receipt["leaf_id"], receipt["operation_id"], receipt["path"]) in owners)
 
 
+def _history_references(value, state):
+    from .. import record_governance
+
+    history = value.get("agent_history")
+    if history is None or not record_governance._valid_agent_history(history, semantic_profile=state.profile):
+        OperationAuthorization.refuse()
+    identities = [event["transition_id"] for event in history["events"]]
+    if len(set(identities)) != len(identities):
+        OperationAuthorization.refuse()
+    return tuple((("agent_history", "events", index, "canonical_path"), event["canonical_path"])
+                 for index, event in enumerate(history["events"])
+                 if (event["transition_id"], event["canonical_path"]) in state.owners)
+
+
 def _seal_metadata_projection(value, evidence):
     """Only the producer and trusted terminal transformations call this."""
     if type(evidence) is _CanonicalCoverageEvidence:
         # File receipt removal can shift indexes; only the original sealed owners receive new slots.
         references = _coverage_references(value, evidence.contributors)
+    elif evidence.history is not None:
+        # History slots follow authenticated transitions when terminal filtering shifts indexes.
+        references = _history_references(value, evidence.history)
+    elif evidence.inventory:
+        # Filtering file entries can shift canonical rows; identity, not position, owns each slot.
+        owners = {(state.manifest.collection_id, state.manifest.basis.subject.path)
+                  for state in evidence.selections}
+        references = tuple((("collections", index, "manifest_path"), row["manifest_path"])
+                           for index, row in enumerate(value["collections"])
+                           if (row.get("collection_id"), row.get("manifest_path")) in owners)
     else:
         references = tuple((location, path) for location, path in evidence.references
                            if _inspection_reference(value, location) == path)
@@ -880,7 +923,10 @@ class OperationAuthorization:
         if row is None:
             self.refuse()
         path, text, digest = row
-        manifest = collections.parse_manifest_bytes(self.root, path, text.encode())
+        # Build authorization inputs without re-entering it; field_plan still decides disclosure.
+        manifest = collections.parse_manifest_bytes(
+            self.root, path, text.encode(), planning_values=PlanningValues(self.root, server_side=True)
+        )
         if manifest.collection_id != cid or manifest.manifest_version.hash != digest:
             self.refuse()
         return manifest
@@ -1390,35 +1436,111 @@ class OperationAuthorization:
 
     def inspection_evidence(self, payload, handle, selection: _ReleaseSelection) -> _CanonicalInspectionEvidence:
         """Bind all released contributors, not merely the public capped list."""
-        from . import views
-
         locations = [("contract", "path"), ("contract", "storage", "source")]
         locations.extend(("source_versions", index, "path")
                          for index in range(len(payload["source_versions"])))
         references = tuple((location, value) for location in locations
                            if isinstance(value := _inspection_reference(payload, location), str))
+        state = _InspectionState(selection.manifest, selection.contributors, selection.snapshot)
+        return self._inspection_proof(handle, (state,), references)
+
+    def inventory_selection(self, cid: str):
+        """Count admitted metadata and retain its release proof in the same snapshot."""
+        try:
+            release = self.summary_release(cid)
+        except collections.CollectionError as error:
+            if error.code != RELEASE_LIMIT:
+                raise
+            return (None, None), self._unknown_inventory_state(cid)
+        selection = self.inspection_selection(cid)
+        if release is not None:
+            committed = release.released
+            held = sum(decision.level >= 6 for _subject, decision in release.held)
+        else:
+            committed = sum(isinstance(subject.row_id, int) for subject in selection.released)
+            held = sum(isinstance(subject.row_id, str) for subject in selection.released)
+        return (committed, held), _InspectionState(
+            selection.manifest, selection.contributors, selection.snapshot)
+
+    def _unknown_inventory_state(self, cid):
+        manifest, decision = self.summary_manifest(cid)
+        if decision.level < 6:
+            self.refuse()
+        return _InspectionState(manifest, (), None)
+
+    def inventory_evidence(self, payload, handle, selections):
+        """Certify canonical manifest slots; file entries retain ordinary byte validation."""
+        evidence = self._inspection_proof(handle, tuple(selections), (), inventory=True)
+        return _seal_metadata_projection(payload, evidence)
+
+    def query_history_evidence(self, payload, writer, manifest):
+        """Certify audit topology, never current file bytes or another query field."""
+        history = payload["agent_history"]
+        state = _QueryHistoryState(
+            manifest.collection_id, manifest.path, manifest.semantic_profile, payload["snapshot"],
+            hashlib.sha256(_json(history).encode()).hexdigest(),
+            tuple((event["transition_id"], event["canonical_path"]) for event in history["events"]),
+        )
+        evidence = self._inspection_proof(writer.handle, (), (), history=state)
+        return _seal_metadata_projection(payload, evidence)
+
+    def _inspection_proof(self, handle, selections, references, *, inventory=False, history=None):
+        from . import views
+
         return _CanonicalInspectionEvidence(
             self.root.resolve(), handle._inspection_identity, tuple(sorted(views.store_identity(self.conn).items())),
-            self.who, self.purpose, selection.manifest, selection.contributors,
-            selection.snapshot, references, "", _METADATA_SEAL,
+            self.who, self.purpose, selections, references, "", _METADATA_SEAL, inventory, history,
         )
 
-    def validate_inspection_projection(self, payload, handle):
+    def validate_inspection_projection(self, payload, handle, *, writer=None):
         """Fresh canonical admission; physical views cannot change this metadata."""
         evidence = _inspection_evidence(payload)
         if evidence is None:
             return None
         try:
             self._validate_metadata_binding(payload, handle, evidence)
-            cid = evidence.manifest.collection_id
-            selection = self.inspection_selection(cid)
-            contributors_match = (
-                selection.contributors == evidence.contributors
-                or frozenset(selection.contributors) == frozenset(evidence.contributors)
-            )
-            if (selection.manifest != evidence.manifest or not contributors_match
-                    or selection.snapshot != evidence.snapshot):
-                self.refuse()
+            if evidence.history is not None:
+                from .history import agent_history
+
+                state = evidence.history
+                manifest = writer._collection(state.collection_id, facade_profile=state.profile)[1]
+                if (manifest.path != state.manifest_path or payload.get("collection_id") != state.collection_id
+                        or payload.get("snapshot") != state.snapshot
+                        or hashlib.sha256(_json(agent_history(writer, manifest)).encode()).hexdigest()
+                        != state.history_hash):
+                    self.refuse()
+                _history_references(payload, state)
+            current = []
+            for state in evidence.selections:
+                cid = state.manifest.collection_id
+                if state.snapshot is None:
+                    if self._unknown_inventory_state(cid).manifest != state.manifest:
+                        self.refuse()
+                    current.append(state)
+                    continue
+                try:
+                    selection = self.inspection_selection(cid)
+                except collections.CollectionError as error:
+                    if not evidence.inventory or error.code != RELEASE_LIMIT:
+                        raise
+                    # A newly bounded census remains an inventory with unknown counts.
+                    limited = self._unknown_inventory_state(cid)
+                    if limited.manifest != state.manifest:
+                        self.refuse()
+                    for row in payload["collections"]:
+                        if row["collection_id"] == cid:
+                            row["committed"] = row["held"] = None
+                    current.append(limited)
+                    continue
+                contributors_match = (
+                    selection.contributors == state.contributors
+                    or frozenset(selection.contributors) == frozenset(state.contributors)
+                )
+                if (selection.manifest != state.manifest or not contributors_match
+                        or selection.snapshot != state.snapshot):
+                    self.refuse()
+                current.append(state)
+            evidence = replace(evidence, selections=tuple(current))
             return evidence
         except (ValueError, TypeError, KeyError, sqlite3.Error):
             self.refuse()
@@ -1587,7 +1709,7 @@ class OperationAuthorization:
                     # A retired page must not disclose a raw-history boundary through an empty matching header.
                     return Decision(0)
             if content is not None:
-                from . import views
+                from . import legacy_originals, views
 
                 cursor = self.conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
                 row = cursor.fetchone()
@@ -1607,7 +1729,9 @@ class OperationAuthorization:
                     root=self.root, cache=self.cache, operation=self,
                 )
                 if content != rendered.encode("utf-8"):
-                    return Decision(0)
+                    # Migration preserves initial source bytes before asynchronous stamping.
+                    if not legacy_originals.current_view_matches(self.conn, projection, content):
+                        return Decision(0)
                 parsed = find_corpus.parse_page(self.root / path, 0, self.root, content=content)
                 if parsed is None:
                     return Decision(0)

@@ -1,7 +1,7 @@
 """Vault-bound lifetime for admitted collection stores.
 
 Admission comes only from a trusted producer session (``admission``) that holds
-custody, fence and takeover authority; the preview flag supplies none. Release
+custody, fence and takeover authority. Release
 capabilities control serving; compatibility gates supported launchers.
 """
 
@@ -832,7 +832,11 @@ def route(command, vault_root, arguments):
 
             capability.require_records_summary(root)
             raise admission.enrollment_required()
-    elif command == "record_memory" and arguments.get("action") in {"describe", "inspect"} and selector is None:
+    elif selector is None and (
+        arguments.get("action") == "inspect"
+        or (command == "record_memory" and arguments.get("action") == "describe")
+    ):
+        # Both public store tools need the service writer for global inventory.
         server = None if proof.marker is None else _server(root)
         return server if server is not None and server.runtime is not None else None
     elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):
@@ -1139,10 +1143,25 @@ class StoreServer:
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)
-                    raise connection.busy(
+                    error = connection.busy(
                         "the collection store did not take this request within the mutation timeout")
+                    try:
+                        try:
+                            error.details["store_thread"] = self._queue_refusal_state()
+                        except Exception:
+                            # Optional diagnostics must not replace the original queue refusal.
+                            pass
+                        raise error
+                    finally:
+                        # Do not retain the request through an exception/traceback cycle.
+                        del error
                 self._condition.wait(remaining)
-        if not request.done.wait(max(0.0, completion_deadline - time.monotonic())):
+        # The worker owns accepted work's priority; a waiting caller must not park its bulk dependencies.
+        waiting = (foreground_priority.awaiting_bulk if foreground_priority._holds_a_boundary()
+                   else foreground_priority.outside_foreground)
+        with waiting():
+            completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
+        if not completed:
             # Accepted work survives the wait deadline so its outcome and replay remain owned.
             raise OpError(
                 "MUTATION_ACKNOWLEDGEMENT_PENDING",
@@ -1155,12 +1174,40 @@ class StoreServer:
             raise request.error
         return request.result
 
+    def _queue_refusal_state(self):
+        """Observe the worker at refusal, without paths, source text or frame locals."""
+        import sys
+
+        state = {"alive": self.thread.is_alive(), "queued_requests": len(self._requests),
+                 "stack_status": "unavailable", "frames": [], "frames_truncated": None}
+        frame = None
+        try:
+            frame = sys._current_frames().get(self.thread.ident)
+            if frame is None or not self.thread.is_alive():
+                return state
+            frames = []
+            # Bound the diagnostic walk; only shipped package symbols leave this process.
+            for _ in range(64):
+                if frame is None:
+                    break
+                module = frame.f_globals.get("__name__")
+                if isinstance(module, str) and module.startswith("exomem."):
+                    frames.append({"module": module, "function": frame.f_code.co_name,
+                                   "line": frame.f_lineno})
+                frame = frame.f_back
+            state.update(stack_status="captured", frames=frames, frames_truncated=frame is not None)
+        finally:
+            del frame
+        return state
+
     def _stopping(self):
         return _closed(self.manager)
 
     def _run(self):
         try:
             while not self._stopping():
+                # Routing demand can precede queue insertion; yield outside every checkout before checking the queue.
+                foreground_priority.yield_to_foreground()
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
@@ -1200,8 +1247,10 @@ class StoreServer:
             return False
         with self._condition:
             notified = any(not checked for checked in self._view_changes.values())
-        return notified or (self._ticks["views"] <= now and self._edit_back is not None
-                            and self._edit_back.wait(now) <= 0)
+        return notified or (self._ticks["views"] <= now and (
+            self._views_after is not None or self._views_passes == 1
+            or self._edit_back is not None and self._edit_back.wait(now) <= 0
+        ))
 
     def take_view_hints(self):
         """Transfer retained path/move/directory hints and the overflow flag to the store's census.
@@ -1497,7 +1546,7 @@ class StoreServer:
         policy and release checks once per slice, not once per window.
         """
         from ..governance import principal
-        from . import capability, edit_back
+        from . import capability, chain, edit_back
         from .preview import _mutate, preview_store
 
         if self.runtime is None or not capability.views_published(self.root):
@@ -1526,7 +1575,12 @@ class StoreServer:
                                                   if change[0] not in owned or change[1] is not None or change[2]], dirty)
 
                     def mutate(method, *args, **kwargs):
-                        return _mutate(self.root, method, *args, **kwargs)
+                        before = chain.recorded_head(writer.connection)
+                        result = _mutate(self.root, method, *args, **kwargs)
+                        if chain.recorded_head(writer.connection) != before:
+                            # A new canonical edit needs its own install and confirmation passes.
+                            self._views_after, self._views_passes = None, 0
+                        return result
 
                     started = time.monotonic()
                     wait = self._edit_back.run(writer, now=started, mutate=mutate, limit=VIEW_BATCH_PATHS)
@@ -1570,14 +1624,18 @@ class StoreServer:
                     self._views_after, self._views_passes = None, 0
                     return min(wait, IMPORT_IDLE_SECONDS)
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                result = _mutate(self.root, writer.reconcile_views, limit=VIEW_BATCH_PATHS,
-                                 after=self._views_after, pending_only=True,
-                                 missing_ready=writer.handle.census(self.root).missing_ready if views else None)
+                # Finish one path even under continuous demand; release its boundary before checking for readers.
+                for _ in range(VIEW_BATCH_PATHS):
+                    result = _mutate(self.root, writer.reconcile_views, limit=1,
+                                     after=self._views_after, pending_only=True,
+                                     missing_ready=writer.handle.census(self.root).missing_ready if views else None)
+                    self._views_after = result["next_path"]
+                    if self._views_after is None or self._aside() or self._stopping():
+                        break
         except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
             logger.warning("pending collection views could not publish; retrying later", exc_info=True)
             self._views_after = None
             return min(wait, IMPORT_RETRY_SECONDS)
-        self._views_after = result["next_path"]
         if self._views_after is None:
             self._views_passes += 1
         return min(wait, 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS)

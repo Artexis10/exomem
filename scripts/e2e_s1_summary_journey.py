@@ -23,6 +23,11 @@ A second summary collection derives nested October/November samples from protect
 archive members. Its independent reference includes both occurrences of the autumn
 fold. Restart and restore must reproduce the exact rows; a missing member blocks row
 reads during rebuild while complete daily rollups remain available.
+
+The last step (OpenSpec P3.6, the GA gate) runs `exomem collections migrate` on the adopted copy,
+which holds the live summary store beside file Records and Planning collections with items. It
+compares file-mode and store-mode answers, writes in store mode, edits an item view while the
+service is stopped, and restarts. The main vault stays in file mode for the rollback step.
 """
 
 from __future__ import annotations
@@ -778,6 +783,8 @@ class Journey:
     def __init__(self, args: argparse.Namespace) -> None:
         self.executable, self.python = Path(args.executable), Path(args.python)
         self.older_python = getattr(args, "older_python", "")
+        compatible = getattr(args, "compatible_python", "")
+        self.compatible_python = Path(compatible).expanduser().absolute() if compatible else None
         self.vault, self.work, self.home = Path(args.vault), Path(args.work), Path(args.home)
         self.work.mkdir(parents=True, exist_ok=True)
         # The outer E2E collector rescues this directory before scratch cleanup.
@@ -841,7 +848,7 @@ class Journey:
             self.timings[name] = round(time.monotonic() - started, 1)
 
     @contextlib.asynccontextmanager
-    async def service(self, label: str, *, measure_memory=False) -> AsyncIterator[Session]:
+    async def service(self, label: str, *, measure_memory=False, python=None) -> AsyncIterator[Session]:
         """The installed stdio service on this vault, holding the writer lease while it runs."""
         from fastmcp import Client
         from fastmcp.client.transports import StdioTransport
@@ -850,6 +857,8 @@ class Journey:
         observation = ((self.observer_log_root / label / (secrets.token_hex(16) + ".json"), secrets.token_hex(16))
                        if measure_memory else None)
         server = self.observed_server(label, "--transport", "stdio", process_observation=observation)
+        if python is not None:
+            server[0] = str(python)
         client = Client(
             StdioTransport(
                 command=server[0],
@@ -971,6 +980,7 @@ class Journey:
     def fork(self, label: str, vault: Path) -> Journey:
         child = Journey(argparse.Namespace(
             executable=str(self.executable), python=str(self.python), older_python=self.older_python,
+            compatible_python=self.compatible_python,
             vault=str(vault), work=str(self.work / label / "work"), home=str(self.work / label / "home"),
             request_timeout=self.timeout,
         ))
@@ -1614,8 +1624,8 @@ def adopt_fresh(journey: Journey) -> None:
     expect(result["status"] == "admitted", "copy adoption did not admit the store", result)
 
 
-async def copy_and_adopt(journey: Journey) -> None:
-    """Step 6: fresh-state adoption of a copy of the mixed vault."""
+async def copy_and_adopt(journey: Journey) -> Journey:
+    """Step 6: fresh-state adoption of a copy of the mixed vault; returns the adopted copy."""
     with journey.step("6. copy the stopped vault and adopt its published replica"):
         copied_root = journey.work / "copied-vault"
         shutil.copytree(journey.vault, copied_root)
@@ -1626,6 +1636,7 @@ async def copy_and_adopt(journey: Journey) -> None:
             await compare_samples(copied, service)
             await compare_queries(copied, service)
             await file_collections_unchanged(copied, service, "after fresh-root copy")
+    return copied
 
 
 async def unsupported_launcher(journey: Journey) -> None:
@@ -1695,6 +1706,334 @@ async def narrowing_rollback(journey: Journey) -> None:
         expect((journey.vault / STORE_FILES[0]).is_file(), "rollback removed the published replica")
 
 
+# --- the copy's file collections move into the store (OpenSpec P3.6, the GA gate) ---
+
+#: A file Records row with nested movements, appended before the move so that A has history.
+MOVED_RECORDS_ROW = {
+    "occurred_on": "2026-08-05", "title": "Pull with bands", "status": "partial",
+    "movements": [{"movement": "Row", "band": "red", "repetitions": "10"},
+                  {"movement": "Press", "band": "blue", "repetitions": "8"}],
+}
+#: A row appended and corrected after migration.
+NATIVE_RECORDS_ROW = {"occurred_on": "2026-08-06", "title": "Native row", "status": "partial"}
+NATIVE_RECORDS_KEY = "5a1f6c0e-3d2b-4b7a-9c18-2e4d7f6a8b90"
+#: The wire fields that say how a collection is stored, not what it holds. The store hashes its own
+#: rows and renders its own views, so file mode and store mode differ in these by design.
+STORAGE_IDENTITY = frozenset({
+    "generated_at", "snapshot", "source_versions", "item_version", "rendered", "expected_container_hash",
+    "projection",
+})
+#: Bound for the service's background view work (an item's view file, the start census adopting an edit).
+EDIT_BACK_WINDOW = 30.0
+
+
+def owner_report(result: subprocess.CompletedProcess[str], what: str) -> dict[str, Any]:
+    expect(result.returncode == 0, f"{what} failed",
+           {"returncode": result.returncode, "stdout": result.stdout[-1500:], "stderr": result.stderr[-1500:]})
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def marker_entries(journey: Journey) -> dict[str, dict[str, Any]]:
+    """The routing marker's collections by manifest path."""
+    marker = json.loads((journey.vault / STORE_FILES[1]).read_text(encoding="utf-8"))
+    return {entry["manifest_path"]: entry for entry in marker["collections"]}
+
+
+def without_storage_identity(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: without_storage_identity(item) for key, item in value.items() if key not in STORAGE_IDENTITY}
+    if isinstance(value, list):
+        return [without_storage_identity(item) for item in value]
+    return value
+
+
+async def file_answers(journey: Journey, service: Session) -> dict[str, Any]:
+    """What the service answers about A and B: the full Records inspection, two Records queries,
+    and a Planning query and view."""
+    records, planning = journey.file_collections["records"], journey.file_collections["planning"]
+    return {
+        "records inspect": await service.records(action="inspect", collection=records),
+        "records columns": await service.records(
+            action="query", collection=records, columns=["occurred_on", "title", "status", "movements"], limit=20),
+        "records view": await service.records(action="query", collection=records, view="completed-sessions"),
+        "planning query": await service.call("plan_memory", action="query", collection=planning,
+                                             limit=20, lifecycle="all"),
+        "planning view": await service.call("plan_memory", action="query", collection=planning, view="year"),
+    }
+
+
+async def store_state(journey: Journey, service: Session) -> dict[str, Any]:
+    """What a restart must keep: A's rows, title and agent history, B's priorities and the summary."""
+    records, planning = journey.file_collections["records"], journey.file_collections["planning"]
+    rows = await service.records(action="query", collection=records, columns=["occurred_on", "title", "status"],
+                                 limit=20)
+    inspected = await service.records(action="inspect", collection=records)
+    history = await service.records(action="query", collection=records, view="completed-sessions",
+                                    include_agent_history=True)
+    plan = await service.call("plan_memory", action="query", collection=planning, limit=20, lifecycle="all")
+    summary, _ = await paged(service, DAILY, "groups", 30)
+    return {
+        "records": sorted((row["record_id"], row["title"], row["status"]) for row in rows["rows"]),
+        "records title": inspected["contract"]["title"],
+        "records history": [(event["operation"], event["item_key"]) for event in history["agent_history"]["events"]],
+        "records transitions": [event["transition_id"] for event in history["agent_history"]["events"]],
+        "planning": sorted((row["plan_id"], row["priority"]) for row in plan["rows"]),
+        "summary": summary,
+    }
+
+
+async def migrate_copy(copied: Journey) -> dict[str, Any]:
+    """Step 7: the owner moves the adopted copy's file Records and Planning collections into its
+    live S1 store, then Records and Planning work in store mode. The copy looks like a real vault:
+    a live summary store beside file collections that hold items."""
+    records, planning = copied.file_collections["records"], copied.file_collections["planning"]
+    async with copied.service("before-migration") as service:
+        with copied.step("7. file-mode references for A, B and the summary query"):
+            migrated = await service.mutate("record_memory", action="append", collection=records, item=MOVED_RECORDS_ROW,
+                                           why="file Records row with nested movements")
+            references = await file_answers(copied, service)
+            history = await service.records(action="query", collection=records, view="completed-sessions",
+                                            include_agent_history=True)
+            legacy_transitions = [event["transition_id"] for event in history["agent_history"]["events"]]
+            expect(len(legacy_transitions) == 4, "the file reference lacks the create and three appends", history)
+            summary_before, _ = await paged(service, DAILY, "groups", 30)
+    digests = file_digests(copied)
+    routed_before = marker_entries(copied)
+
+    with copied.step("7. owner dry run: migratable, every proof check green"):
+        dry = owner_report(copied.owner_cli_after_stop("migrate", "--dry-run"), "migrate --dry-run")
+        proved = {row["path"]: row for row in dry["collections"]}
+        expect(
+            dry["verdict"] == "migratable" and dry["blocked"] == [] and dry["dry_run"] is True
+            and dry["coordinator"]["status"] == "supported"
+            and set(proved) == {records, planning}
+            and all(row["status"] == "ready" and row["proof"] == "passed" and row["legacy_audit_status"] == "ok"
+                    for row in proved.values())
+            and proved[records]["rows"] == 3 and proved[planning]["rows"] == len(PLAN_ITEMS)
+            and dry["store_collections"] == len(routed_before),
+            "the dry run did not report the copy migratable with every proof green", dry)
+        expect(file_digests(copied) == digests, "the dry run changed the file collections")
+
+    with copied.step("7. owner apply: copy-then-swap into the live store"):
+        applied = owner_report(copied.owner_cli_after_stop("migrate", "--apply"), "migrate --apply")
+        expect(applied.get("status") == "marker_admitted", "the migration did not admit the marker", applied)
+        routed = marker_entries(copied)
+        expect(
+            {path for path, entry in routed.items() if entry["authority"] == "store"}
+            == set(routed_before) | {records, planning}
+            and len({entry["store_id"] for entry in routed.values()}) == 1,
+            "the marker does not route A and B to the one store beside the summary collections", routed)
+        expect(file_digests(copied) == digests, "the migration rewrote the file collections")
+        after = owner_report(copied.owner_cli_after_stop("migrate", "--dry-run"), "migrate --dry-run after the move")
+        expect(after["verdict"] == "nothing_to_migrate" and after["store_collections"] == len(routed),
+               "the preflight does not report A and B as store collections", after)
+
+    async with copied.service("migrated") as service:
+        await same_answers(copied, service, references, summary_before)
+        imported = await store_mode_writes(copied, service, summary_before, migrated, legacy_transitions)
+    with copied.step("7. owner edits a migrated item's view while the service is stopped"):
+        view = copied.vault / imported["path"]
+        text = view.read_text(encoding="utf-8")
+        edited = text.replace(f"status: {MOVED_RECORDS_ROW['status']}", "status: aborted", 1)
+        expect(edited != text, "the item view has no status line to edit", text)
+        view.write_text(edited, encoding="utf-8")
+    async with copied.service("view-edited") as service:
+        settled = await view_edit_adopted(copied, service, imported, legacy_transitions)
+    async with copied.service("restarted") as service:
+        with copied.step("7. a further restart keeps every committed change"):
+            expect(await store_state(copied, service) == settled,
+                   "a restart lost or changed a committed change", settled)
+            expect(marker_entries(copied) == routed, "a restart changed the routing marker")
+    return settled
+
+
+async def compatible_rollback(copied: Journey, settled: dict[str, Any]) -> dict[str, Any]:
+    """Run the earlier wheel on the same migrated state, keeping SQLite and its original archives."""
+    if copied.compatible_python is None:
+        return {"status": "unverified", "reason": "no compatible application supplied"}
+    with copied.step("7. compatible application rollback keeps SQLite authority and archives"):
+        admission = copied.installed_helper("--compatible-launcher", copied.vault,
+                                           compatible_python=str(copied.compatible_python))
+        before = snapshot_state(copied, "before-compatible-rollback")
+        expect(before["legacy_originals"]["rows"] > 0, "the migrated fixture has no original-file archive")
+        expect(before["store"]["store_id"] == admission["fence"]["store_id"],
+               "the admitted fence names another store")
+        routed = marker_entries(copied)
+        records, planning = copied.file_collections["records"], copied.file_collections["planning"]
+        async with copied.service("compatible", python=copied.compatible_python) as service:
+            expect(await store_state(copied, service) == settled, "the earlier application changed existing answers")
+            rows = await service.records(action="query", collection=records,
+                                         columns=["occurred_on", "title", "status"], limit=20)
+            row = next(row for row in rows["rows"] if row["record_id"] == NATIVE_RECORDS_KEY)
+            title = row["title"] + " (rollback)"
+            changed = await service.mutate(
+                "record_memory", action="update", collection=records, item_key=NATIVE_RECORDS_KEY,
+                changes={"title": title}, expected_container_hash=rows["snapshot"],
+                expected_item_version=row["item_version"], why="verify the compatible application write")
+            plan = await service.call("plan_memory", action="query", collection=planning, limit=20, lifecycle="all")
+            item = next(key for key, values in PLAN_ITEMS.items() if "priority" in values)
+            row = next(row for row in plan["rows"] if row["plan_id"] == item)
+            priority = PLAN_ITEMS[item]["priority"]
+            expect(row["priority"] != priority, "the rollback fixture has no distinct Planning update")
+            await service.mutate(
+                "plan_memory", action="update", collection=planning, plan_id=item, changes={"priority": priority},
+                expected_container_hash=plan["snapshot"], expected_item_version=row["item_version"],
+                why="verify the compatible application Planning write")
+            expected = {**settled,
+                "records": [(key, title if key == NATIVE_RECORDS_KEY else value, status)
+                            for key, value, status in settled["records"]],
+                "planning": [(key, priority if key == item else value) for key, value in settled["planning"]],
+                "records history": [("update", NATIVE_RECORDS_KEY), *settled["records history"]],
+                "records transitions": [changed["audit_correlation"], *settled["records transitions"]]}
+
+            async def retained() -> bool:
+                return await store_state(copied, service) == expected
+
+            await until(retained, within=EDIT_BACK_WINDOW, what="both compatible writes and their published history")
+        async with copied.service("compatible-restarted", python=copied.compatible_python) as service:
+            expect(await store_state(copied, service) == expected, "the earlier application lost changes after restart")
+        after = snapshot_state(copied, "after-compatible-rollback")
+        expect(after["legacy_originals"] == before["legacy_originals"], "the earlier application changed exact archives")
+        expect(after["store"] == before["store"] and marker_entries(copied) == routed,
+               "the earlier application changed SQLite authority")
+        verified = copied.installed_helper("--compatible-launcher", copied.vault,
+                                          compatible_python=str(copied.compatible_python))
+        expect(verified == admission, "the earlier application, its admission or its fence changed")
+    return {"status": "passed", "application": admission, "archives": after["legacy_originals"],
+            "release_origin": "unverified; the caller must bind the wheel digest to the official release"}
+
+
+async def same_answers(journey: Journey, service: Session, references: dict[str, Any], summary_before: list) -> None:
+    import yaml
+
+    with journey.step("7. store mode answers as file mode did"):
+        answers = await file_answers(journey, service)
+        path = journey.file_collections["records"]
+        declared = yaml.safe_load((journey.vault / path).read_text().split("---\n")[1])
+        answers["records inspect"] = shared_inspection(
+            answers["records inspect"], store_id=marker_entries(journey)[path]["store_id"],
+            fields=list(declared["item_schema"]["fields"]))
+        for name, reference in references.items():
+            expect(without_storage_identity(answers[name]) == without_storage_identity(reference),
+                   f"{name} differs between file mode and store mode", {"file": reference, "store": answers[name]})
+        expect(answers["records inspect"].get("projection") is not None,
+               "Records inspection does not report the store's view projection", answers["records inspect"])
+        summary, _ = await paged(service, DAILY, "groups", 30)
+        expect(summary == summary_before, "the summary collection answers differently after the move")
+
+
+def shared_inspection(inspection: dict[str, Any], *, store_id: str, fields: list[str]) -> dict[str, Any]:
+    """Check store-only owner discovery separately from the shared collection answers."""
+    basis, contract = inspection.get("field_release_basis"), inspection["contract"]
+    expect(isinstance(basis, dict) and basis.get("version") == 1
+           and basis.get("store_id") == store_id and basis.get("collection_id") == contract["collection_id"]
+           and basis.get("path") == basis.get("ref") == contract["path"] and basis.get("fields") == fields,
+           "inspection returned a different canonical field-release basis", basis)
+    return {key: value for key, value in inspection.items() if key != "field_release_basis"}
+
+
+async def store_mode_writes(journey: Journey, service: Session, summary_before: list,
+                            migrated: dict[str, Any], legacy_transitions: list[str]) -> dict[str, Any]:
+    """Guarded Records append, update and manifest revise, a Planning update, and the history that
+    shows them. Returns a migrated item's key and its stamped view path."""
+    records, planning = journey.file_collections["records"], journey.file_collections["planning"]
+    with journey.step("7. Records in store mode: guarded append, update and manifest revise"):
+        guards = (await service.records(action="inspect", collection=records))["lifecycle_guards"]
+        appended = await service.mutate(
+            "record_memory", action="append", collection=records, item=NATIVE_RECORDS_ROW,
+            item_key=NATIVE_RECORDS_KEY, expected_container_hash=guards["expected_container_hash"],
+            why="Records row written in store mode")
+        expect(appended["operation"] == "append" and appended["item_key"] == NATIVE_RECORDS_KEY,
+               "the store-mode append did not commit the keyed row", appended)
+        (path,) = appended["affected_paths"]
+        rows = await service.records(action="query", collection=records,
+                                     columns=["occurred_on", "title", "status"], limit=20)
+        row = next(row for row in rows["rows"] if row["record_id"] == NATIVE_RECORDS_KEY)
+        updated = await service.mutate(
+            "record_memory", action="update", collection=records, item_key=NATIVE_RECORDS_KEY,
+            changes={"title": "Native row corrected"}, expected_container_hash=rows["snapshot"],
+            expected_item_version=row["item_version"], why="Records correction written in store mode")
+        expect(updated["operation"] == "update", "the store-mode update did not commit", updated)
+        inspected = await service.records(action="inspect", collection=records)
+        title = inspected["contract"]["title"]
+        manifest = (journey.vault / records).read_text(encoding="utf-8")
+        expect(f"title: {title}\n" in manifest, "the migrated manifest does not hold the contract title", title)
+        proposal = manifest.replace(f"title: {title}\n", f"title: {title} (revised)\n", 1)
+        validated = await service.records(action="validate", collection=records, manifest_text=proposal)
+        expect(validated["valid"] is True, "the store-mode revision did not validate", validated)
+        revised = await service.mutate(
+            "record_memory", action="revise", collection=records,
+            manifest_text=proposal, **validated["lifecycle_guards"], why="manifest revised in store mode")
+        expect(revised["operation"] == "revise", "the store-mode manifest revise did not commit", revised)
+        state = await store_state(journey, service)
+        expect(state["records title"] == f"{title} (revised)", "the revised manifest is not what inspect reports", state)
+        expect((NATIVE_RECORDS_KEY, "Native row corrected", "partial") in state["records"],
+               "the store-mode update is not in the Records query", state)
+        expect(state["summary"] == summary_before, "store-mode writes changed the summary collection's answer")
+        expected = [revised["audit_correlation"], updated["audit_correlation"], appended["audit_correlation"],
+                    *legacy_transitions]
+        history = {}
+
+        async def history_published() -> bool:
+            nonlocal history
+            history = await service.records(action="query", collection=records, view="completed-sessions",
+                                            include_agent_history=True)
+            return [event["transition_id"] for event in history["agent_history"]["events"]] == expected
+
+        # Egress releases an event's path only after its asynchronous view publishes.
+        try:
+            await until(history_published, within=EDIT_BACK_WINDOW, what="the native and exact imported history")
+        except RuntimeError:
+            expect(False, "history lacks the native entries or exact imported events", history)
+
+    with journey.step("7. Planning in store mode: one update"):
+        item = "b4596ce9-10fd-4856-a26e-89d8be72b0db"
+        plan = await service.call("plan_memory", action="query", collection=planning, limit=20, lifecycle="all")
+        row = next(row for row in plan["rows"] if row["plan_id"] == item)
+        updated = await service.mutate(
+            "plan_memory", action="update", collection=planning, plan_id=item, changes={"priority": "low"},
+            expected_container_hash=plan["snapshot"], expected_item_version=row["item_version"],
+            why="Planning update written in store mode")
+        expect(updated["operation"] == "update", "the store-mode Planning update did not commit", updated)
+        after = await service.call("plan_memory", action="query", collection=planning, limit=20, lifecycle="all")
+        expect({row["plan_id"]: row["priority"] for row in after["rows"]}[item] == "low",
+               "the Planning update is not in the query", after)
+
+    with journey.step("7. the appended item's view file appears"):
+        async def written() -> bool:
+            view = journey.vault / path
+            return view.is_file() and "title: Native row corrected" in view.read_text(encoding="utf-8")
+
+        await until(written, within=EDIT_BACK_WINDOW, what="the appended item's view file with its update")
+    with journey.step("7. the migrated item's view receives its first stamp"):
+        (migrated_path,) = migrated["affected_paths"]
+
+        async def stamped() -> bool:
+            return "exomem_view:" in (journey.vault / migrated_path).read_text(encoding="utf-8")
+
+        await until(stamped, within=EDIT_BACK_WINDOW, what="the migrated item's stamped view")
+    return {"key": migrated["item_key"], "path": migrated_path, "title": MOVED_RECORDS_ROW["title"]}
+
+
+async def view_edit_adopted(journey: Journey, service: Session, imported: dict[str, Any],
+                           legacy_transitions: list[str]) -> dict[str, Any]:
+    """The owner's edit of the view file becomes a governed update after the start census."""
+    records = journey.file_collections["records"]
+    with journey.step("7. the start census adopts the owner's view edit as a governed update"):
+        async def adopted() -> dict[str, Any] | None:
+            state = await store_state(journey, service)
+            return state if (imported["key"], imported["title"], "aborted") in state["records"] else None
+
+        state = await until(adopted, within=EDIT_BACK_WINDOW, what="the owner's view edit as a governed update")
+        operations = [operation for operation, _ in state["records history"]]
+        expect(operations[:4] == ["update", "revise", "update", "append"]
+               and state["records transitions"][4:] == legacy_transitions,
+               "history does not show the adopted edit and exact imported events", state)
+        held = (await service.records(action="inspect", collection=records))["projection"]
+        expect(held["held_view_corrections"] == 0, "the owner's edit was held instead of applied", held)
+    return state
+
+
 # --- entry point --------------------------------------------------------------
 
 
@@ -1735,6 +2074,7 @@ def inspect_snapshot_state(path: Path) -> int:
     """Compare business state and job checkpoints in private, integrity-checked backup files."""
     from contextlib import closing
 
+    from exomem.collection_store import legacy_originals, schema
     from exomem.collection_store.connection import open_reader
 
     with closing(open_reader(path)) as reader:
@@ -1747,7 +2087,51 @@ def inspect_snapshot_state(path: Path) -> int:
             rows = reader.execute(f"SELECT * FROM {table} ORDER BY {order}").fetchall()
             encoded = json.dumps(rows, separators=(",", ":"), default=repr).encode()
             proof[table] = {"rows": len(rows), "sha256": hashlib.sha256(encoded).hexdigest()}
+        metadata = legacy_originals.metadata(reader)
+        proof["store"] = {"store_id": metadata[schema.META_STORE_ID],
+                          "schema_version": metadata[schema.META_SCHEMA_VERSION]}
+        archive_hash, count = hashlib.sha256(), 0
+        for row in reader.execute("SELECT key,value FROM store_meta WHERE substr(key,1,?)=? ORDER BY key",
+                                  (len(legacy_originals.PREFIX), legacy_originals.PREFIX)):
+            encoded = json.dumps(row, separators=(",", ":")).encode()
+            archive_hash.update(len(encoded).to_bytes(8, "big"))
+            archive_hash.update(encoded)
+            count += 1
+        proof["legacy_originals"] = {"rows": count, "sha256": archive_hash.hexdigest()}
     print(json.dumps(proof))
+    return 0
+
+
+def inspect_compatible_launcher(args: argparse.Namespace) -> int:
+    """Bind rollback behavior to an intact wheel and assess the existing managed admission boundary."""
+    from dataclasses import asdict
+    from urllib.parse import urlsplit
+    from urllib.request import url2pathname
+
+    from exomem import service_upgrade, writer_lease
+    from exomem.service_manager import WorkerRuntime
+
+    python = Path(args.compatible_python).expanduser().absolute()
+    identity = service_upgrade._staged_identity(python, wheel=True)
+    source = identity.get("direct_url")
+    # The qualification uses wheel provenance so the maintained verifier binds the installed bytes.
+    expect(isinstance(source, dict) and isinstance(source.get("url"), str), "the compatible wheel has no provenance")
+    location = urlsplit(source["url"])
+    expect(location.scheme == "file" and not location.netloc, "the compatible wheel snapshot is not local")
+    wheel = Path(url2pathname(location.path))
+    digest = service_upgrade._sha256_file(wheel)
+    service_upgrade._verify_wheel_install(identity, wheel, digest, identity["version"])
+    expect(service_upgrade._sha256_file(wheel) == digest, "the compatible wheel changed during verification")
+    runtime = WorkerRuntime(Path(args.work) / "compatible.sock", host="127.0.0.1", port=0)
+    target = asyncio.run(runtime.inspect({"python": str(python), "version": identity["version"]}))
+    migrate, reason = runtime.migration_required(target)
+    expect(not migrate, "the earlier application requires a state migration", reason)
+    expect(runtime._collections_declared(target) == "none", "the supplied application declares general migration")
+    expect(runtime.child is None and runtime.standby is None, "candidate inspection started an application")
+    fence = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env()).collection_store_fence()
+    expect(fence.enrolled, "the compatible rollback retired the store fence")
+    print(json.dumps({"version": identity["version"], "python": str(python), "wheel_sha256": digest,
+                      "installed_record_hashes": len(identity["record_hashes"]), "fence": asdict(fence)}))
     return 0
 
 
@@ -1849,7 +2233,10 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(resume_import(journey, continuation, imported))
         asyncio.run(import_samples(journey))
         asyncio.run(field_release_journey(journey))
-        asyncio.run(copy_and_adopt(journey))
+        copied = asyncio.run(copy_and_adopt(journey))
+        with journey.step("7. migrate the adopted copy and prove store-mode workflows"):
+            settled = asyncio.run(migrate_copy(copied))
+            journey.measurements["compatible_rollback"] = asyncio.run(compatible_rollback(copied, settled))
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
         capability_after = capability_file.read_bytes()
@@ -1889,6 +2276,7 @@ def main() -> int:
     parser.add_argument("--python", required=True, help="the installed wheel's python")
     parser.add_argument("--executable", required=True, help="the installed wheel's exomem")
     parser.add_argument("--older-python", default="", help="the actual unsupported installed reader for the launcher proof")
+    parser.add_argument("--compatible-python", default="", help="the earlier wheel installation for compatible SQLite rollback")
     parser.add_argument("--vault", required=True, help="a vault path for this journey; created by init")
     parser.add_argument("--work", required=True)
     parser.add_argument("--home", required=True)
@@ -1896,6 +2284,7 @@ def main() -> int:
     parser.add_argument("--issue-recipient-session", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--unsupported-launcher", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--snapshot-state", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--compatible-launcher", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.issue_recipient_session:
         return issue_recipient_session(args.issue_recipient_session)
@@ -1903,6 +2292,8 @@ def main() -> int:
         return inspect_unsupported_launcher(args)
     if args.snapshot_state:
         return inspect_snapshot_state(args.snapshot_state)
+    if args.compatible_launcher:
+        return inspect_compatible_launcher(args)
     return run(args)
 
 

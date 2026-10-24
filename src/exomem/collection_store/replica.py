@@ -61,6 +61,8 @@ class _Verification:
     version: held_fs.FileVersion
     digest: str | None = None
     fsynced: bool = False
+    intent_loaded: bool = False
+    intent_raw: str | None = None
 
 
 def _metadata(writer: connection.WriterConnection) -> dict[str, str]:
@@ -86,6 +88,64 @@ def _intent_digest(metadata: Mapping[str, str | None]) -> str | None:
     return None if raw is None else hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _published_metadata_current(metadata, *, copied_raw=None, raw_marker=None):
+    """Completed local intent cleanup leaves the authentic replica bookkeeping intact."""
+    if metadata.get(_EPOCH) != metadata.get(schema.META_LEASE_EPOCH):
+        return False
+    if _intent_digest(metadata) == metadata.get(_INTENT):
+        return True
+    if (metadata.get(authority.PENDING_CREATE) is not None or copied_raw is None
+            or raw_marker is None or json.loads(metadata[_PUBLISHED]) != _head(metadata)
+            or _intent_digest({authority.PENDING_CREATE: copied_raw}) != metadata.get(_INTENT)):
+        return False
+    authority.parse_pending_create(copied_raw)
+    from .takeover import replica_adoptability
+
+    return replica_adoptability(
+        {authority.PENDING_CREATE: copied_raw}, raw_marker, intent_only=True,
+    ) is None
+
+
+def _read_copied_intent(filesystem, witness, *, digest, head, epoch, deadline=None, progress=None):
+    """Read metadata from a private copy of the authenticated retained descriptor."""
+    check = progress if progress is not None else lambda: None
+    check()
+    with reserved_paths.private_copy_directory() as private:
+        with held_fs.acquire(private).require() as private_fs:
+            with private_fs.parent(".").require() as parent:
+                if witness.file.version() != witness.version:
+                    raise _Retry("installed copy changed before private copy")
+                filesystem.copy(
+                    witness.file, parent, connection.STORE_FILENAME,
+                    max_bytes=witness.version.size, deadline=deadline,
+                ).require()
+                check()
+                if witness.file.version() != witness.version:
+                    raise _Retry("installed copy changed during private copy")
+                with private_fs.file(parent, connection.STORE_FILENAME).require() as copied:
+                    version = copied.version()
+                    if (version.size != witness.version.size
+                            or snapshot._file_sha256(copied.descriptor, check) != digest
+                            or copied.version() != version):
+                        raise _Retry("private copy differs from the published replica")
+                    reader, _ = connection._open_read_only(private / connection.STORE_FILENAME, 50)
+                    try:
+                        metadata = legacy_originals.metadata(reader)
+                    finally:
+                        reader.close()
+                    with private_fs.file(parent, connection.STORE_FILENAME).require() as current:
+                        if current.version() != version or copied.version() != version:
+                            raise _Retry("private copy changed while reading metadata")
+    check()
+    try:
+        copied_head = _head(metadata)
+    except (KeyError, ValueError, TypeError) as error:
+        raise _Retry("private copy metadata is invalid") from error
+    if copied_head != head or metadata.get(schema.META_LEASE_EPOCH) != epoch:
+        raise _Retry("private copy metadata differs from the published replica")
+    return metadata.get(authority.PENDING_CREATE)
+
+
 def file_writer_marker(root, acquired=None):
     """Prove current local publication and complete routing without admitting a store producer."""
     from ..writer_lease import CollectionStoreHead
@@ -107,8 +167,7 @@ def file_writer_marker(root, acquired=None):
         if ((tail or (0, None)) != (head.commit_seq, head.head_hash)
                 or marker["store_id"] != head.store_id
                 or authority.PENDING_CREATE in metadata or _PENDING in metadata
-                or schema.META_REPLICA_DIVERGENCE in metadata
-                or _intent_digest(metadata) != metadata.get(_INTENT)):
+                or schema.META_REPLICA_DIVERGENCE in metadata):
             return None
         if {entry["collection_id"] for entry in marker["collections"]} != {
                 row[0] for row in reader.execute("SELECT collection_id FROM collections")}:
@@ -130,6 +189,14 @@ def file_writer_marker(root, acquired=None):
                 with filesystem.file(parent, relative.name).require() as file:
                     version = file.version()
                     if snapshot._file_sha256(file.descriptor) != digest or file.version() != version:
+                        return None
+                    copied_raw = None
+                    if not _published_metadata_current(metadata):
+                        copied_raw = _read_copied_intent(
+                            filesystem, _Verification(file, parent, relative.name, version),
+                            digest=digest, head=_head(metadata), epoch=metadata.get(_EPOCH),
+                        )
+                    if not _published_metadata_current(metadata, copied_raw=copied_raw, raw_marker=raw):
                         return None
                     filesystem.validate_directory(parent).require()
                     with filesystem.file(parent, relative.name).require() as current:
@@ -667,7 +734,7 @@ class _Publisher:
         # Only the installed copy proves which intent a successor will read.
         self.bookkeeping({_DIGEST: pending["sha256"], _PUBLISHED: _json(head),
                           _EPOCH: pending["lease_epoch"], _PENDING: None,
-                          _INTENT: self.copied_intent(pending, artifact)})
+                          _INTENT: _intent_digest({authority.PENDING_CREATE: self.copied_intent(pending, artifact)})})
         return head
 
     @contextmanager
@@ -710,52 +777,23 @@ class _Publisher:
         with self.file(leaf, required=True) as installed:
             if self.digest(installed) != pending["sha256"]:
                 raise _Retry("installed copy changed before reading its intent")
+            witness = self.verifications[(id(self.parent), leaf)]
             if artifact is not None:
                 if (artifact.file_sha256 != pending["sha256"]
                         or artifact.lease_epoch != pending["lease_epoch"]
                         or any(getattr(artifact, key) != pending[key] for key in self.identity)):
                     raise _Retry("snapshot metadata differs from the ready intent")
-                return _intent_digest({authority.PENDING_CREATE: artifact.pending_create_raw})
-            witness = self.verifications[(id(self.parent), leaf)]
-            with self.outside():
-                self._progress()
-                with reserved_paths.private_copy_directory() as private:
-                    with held_fs.acquire(private).require() as filesystem:
-                        with filesystem.parent(".").require() as parent:
-                            if witness.file.version() != witness.version:
-                                raise _Retry("installed copy changed before private copy")
-                            # The maintained copy checks deadlines between chunks; cancellation surrounds it.
-                            self.filesystem.copy(
-                                witness.file, parent, leaf,
-                                max_bytes=witness.version.size, deadline=self.deadline,
-                            ).require()
-                            self._progress()
-                            if witness.file.version() != witness.version:
-                                raise _Retry("installed copy changed during private copy")
-                            with filesystem.file(parent, leaf).require() as copied:
-                                version = copied.version()
-                                if (version.size != witness.version.size
-                                        or snapshot._file_sha256(copied.descriptor, self._progress)
-                                        != pending["sha256"]
-                                        or copied.version() != version):
-                                    raise _Retry("private copy differs from the ready intent")
-                                reader, _ = connection._open_read_only(private / leaf, 50)
-                                try:
-                                    metadata = legacy_originals.metadata(reader)
-                                finally:
-                                    reader.close()
-                                with filesystem.file(parent, leaf).require() as current:
-                                    if current.version() != version or copied.version() != version:
-                                        raise _Retry("private copy changed while reading metadata")
-                self._progress()
-            try:
-                copied = _head(metadata)
-            except (KeyError, ValueError, TypeError) as error:
-                raise _Retry("private copy metadata is invalid") from error
-            if (copied != {key: pending[key] for key in self.identity}
-                    or metadata.get(schema.META_LEASE_EPOCH) != pending["lease_epoch"]):
-                raise _Retry("private copy metadata differs from the ready intent")
-            return _intent_digest(metadata)
+                witness.intent_raw = artifact.pending_create_raw
+                witness.intent_loaded = True
+            if not witness.intent_loaded:
+                with self.outside():
+                    witness.intent_raw = _read_copied_intent(
+                        self.filesystem, witness, digest=pending["sha256"],
+                        head={key: pending[key] for key in self.identity}, epoch=pending["lease_epoch"],
+                        deadline=self.deadline, progress=self._progress,
+                    )
+                    witness.intent_loaded = True
+            return witness.intent_raw
 
     def abandon(self, intent, predecessor):
         """Remove an adopted-over tenure's publication workspace: bounded recovery (A4).
@@ -805,8 +843,24 @@ class _Publisher:
         alone does not prove that a host adopting the replica reads it.
         """
         metadata = _metadata(self.writer)
-        return (_intent_digest(metadata) == metadata.get(_INTENT)
-                and metadata.get(_EPOCH) == metadata.get(schema.META_LEASE_EPOCH))
+        if _published_metadata_current(metadata):
+            return True
+        if (metadata.get(authority.PENDING_CREATE) is not None
+                or metadata.get(_EPOCH) != metadata.get(schema.META_LEASE_EPOCH)
+                or metadata.get(_PUBLISHED) is None
+                or json.loads(metadata[_PUBLISHED]) != _head(metadata)):
+            return False
+        marker = authority.read_marker(self.root)
+        if marker is None:
+            return False
+        pending = {**_head(metadata), "sha256": metadata[_DIGEST], "lease_epoch": metadata.get(_EPOCH)}
+        copied_raw = self.copied_intent(pending, None)
+        # Exclusion was released for verification; a new intent or commit must not borrow the old proof.
+        current = _metadata(self.writer)
+        if (current.get(authority.PENDING_CREATE) != metadata.get(authority.PENDING_CREATE)
+                or _head(current) != _head(metadata) or authority.read_marker(self.root) != marker):
+            raise _Retry("live intent, head or marker changed during verification")
+        return _published_metadata_current(current, copied_raw=copied_raw, raw_marker=marker)
 
     def run(self, stage_new, *, force=False):
         """Orderly publication: settle, then copy and swap the head known at entry, all under the boundary.

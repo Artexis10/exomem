@@ -369,6 +369,10 @@ def dispatch(
         return False, None
     writer._require_operation_context()
     writer._facade_profile = profile
+    if action == "validate":
+        if args.get("collection") is None:
+            return False, None
+        return True, writer.validate_revision(args["collection"], manifest_text=args["manifest_text"])
     # Records inspection is generic in file mode; only its mutations require
     # the Records profile. Planning inspection retains its profile guard.
     if action == "inspect" and profile == "records":
@@ -390,10 +394,13 @@ def dispatch(
             from .history import agent_history
 
             result = record_governance.query_collection(vault_root, manifest, **args)
-            return True, record_governance.project_query_result(
+            projected = record_governance.project_query_result(
                 result, manifest, output_format=args.get("output_format", "json"),
                 agent_history=agent_history(writer, manifest) if include_history else None,
             )
+            if include_history and projected.get("agent_history") is not None:
+                projected = writer._operation.query_history_evidence(projected, writer, manifest)
+            return True, projected
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)
     if action == "import" and profile == "records":

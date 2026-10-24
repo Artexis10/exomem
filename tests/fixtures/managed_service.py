@@ -86,6 +86,8 @@ def worker(root, socket_path, standby=False):
             # waits on it, and a standby that reaches cutover-ready without it
             # promotes into a worker that refuses writes.
             service_standby.build_semantic_corpus(root)
+            # Run the final warm step that the released migration readiness requires.
+            service_standby.prepare_collections_migration(root)
     else:
         (root / "worker.pid").write_text(str(os.getpid()))
         event(root, "worker-start")

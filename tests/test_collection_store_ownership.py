@@ -585,6 +585,9 @@ def test_owner_preview_binds_original_replica_bytes_despite_incomplete_hints(ser
     older = authority.read_marker(root)
     call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
          manifest_text=DAILY_TEXT, why="second collection")
+    # Publish a later business head so this adoption fixture has no historical marker intent.
+    call(root, "record_memory", action="append", collection=DAILY,
+         item={"title": "Second canonical"}, item_key=KEY, why="capture")
     _published(SimpleNamespace(meta=lambda: store_meta(root)))
     service.stop()
     if hint == "older":

@@ -537,6 +537,12 @@ def test_summary_policy_varying_past_the_bound_refuses_with_its_typed_limit(stor
     with runtime.read_session(store.root, store.handle.path) as session:
         with pytest.raises(runtime.QueryError, match="COLLECTION_RELEASE_LIMIT"):
             session.admit(CID)
+    from test_governance_egress import _through_dispatcher
+
+    with preview_store(store.root, store.handle):
+        inventory = _through_dispatcher(store.root, "record_memory", action="inspect")
+    assert [(row["collection_id"], row["committed"], row["held"])
+            for row in inventory["collections"]] == [(CID, None, None)]
 
 
 @pytest.mark.parametrize("population", ["empty", "uniform", "varying"])

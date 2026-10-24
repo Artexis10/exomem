@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .. import collection_profiles, held_fs, state_migration, state_paths, vault
 from .. import structured_collections as collections
+from ..planning_values import PlanningValues
 from . import authority, connection, legacy_originals, schema, tokens
 
 
@@ -81,6 +82,8 @@ def declarations(root, conn, *, generation=1):
     """Validate the complete immutable declaration namespace, also at verified ingestion boundaries."""
     sid = conn.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_STORE_ID,)).fetchone()[0]
     entries, declarations = [], []
+    # Ownership is caller-independent; vocabulary admission can itself require this unfinished proof.
+    planning_values = PlanningValues(root, server_side=True)
     for cid, path, source, layout, text, digest in conn.execute(
         "SELECT c.collection_id,c.manifest_path,c.source_path,c.layout,m.manifest_text,m.manifest_hash "
         "FROM collections c LEFT JOIN collection_manifests m ON m.collection_id=c.collection_id "
@@ -88,7 +91,7 @@ def declarations(root, conn, *, generation=1):
     ):
         if text is None or tokens.manifest_hash(text) != digest:
             raise unavailable()
-        manifest = collections.parse_manifest_bytes(root, path, text.encode())
+        manifest = collections.parse_manifest_bytes(root, path, text.encode(), planning_values=planning_values)
         if (manifest.collection_id, manifest.storage.source, manifest.storage.strategy) != (cid, source, layout):
             raise unavailable()
         entries.append(authority.marker_entry(cid, path, sid, manifest.semantic_profile, source, layout))

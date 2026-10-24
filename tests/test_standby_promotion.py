@@ -34,6 +34,7 @@ def test_standby_reports_the_cutover_component_it_waits_on(monkeypatch) -> None:
         "lexical": "ready",
         "graph_snapshot": "waiting",
         "semantic_corpus": "waiting",
+        "collections_migration": "waiting",
     }
     assert payload["cutover_ready"] is False
     assert service_standby.waiting_component() == "graph_snapshot"
@@ -48,6 +49,7 @@ def test_embeddings_join_the_cutover_set_only_when_preload_is_allowed(monkeypatc
         "embeddings": "waiting",
         "graph_snapshot": "waiting",
         "semantic_corpus": "waiting",
+        "collections_migration": "waiting",
     }
     assert service_standby.waiting_component() == "lexical"
 
@@ -65,9 +67,14 @@ def test_cutover_becomes_ready_once_every_component_lands(monkeypatch, tmp_path:
     assert service_standby.readiness_payload()["cutover_ready"] is False
     assert service_standby.waiting_component() == "semantic_corpus"
     assert service_standby.build_semantic_corpus(tmp_path) is True
+    # The collections pre-import is the last step of every warm; the release runs the migration,
+    # so a standby that has not settled it cannot promise a handoff without a cold start.
+    assert service_standby.waiting_component() == "collections_migration"
+    service_standby.prepare_collections_migration(tmp_path)
     payload = service_standby.readiness_payload()
     assert payload["components"]["graph_snapshot"] == "ready"
     assert payload["components"]["semantic_corpus"] == "ready"
+    assert payload["components"]["collections_migration"] == "ready"
     assert payload["cutover_ready"] is True
     assert service_standby.waiting_component() is None
 
@@ -259,6 +266,7 @@ def test_readiness_payload_is_absent_outside_standby_and_present_after_promotion
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
     service_standby.build_semantic_corpus(tmp_path)
+    service_standby.prepare_collections_migration(tmp_path)
     service_standby.promote(tmp_path, migrated=False)
     payload = service_standby.readiness_payload()
     assert payload["standby"] is False
@@ -744,6 +752,7 @@ def test_a_failed_corpus_build_still_lets_the_upgrade_happen(monkeypatch, tmp_pa
     service_standby.register_activation(_Activation())
     service_standby.prove_graph_snapshot(tmp_path)
     assert service_standby.build_semantic_corpus(tmp_path) is False
+    service_standby.prepare_collections_migration(tmp_path)
 
     assert service_standby.readiness_payload()["cutover_ready"] is True
     service_standby.promote(tmp_path, migrated=False)

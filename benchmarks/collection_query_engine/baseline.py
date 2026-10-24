@@ -22,7 +22,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
-os.environ["EXOMEM_COLLECTION_STORE_PREVIEW"] = "1"
 
 from exomem.collection_store import connection  # noqa: E402
 from exomem.collection_store.writer import CollectionWriter  # noqa: E402

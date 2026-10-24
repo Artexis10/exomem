@@ -593,11 +593,13 @@ def test_row_metadata_change_reselects_prior_history_and_repairs_its_page(store)
 
 
 
-def test_new_current_row_releases_a_missing_imported_history_key(tmp_path, store):
+def test_new_current_row_releases_a_missing_imported_history_key(tmp_path, store, monkeypatch):
     """Creating an unresolved legacy key must reselect the old stream, not only its suffix."""
     from test_collection_store_writer import OTHER
 
     from exomem.collection_store import history
+    from exomem.governance import lifecycle
+    from exomem.governance.principal import owner_principal
 
     _import_history(tmp_path, store, missing_key=OTHER)
     manifest = store._projection_manifest(CID)
@@ -605,6 +607,16 @@ def test_new_current_row_releases_a_missing_imported_history_key(tmp_path, store
     context = history.PageContext(store.connection, store.root, manifest, cache=store.handle.release_cache)
     before = context.window(path)
     assert before.unresolved
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        denied = records.agent_audit_history(store.root, CID)
+        assert f"{1:024x}" not in {event["transition_id"] for event in denied["events"]}
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        released = records.agent_audit_history(store.root, CID)
+        assert f"{1:024x}" in {event["transition_id"] for event in released["events"]}
+        with monkeypatch.context() as changed:
+            changed.setattr(lifecycle, "tombstoned_paths", lambda root: frozenset({collections.record_ref(CID, OTHER)}))
+            denied = records.agent_audit_history(store.root, CID)
+            assert f"{1:024x}" not in {event["transition_id"] for event in denied["events"]}
     store.append_record(CID, item={"title": "Recovered"}, item_key=OTHER, why="capture recovered key")
     context = history.PageContext(store.connection, store.root, manifest, cache=store.handle.release_cache)
     after = context.window(path)

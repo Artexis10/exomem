@@ -596,6 +596,8 @@ def query(
                 },
                 manifest,
             )
+            if writer is not None and include_agent_history:
+                projected = writer._operation.query_history_evidence(projected, writer, manifest)
         egress.emit_boundary_receipt(collector)
         return projected
 

@@ -7346,19 +7346,22 @@ def _collection_store_thread(func):
     @wraps(func)
     def wrapped(command, *injected, **kwargs):
         if injected and isinstance(injected[0], (str, os.PathLike)):
+            from . import foreground_priority
             from .collection_store import runtime as store_runtime
 
-            server = store_runtime.route(command.name, injected[0], kwargs)
-            if server is not None:
-                import_request = kwargs.get("import_request")
-                # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
-                import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
-                                 and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
-                return server.call(
-                    lambda: func(command, *injected, **kwargs),
-                    wake_maintenance=not import_status,
-                    read_only=_store_request_is_read_only(command, kwargs),
-                )
+            # Keep demand visible between the routing proof and queue insertion.
+            with foreground_priority.foreground():
+                server = store_runtime.route(command.name, injected[0], kwargs)
+                if server is not None:
+                    import_request = kwargs.get("import_request")
+                    # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
+                    import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
+                                     and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
+                    return server.call(
+                        lambda: func(command, *injected, **kwargs),
+                        wake_maintenance=not import_status,
+                        read_only=_store_request_is_read_only(command, kwargs),
+                    )
         return func(command, *injected, **kwargs)
 
     return wrapped

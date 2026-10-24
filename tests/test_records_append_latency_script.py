@@ -12,14 +12,14 @@ import pytest
 def test_store_diagnostic_uses_scoped_lease_and_full_public_inspect(tmp_path):
     script = Path(__file__).resolve().parents[1] / "scripts/measure-records-append-latency.py"
     completed = subprocess.run(
-        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store-preview",
+        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store",
          "--size", "3", "--appends", "2"],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert completed.returncode == 0, completed.stderr[-3000:]
     line = next(row for row in completed.stdout.splitlines() if row.startswith("RESULT-JSON:"))
     result = json.loads(line.removeprefix("RESULT-JSON:"))
-    assert result["storage_mode"] == "store-preview"
+    assert result["storage_mode"] == "store"
     assert result["phase_acceptance"] is False
     assert result["command_path"]["lease"] == "vault-scoped"
     assert result["command_path"]["inspect"] == "full public"
@@ -67,7 +67,7 @@ def test_store_diagnostic_cannot_use_an_ambient_coordinator(monkeypatch, env_pre
     monkeypatch.setenv(env_prefix + "WRITER_LEASE_TOKEN", "invented-token")
     script = Path(__file__).resolve().parents[1] / "scripts/measure-records-append-latency.py"
     completed = subprocess.run(
-        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store-preview",
+        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store",
          "--size", "1", "--appends", "1"],
         capture_output=True, text=True, timeout=60, check=False,
     )
@@ -109,7 +109,7 @@ def test_phase_probes_prove_release_refusal_and_bulk_storage(tmp_path):
     """A filtered public read must not turn a partial audience's write into a commit."""
     script = Path(__file__).resolve().parents[1] / "scripts/measure-records-append-latency.py"
     completed = subprocess.run(
-        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store-preview",
+        [sys.executable, str(script), "--child", "--work-dir", str(tmp_path), "--storage", "store",
          "--size", "10", "--appends", "2", "--phase-probes"],
         capture_output=True, text=True, timeout=60, check=False,
     )

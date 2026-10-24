@@ -1019,3 +1019,113 @@ def test_held_capture_never_silently_drops_unusable_input(tmp_path, defect):
     ):
         with _capture(tmp_path, root, path):
             pass
+
+
+def test_imported_current_item_remains_linkable_before_view_stamping(store, tmp_path):
+    """A preserved initial item must stay linkable while its stamped view is pending."""
+    from test_collection_store_writer import OTHER
+    from exomem import record_governance
+    from exomem.collection_store.preview import preview_store
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+    from exomem.record_memory import record_memory
+
+    text = manifest_text().replace(
+        "    count: {type: integer}\n",
+        "    count: {type: integer}\n    related: {type: array, items: {type: link, link_kind: note}}\n")
+    root, path = _items(tmp_path, text=text, values={"title": "Target", "count": 1})
+    manifest = collections.load_manifest(root, path)
+    target = root / manifest.storage.source / "Original.md"
+    original = target.read_bytes()
+    ordinary = root / "Knowledge Base/Notes/Control.md"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text("# Control\n")
+    targets = [target.relative_to(root).as_posix(), ordinary.relative_to(root).as_posix()]
+    (target.parent / "Source.md").write_text(record_formats.render_markdown_item(
+        manifest, {"title": "Source", "count": 2, "related": targets}, OTHER, "Source body\n"))
+    with _capture(tmp_path, root, path) as (audit, captured), store.handle.transaction() as conn:
+        legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+    assert target.read_bytes() == original
+    with request_scope(owner_principal(surface="mcp")), preview_store(root, store.handle) as bound:
+        with bound.read_snapshot():
+            operation = bound._operation
+            canonical_manifest = operation.field_manifest(CID)
+            allowed = operation.allows_file(targets[0])
+            byte_decision = operation.projection_decision(
+                targets[0], content=original, manifest_for=lambda _cid: canonical_manifest)
+            direct = record_governance._LinkProjector.create(
+                root, canonical_manifest, policy=operation.policy,
+                authorize_path=operation.allows_file)({"related": targets})
+            payload = record_memory(root, "query", collection=CID)
+            before = next(row for row in payload["rows"] if row["record_id"] == OTHER)
+            filtered = egress.filter_withheld_entries(root, payload)
+            after = next(row for row in filtered["rows"] if row["record_id"] == OTHER)
+    assert byte_decision.level == 6
+    assert allowed and direct["related"] == targets and before["related"] == targets
+    assert after["related"] == targets
+
+
+@pytest.mark.parametrize("kind", ["item", "manifest", "log"])
+def test_imported_original_read_proof_rejects_edits_and_later_canonical_changes(store, tmp_path, kind):
+    """An archived initial view cannot authorize edited bytes or an older canonical version."""
+    from exomem.collection_store import legacy_originals
+    from exomem.governance.principal import owner_principal
+
+    if kind == "log":
+        root, path = _x3_log(tmp_path, lambda raw: raw)
+    else:
+        root, path = _items(tmp_path, values={"title": "Target", "count": 1})
+    with _capture(tmp_path, root, path) as (audit, captured), store.handle.transaction() as conn:
+        legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+    cid = captured.manifest.collection_id
+    cursor = store.connection.execute(
+        "SELECT * FROM projection_state WHERE collection_id=? AND kind=?", (cid, kind))
+    projection = dict(zip((column[0] for column in cursor.description), cursor.fetchone(), strict=True))
+    original = (root / projection["path"]).read_bytes()
+    assert legacy_originals.current_view_matches(store.connection, projection, original)
+    assert not legacy_originals.current_view_matches(store.connection, projection, original + b"edited")
+
+    with request_scope(owner_principal()):
+        guards = store.inspect_collection(cid)["lifecycle_guards"]
+        if kind == "manifest":
+            store.revise_collection(
+                cid, manifest_text=path.read_text().replace("title: Work", "title: Revised"),
+                why="revise title", **guards)
+        else:
+            key = captured.snapshot.records[0].identity.key
+            version = store._version(store._item(cid, key))
+            store.update_record(cid, item_key=key, changes={"title": "Revised"},
+                                expected_container_hash=guards["expected_container_hash"],
+                                expected_item_version=version, why="correct title")
+        with store.read_snapshot():
+            operation = store._operation
+            decision = operation.projection_decision(
+                projection["path"], content=original, manifest_for=operation.field_manifest)
+    assert decision.level == 0
+
+
+def test_imported_inspection_compares_the_existing_journey_contract(store, tmp_path, monkeypatch):
+    """A neutral imported collection must preserve the journey's file-mode inspection."""
+    from pathlib import Path
+
+    from exomem.collection_store.preview import preview_store
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+    from exomem.record_memory import record_memory
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "scripts"))
+    import e2e_s1_summary_journey as journey
+
+    root, path = _items(tmp_path / "imported", values={"title": "One", "count": 1})
+    relative = path.relative_to(root).as_posix()
+    with request_scope(owner_principal(surface="mcp")):
+        before = egress.filter_withheld_entries(root, record_memory(root, "inspect", collection=relative))
+        with _capture(tmp_path / "imported", root, path) as (audit, captured), store.handle.transaction() as conn:
+            legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        with preview_store(root, store.handle):
+            after = egress.filter_withheld_entries(root, record_memory(root, "inspect", collection=relative))
+    store_id = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+    shared = journey.shared_inspection(after, store_id=store_id, fields=["title", "count"])
+    assert journey.without_storage_identity(before) == journey.without_storage_identity(shared)
+    with pytest.raises(RuntimeError, match="different canonical field-release basis"):
+        journey.shared_inspection(after, store_id="another-store", fields=["title", "count"])
