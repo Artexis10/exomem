@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.137.0](https://github.com/Artexis10/exomem/compare/v0.136.0...v0.137.0) (2026-10-24)
+
+
+### Features
+
+* clarify memory tool names, activity titles and operation guidance ([2ade710](https://github.com/Artexis10/exomem/commit/2ade710da857c8f4e48ebe9a419ff0715dfaa96f))
+
+
+### Bug Fixes
+
+* choose coherent capture homes and reuse curation preparation ([#2030](https://github.com/Artexis10/exomem/issues/2030)) ([af17387](https://github.com/Artexis10/exomem/commit/af173872f45e2303784797c3d630fcc23c31cc2e))
+* **ci:** select the requested runtime and bound query recovery ([#2035](https://github.com/Artexis10/exomem/issues/2035)) ([41399e9](https://github.com/Artexis10/exomem/commit/41399e92533d8598eee4cc01467bc4455ea61140))
+* freeze mixed recall before page hydration ([#2026](https://github.com/Artexis10/exomem/issues/2026)) ([1ee9b6b](https://github.com/Artexis10/exomem/commit/1ee9b6b097ec1cf42734c7917835adb87bc2371b))
+* **graph:** yield availability sealing to queued writers ([#2023](https://github.com/Artexis10/exomem/issues/2023)) ([eabd3a7](https://github.com/Artexis10/exomem/commit/eabd3a75af318be75c435adb06df45fabb167690))
+* include citation guidance in native activation ([#2022](https://github.com/Artexis10/exomem/issues/2022)) ([7854f79](https://github.com/Artexis10/exomem/commit/7854f79a4de13824a7de71e5fd97a7df138251d1))
+* **query:** preserve issued cursors across terminal egress ([#2028](https://github.com/Artexis10/exomem/issues/2028)) ([f78adf1](https://github.com/Artexis10/exomem/commit/f78adf18c015ae6417f42af31da8de62714dbb40))
+
 ## [0.136.0](https://github.com/Artexis10/exomem/compare/v0.135.0...v0.136.0) (2026-10-23)
 
 
