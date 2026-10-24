@@ -21,6 +21,7 @@ from pathlib import Path
 from . import (
     entity_candidates,
     indexes,
+    markdown_relations,
     memory_refs,
     origin_bindings,
     provenance,
@@ -311,6 +312,7 @@ def _render_entity(
     date_iso: str,
     tags: list[str],
     connections: list[str],
+    relations: tuple[tuple[str, str], ...] = (),
     affiliation: str | None,
     relationship: str | None,
     domain: str | None,
@@ -383,10 +385,12 @@ def _render_entity(
         lines.append("## Why in the KB")
         lines.append("")
         lines.append(why_in_kb.strip())
-    if connections:
+    if relations or connections:
         lines.append("")
         lines.append("## Relations")
         lines.append("")
+        for kind, target in relations:
+            lines.append(_relation_line(kind, target))
         for c in connections:
             lines.append(f"- relates_to [[{c}]]")
     lines.append("")
@@ -462,6 +466,61 @@ def _normalize_connections(
             seen.add(canonical)
             out.append(canonical)
     return out, warnings
+
+
+def _relation_line(kind: str, target: str) -> str:
+    return f"- {kind} [[{target}]]"
+
+
+def _normalize_relations(
+    relations: list[dict] | None,
+    *,
+    vault_root: Path,
+    resolver: WikilinkResolver,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Validate typed `{kind, target}` edges and canonicalize each target as
+    `_normalize_connections` does.
+
+    Each pair must render as exactly one canonical `## Relations` bullet that
+    parses back to the same kind, so no value can add or reshape a line. Whether
+    the kind is registered and in scope stays the creation preflight's decision.
+    Identical pairs collapse; different kinds for one target stay distinct.
+    """
+    if not relations:
+        return [], []
+    if not isinstance(relations, list):
+        raise LinkError("INVALID_LINK", ["relations"], "relations must be a list of {kind, target}")
+    pairs: list[tuple[str, str]] = []
+    warnings: list[str] = []
+    for index, item in enumerate(relations):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"kind", "target"}
+            or not all(isinstance(item[key], str) and item[key].strip() for key in item)
+        ):
+            raise LinkError(
+                "INVALID_LINK",
+                ["relations"],
+                f"relations[{index}] must contain exactly non-empty string kind and target",
+            )
+        targets, target_warnings = _normalize_connections(
+            [item["target"]], vault_root=vault_root, resolver=resolver
+        )
+        warnings.extend(warning for warning in target_warnings if warning not in warnings)
+        pair =(item["kind"].strip(), render_wikilink_target(targets[0], vault_root))
+        parsed = markdown_relations.scan_markdown_relations(
+            f"## Relations\n{_relation_line(*pair)}\n"
+        ).candidates
+        if len(parsed) != 1 or not parsed[0].grammar_valid or parsed[0].kind != pair[0]:
+            raise LinkError(
+                "INVALID_LINK",
+                ["relations"],
+                f"relations[{index}] must be a lower snake_case relation key and one "
+                "single-line wikilink target",
+            )
+        if pair not in pairs:
+            pairs.append(pair)
+    return pairs, warnings
 
 
 def _clean_tags(tags: list[str] | None) -> list[str]:
@@ -605,6 +664,7 @@ def link(
     today: dt.date | None = None,
     validate_only: bool = False,
     registry_scope: str | None = None,
+    relations: list[dict] | None = None,
 ) -> LinkResult | IdentityPreparation:
     """Create an entity through detached structural preflight.
 
@@ -778,6 +838,10 @@ def link(
     connections_norm, connection_warnings = _normalize_connections(
         connections, vault_root=vault_root, resolver=resolver
     )
+    relation_pairs, relation_warnings = _normalize_relations(
+        relations, vault_root=vault_root, resolver=resolver
+    )
+    connection_warnings.extend(relation_warnings)
     facet_values: list[tuple[str, list[str], bool]] = []
     for facet_name, value_kind, values, multi in declared_facets:
         if value_kind == "wikilink":
@@ -806,6 +870,7 @@ def link(
         connections=[
             render_wikilink_target(item, vault_root) for item in connections_norm
         ],
+        relations=tuple(relation_pairs),
         affiliation=affiliation,
         relationship=relationship,
         domain=domain,
