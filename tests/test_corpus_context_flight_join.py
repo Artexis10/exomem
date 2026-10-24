@@ -720,6 +720,12 @@ _DECLARED_UNBOUNDED_JOINS = {
         "join_builds",
         "thread.join",
     ): "shutdown joins the owned refresh after scheduling closes; the supervisor bounds process retirement",
+    (
+        "writer_lease.py",
+        "LeaseManager.writer_authority_guard",
+        "renewer.join",
+    ): "guard-owned fixed-token renewal teardown: stop scheduling and join the in-flight renewal "
+    "before ending the guard; coordinator I/O has no absolute wall deadline",
 }
 
 

@@ -5032,6 +5032,7 @@ class LeaseManager:
             if renewal_stop is not None:
                 renewal_stop.set()
                 # The renewal needs the manager lock; keep this join outside it.
+                # Finish in-flight coordinator I/O before ending this guard's ownership.
                 if renewer is not None and renewer.ident is not None:
                     renewer.join()
             if file_context is not None:
