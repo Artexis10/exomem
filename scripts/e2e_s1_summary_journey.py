@@ -604,10 +604,11 @@ RECIPIENT_ID = 20261007
 class Refused(RuntimeError):
     """A tool call the service refused; ``code`` is the product's own refusal code."""
 
-    def __init__(self, tool: str, code: str, message: str) -> None:
+    def __init__(self, tool: str, code: str, message: str, *, error: dict[str, Any] | None = None) -> None:
         super().__init__(f"{tool} refused {code}: {message}")
         self.code = code
         self.message = message
+        self.error = error
 
 
 def expect(condition: object, message: str, observed: object = None) -> None:
@@ -707,7 +708,7 @@ class Session:
             data = data["result"]
         error = data.get("error") if isinstance(data, dict) else None
         if isinstance(data, dict) and data.get("success") is False and isinstance(error, dict):
-            raise Refused(tool, str(error.get("code")), str(error.get("message")))
+            raise Refused(tool, str(error.get("code")), str(error.get("message")), error=error)
         return data
 
     async def mutate(self, tool: str, **arguments: Any) -> dict[str, Any]:
@@ -728,7 +729,24 @@ class Session:
         return await self.call("record_memory", **arguments)
 
     async def query(self, query: dict[str, Any], collection: str = WORKOUTS_ID) -> Any:
-        return await self.records(action="query", collection=collection, query=query)
+        started = time.monotonic()
+        try:
+            return await self.records(action="query", collection=collection, query=query)
+        except Refused as refusal:
+            # The query protocol permits the same read after this explicit transient refusal.
+            if (refusal.code != "QUERY_TIMEOUT" or not isinstance(refusal.error, dict)
+                    or refusal.error.get("retryable") is not True):
+                raise
+        print("s1-journey: query attempt=1 refused=QUERY_TIMEOUT retryable=true "
+              f"roundtrip_ms={(time.monotonic() - started) * 1000:.3f}; retry=1/1", flush=True)
+        outcome = "failed"
+        try:
+            result = await self.records(action="query", collection=collection, query=query)
+            outcome = "complete"
+            return result
+        finally:
+            print(f"s1-journey: query attempts=2 outcome={outcome} "
+                  f"total_roundtrip_ms={(time.monotonic() - started) * 1000:.3f}", flush=True)
 
     async def import_job(self, collection: str, **request: Any) -> Any:
         return await self.records(action="import", collection=collection, import_request=request)
@@ -748,7 +766,7 @@ class RestOwner(Session):
         )
         error = payload.get("error")
         if payload.get("success") is False and isinstance(error, dict):
-            raise Refused(tool, str(error.get("code")), str(error.get("message")))
+            raise Refused(tool, str(error.get("code")), str(error.get("message")), error=error)
         expect(status == 200 and payload.get("success") is True,
                f"owner REST {tool} failed", {"status": status, "payload": payload})
         return payload["data"]
