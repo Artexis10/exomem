@@ -47,10 +47,27 @@ MAX_CANDIDATES_DEFAULT = 5000
 IMPORT_STAGE_DIR = "_Imports"
 # One `apply` batch holds at most this many items or bytes of originals (the
 # batch writer re-validates the whole batch per write, so cost grows with size).
-APPLY_CHUNK_ITEMS = 100
+# 25 items is about 2-4 s on the measured vaults: a small share of the 50 s call.
+APPLY_CHUNK_ITEMS = 25
 APPLY_CHUNK_BYTES = 64 * 1024 * 1024
-# Seconds one item costs before this call has measured it (a pessimistic start).
+# A chunk is also cut so its predicted cost stays at most this share of the call's budget.
+APPLY_CHUNK_BUDGET_SHARE = 0.1
+# What a call assumes before it has timed a chunk: seconds per item, and per media
+# artifact for its extraction request (both pessimistic starts).
 INITIAL_ITEM_SECONDS = 0.5
+INITIAL_EXTRACTION_SECONDS = 1.0
+# Work a call owes after its loop, inside the same MCP call, which the loop cannot
+# time. Media sidecars are indexed by a fan-out deferred until the mutation's
+# terminal is persisted (a fast-acknowledgement session moves it behind the reply
+# instead); its first graph step waits on the graph the background media worker
+# also holds, and the reply names every written path for the egress checks to
+# scan. PROVISIONAL, from a 1,100-file collection on the personal profile: seven
+# terminal drains took 3.4-15.2 s, with one outlier of 30.4 s on a short final
+# call; once the first had run, each further sidecar cost about 0.1 s; reply
+# handling took about 2.4 s for 456 written paths (0.005 s each).
+TERMINAL_FANOUT_RESERVE_SECONDS = 20.0
+TERMINAL_FANOUT_SECONDS_PER_ARTIFACT = 0.15
+REPLY_SECONDS_PER_ITEM = 0.006
 PHASES = (
     "selecting",
     "planned",
@@ -109,7 +126,15 @@ def _rel(root: Path, p: Path) -> str:
 
 
 def _call_budget() -> request_budget.RequestBudget:
-    """This call's deadline: the MCP request's, or a fresh one off the MCP path."""
+    """This call's deadline, which `plan` and `apply` pace themselves against.
+
+    Over MCP, stdio and HTTP alike, the dispatcher binds one `RequestBudget` per
+    request (`request_budget.MCP_REQUEST_BUDGET_SECONDS`, 50 s unless the operator
+    sets `EXOMEM_MCP_REQUEST_BUDGET_SECONDS`) and `current()` returns it, with the
+    time the request has already spent. The REST and CLI doors bind none, so they
+    get a fresh budget of the same length that starts here. Either way the call
+    stops starting work `request_budget.DELIVERY_RESERVE_SECONDS` before the end.
+    """
     return request_budget.current() or request_budget.RequestBudget(
         seconds=request_budget.budget_seconds()
     )
@@ -1112,6 +1137,86 @@ def _earlier_with_same_bytes(
     return None
 
 
+class _ApplyPacer:
+    """Decides how much of the plan one `apply` call may start, from what its chunks cost.
+
+    A call never starts a chunk whose predicted cost does not fit in the time left
+    before the delivery reserve, after the fan-out the call already owes past the
+    loop. Costs are those this call has measured, not a past call's, and each
+    rate is the dearest seen so far: chunk cost swings several-fold with media
+    artifacts and a contended index, so the last chunk is a poor guide to the next.
+    A slow stretch shrinks the rest of this call's chunks and nothing after it.
+    """
+
+    def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
+        from .writer_lease import active_derived_batch_custody
+
+        self._budget = budget
+        self._item_seconds: float | None = None
+        self._extraction_seconds: float | None = None
+        self._deferred_artifacts = 0
+        self._started_items = 0
+        # A fast-acknowledgement session runs the sidecar fan-out behind the reply.
+        self._owes_fanout = not active_derived_batch_custody(root)
+
+    @staticmethod
+    def _tracked(rate: float | None, seen: float) -> float:
+        return seen if rate is None else max(rate, seen)
+
+    def _owed_after_loop(self, artifacts: int) -> float:
+        if not self._owes_fanout or not artifacts:
+            return 0.0
+        return TERMINAL_FANOUT_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
+
+    @staticmethod
+    def _media(chunk: list[dict]) -> int:
+        """How many of `chunk` get an extraction request: media artifacts, by extension."""
+        from . import media_processing
+
+        return sum(
+            1 for planned in chunk
+            if planned["form"] == "artifact" and planned.get("artifact_path")
+            and media_processing.classify_media(planned["artifact_path"]) is not None
+        )
+
+    def _cost(self, chunk: list[dict]) -> float:
+        item = INITIAL_ITEM_SECONDS if self._item_seconds is None else self._item_seconds
+        extraction = (
+            INITIAL_EXTRACTION_SECONDS if self._extraction_seconds is None
+            else self._extraction_seconds
+        )
+        return len(chunk) * item + self._media(chunk) * extraction
+
+    def _room(self, chunk: list[dict]) -> float:
+        """Seconds the chunk may take: what is left, less the reserve and the call's debts."""
+        return (
+            self._budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
+            - REPLY_SECONDS_PER_ITEM * (self._started_items + len(chunk))
+            - self._owed_after_loop(self._deferred_artifacts + self._media(chunk))
+        )
+
+    def next_chunk(self, pending: list[dict], *, first: bool) -> list[dict]:
+        """The next chunk, trimmed to fit; empty when none fits. The first is never empty."""
+        share = APPLY_CHUNK_BUDGET_SHARE * self._budget.seconds
+        chunk = _take_chunk(pending, APPLY_CHUNK_ITEMS)
+        cost, allowed = self._cost(chunk), min(share, self._room(chunk))
+        while len(chunk) > 1 and cost > allowed:
+            chunk = chunk[: max(1, int(len(chunk) * allowed / cost))]
+            cost, allowed = self._cost(chunk), min(share, self._room(chunk))
+        return chunk if first or cost <= self._room(chunk) else []
+
+    def record(self, chunk: list[dict], elapsed: float, extractions: list[float]) -> None:
+        """Learn from a finished chunk: `extractions` are its media requests' seconds."""
+        self._started_items += len(chunk)
+        committing = max(elapsed - sum(extractions), 0.0)
+        self._item_seconds = self._tracked(self._item_seconds, committing / len(chunk))
+        if extractions:
+            self._extraction_seconds = self._tracked(
+                self._extraction_seconds, sum(extractions) / len(extractions)
+            )
+            self._deferred_artifacts += len(extractions)
+
+
 def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
     """Up to `limit` items, bounded by bytes, always at least one."""
     chunk: list[dict] = []
@@ -1125,16 +1230,20 @@ def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
 
 
 def _request_extraction(root: Path, planned: dict, budget: request_budget.RequestBudget,
-                        stats: Counter) -> None:
-    """Ask for text extraction of a committed media artifact; finish repairs what is missed."""
+                        stats: Counter) -> float | None:
+    """Ask for text extraction of a committed media artifact; finish repairs what is missed.
+
+    Returns the seconds the request took, or None when none was made.
+    """
     from . import media_processing
 
     artifact = root / planned["artifact_path"]
     if media_processing.classify_media(artifact) is None:
-        return
+        return None
     if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
         stats["extraction_deferred"] += 1
-        return
+        return None
+    started = time.monotonic()
     try:
         # The caller already holds the mutation guard, so the sidecar write needs no second one.
         media_processing.reconcile_media(
@@ -1145,6 +1254,7 @@ def _request_extraction(root: Path, planned: dict, budget: request_budget.Reques
         stats["extraction_failed"] += 1
     else:
         stats["extraction_requested"] += 1
+    return time.monotonic() - started
 
 
 def _commit_chunk(
@@ -1187,7 +1297,8 @@ def _apply_chunk(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], *,
     run_date: dt.date, ceiling: int, budget: request_budget.RequestBudget, stats: Counter,
     written: list[str],
-) -> None:
+) -> list[float]:
+    """Apply one chunk; returns the seconds each media extraction request took."""
     plan = run["plan"]
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
@@ -1234,11 +1345,15 @@ def _apply_chunk(
         landed = _commit_chunk(root, store, run, survivors, run_date=run_date, label=label)
     for planned in [*settled, *landed]:
         _record_unchanged(root, planned, outcomes[planned["original_path"]], stats)
+    extractions: list[float] = []
     for planned in landed:
         if outcomes[planned["original_path"]]["status"] == "applied":
             written.append(planned["target_path"])
         if planned["form"] == "artifact":
-            _request_extraction(root, planned, budget, stats)
+            seconds = _request_extraction(root, planned, budget, stats)
+            if seconds is not None:
+                extractions.append(seconds)
+    return extractions
 
 
 def _record_unchanged(root: Path, planned: dict, outcome: dict, stats: Counter) -> None:
@@ -1348,7 +1463,6 @@ def apply(
 
         budget = _call_budget()
         ceiling = client_artifacts.fetch_budget().max_file_bytes
-        reserve = request_budget.DELIVERY_RESERVE_SECONDS
         written: list[str] = []
         pending = _pending(run)
         if pending:
@@ -1357,21 +1471,20 @@ def apply(
             run["phase"] = "applying"
             run["inflight"] = True
 
-        per_item = INITIAL_ITEM_SECONDS
+        pacer = _ApplyPacer(root, budget)
         stopped = False
         chunks = 0
         while pending:
-            fit = int((budget.remaining() - reserve) / per_item)
-            if chunks and fit < 1:
+            chunk = pacer.next_chunk(pending, first=not chunks)
+            if not chunk:
                 stopped = True
                 break
-            chunk = _take_chunk(pending, max(1, min(APPLY_CHUNK_ITEMS, fit)))
             started = time.monotonic()
-            _apply_chunk(
+            extractions = _apply_chunk(
                 root, store, run, chunk, run_date=run_date, ceiling=ceiling,
                 budget=budget, stats=stats, written=written,
             )
-            per_item = max((time.monotonic() - started) / len(chunk), 0.001)
+            pacer.record(chunk, time.monotonic() - started, extractions)
             pending = pending[len(chunk):]
             chunks += 1
 

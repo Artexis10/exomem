@@ -1,7 +1,7 @@
 ## 1. Measurement
 
-- [ ] 1.1 Add `benchmarks/collection_ingest/` (generator, driver, scorer, README) for an invented collection of about 1,000 notes with mixed media and an answer key the generator writes. Verify: the same seed gives byte-identical output, and five hand-checked items per metric agree with the scorer.
-- [ ] 1.2 Record the baseline on the unchanged product, for the personal and Cloud-like profiles. Verify: the metrics files exist, and attachments landed, links preserved and classified homes are each zero, matching the code read.
+- [x] 1.1 Add `benchmarks/collection_ingest/` (generator, driver, scorer, README) for an invented collection of about 1,000 notes with mixed media and an answer key the generator writes. Verify: the same seed gives byte-identical output, and five hand-checked items per metric agree with the scorer.
+- [x] 1.2 Record the baseline on the unchanged product, for the personal and Cloud-like profiles. Verify: the metrics files exist, and attachments landed, links preserved and classified homes are each zero, matching the code read.
 
 ## 2. Plan (D2, D3, D4)
 

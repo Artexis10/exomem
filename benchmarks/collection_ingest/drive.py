@@ -260,6 +260,9 @@ class Journey:
             "plan_items": len((run.get("plan") or {}).get("items") or []),
             "outcome_status": counts_by_status(run.get("outcomes") or {}),
             "recall_check": (run.get("finish") or {}).get("recall_check"),
+            # The product's own coverage report, kept verbatim so the scorer's
+            # outside view can be compared with what finish told the agent.
+            "coverage": find_field(data, "coverage"),
             "verified_unchanged": run.get("verified_unchanged"),
             "verified_total": run.get("verified_total"),
             "stopped_at": None,

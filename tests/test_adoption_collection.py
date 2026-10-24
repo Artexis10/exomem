@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import itertools
+import types
 from pathlib import Path
 
 import pytest
@@ -284,6 +286,48 @@ def test_a_tiny_budget_needs_several_calls_writes_each_item_once_and_replays_a_r
     assert len(pages) == len(files)
     assert {o["status"] for o in final["outcomes"].values()} == {"applied"}
     assert {rel: (vault / rel).read_bytes() for rel in files} == originals
+
+
+def test_no_apply_call_runs_past_its_budget_minus_the_delivery_reserve_when_chunk_cost_swings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cheap chunk must not license a big one: every call ends inside budget minus the reserve."""
+    clock = {"now": 1000.0}
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(adoption_run, "time", fake_time)
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 2.0)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "10")
+    request_budget.reset_resolution_cache()
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 10)
+    seconds_per_item = itertools.cycle([0.05, 0.4])  # cheap chunk, then one eight times dearer
+    real_apply_chunk = adoption_run._apply_chunk
+
+    def costly_chunk(*args, **kwargs):
+        result = real_apply_chunk(*args, **kwargs)
+        clock["now"] += next(seconds_per_item) * len(args[3])
+        return result
+
+    monkeypatch.setattr(adoption_run, "_apply_chunk", costly_chunk)
+    files = {f"Coll/note-{n:03d}.md": f"# Note {n}\n\ntext {n}\n" for n in range(60)}
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    plan_id = planned["plan"]["plan_id"]
+
+    elapsed: list[float] = []
+    last: dict = {}
+    while not elapsed or last.get("continuation"):
+        began = clock["now"]
+        last = adoption_run.apply(
+            vault, run_id=run_id, plan_id=plan_id, continuation=last.get("continuation"),
+            today=TODAY,
+        )
+        elapsed.append(clock["now"] - began)
+
+    assert max(elapsed) <= 10.0 - 2.0
+    assert len(elapsed) >= 2
+    assert last["progress"] == {"applied": 60, "failed": 0, "remaining": 0, "total": 60}
+    assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 60
 
 
 def test_a_frozen_destination_taken_by_another_writer_fails_without_moving(tmp_path: Path) -> None:
