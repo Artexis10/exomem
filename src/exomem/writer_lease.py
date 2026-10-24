@@ -4973,10 +4973,11 @@ class LeaseManager:
     ) -> Iterator[None]:
         """Revalidate writer authority without holding the vault mutation lock.
 
-        The single choke point for idle-release accounting (R5): this is the
-        only place `_ACTIVE_WRITE_FENCE` is set, so it is also the only place
-        that may safely count `_active_mutations` — `count == 0` therefore
-        provably means no outstanding fence anywhere in this process.
+        The choke point for idle-release accounting (R5): every command fence is
+        set and counted here, so `count == 0` means no command holds a fence
+        from this guard. Two collection-store helpers also set
+        `_ACTIVE_WRITE_FENCE` without counting: the admission session's `writer`
+        and the offline export's `_files_as`. The count does not cover them.
         """
         fence_context: Token[tuple[Any, int] | None] | None = None
         file_context = None

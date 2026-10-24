@@ -611,3 +611,52 @@ def test_curation_proposal_preparation_leaves_the_boundary_free_and_the_seal_rec
         assert getattr(error, "code", None) == "CURATION_BINDING_STALE", error
         assert boundary_at_seal == []
         assert not runs.exists() or not any(runs.iterdir())
+
+
+def test_curation_proposal_refuses_a_registry_that_changed_during_preparation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preparation runs unguarded, so it captures registry identities before it
+    reads anything: a registry change during preparation must refuse at the seal,
+    not be absorbed into the plan's bindings."""
+    rel = "Knowledge Base/Notes/Insights/propose-registry.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000f1")
+    plan = {
+        "version": 1,
+        "title": "Reword the page",
+        "steps": [
+            {
+                "step_id": "reword",
+                "kind": "edit",
+                "args": {
+                    "path": rel,
+                    "why": "Apply the reviewed wording.",
+                    "operation": {
+                        "kind": "replace_string",
+                        "old_string": "Before.",
+                        "new_string": "Reworded.",
+                        "expected_hash": content_hash((vault / rel).read_text(encoding="utf-8")),
+                        "relation_disposition": "reviewed_none",
+                        "relation_review_reason": "No relation changes.",
+                    },
+                },
+            }
+        ],
+    }
+    real_prepare_step = curation._prepare_step
+
+    def change_a_registry_after_preparation(*args, **kwargs):
+        result = real_prepare_step(*args, **kwargs)
+        contracts = vault / "Knowledge Base" / "_Schema" / "contracts"
+        contracts.mkdir(parents=True, exist_ok=True)
+        (contracts / "added-during-preparation.yaml").write_text("version: 1\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(curation, "_prepare_step", change_a_registry_after_preparation)
+
+    with pytest.raises(Exception) as refused:
+        curation.propose(vault, plan)
+
+    assert getattr(refused.value, "code", None) == "CURATION_REGISTRY_CHANGED", refused.value
+    runs = curation.CurationStore(vault).root
+    assert not runs.exists() or not any(runs.iterdir())

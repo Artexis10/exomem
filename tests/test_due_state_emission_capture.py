@@ -243,6 +243,33 @@ def test_a_batch_scope_is_per_vault(vault: Path, tmp_path: Path) -> None:
         assert not due_state_module.batch_active(other)
 
 
+def test_a_write_beside_a_batch_on_another_thread_keeps_its_block(vault: Path) -> None:
+    """A batch silences its own request, not a user's write that runs beside it."""
+    import threading
+
+    overdue_prediction(vault)
+    scratch_page(vault)
+    commands.op_bootstrap(vault, section="all")
+    due_state_module.reset_emission_state()
+    page = _bulk_pages(vault, 1)[0]
+    batch_open, write_done = threading.Event(), threading.Event()
+
+    def batch() -> None:
+        with due_state_module.batch_scope(vault):
+            batch_open.set()
+            assert write_done.wait(10)
+
+    runner = threading.Thread(target=batch)
+    runner.start()
+    try:
+        assert batch_open.wait(10)
+        block = due_state_module.block_for_write(vault, page)
+        assert due_state_module.should_emit(block, vault_root=vault)
+    finally:
+        write_done.set()
+        runner.join(10)
+
+
 def test_source_adoption_omits_unrelated_due_advice(vault: Path) -> None:
     """Adopting Sources must not repeat due findings from untouched compiled pages."""
     overdue_prediction(vault)
