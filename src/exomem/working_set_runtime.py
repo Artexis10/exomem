@@ -2569,6 +2569,62 @@ def _key_text(freshness_key: Any) -> str:
     return str(freshness_key or "")
 
 
+LOOKUP_CURRENT = "current"
+LOOKUP_STALE = "stale"
+LOOKUP_UNAVAILABLE = "unavailable"
+
+
+class NameLookup(NamedTuple):
+    """Whether prose names can be resolved against current lookup evidence."""
+
+    state: str
+    checkpoint: Any
+    # The live key a stamped build records; empty without a live checkpoint.
+    stamp: str
+    index_stamp: str
+
+    @property
+    def needs_build(self) -> bool:
+        return self.state == LOOKUP_STALE and self.index_stamp != self.stamp
+
+
+def name_lookup(vault_root: Path) -> NameLookup:
+    """Read lookup currency in O(1): the live KB checkpoint against the index stamp.
+
+    Only a stamped build advances the stamp, and only a request or a reader
+    that refused on staleness asks for one, so any KB write leaves the lookup
+    `stale` until then. A checkpoint still settling an external change is
+    `stale` too, though no build can help it. `unavailable` means no build can:
+    the recall registry is not live or the index is off.
+    """
+    from . import freshness
+
+    root = Path(vault_root)
+    checkpoint = freshness.live_recall_checkpoint(root, "kb")
+    if checkpoint is None:
+        return NameLookup(LOOKUP_UNAVAILABLE, None, "", "")
+    stamp = _key_text(
+        (checkpoint.triple, checkpoint.policy_version, checkpoint.access_policy_fingerprint)
+    )
+    index = working_set_index.WorkingSetIndex(root)
+    if not index.available():
+        return NameLookup(LOOKUP_UNAVAILABLE, checkpoint, stamp, "")
+    index_stamp = index.freshness_stamp()
+    current = index_stamp == stamp and freshness.recall_checkpoint_is_current(root, "kb", checkpoint)
+    return NameLookup(LOOKUP_CURRENT if current else LOOKUP_STALE, checkpoint, stamp, index_stamp)
+
+
+def request_lookup_refresh(vault_root: Path, lookup: NameLookup) -> None:
+    """Schedule the stamped build a stale lookup needs; never on the caller's thread.
+
+    Without it a refused reader stays refused until the next recall. Only a
+    managed runtime has a background owner, and a bounded read must not walk
+    the vault itself.
+    """
+    if lookup.needs_build and _managed():
+        _schedule_build(vault_root, freshness_stamp=lookup.stamp)
+
+
 def unevaluated_continuity(continuity: str | None) -> str:
     """The state for a packet that abstained before the token could be checked.
 

@@ -4,8 +4,8 @@ One entry keeps one before image as read. History stays outside ordinary reads
 and indexing; this owner admits every retained image before serving its fields.
 It reuses the held history reader and Records' page bounds and continuation, without
 registry history's rotation policy. Its envelope differs from Records': `status` is
-`retained`, `incomplete` or `unavailable`, `coverage` is always `unverified`, and
-no field claims a total. Each change costs one full before image. Only a returned
+`retained`, `incomplete` or `unavailable`, `coverage` is always `unverified`, an
+optional `lookup` names stale name-resolution evidence, and no field claims a total. Each change costs one full before image. Only a returned
 page of independently admitted text stays in memory.
 """
 
@@ -219,13 +219,20 @@ def read(
     be short or empty while `truncated` is true; the continuation then names the last
     admitted entry examined, never an unavailable one. Such an empty page reports
     `incomplete`, not `unavailable`.
+
+    `lookup` appears when prose names could not be checked against current lookup
+    evidence, so a name-linked entry may have been refused for that alone. A
+    `stale` read schedules the stamped build; repeating the same call, not paging
+    on, can then admit what this one refused.
     """
-    from . import commands
+    from . import commands, working_set_runtime
 
     size, after = record_history._page_bounds(limit, continuation)
     current = commands.op_read_memory(root, path=path)
     if not isinstance(current.get("content_hash"), str):
         raise ValueError("NOT_FOUND: page is unavailable")
+    lookup = working_set_runtime.name_lookup(root)
+    working_set_runtime.request_lookup_refresh(root, lookup)
     canonical = current["path"]
     # The current read establishes the parent identity, never prior disclosure.
     identity = memory_refs.normalize_id(current["frontmatter"].get(memory_refs.ID_FIELD))
@@ -287,7 +294,7 @@ def read(
         revisions.append(
             {**entry, "version": version, "status": "available", "prior": prior, "actor": actor}
         )
-    return {
+    result = {
         "parent_ref": parent_ref,
         "unit_ref": unit_ref,
         # These protocol outcomes describe admitted snapshots, never complete retention.
@@ -299,3 +306,27 @@ def read(
         "continuation": consumed if truncated else None,
         "revisions": revisions,
     }
+    marker = _lookup_marker(root, lookup, working_set_runtime.name_lookup(root))
+    if marker is not None:
+        result["lookup"] = marker
+    return result
+
+
+def _lookup_marker(root: Path, before: Any, after: Any) -> str | None:
+    """Name the lookup state when it alone may have refused name-linked entries.
+
+    Both readings bracket the scan, so a write during it still counts. The state
+    is vault-wide and says nothing about this page's entries, but it flips on any
+    write, withheld pages included, so a restricted caller does not receive it,
+    as recall withholds its vault generation.
+    """
+    from . import working_set_runtime as runtime
+    from .governance import egress
+
+    if before.state == after.state == runtime.LOOKUP_CURRENT and before.stamp == after.stamp:
+        return None
+    if not egress.name_lookup_required(root) or egress.caller_restricted(root):
+        return None
+    if runtime.LOOKUP_UNAVAILABLE in (before.state, after.state):
+        return runtime.LOOKUP_UNAVAILABLE
+    return runtime.LOOKUP_STALE
