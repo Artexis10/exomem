@@ -1073,11 +1073,10 @@ def lexical_evidence(
     This is own-page retrieval evidence, not a second vote for title overlap.
     Unavailable FTS never falls back to a corpus walk or foreground repair.
 
-    The state is the catalogue's readiness. For a restricted reader (`visible`
-    given), a catalogue that trails only by pages that reader may not see reads
-    `available`, so a write to a withheld page does not flip it (`view_lag`).
-    Only the reported state changes: the readiness gate still serves no hits
-    from a catalogue that trails.
+    The state is the catalogue's readiness. A catalogue that trails serves no
+    hits and reads as it is, except for a restricted reader (`visible` given)
+    when it trails only by pages that reader may not see: it is current for
+    that reader, so it serves and reads `available` (`_reader_lexical_query`).
 
     Bounded on any turn: at most `ACTIVATION_LEXICAL_MAX_TERMS` of the
     turn's units, the rarest in the knowledge base, carrying at most
@@ -1093,26 +1092,18 @@ def lexical_evidence(
         return [], "available"
     turn = working_set_index.subject_text(turn)
     try:
-        result = _lexical_query(
+        result = _reader_lexical_query(
             vault_root,
             turn,
             set(by_path),
+            visible=visible,
             limit=limit,
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
             selection=selection,
         )
         if not result.readiness.complete:
-            readiness = result.readiness
-            if (
-                visible is not None
-                and readiness.status == "stale"
-                and view_lag.recall_lag_only_withheld(
-                    vault_root, "kb", readiness.published, visible
-                )
-            ):
-                return [], "available"
-            return [], readiness.status
+            return [], result.readiness.status
         hits = [
             find_types.Hit(
                 path=path,
@@ -1167,6 +1158,36 @@ def _lexical_query(
     )
 
 
+def _reader_lexical_query(
+    vault_root: Path,
+    words: str,
+    paths: set[str],
+    *,
+    visible: Callable[[str], bool] | None,
+    **query,
+):
+    """`_lexical_query`, serving a restricted reader a catalogue that trails only by
+    pages that reader may not see.
+
+    Such a catalogue holds every page the reader may see as it is now, so a write
+    to a page it may not see changes neither the hits nor their state (`view_lag`).
+    The query then reads the catalogue at its own checkpoint, once. Every other
+    lag, and the owner (`visible` None), keep the readiness gate: no hits, `stale`.
+    The release decision on each hit stays per request, on the live file.
+    """
+    result = _lexical_query(vault_root, words, paths, **query)
+    readiness = result.readiness
+    if (
+        visible is None
+        or readiness.status != "stale"
+        or not view_lag.recall_lag_only_withheld(vault_root, "kb", readiness.published, visible)
+    ):
+        return result
+    return _lexical_query(
+        vault_root, words, paths, **{**query, "recall_checkpoint": readiness.published}
+    )
+
+
 def lexical_hits_without(
     vault_root: Path,
     turn: str,
@@ -1175,6 +1196,7 @@ def lexical_hits_without(
     *,
     freshness=None,
     recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
     """Which of `pages` the activation lexical query still reaches for `turn`
     when the stems of the `left_out` words are not counted
@@ -1195,10 +1217,11 @@ def lexical_hits_without(
     if not pages:
         return frozenset()
     try:
-        result = _lexical_query(
+        result = _reader_lexical_query(
             vault_root,
             turn,
             set(pages),
+            visible=visible,
             limit=len(pages),
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,

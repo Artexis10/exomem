@@ -10,6 +10,7 @@ the vault-wide flag.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -232,13 +233,25 @@ def withheld_path(request: pytest.FixtureRequest) -> str | None:
     return getattr(request, "param", None)
 
 
-def _withhold_from_external(vault: Path, rel: str) -> None:
+RESTRICTED_TAG = "coverage-restricted"
+
+
+@pytest.fixture
+def withheld_tag(request: pytest.FixtureRequest) -> str | None:
+    """A tag that withholds the pages carrying it from the external reader (`indirect` parameter).
+
+    The scope exists from the start, so tagging a page later moves no policy.
+    """
+    return getattr(request, "param", None)
+
+
+def _withhold_from_external(vault: Path, selector: str) -> None:
     scope, rule = "01ARZ3NDEKTSV4RRFFQ69G5FB2", "01ARZ3NDEKTSV4RRFFQ69G5FB3"
     governance = vault / "Knowledge Base/_Governance"
     (governance / "scopes").mkdir(parents=True, exist_ok=True)
     (governance / "rules").mkdir(parents=True, exist_ok=True)
     (governance / "scopes/extra.yaml").write_text(
-        f'governance_version: 1\nid: {scope}\nname: Extra\npaths: ["{rel}"]\n', encoding="utf-8"
+        f"governance_version: 1\nid: {scope}\nname: Extra\n{selector}\n", encoding="utf-8"
     )
     (governance / "rules/extra-external.yaml").write_text(
         f'governance_version: 1\nid: {rule}\nscope_ids: ["{scope}"]\naudience: external\nceiling: 0\n',
@@ -248,12 +261,15 @@ def _withhold_from_external(vault: Path, rel: str) -> None:
 
 @pytest.fixture
 def activation(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, withheld_path: str | None
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    withheld_path: str | None,
+    withheld_tag: str | None,
 ) -> SimpleNamespace:
     """A managed runtime whose activation catalogue was built at the current stamp.
 
-    A scheduled build never runs, so the catalogue stays behind until a test
-    publishes it: the request reports what it can prove about that lag.
+    A scheduled build or lexical repair never runs, so each catalogue stays behind
+    until a test publishes it: the request reports what it can prove about that lag.
     """
     _seed_structure(vault)
     _seed_planning(vault)
@@ -263,7 +279,9 @@ def activation(
     write_scope(vault)
     write_rule(vault, ceiling=0)
     if withheld_path is not None:
-        _withhold_from_external(vault, withheld_path)
+        _withhold_from_external(vault, f'paths: ["{withheld_path}"]')
+    if withheld_tag is not None:
+        _withhold_from_external(vault, f'tags: ["{withheld_tag}"]')
     _seed_live_recall(vault)
     lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
@@ -276,6 +294,7 @@ def activation(
         "_schedule_build",
         lambda root, freshness_stamp="": scheduled.append(freshness_stamp),
     )
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: False)
     return SimpleNamespace(vault=vault, scheduled=scheduled)
 
 
@@ -331,38 +350,99 @@ def _lexical_flag(vault: Path, *, restricted: bool = True) -> str:
     return _activate(vault, restricted=restricted)["generation"]["lexical_evidence"]
 
 
-def test_a_withheld_write_leaves_the_restricted_lexical_flag_as_it_was(
+SLED = "Knowledge Base/Products/Cargo Sled.md"
+
+
+def _lexical(vault: Path, *, restricted: bool = True) -> tuple[list[str], str]:
+    """The activation lexical lane as the request runs it: `(hit paths, state)`."""
+    with _caller(restricted):
+        hits, state = working_set_runtime.lexical_evidence(
+            vault, TURN, working_set_index.WorkingSetIndex(vault).anchors(),
+            limit=10, visible=egress.visible_page_filter(vault),
+        )
+    return [hit.path for hit in hits], state
+
+
+def _append_to_sled(vault: Path, line: str = "An added line.") -> None:
+    page = vault / SLED
+    _write_as_the_service_does(vault, SLED, page.read_text(encoding="utf-8") + f"\n{line}\n")
+
+
+def test_a_withheld_write_leaves_the_restricted_lexical_lane_as_it_was(
     activation: SimpleNamespace,
 ) -> None:
-    """The lexical catalogue lags the registry here; only the flag is caller-relative."""
-    before = _lexical_flag(activation.vault)
-    assert before == "available"
+    """The lexical catalogue lags the registry here; the lane is served from it all the same."""
+    assert _lexical_flag(activation.vault) == "available"
+    before = _lexical(activation.vault)
+    assert before == ([SLED], "available")
 
     _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
 
-    assert _lexical_flag(activation.vault) == before
+    assert _lexical(activation.vault) == before
+    assert _lexical_flag(activation.vault) == "available"
 
 
-def test_a_visible_write_marks_the_restricted_lexical_flag_stale(
+def test_a_visible_write_serves_no_lexical_hits_to_the_restricted_reader(
     activation: SimpleNamespace,
 ) -> None:
-    _lexical_flag(activation.vault)
-    page = activation.vault / "Knowledge Base/Products/Cargo Sled.md"
-    _write_as_the_service_does(
-        activation.vault, "Knowledge Base/Products/Cargo Sled.md",
-        page.read_text(encoding="utf-8") + "\nAn added line.\n",
-    )
+    _append_to_sled(activation.vault)
 
+    assert _lexical(activation.vault) == ([], "stale")
     assert _lexical_flag(activation.vault) == "stale"
 
 
-def test_a_withheld_write_marks_the_owner_lexical_flag_stale(
+def test_a_withheld_write_serves_no_lexical_hits_to_the_owner(
     activation: SimpleNamespace,
 ) -> None:
-    _lexical_flag(activation.vault, restricted=False)
     _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
 
+    assert _lexical(activation.vault, restricted=False) == ([], "stale")
     assert _lexical_flag(activation.vault, restricted=False) == "stale"
+
+
+def test_the_dependence_check_reads_the_catalogue_the_lexical_lane_was_served(
+    activation: SimpleNamespace,
+) -> None:
+    """Which pages the turn still reaches without a word; the same catalogue, the same reader."""
+    def reached() -> frozenset[str]:
+        with _caller(True):
+            return working_set_runtime.lexical_hits_without(
+                activation.vault, TURN, frozenset({SLED}), frozenset({"north"}),
+                visible=egress.visible_page_filter(activation.vault),
+            )
+
+    before = reached()
+    assert before == {SLED}
+
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert reached() == before
+
+
+@pytest.mark.parametrize("withheld_tag", [RESTRICTED_TAG], indirect=True)
+def test_a_page_retagged_as_withheld_is_not_released_from_the_lagging_catalogue(
+    activation: SimpleNamespace,
+) -> None:
+    """The lagging catalogue still ranks the page by its old text; the release decision, made
+    on the live file for each request, drops it."""
+    assert _lexical(activation.vault) == ([SLED], "available")
+    page = activation.vault / SLED
+    _write_as_the_service_does(
+        activation.vault, SLED,
+        page.read_text(encoding="utf-8").replace("type: note\n", f"type: note\ntags: [{RESTRICTED_TAG}]\n"),
+    )
+
+    with _caller(True):
+        assert not egress.visible_page_filter(activation.vault)(SLED)
+        hits, state = working_set_runtime.lexical_evidence(
+            activation.vault, TURN, working_set_index.WorkingSetIndex(activation.vault).anchors(),
+            limit=10, visible=egress.visible_page_filter(activation.vault),
+        )
+        released = egress.annotate_hits(activation.vault, hits, limit=10).hits
+
+    assert (state, [hit.path for hit in hits]) == ("available", [SLED])
+    assert released == []
+    assert SLED not in json.dumps(_activate(activation.vault))
 
 
 def test_a_lag_with_no_remembered_stamp_is_reported_to_the_restricted_reader(
