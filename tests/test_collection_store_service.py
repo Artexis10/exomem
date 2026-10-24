@@ -1363,6 +1363,13 @@ def test_served_field_release_and_summary_use_canonical_authority_without_previe
     assert "exomem_view" not in page["frontmatter"]
     with pytest.raises(ValueError, match="NOT_FOUND"):
         recipient("read_memory", path=manifest_path())
+
+    def summary_published():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT state FROM projection_state WHERE path=?", (path,)).fetchone() == ("current",)
+
+    # The owner reads physical bytes, which must match the latest canonical render.
+    _until(summary_published)
     assert "exomem_view" in call(root, "read_memory", path=path)["frontmatter"]
     assert recipient("read_memory", path=A_PATH)["path"] == A_PATH
     basis = call(root, "record_memory", action="inspect", collection=CID)["field_release_basis"]
