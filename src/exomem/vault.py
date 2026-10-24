@@ -5653,6 +5653,14 @@ def _batch_atomic_write_locked(
         if additive_guard is not None:
             additive_guard.abort()
 
+    if vault_root is not None:
+        # Before the write acknowledges, so the free-text census names every
+        # file this batch installed, whatever its kind and whichever fan-out
+        # route follows. The fast-receipt route skips the watcher registration.
+        from .governance import artifact_census
+
+        artifact_census.note_created(vault_root, replaced)
+
     if fast_receipt is not None:
         if canonical_commit_monotonic is None:  # pragma: no cover - receipt implies a batch
             raise RuntimeError("derived receipt has no canonical commit timestamp")

@@ -6849,9 +6849,11 @@ class _ArtifactReferenceGate:
         self.grants_hash = "" if self.fail_closed else _grants_hash(self.policy)
         self.purpose = _declared_purpose(self.vault_root, self.who, purpose)
         self.verdicts: dict[str, bool] = {}
-        self.census = artifact_census.ArtifactCensus.empty()
-        self.tombstone_paths: dict[str, list[str]] = {}
+        self.census = artifact_census.CensusView.empty()
+        self.tombstone_paths: Mapping[str, tuple[str, ...]] = {}
         self.tombstone_literals = artifact_census.LiteralAliases()
+        # Path-shaped tokens that the census lacked, checked on disk once each.
+        self._directly: dict[str, tuple[str, ...]] = {}
         # One gate pass shares one lifecycle view, as the release walk does.
         with call_spans.span("egress.artifact_gate.tombstones"):
             self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
@@ -6876,25 +6878,20 @@ class _ArtifactReferenceGate:
 
     def _index(self) -> None:
         self._index_entered = True
-        self.census = artifact_census.vault_census(self.vault_root)
-        kb_prefix = f"{kb_dirname()}/"
-        literal_aliases: set[str] = set()
-        for rel in self.tombstones:
-            if rel.startswith(("exomem://", "sha256:")):
-                continue
-            path = Path(rel)
-            aliases = {rel, unquote(rel), path.name, path.stem}
-            if rel.startswith(kb_prefix):
-                aliases.add(rel[len(kb_prefix) :])
-            for alias in aliases:
-                artifact_census.add_alias(self.tombstone_paths, alias, rel)
-                if len(alias) >= 3:
-                    literal_aliases.add(alias)
-        self.tombstone_literals = artifact_census.LiteralAliases.build(literal_aliases)
+        self.census = artifact_census.request_census(self.vault_root)
+        self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
+            self.tombstones, kb_dirname()
+        )
 
     def _paths_for(self, alias: str) -> tuple[str, ...]:
         key = alias.casefold()
-        return tuple(sorted({*self.census.by_path.get(key, ()), *self.tombstone_paths.get(key, ())}))
+        return tuple(sorted({*self.census.paths(key), *self.tombstone_paths.get(key, ())}))
+
+    def _directly_named(self, token: str) -> tuple[str, ...]:
+        found = self._directly.get(token)
+        if found is None:
+            found = self._directly[token] = artifact_census.direct_paths(self.vault_root, token)
+        return found
 
     @staticmethod
     def _unwrap(value: str) -> tuple[str, bool]:
@@ -6939,19 +6936,29 @@ class _ArtifactReferenceGate:
         direct = self._paths_for(token)
         if direct:
             return direct
+        sibling = None
         if directory is not None and "/" not in token:
             sibling = f"{directory.rstrip('/')}/{token}" if directory else token
             direct = self._paths_for(sibling)
             if direct:
                 return direct
         if "/" not in token:
-            named = self.census.by_name.get(token.casefold())
+            named = self.census.names(token.casefold())
             if named:
                 return tuple(sorted(named))
             if wikilink or "." not in token:
-                stemmed = self.census.by_stem.get(Path(token).stem.casefold())
+                stemmed = self.census.stems(Path(token).stem.casefold())
                 if stemmed:
                     return tuple(sorted(stemmed))
+        if self.census.published:
+            # A published census lists no directory, so a file created a moment
+            # ago may be missing from it. A token with the shape of a vault path
+            # names its file exactly, so one check on disk settles it.
+            for shaped in (token, sibling):
+                if shaped is not None and "/" in shaped:
+                    named = self._directly_named(shaped)
+                    if named:
+                        return tuple(sorted(named))
         return ()
 
     def _permits(self, rel_path: str) -> bool:
@@ -7025,8 +7032,10 @@ class _ArtifactReferenceGate:
 
         out = _WRAPPED_ARTIFACT_REFERENCE.sub(lambda match: _replace_token(match.group(0)), text)
         spans = artifact_census.literal_alias_spans(
-            out, (self.census.literals, self.tombstone_literals)
+            out, (*self.census.literals, self.tombstone_literals)
         )
+        if self.census.published:
+            spans = artifact_census.with_path_spans(out, spans)
         if not spans:
             return out
         pieces: list[str] = []

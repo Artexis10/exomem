@@ -42,6 +42,7 @@ import yaml
 
 from .. import held_fs, memory_refs, reserved_paths
 from ..kbdir import kb_dirname
+from . import artifact_census
 from . import store as store_module
 
 GOVERNANCE_DIRNAME = "_Governance"
@@ -683,6 +684,8 @@ def mirror_authoring_workspace(
                             if not flushed.ok:
                                 return _workspace_mirror_failure(flushed.error)
                             publications[f"{base}/{relative}"] = published.require()
+                            # A policy file is a vault file: the free-text census names it too.
+                            artifact_census.note_created(root, [f"{base}/{relative}"])
                         if (
                             not filesystem.validate_directory(parent).ok
                             or not filesystem.validate_directory(governance_root).ok

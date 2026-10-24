@@ -1507,6 +1507,16 @@ def inspect_generic_path(
                 )
 
 
+def _note_census(
+    vault_root: Path, created: Iterable[str], *, removed: Iterable[str] = ()
+) -> None:
+    """Tell the free-text census about files this writer made, before the writer returns."""
+    from .governance import artifact_census
+
+    artifact_census.note_created(vault_root, created)
+    artifact_census.note_touched(vault_root, removed)
+
+
 def publish_generic_bytes(
     vault_root: Path,
     value: object,
@@ -1586,6 +1596,7 @@ def publish_generic_bytes(
                 identity = published.require()
                 _refuse_private_identity(identity, current)
                 _require_current_generic_directory(filesystem, parent)
+                _note_census(vault_root, [leaf if parent_path == "." else f"{parent_path}/{leaf}"])
                 return identity
 
 
@@ -1740,7 +1751,7 @@ def move_generic_path(
     with _generic_identity_catalogue_scope(
         vault_root, source, destination, identities=identities
     ) as current:
-        _move_generic_path_held(
+        arrived = _move_generic_path_held(
             vault_root,
             source,
             destination,
@@ -1749,6 +1760,7 @@ def move_generic_path(
             physical=physical,
             rollback=rollback,
         )
+    _note_census(vault_root, arrived, removed=[os.fspath(source)])
 
 
 def _move_generic_path_held(
@@ -1760,11 +1772,17 @@ def _move_generic_path_held(
     identities: IdentityCatalogue,
     physical: bool = False,
     rollback: bool = False,
-) -> None:
+) -> list[str]:
+    """Move one path; return the vault-relative files that now exist at the destination."""
     from . import writer_lease
 
     source_parent_path, source_leaf = _leaf_spelling(source, physical=physical)
     destination_parent_path, destination_leaf = _leaf_spelling(destination)
+    destination_relative = (
+        destination_leaf
+        if destination_parent_path == "."
+        else f"{destination_parent_path}/{destination_leaf}"
+    )
     effects = [Path(vault_root) / source_parent_path / source_leaf,
                Path(vault_root) / destination_parent_path / destination_leaf]
     if source_kind not in {"file", "directory"}:
@@ -1845,7 +1863,7 @@ def _move_generic_path_held(
                         _require_current_generic_directory(
                             filesystem, destination_parent
                         )
-            return
+            return [destination_relative]
 
         source_result = filesystem.parent(source_relative, access="mutate")
         if not source_result.ok:
@@ -1858,6 +1876,11 @@ def _move_generic_path_held(
             if not enumerated.ok:
                 code = enumerated.error.code if enumerated.error is not None else "IO_REFUSED"
                 raise ReservedPathLeafError(code)
+            arrived = [
+                f"{destination_relative}/{record.relative_path}"
+                for record in enumerated.require()
+                if record.identity.kind == "file"
+            ]
             for record in enumerated.require():
                 child = f"{source_relative.rstrip('/')}/{record.relative_path}"
                 if classify_logical(child).blocked:
@@ -1889,6 +1912,7 @@ def _move_generic_path_held(
                     code = moved.error.code if moved.error is not None else "IO_REFUSED"
                     raise ReservedPathLeafError(code)
                 _require_current_generic_directory(filesystem, destination_parent)
+    return arrived
 
 
 def read_generic_tree(
