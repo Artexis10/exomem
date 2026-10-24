@@ -226,13 +226,16 @@ def read(
     on, can then admit what this one refused.
     """
     from . import commands, working_set_runtime
+    from .governance import egress
 
     size, after = record_history._page_bounds(limit, continuation)
     current = commands.op_read_memory(root, path=path)
     if not isinstance(current.get("content_hash"), str):
         raise ValueError("NOT_FOUND: page is unavailable")
-    lookup = working_set_runtime.name_lookup(root)
-    working_set_runtime.request_lookup_refresh(root, lookup)
+    # Only admission that resolves prose names depends on lookup currency.
+    scan_start = working_set_runtime.name_lookup(root) if egress.name_lookup_required(root) else None
+    if scan_start is not None:
+        working_set_runtime.request_lookup_refresh(root, scan_start)
     canonical = current["path"]
     # The current read establishes the parent identity, never prior disclosure.
     identity = memory_refs.normalize_id(current["frontmatter"].get(memory_refs.ID_FIELD))
@@ -306,27 +309,35 @@ def read(
         "continuation": consumed if truncated else None,
         "revisions": revisions,
     }
-    marker = _lookup_marker(root, lookup, working_set_runtime.name_lookup(root))
-    if marker is not None:
-        result["lookup"] = marker
+    if scan_start is not None:
+        scan_end = working_set_runtime.name_lookup(root)
+        # A write during the scan leaves the end stale; its build is owed too.
+        working_set_runtime.request_lookup_refresh(root, scan_end)
+        marker = _lookup_marker(root, scan_start, scan_end)
+        if marker is not None:
+            result["lookup"] = marker
     return result
 
 
-def _lookup_marker(root: Path, before: Any, after: Any) -> str | None:
+def _lookup_marker(root: Path, scan_start: Any, scan_end: Any) -> str | None:
     """Name the lookup state when it alone may have refused name-linked entries.
 
-    Both readings bracket the scan, so a write during it still counts. The state
-    is vault-wide and says nothing about this page's entries, but it flips on any
+    Both readings bracket the scan, and the gate refuses on any checkpoint change,
+    so they must agree on the whole checkpoint, not only the stamp. The state is
+    vault-wide and says nothing about this page's entries, but it flips on any
     write, withheld pages included, so a restricted caller does not receive it,
     as recall withholds its vault generation.
     """
     from . import working_set_runtime as runtime
     from .governance import egress
 
-    if before.state == after.state == runtime.LOOKUP_CURRENT and before.stamp == after.stamp:
+    if (
+        scan_start.state == scan_end.state == runtime.LOOKUP_CURRENT
+        and scan_start.checkpoint == scan_end.checkpoint
+    ):
         return None
-    if not egress.name_lookup_required(root) or egress.caller_restricted(root):
+    if egress.caller_restricted(root):
         return None
-    if runtime.LOOKUP_UNAVAILABLE in (before.state, after.state):
+    if runtime.LOOKUP_UNAVAILABLE in (scan_start.state, scan_end.state):
         return runtime.LOOKUP_UNAVAILABLE
     return runtime.LOOKUP_STALE
