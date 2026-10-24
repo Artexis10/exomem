@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.140.0](https://github.com/Artexis10/exomem/compare/v0.139.0...v0.140.0) (2026-10-24)
+
+
+### Features
+
+* **collection-store:** enable SQLite collection migrations ([714568d](https://github.com/Artexis10/exomem/commit/714568d8d3ef1ebeef7300d979c8356b9197ede3))
+
+
+### Bug Fixes
+
+* retain safe canary connection failure details ([12be2c2](https://github.com/Artexis10/exomem/commit/12be2c2dec1a76c4652133116c18d595479aeffd))
+
 ## [0.139.0](https://github.com/Artexis10/exomem/compare/v0.138.0...v0.139.0) (2026-10-24)
 
 
