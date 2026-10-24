@@ -180,7 +180,7 @@ def test_an_unclosed_fence_in_the_summary_cannot_hide_authored_edges(vault: Path
     assert not (vault / ENTITIES / "Slipway Notes.md").exists()
 
 
-def test_relations_must_be_a_list_even_when_empty(vault: Path) -> None:
+def test_relations_must_be_a_list(vault: Path) -> None:
     with pytest.raises(ValueError, match=r"INVALID_LINK: relations must be a list"):
         commands.op_connect_memory(
             vault,
@@ -190,8 +190,25 @@ def test_relations_must_be_a_list_even_when_empty(vault: Path) -> None:
             summary="A synthetic concept sent the REST object shape by mistake.",
             relations={},
         )
+
+
+def test_read_operation_refuses_relations_unless_empty(vault: Path) -> None:
+    with pytest.raises(ValueError, match="INVALID_SCHEMA_ARGUMENT: relations requires create-entity"):
+        commands.op_connect_memory(vault, operation="context", query="tidal ledger", relations={})
     # An empty list is the unset value, so a read operation still accepts it.
     commands.op_connect_memory(vault, operation="context", query="tidal ledger", relations=[])
+
+
+def test_malformed_connection_keeps_the_relation_finding(vault: Path) -> None:
+    with pytest.raises(ValueError, match="malformed_relation"):
+        commands.op_connect_memory(
+            vault,
+            operation="create-entity",
+            entity_type="concept",
+            name="Dock Ledger",
+            summary="A synthetic concept whose connection packs two links into one value.",
+            connections=["[[Tidal Ledger]], [[Quay Inventory]]"],
+        )
 
 
 def test_curation_plan_authors_typed_relations_through_the_entity_leaf(vault: Path) -> None:

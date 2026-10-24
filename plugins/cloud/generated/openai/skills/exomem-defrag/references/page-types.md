@@ -11,7 +11,8 @@ governed rich kind is the alternative when richer semantics are intended.
 
 Each `## Relations` line below shows one registered relation that often fits that
 page type; it is an example, not a default. State the meaning the note actually
-has with the registered relation that fits (resolve it first), use `relates_to`
+has with the registered relation that fits (resolve it with
+`connect_memory(operation="resolve-relation")`), use `relates_to`
 only for a real generic connection, and write no edge when no meaning is known.
 
 ## source
@@ -528,7 +529,7 @@ What this person is relevant to in your work.
 
 ## Relations
 
-- member_of [[...]]
+- produces [[...]]
 ```
 
 `## Contact` is optional. Keep contact details in `[contact]` units there, never in
@@ -537,7 +538,7 @@ the person.
 
 On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical
 topic-to-person edge. On the entity page, prefer a specific relation such as
-`member_of`; `relates_to` stays honest only for a real generic connection.
+`member_of` or `produces`; `relates_to` stays honest only for a real generic connection.
 
 ### Organizations
 

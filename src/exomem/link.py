@@ -889,13 +889,20 @@ def link(
         origin_metadata=origin_block,
     )
     # Parse the rendered page once: an unclosed fence or a stray heading in the
-    # summary or why_in_kb must not hide the edges this call authored.
-    found = {
-        (candidate.kind, candidate.target)
-        for candidate in markdown_relations.scan_markdown_relations(source).candidates
-        if candidate.canonical and candidate.grammar_valid
-    }
-    if not {*relation_pairs, *(("relates_to", c) for c in connection_targets)} <= found:
+    # summary or why_in_kb must not hide the edges this call authored. The
+    # expected edges come from the rendered Relations block alone, so a malformed
+    # connection still reaches the preflight's own relation finding.
+    def _edges(markdown: str) -> set[tuple[str, str]]:
+        return {
+            (candidate.kind, candidate.target)
+            for candidate in markdown_relations.scan_markdown_relations(markdown).candidates
+            if candidate.canonical and candidate.grammar_valid
+        }
+
+    authored_block = (
+        source.rsplit("\n## Relations\n", 1)[1] if relation_pairs or connection_targets else ""
+    )
+    if not _edges("## Relations\n" + authored_block) <= _edges(source):
         raise LinkError(
             "INVALID_LINK",
             ["summary", "why_in_kb"],
