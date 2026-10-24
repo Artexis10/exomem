@@ -107,6 +107,10 @@ CHUNK_PATH_LOG = sidecar_store.PathChangeLog(
 # answer.
 CATCHUP_MAX_PATHS = 32
 CATCHUP_MAX_GENERATIONS = 64
+# Rounds in which the background catch-up carries the matrix over the writes
+# that committed during the previous round. A round reads only the changed
+# paths, so a few rounds outpace a steady write stream.
+CATCHUP_MAX_ROUNDS = 8
 # After a background corpus-matrix load fails, a managed recall reports the
 # dense lane failed, not warming, and starts no load for this long. A load that
 # fails late has read the whole corpus, so retrying on every recall would repeat
@@ -765,20 +769,29 @@ class EmbeddingIndex:
         self._mask_cache: _MaskCache | None = None
         # The resident semantic-unit matrix (see `_unit_vectors`).
         self._unit_cache: _UnitCache | None = None
+        # Lock order, outermost first: `_catch_up_lock`, `_lock`, the
+        # embeddings-store coordination scope that `_connect` holds while it
+        # opens a connection, then `_identity_lock`. A thread that holds one
+        # may take a later one, never an earlier one: `_connect` may run under
+        # `_lock`, and nothing inside `_connect` waits for `_lock`.
+        # `_unit_lock` and `_matrix_load_lock` are leaves. The background
+        # loader takes the four ordered locks, so no thread waits for it while
+        # it holds one of them.
+        #
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        # Guards `_identity` and `_identity_token`, so observations stay ordered.
+        self._identity_lock = threading.Lock()
         # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
         # stalls a chunk write's `_patch_cache`.
         self._unit_lock = threading.Lock()
-        # Guards `_matrix_load`, the one background corpus-matrix load. A leaf:
-        # it is taken under `_lock` but never waits on it.
+        # Guards `_matrix_load`, the one background corpus-matrix load.
         self._matrix_load_lock = threading.Lock()
         self._matrix_load: threading.Thread | None = None
         # Serializes the off-lock catch-ups the background load thread runs, so
-        # two never build a replacement matrix at once. A leaf:
-        # the thread holding it takes `_lock` only for the final swap, and no
-        # `_lock` holder ever waits on it.
+        # two never build a replacement matrix at once. Its holder takes `_lock`
+        # only for the final swap.
         self._catch_up_lock = threading.Lock()
         self._matrix_load_failed_at: float | None = None
         self._matrix_load_failures = 0
@@ -931,15 +944,26 @@ class EmbeddingIndex:
             self._vec_quant_synced = False
 
     def _observe_identity(
-        self, identity: recall_space.SpaceIdentity | None, token: tuple[int, int, int, int]
+        self,
+        identity: recall_space.SpaceIdentity | None,
+        token: tuple[int, int, int, int],
+        *,
+        same_instance: bool = False,
     ) -> bool:
-        """Remember a serving snapshot unless a newer observation already won."""
-        with self._lock:
+        """Remember a serving snapshot unless a newer observation already won.
+
+        `same_instance` also refuses a snapshot of another sidecar instance
+        than the one observed. Takes only `_identity_lock`, because `_connect`
+        calls this inside the coordination scope (see the lock order).
+        """
+        with self._identity_lock:
             observed = self._identity_token
-            if observed is not None and observed[2] == token[2] and (
-                observed[0], observed[1], observed[3]
-            ) > (token[0], token[1], token[3]):
-                return False
+            if observed is not None:
+                if observed[2] != token[2]:
+                    if same_instance:
+                        return False
+                elif (observed[0], observed[1], observed[3]) > (token[0], token[1], token[3]):
+                    return False
             self._set_identity(identity)
             self._identity_token = token
             return True
@@ -949,9 +973,7 @@ class EmbeddingIndex:
     ) -> None:
         """Fence identity and retained caches together after the SQL commit."""
         with self._lock:
-            observed = self._identity_token
-            if observed is None or observed[2] == token[2]:
-                self._observe_identity(identity, token)
+            self._observe_identity(identity, token, same_instance=True)
             self._invalidate_before((self._identity_token or token)[:3])
 
     def _vec_prepare(self, conn: sqlite3.Connection) -> bool:
@@ -1632,16 +1654,21 @@ class EmbeddingIndex:
         served = self._serve_resident(policy_identity)
         if served is not None:
             return served
+        # The loader takes `_lock` to swap its matrix in, so a caller whose
+        # thread already holds `_lock` never waits for the loader: it runs the
+        # bounded catch-up or the load itself. `_is_owned` is the RLock's owner
+        # test, which `threading.Condition` also uses.
+        may_wait = not self._lock._is_owned()
         while True:
             loading = self._matrix_loading()
-            if loading is not None:
+            if loading is not None and may_wait:
                 # Wait off the lock for the load already running, never a second one.
                 loading.join()
             with self._lock:
                 served = self._serve_or_catch_up_locked(policy_identity)
                 if served is not None:
                     return served
-                if self._matrix_loading() is not None:
+                if may_wait and self._matrix_loading() is not None:
                     continue
                 loaded = self._full_load_locked()
                 return loaded
@@ -1793,7 +1820,7 @@ class EmbeddingIndex:
         backoff = MATRIX_LOAD_RETRY_SECONDS * 2 ** min(self._matrix_load_failures - 1, 6)
         return time.monotonic() - failed_at < backoff
 
-    def _advance_matrix(self) -> None:
+    def _advance_matrix(self) -> bool:
         """Carry the resident matrix to the sidecar's publication, off `self._lock`.
 
         The publisher's catch-up: the background load thread runs it before any
@@ -1802,8 +1829,8 @@ class EmbeddingIndex:
         and takes `_lock` only to swap it in, and only when no writer patch,
         purge, reload or unload replaced that matrix meanwhile. Requests and
         writers therefore never wait on the splice, which grows with the vault.
-        Does nothing for a cold matrix or one outside the catch-up bound: the
-        next request starts the background load. Never raises: the rows are
+        Returns whether it swapped a replacement in. Does nothing for a cold
+        matrix or one outside the catch-up bound. Never raises: the rows are
         already committed, and a lagging matrix is served as lagging.
         """
         from . import recall_policy
@@ -1815,12 +1842,12 @@ class EmbeddingIndex:
                 for _attempt in range(3):
                     c = self._cache
                     if c is None or c.recall_policy_identity != policy_identity:
-                        return
+                        return False
                     fields: dict[str, int] = {}
                     with call_spans.span("embeddings.matrix_catch_up", fields):
                         patched = self._catch_up_cache(c, fields)
                     if patched is None:
-                        return
+                        return False
                     with self._lock:
                         if self._cache is c:
                             self._cache = patched
@@ -1828,14 +1855,16 @@ class EmbeddingIndex:
                             break
         except Exception as e:  # noqa: BLE001 — see the docstring
             log.warning("embedding matrix catch-up failed (%s); requests take the load path", e)
-            return
-        if swapped is not None:
-            # The patched metadata is a new list, so the mask memo would miss on
-            # the first request. Rebuild it for the same allowed set here.
-            before, after = swapped
-            memo = self._mask_cache
-            if memo is not None and memo.metadata is before.metadata:
-                self._eligibility_mask(after.metadata, memo.allowed_paths)
+            return False
+        if swapped is None:
+            return False
+        # The patched metadata is a new list, so the mask memo would miss on
+        # the first request. Rebuild it for the same allowed set here.
+        before, after = swapped
+        memo = self._mask_cache
+        if memo is not None and memo.metadata is before.metadata:
+            self._eligibility_mask(after.metadata, memo.allowed_paths)
+        return True
 
     def _serve_or_catch_up_locked(
         self, policy_identity: tuple[str, str], *, catch_up: bool = True
@@ -1935,12 +1964,28 @@ class EmbeddingIndex:
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
             # A resident matrix within the catch-up bound needs only its changed
-            # paths, so read every row again only when it did not catch up.
-            self._advance_matrix()
-            caught_up = self._resident_current(policy_identity)
-            if caught_up is not None:
+            # paths. A write that commits during a round leaves the swapped
+            # matrix behind again, and the next round carries that write too.
+            # Every row is read again only when a round cannot advance it.
+            advanced, caught_up = False, None
+            for _round in range(CATCHUP_MAX_ROUNDS):
+                advanced = self._advance_matrix()
+                caught_up = self._resident_current(policy_identity)
+                if caught_up is not None or not advanced:
+                    break
+            if caught_up is not None or advanced:
                 self._matrix_load_failed_at = None
                 self._matrix_load_failures = 0
+                if caught_up is None:
+                    # Writes outpaced every round, and each round stayed within
+                    # the bound. The matrix stays served as lagging, and the next
+                    # batch or lagging read starts this catch-up again. A full
+                    # read here could end under `_lock` and stall every writer.
+                    log.info(
+                        "embedding matrix background catch-up still lags after %d rounds",
+                        CATCHUP_MAX_ROUNDS,
+                    )
+                    return
                 log.info(
                     "embedding matrix background catch-up: rows=%d gen=%d in %.0f ms",
                     len(caught_up.metadata),

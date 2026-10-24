@@ -273,3 +273,73 @@ def test_concurrent_requests_during_a_lag_start_one_catch_up_and_none_waits_for_
     assert served == [frozenset({"a.md"})] * 6
     assert catch_up_threads == ["exomem-matrix-load"]
     assert idx.require_resident_matrix().stale_paths is None
+
+
+def test_a_lagging_request_never_waits_for_a_reader_that_holds_the_cache_lock(
+    tmp_path: Path,
+) -> None:
+    """A full load holds the cache lock while it reads every row.
+
+    A lagging request connects to read the change log, inside the store's
+    coordination scope. If that connection waited there for the cache lock, the
+    request would stall behind the load, and every other connection to the
+    store would stall behind the request until MUTATION_BUSY.
+    """
+    idx = _warm_index(tmp_path)
+    _lag_behind_another_writer(idx, "a.md", "new a", [0, 1])
+    served: list[frozenset[str] | None] = []
+    request = threading.Thread(
+        target=lambda: served.append(idx.require_resident_matrix().stale_paths), name="request"
+    )
+    with idx._lock:  # a reader in the middle of a full load
+        request.start()
+        request.join(timeout=10)
+        waited = request.is_alive()
+    request.join(timeout=30)
+    _settle(idx)
+
+    assert not waited
+    assert served == [frozenset({"a.md"})]
+    assert idx.require_resident_matrix().stale_paths is None
+
+
+def test_a_write_that_commits_during_the_background_catch_up_is_carried_without_a_full_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The swapped matrix lags that write by one path, which is within the catch-up bound."""
+    idx = _warm_index(tmp_path)
+    real_catch_up = idx._catch_up_cache
+    writers: list[threading.Thread] = []
+
+    def write_during(c, fields):
+        patched = real_catch_up(c, fields)
+        if not writers:
+            # Another request's write commits while the loader builds its replacement.
+            writer = threading.Thread(
+                target=idx.upsert_batch,
+                args=([("e.md", ["e"], _mat([0, 3]), 2.0)],),
+                kwargs={"identity": idx.identity},
+                name="write-request",
+            )
+            writers.append(writer)
+            writer.start()
+            writer.join(timeout=30)
+        return patched
+
+    loads: list[str] = []
+    real_load = idx._load_all_rows
+
+    def counted_load(*args, **kwargs):
+        loads.append(threading.current_thread().name)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(idx, "_catch_up_cache", write_during)
+    monkeypatch.setattr(idx, "_load_all_rows", counted_load)
+    idx.upsert_batch([("d.md", ["d"], _mat([0, 2]), 2.0)], identity=idx.identity)
+    _settle(idx)
+    resident = idx.require_resident_matrix()
+
+    assert [writer.is_alive() for writer in writers] == [False]
+    assert loads == []
+    assert resident.stale_paths is None
+    assert {path for path, _chunk in resident.metadata} == {"a.md", "b.md", "c.md", "d.md", "e.md"}
