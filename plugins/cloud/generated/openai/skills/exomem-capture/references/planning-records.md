@@ -30,21 +30,26 @@ an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Simple front door
 
-For a correction to observed state, inspect Records independently of ordinary
-Note recall. Raw Records items do not appear in ordinary recall results.
+For recall or correction of an observed event or state, inspect Records
+independently of ordinary Note recall. Raw Records items do not appear there.
 Call `record_memory(action="inspect")` to list admitted collections, then inspect
 one compatible collection using its returned `manifest_path` as `collection`.
-Run a bounded `query` for the known item identity before choosing a write.
+Run a bounded `query` for the requested identity or declared fields.
+An empty ordinary search does not establish that no matching Record exists.
+If inspection or query refuses, report that unavailable boundary rather than absence.
+For recall, return the matching rows. An authorized correction uses the guarded update below.
 For `update`, copy the returned internal UUID into `item_key`, the row's
 `item_version` into `expected_item_version`, and `snapshot` into
 `expected_container_hash`. Preserve provenance and verify the updated row.
 Do not infer that a matching row exists or create another collection when
 the inventory, schema, or query does not establish one.
 
-For a Planning change, call `plan_memory(action="inspect")` to list admitted
+For Planning recall or a change, call `plan_memory(action="inspect")` to list admitted
 collections. Copy the chosen `manifest_path` into `collection`, then inspect
-that collection and run a bounded `query` to identify exactly one item.
-If collection titles repeat, use their separate manifest paths. Use the returned
+that collection and run a bounded `query` for the requested items.
+For a change, identify exactly one item before choosing a write.
+If collection titles repeat, use their separate manifest paths. For recall,
+return the matching items. For an authorized change, use the returned
 `snapshot` as `expected_container_hash`, and that query row's `plan_id`
 and `item_version` as `plan_id` and `expected_item_version`. These are
 returned identities and versions, not filenames or values to invent.
@@ -79,8 +84,8 @@ when Exomem cannot capture; move durable results to Exomem when it can.
 
 | Simple action | User phrasing | Product route |
 |---|---|---|
-| `ask` | "what do I know," "find what I concluded," "show the context" | `ask_memory(detail="compact", rerank=false)` first; `read_memory` or `ask_memory(deep=true)` when synthesis needs context |
-| `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
+| `ask` | "what do I know," "find what I concluded," "show the context" | Reuse turn context; `search_memory(detail="compact", rerank=false)` for gaps, then `read_memory` or `search_memory(deep=true)` as needed |
+| `create_note` | "remember this," "save this conclusion," "write this decision" | `create_note`; use `supersede_note` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | Pick the lane first, then the transport. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
 | `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `plan_memory` for intended future state in a configured Planning collection |
 | `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `record_memory` for observed state in a configured Record collection |
@@ -169,7 +174,7 @@ Examples:
 
 - "Remember this decision" -> write a concise compiled note and report
   `Saved -> <path>`.
-- "What did I conclude about onboarding?" -> `ask_memory` first, cite hits, and
+- "What did I conclude about onboarding?" -> reuse current context, search remaining gaps with `search_memory`, cite hits, and
   retry with adjacent terms before treating a miss as meaningful.
 - "Save this article" -> `capture_source` with provenance; ask about compiling
   only if a conclusion is present.
@@ -190,7 +195,7 @@ Examples:
 - "Compile these three sources" -> ensure the three originals are already
   captured as Source/Evidence pages (capture any missing originals first), then
   draft a sourced note with
-  `remember(suggestions=true, response_detail="full")` link suggestions, then
+  `create_note(suggestions=true, response_detail="full")` link suggestions, then
   write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for
   keep/edit/supersede/archive.

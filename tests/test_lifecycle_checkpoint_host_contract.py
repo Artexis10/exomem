@@ -125,7 +125,9 @@ def declaration(scope: str, **changes) -> dict:
 def test_installed_exhaustion_stops_refresh_dispatch_but_end_restores_inspection(tmp_path, client):
     report = install(tmp_path / client, client, refresh_max_operations=1)
     prompt = envelope(client, "UserPromptSubmit", prompt="Check the current adapter evidence.")
-    scope = metadata(invoke(report, prompt))["scope_id"]
+    initial = invoke(report, prompt)
+    scope = metadata(initial)["scope_id"]
+    assert continuation.MEMORY_CITATION_GUIDANCE in initial["hookSpecificOutput"]["additionalContext"]
     declaration = {
         "schema_version": 1,
         "kind": "checkpoint",
@@ -157,7 +159,9 @@ def test_generated_bridge_covers_only_registry_static_reads_and_preserves_select
     report = install(profile, "codex")
     generated = json.loads((profile / "hooks" / retrieve.REFRESH_METADATA_NAME).read_text())
     assert generated["operations"] == {
-        command.name: command.read_only for command in commands.product_commands_for("mcp")
+        name: command.read_only
+        for command in commands.product_commands_for("mcp")
+        for name in command.callable_names
     }
     assert generated["activation"] == {
         "operation": "activate_context",

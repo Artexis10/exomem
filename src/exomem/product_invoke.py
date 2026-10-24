@@ -35,9 +35,11 @@ def product_command(op: str, *, expose_tier2: bool | None = None):
     from . import commands as commands_module
 
     tier2 = _expose_tier2(expose_tier2)
-    for command in commands_module.product_commands_for("cli", expose_tier2=tier2):
-        if command.name == op:
-            return command
+    from .command_surface import resolve_command
+
+    command = resolve_command(op, commands_module.product_commands_for("cli", expose_tier2=tier2))
+    if command is not None:
+        return command
     raise cli_ops.OpError("UNKNOWN_OP", f"unknown product operation {op!r}")
 
 
@@ -52,7 +54,8 @@ def cli_surface_descriptor(*, expose_tier2: bool | None = None):
         surface="cli",
         profile="product",
         tier2_enabled=tier2,
-        product_commands=tuple(command.name for command in registered),
+        product_commands=tuple(command.public_name for command in registered),
+        compatibility_commands=tuple(command.name for command in registered if command.preferred_name),
         exported_aliases=commands_module.simple_action_names(),
     )
 

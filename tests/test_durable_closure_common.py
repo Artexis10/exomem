@@ -675,7 +675,7 @@ def test_run_product_does_not_start_timed_work_when_indexed_fixture_times_out(
         async def list_tools(self) -> list[types.SimpleNamespace]:
             return [
                 types.SimpleNamespace(name=name)
-                for name in ("remember", "edit_memory", "read_memory", "ask_memory")
+                for name in ("create_note", "edit_note", "read_memory", "search_memory")
             ]
 
     fastmcp = types.ModuleType("fastmcp")
@@ -743,7 +743,7 @@ def test_run_product_rejects_late_success_before_starting_timed_work(
         async def list_tools(self) -> list[types.SimpleNamespace]:
             return [
                 types.SimpleNamespace(name=name)
-                for name in ("remember", "edit_memory", "read_memory", "ask_memory")
+                for name in ("create_note", "edit_note", "read_memory", "search_memory")
             ]
 
     fastmcp = types.ModuleType("fastmcp")

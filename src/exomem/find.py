@@ -1140,6 +1140,14 @@ class _SelectedHits:
     finish: Callable[[], list[Any]]
 
 
+@dataclass
+class _MixedPlan:
+    # Lane ranks stay fixed when selected canonical evidence disappears.
+    items: list[tuple[float, int, str, int, str]]
+    omitted_by_parent: dict[str, int]
+    truncation_targets: dict[str, tuple[int, str]]
+
+
 @dataclass(frozen=True)
 class _QueryPreparation:
     unit: bool
@@ -2110,6 +2118,21 @@ def find(
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
 
+    mixed_plan: _MixedPlan | None = None
+
+    def select_mixed_pages(paths: list[str]) -> set[str]:
+        nonlocal mixed_plan
+        mixed_plan = _mixed_plan(paths, mixed_unit_hits, limit=limit, config=resolved_config)
+        return {identity for _score, priority, identity, _rank, _lane in mixed_plan.items if priority == 0}
+
+    # Widening and post-selection dates can change page-lane membership. Keep
+    # their existing path until their complete metadata selection is available.
+    select_pages = (
+        select_mixed_pages if mixed and query_norm and catalog_view is not None
+        and not widen_outside_kb and updated_after is None and updated_before is None
+        and recency_days is None else None
+    )
+
     # Primary page semantic recall spans the vault even before widening.
     # Unit and lexical scoring retain their existing KB scope.
     admitted_paths = _admitted(
@@ -2172,6 +2195,7 @@ def find(
                 pending_paths=keyword_pending_paths,
                 timings=timings,
                 page_memo=page_memo,
+                select_pages=select_pages,
             )
     else:
         with _span(timings, "semantic.search", elapsed_ms_field="entry_ms"):
@@ -2215,6 +2239,7 @@ def find(
                 pending_paths=keyword_pending_paths,
                 prepared_queries=_prepared_queries,
                 defer_finish=_defer_finish,
+                select_pages=select_pages,
             )
 
     def select_outside(exclude_paths=None, *, defer_finish=False):
@@ -2286,7 +2311,14 @@ def find(
             hits = selected
 
         if retrieval_trace is not None and (mode == "keyword" or not query_norm):
-            retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
+            retrieval_trace.record_keyword_hits(
+                hits, filter_only=not query_norm,
+                ranks=(
+                    {identity: rank for _score, priority, identity, rank, _lane in mixed_plan.items
+                     if priority == 0}
+                    if mixed_plan is not None else None
+                ),
+            )
         if mode == "keyword" or not query_norm:
             _set_rerank_timing_profile(
                 timings,
@@ -2417,6 +2449,7 @@ def find(
                 limit=limit,
                 config=resolved_config,
                 retrieval_trace=retrieval_trace,
+                plan=mixed_plan,
             )
             hits = _finish_unit_candidates(
                 vault_root, hits, parent_reads=unit_reads, pages=page_memo, failed_out=failed,
@@ -3842,15 +3875,14 @@ def _find_semantic_units(
     ])
 
 
-def _merge_mixed_hits(
-    page_hits: list[Hit],
+def _mixed_plan(
+    page_paths: list[str],
     unit_hits: list[SemanticUnitHit],
     *,
     limit: int,
     config: RankingConfig,
-    retrieval_trace: Any | None = None,
-) -> list[Hit | SemanticUnitHit]:
-    """Fuse independent page/unit rankings after exact per-parent unit caps."""
+) -> _MixedPlan:
+    """Freeze independent lane ranks before any selected evidence is read."""
     kept_units: list[SemanticUnitHit] = []
     units_by_parent: dict[str, int] = {}
     omitted_by_parent: dict[str, int] = {}
@@ -3862,30 +3894,58 @@ def _merge_mixed_hits(
         units_by_parent[hit.parent_path] = count + 1
         kept_units.append(hit)
 
-    ranked: list[tuple[float, int, str, Hit | SemanticUnitHit, int, str]] = []
+    ranked: list[tuple[float, int, str, int, str]] = []
     ranked.extend(
         (
             _MIXED_PAGE_WEIGHT / (config.rrf_k + rank),
             0,
-            hit.path,
-            hit,
+            path,
             rank,
             "page",
         )
-        for rank, hit in enumerate(page_hits, start=1)
+        for rank, path in enumerate(page_paths, start=1)
     )
     ranked.extend(
         (
             _MIXED_UNIT_WEIGHT / (config.rrf_k + rank),
             1,
             hit.unit_ref,
-            hit,
             rank,
             "unit",
         )
         for rank, hit in enumerate(kept_units, start=1)
     )
-    ranked_items = sorted(ranked, key=lambda item: (-item[0], item[1], item[2]))[:limit]
+    items = sorted(ranked, key=lambda item: (-item[0], item[1], item[2]))[:limit]
+    parents = {hit.unit_ref: hit.parent_path for hit in kept_units}
+    truncation_targets = {}
+    for _score, priority, identity, _rank, _lane in items:
+        parent = identity if priority == 0 else parents[identity]
+        if parent in omitted_by_parent:
+            if priority == 0:
+                truncation_targets[parent] = (priority, identity)
+            else:
+                truncation_targets.setdefault(parent, (priority, identity))
+    return _MixedPlan(items, omitted_by_parent, truncation_targets)
+
+
+def _merge_mixed_hits(
+    page_hits: list[Hit],
+    unit_hits: list[SemanticUnitHit],
+    *,
+    limit: int,
+    config: RankingConfig,
+    retrieval_trace: Any | None = None,
+    plan: _MixedPlan | None = None,
+) -> list[Hit | SemanticUnitHit]:
+    """Bind the frozen mixed ranking without replacing missing evidence."""
+    plan = plan or _mixed_plan([hit.path for hit in page_hits], unit_hits, limit=limit, config=config)
+    pages = {hit.path: hit for hit in page_hits}
+    units = {hit.unit_ref: hit for hit in unit_hits}
+    ranked_items = []
+    for score, priority, identity, rank, lane in plan.items:
+        hit = pages.get(identity) if priority == 0 else units.get(identity)
+        if hit is not None:
+            ranked_items.append((score, priority, identity, hit, rank, lane))
     merged = [item[3] for item in ranked_items]
     if retrieval_trace is not None:
         retrieval_trace.record_mixed(
@@ -3896,18 +3956,13 @@ def _merge_mixed_hits(
             unit_parent_cap=_MIXED_UNITS_PER_PARENT_CAP,
         )
 
-    first_unit_by_parent: dict[str, SemanticUnitHit] = {}
-    page_by_path: dict[str, Hit] = {}
     for hit in merged:
         if isinstance(hit, Hit):
             hit.result_type = "page"
-            page_by_path[hit.path] = hit
-        else:
-            first_unit_by_parent.setdefault(hit.parent_path, hit)
-    for parent_path, omitted in omitted_by_parent.items():
-        target = page_by_path.get(parent_path) or first_unit_by_parent.get(parent_path)
+    for parent_path, (priority, identity) in plan.truncation_targets.items():
+        target = pages.get(identity) if priority == 0 else units.get(identity)
         if target is not None:
-            target.mixed_units_truncated = omitted
+            target.mixed_units_truncated = plan.omitted_by_parent[parent_path]
     return merged
 
 
@@ -5141,6 +5196,7 @@ def _find_managed_keyword(
     tags: list[str] | None, speakers: list[str] | None, file_types: list[str] | None,
     exclude_file_types: list[str] | None,
     page_memo: dict[str, ParsedPage | None] | None = None,
+    select_pages: Callable[[list[str]], set[str]] | None = None,
 ) -> list[Hit]:
     """Fix emitted groups in SQL, then verify only the selected canonical evidence."""
     from . import lexstore
@@ -5189,8 +5245,12 @@ def _find_managed_keyword(
             return None
         return page
 
+    groups = list(result.value or ())
+    selected_paths = select_pages([group.path for group in groups]) if select_pages is not None else None
     hits = []
-    for group in result.value or ():
+    for group in groups:
+        if selected_paths is not None and group.path not in selected_paths:
+            continue
         if view is not None:
             view.page_hashes.update(group.hashes)
         page = resolve(group.path, group.hashes[group.path])
@@ -5245,6 +5305,7 @@ def _find_keyword(
     pending_paths: frozenset[str] | None = None,
     timings: FindTimings | None = None,
     page_memo: dict[str, ParsedPage | None] | None = None,
+    select_pages: Callable[[list[str]], set[str]] | None = None,
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches.
 
@@ -5267,6 +5328,7 @@ def _find_keyword(
                 types=types, projects=projects, tags=tags, speakers=speakers,
                 file_types=file_types, exclude_file_types=exclude_file_types,
                 page_memo=page_memo,
+                select_pages=select_pages,
             )
     if not query_norm and _managed_browse_reader():
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
@@ -5442,6 +5504,7 @@ def _find_semantic(
     type_basis: note_types.Basis | None = None,
     prepared_queries: find_candidates.PreparedQueryInputs | None = None,
     defer_finish: bool = False,
+    select_pages: Callable[[list[str]], set[str]] | None = None,
 ) -> list[Hit] | _SelectedHits:
     """Hybrid (BM25+vector) or vector-only mode.
 
@@ -5453,7 +5516,7 @@ def _find_semantic(
     """
     with _span(timings, "semantic.preflight"):
         # Lazy imports — keep keyword-mode users out of the torch import path.
-        from . import embeddings, lexstore, readiness, scene_frames
+        from . import access, embeddings, lexstore, readiness, scene_frames
 
         status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
         type_basis = type_basis or note_types.Basis(vault_root)
@@ -5594,6 +5657,7 @@ def _find_semantic(
                 pending=pending,
                 pending_paths=pending_paths,
                 timings=timings,
+                page_memo=page_memo,
             )
         if retrieval_trace is not None:
             retrieval_trace.record_keyword_fallback(
@@ -5718,6 +5782,53 @@ def _find_semantic(
             return 2 * present > total and content_present > 0
         return _stem_tokens_present(page, query_norm)
 
+    def _needs_corroboration(path: str) -> bool:
+        return (
+            path not in vector_paths and path not in graph_set and path not in keyword_set
+            and path not in clip_set and path not in frame_attribution
+        )
+
+    def ranked_paths() -> Iterable[str]:
+        for path, _score in fused:
+            if path in seen:
+                continue
+            seen.add(path)
+            if path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+                continue
+            if not recall_policy.is_recall_candidate(vault_root, vault_root / path):
+                continue
+            if not access.is_indexable(vault_root, path):
+                continue
+            if path in bundle.ranking_pages:
+                ranking_page = bundle.ranking_pages[path]
+                if ranking_page is None:
+                    incomplete()
+                    continue
+                if (
+                    _needs_corroboration(path)
+                    and not find_results.literal_tokens_present(ranking_page, query_norm)
+                    and not _supported_stems(ranking_page)
+                ):
+                    continue
+            yield path
+
+    paths = ranked_paths()
+    # Collect and rank with the original limit. Only an entirely proved page
+    # prefix can join units before hydration; rerank passages retain their path.
+    if (
+        select_pages is not None and not may_rerank
+        and not any((types, projects, tags, speakers, file_types, exclude_file_types))
+        and all(bundle.ranking_pages.get(path) is not None for path, _score in fused)
+    ):
+        prefix = []
+        for path in paths:
+            if eligible_paths is None or path in eligible_paths:
+                prefix.append(path)
+            if len(prefix) >= target_n:
+                break
+        selected_paths = select_pages(prefix)
+        paths = (path for path in prefix if path in selected_paths)
+
     with _span(timings, "filter_hits"):
         # Hit construction is one of the four stages the contract names, so it
         # says `index` rather than carrying the static `computed` default.
@@ -5739,36 +5850,8 @@ def _find_semantic(
         # report a walk, so it contributes nothing to the walk sentinel, and
         # `WALKER_STAGES` in the gate now says so instead of counting it.
         _mark_source(timings, "filter_hits", find_types.SOURCE_INDEX)
-        for rel_path, _score in fused:
-            if rel_path in seen:
-                continue
-            seen.add(rel_path)
-            if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
-                continue
-            # Final egress guard: stale/non-projected sidecars can nominate paths,
-            # but they must not cause a raw Record to be hydrated even transiently.
-            if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
-                continue
-            needs_corroboration = (
-                rel_path not in vector_paths
-                and rel_path not in graph_set
-                and rel_path not in keyword_set
-                and rel_path not in clip_set
-                and rel_path not in frame_attribution
-            )
-            if rel_path in bundle.ranking_pages:
-                ranking_page = bundle.ranking_pages[rel_path]
-                if ranking_page is None:
-                    catalog_view = lexstore._admitted_catalog_view(vault_root)
-                    if catalog_view is not None:
-                        catalog_view.incomplete = True
-                    continue
-                if (
-                    needs_corroboration
-                    and not find_results.literal_tokens_present(ranking_page, query_norm)
-                    and not _supported_stems(ranking_page)
-                ):
-                    continue
+        for rel_path in paths:
+            needs_corroboration = _needs_corroboration(rel_path)
             page = _page_of(rel_path)
             if page is None:
                 continue

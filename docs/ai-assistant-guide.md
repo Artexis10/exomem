@@ -78,8 +78,8 @@ routes.
 
 | Simple action | User intent | Product command |
 | --- | --- | --- |
-| `ask` | "What do I know?", "find what I concluded", "show the context" | `ask_memory(detail="compact", rerank=false)`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
-| `remember` | "remember this conclusion", "save this decision", "write this up" | `remember`; use `replace_memory` when it supersedes an old conclusion |
+| `ask` | "What do I know?", "find what I concluded", "show the context" | `search_memory(detail="compact", rerank=false)`, then `read_memory`; use `search_memory(deep=true)` for synthesis |
+| `create_note` | "remember this conclusion", "save this decision", "write this up" | `create_note`; use `supersede_note` when it supersedes an old conclusion |
 | `capture` | "save this source", "preserve this receipt", "keep this proof" | `capture_source` for raw sources; `preserve_evidence` or `transfer_artifact` for Evidence |
 | `review` | "what needs review?", "show stale/disconnected knowledge", "what is unprocessed?" | `review_memory`; `triage_memory` for explicit dismiss/snooze/reopen |
 | `connect` | "what should this link to?", "suggest relations", "show related ideas" | `connect_memory`; entity writes stay explicit through its write-capable mode |
@@ -113,7 +113,7 @@ For CLI use, these actions are also available as friendly aliases:
 exomem ask "what did I conclude about onboarding?" --json
 exomem ask "warranty dispute context" --deep --graph-enrich --json
 exomem ask "battery policy" --category config --result-level mixed --explain --json
-exomem remember "# Decision\n\n## Claim\n\nUse simple actions first." --title "Use simple actions first" --json
+exomem create_note "# Decision\n\n## Claim\n\nUse simple actions first." --title "Use simple actions first" --json
 exomem capture "raw article excerpt" --title "Article title" --source-type article --url "https://example.com" --json
 exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
 exomem review --json
@@ -153,7 +153,7 @@ What did I conclude about Exomem vs built-in memory?
 
 Agent behavior:
 
-1. Run `ask_memory(query="Exomem built-in memory boundary", detail="compact")`.
+1. Run `search_memory(query="Exomem built-in memory boundary", detail="compact")`.
 2. Cite relevant hits.
 3. If results are thin, retry with adjacent terms such as `native memory`,
    `assistant memory`, `custom instructions`, or `durable governed knowledge`.
@@ -239,7 +239,7 @@ Agent behavior:
 
 1. Search or read the named sources.
 2. Draft a compiled conclusion that links back to the sources.
-3. Use `remember(suggestions=true, response_detail="full")` so the new note
+3. Use `create_note(suggestions=true, response_detail="full")` so the new note
    connects to prior work. Link suggestions are off by default — they cost a
    whole retrieval pass on the write path — so the call has to ask for them,
    and the default compact response would not carry them even once computed.
@@ -271,7 +271,7 @@ The old setup recommendation is wrong now; this new one replaces it.
 Agent behavior:
 
 1. Find and confirm the old compiled page.
-2. Use `replace_memory` to write the new conclusion and mark the old page superseded.
+2. Use `supersede_note` to write the new conclusion and mark the old page superseded.
 3. Surface downstream pages that may need review; do not silently rewrite them.
 
 ## Mutation responses and compatibility
@@ -306,7 +306,7 @@ Busy, acknowledgement-pending, and committed-acknowledgement-uncertain results
 remain errors. Follow their remediation with the same mutation identity and
 unchanged payload; never turn an uncertain acknowledgement into a new write.
 
-`edit_memory` remains one tool. New clients must send `path`, `why`, and a nested
+`edit_note` remains one tool. New clients must send `path`, `why`, and a nested
 `operation` whose `kind` is one of `replace_body`, `replace_tags`,
 `replace_string`, `batch_replace`, `edit_section`, `patch_frontmatter`, or
 `fill_row`. The old flat arguments remain runtime-only for at least one release,
@@ -355,7 +355,7 @@ Without a loaded skill, call bootstrap(profile="compact") once per session and f
 
 Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
-Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_memory` for small corrections, `replace_memory` for supersession.
+Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_note` for small corrections, `supersede_note` for supersession.
 ```
 
 ## Codex CLI
@@ -488,9 +488,9 @@ decisions, sources, failures, experiments, or domains.
 
 | Use case | Tool shape | Meaning |
 | --- | --- | --- |
-| Normal lookup | `ask_memory(detail="compact", rerank=false)` | Cheap routing recall |
-| Reasoning | `ask_memory(deep=true)` | Bounded context assembly for synthesis |
-| Diagnostics | `ask_memory(detail="compact", include_timings=true, rerank=true)` | Explain latency and ranking behavior |
+| Normal lookup | `search_memory(detail="compact", rerank=false)` | Cheap routing recall |
+| Reasoning | `search_memory(deep=true)` | Bounded context assembly for synthesis |
+| Diagnostics | `search_memory(detail="compact", include_timings=true, rerank=true)` | Explain latency and ranking behavior |
 
 When reranking is active, optional `rerank_max_candidates` bounds the fused
 prefix sent to the scorer. It must be between the effective normalized result
@@ -522,7 +522,7 @@ exomem install-hook --check
 Then ask the client to call `bootstrap(profile="compact")`. A good response
 includes a `contract_version`, server compute policy, tool defaults, and the
 search/save workflow. Ask one known vault question next and confirm it uses
-`ask_memory` before answering.
+`search_memory` before answering.
 
 For remote connectors, use [remote-quickstart.md](remote-quickstart.md). For the
 memory boundary, see [vs-built-in-memory.md](vs-built-in-memory.md).

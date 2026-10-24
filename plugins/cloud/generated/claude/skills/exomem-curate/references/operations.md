@@ -10,8 +10,8 @@ commands.
 
 | Simple action | User intent | Product route |
 |---|---|---|
-| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `ask_memory`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
-| `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
+| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_memory`; use `search_memory(deep=true)` for synthesis |
+| `create_note` | Remember a durable conclusion, decision, solved problem, or pattern | `create_note`; use `supersede_note` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
 | `plan` | Capture, inspect, query, update, or triage intended future state | `plan_memory` for a configured Planning collection |
 | `record` | Capture, correct, inspect, or query a durable observed event or current state | `record_memory` for a configured Record collection |
@@ -236,7 +236,7 @@ same identity rather than creating a new write.
 It never holds the mutation boundary and never means the Exomem tool is disabled;
 retry the unchanged call after `retry_after_ms`.
 
-`edit_memory` is one tool. New calls supply `path`, `why`, and one nested
+`edit_note` is one tool. New calls supply `path`, `why`, and one nested
 `operation` selected by `kind`:
 
 - `replace_body`: `new_body`; optional `tags`, `expected_hash`, and semantic
@@ -488,11 +488,11 @@ model, embedding, or due-state claim.
 ### Procedure
 1. Read the active entity registry and selected knowledge-pack priorities.
 2. Call `connect_memory(operation="resolve-entity", name=...)`. If one active entity matches, use a guarded
-   `edit_memory` correction or the canonical relation workflow instead of create.
+   `edit_note` correction or the canonical relation workflow instead of create.
 3. If no entity matches and the identity is stable, and central or recurring,
    and useful beyond this source, call `connect_memory(operation="create-entity")`.
 4. Draft the page using `page-types.md` and write under the served promotion class and current write scope.
-5. For an existing entity, show a guarded diff and update through `edit_memory`.
+5. For an existing entity, show a guarded diff and update through `edit_note`.
 6. Refresh the entity index and top-level counts through the governed writer.
 
 ### Edge cases
@@ -891,7 +891,7 @@ See `supersession.md`. Summary:
 ## query_data
 
 Structured query over a CSV/JSON **data file** under the vault — the retrieval
-half of the data-search pattern. `ask_memory` surfaces a dataset's markdown card;
+half of the data-search pattern. `search_memory` surfaces a dataset's markdown card;
 `query_dataset` reads the raw file the card's `data_file:` points at and returns
 exact rows or an aggregate. Read-only. Raw CSV/JSON are not `find`-searchable;
 this is how you query their values.
@@ -921,7 +921,7 @@ this is how you query their values.
 
 ## episode_memory
 
-Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `activate_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
+Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
 
 ### Candidate workflow (`resume` refuses with `episode_workflow_disabled` unless the service enables it)
 - `prepare` one candidate's destination, set its `disposition` (routed, no_capture, uncertain, rejected, deferred, awaiting_authority), then `resume` to execute routed leaves.

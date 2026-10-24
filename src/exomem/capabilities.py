@@ -21,12 +21,14 @@ class ActiveSurfaceDescriptor:
     exported_aliases: tuple[str, ...] = ()
     hand_registered_tools: tuple[str, ...] = ()
     unavailable_reasons: tuple[tuple[str, str], ...] = ()
+    compatibility_commands: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in (
             "product_commands",
             "exported_aliases",
             "hand_registered_tools",
+            "compatibility_commands",
         ):
             values = tuple(getattr(self, field_name))
             if len(values) != len(set(values)):
@@ -40,7 +42,7 @@ class ActiveSurfaceDescriptor:
     @property
     def callable_commands(self) -> frozenset[str]:
         return frozenset(
-            (*self.product_commands, *self.exported_aliases, *self.hand_registered_tools)
+            (*self.product_commands, *self.compatibility_commands, *self.exported_aliases, *self.hand_registered_tools)
         )
 
     @property

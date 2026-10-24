@@ -31,14 +31,14 @@ REQUIRED_SECTIONS = [
 ]
 
 PRODUCT_COMMAND_HINTS = [
-    "ask_memory",
+    "search_memory",
     "read_memory",
-    "remember",
-    "edit_memory",
+    "create_note",
+    "edit_note",
     "observe_memory",
-    "replace_memory",
+    "supersede_note",
     "capture_source",
-    "compile_source",
+    "prepare_note",
     "preserve_evidence",
     "preserve_artifacts",
     "transfer_artifact",
@@ -326,15 +326,15 @@ def test_core_skill_routes_tool_loading_by_current_intent() -> None:
 
     for command in [
         "bootstrap",
-        "ask_memory",
+        "search_memory",
         "read_memory",
         "browse_memory",
-        "remember",
-        "edit_memory",
+        "create_note",
+        "edit_note",
         "observe_memory",
-        "replace_memory",
+        "supersede_note",
         "capture_source",
-        "compile_source",
+        "prepare_note",
         "preserve_evidence",
         "preserve_artifacts",
         "transfer_artifact",
@@ -351,7 +351,7 @@ def test_core_skill_routes_tool_loading_by_current_intent() -> None:
     ]:
         assert command in loading_section
     # Discovery must not turn a lookup into a load of every mutation/media schema.
-    assert 'ToolSearch("select:ask_memory")' in loading_section
+    assert 'ToolSearch("select:search_memory")' in loading_section
     assert "Load only" in loading_section
     assert "available_product_tools" in loading_section
     assert "Load the product surface up front" not in loading_section

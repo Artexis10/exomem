@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 1496455827106c6207692ebd02e7b121402a2f56a64e44698ef8409ea3150b65
+  skill_contract: af52c0c7404f5a48a828e329a57063db3290dfe5344e2e5617b5fb35abffc645
   version: "0.32.0"
 ---
 
@@ -26,7 +26,7 @@ Use product tools so validation, indexes, logs, and provenance stay governed.
 ## Loading the tools
 
 Load only the tools needed for the current intent. With deferred discovery,
-Claude Code can use `ToolSearch("select:ask_memory")` for a lookup, then discover
+Claude Code can use `ToolSearch("select:search_memory")` for a lookup, then discover
 `read_memory` after selecting a hit. Other harnesses use their own tool discovery
 or directly call already exposed tools; `select:` is not a portable requirement.
 Do not preload the mutation/media catalogue for recall.
@@ -36,7 +36,8 @@ when this session lacks the current `engagement` (including `envelope`) or activ
 capability information. Reuse it until policy, connection, adapter, or returned
 vault configuration/registry state changes. Inspect the exposed bootstrap schema: if it lacks
 `skill_contract`, request `bootstrap(profile="compact")` directly. Otherwise request session;
-if the server rejects the session profile or argument, request compact once. The static skill
+if the server rejects the session profile or argument, request compact once.
+`session_profile_unavailable` marks compact fallback, not loaded session rules. The static skill
 cannot tell you a user's current overrides. Generic MCP clients without this skill
 obtain their portable operating contract from compact bootstrap. Use
 `profile="diagnostics"` only when investigating compute, timing, reranking, or
@@ -54,9 +55,9 @@ bootstrap; do not improvise a mutation whose rules remain unavailable.
 
 | Current intent | Tools to discover as needed | Required procedure |
 |---|---|---|
-| Ordinary recall | `activate_context` for a turn with no prior context, then `ask_memory` and `read_memory`; `browse_memory` for structure | The short recall loop below suffices |
-| Filtered/unit/media recall, unresolved identities, or retrieval diagnostics | `ask_memory`, `read_memory`, `connect_memory`, `query_dataset`, `read_media` | [recall](references/recall.md) |
-| Capture/compile/edit a conclusion or entity, connect or supersede knowledge | `remember`, `observe_memory`, `edit_memory`, `replace_memory`, `capture_source`, `compile_source`, `connect_memory` | [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
+| Ordinary recall | `recall_context` for a turn with no prior context, then `search_memory` and `read_memory`; `browse_memory` for structure | The short recall loop below suffices |
+| Filtered/unit/media recall, unresolved identities, or retrieval diagnostics | `search_memory`, `read_memory`, `connect_memory`, `query_dataset`, `read_media` | [recall](references/recall.md) |
+| Capture/compile/edit a conclusion or entity, connect or supersede knowledge | `create_note`, `observe_memory`, `edit_note`, `supersede_note`, `capture_source`, `prepare_note`, `connect_memory` | [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Preserve or retrieve original files, process media | `capture_source`, `preserve_evidence`, `preserve_artifacts`, `transfer_artifact`, `process_media`, `read_media` | [operation routing and transport](references/operation-routing.md); [mutation results](references/mutation-results.md) before any mutation |
 | Save intent or observed events; interpret an ambiguous action | `plan_memory`, `record_memory`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
 | Record what a conversation worked on, decided and left open | `episode_memory` | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
@@ -81,7 +82,7 @@ The table above also works when the current package is the only installed skill.
 
 ## Portable operating rules
 
-Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
@@ -134,10 +135,10 @@ Follow the live recall policy: at `balanced`, skip unrelated fresh tasks; at
 `maximal`, recall before every substantive turn. Connection alone does not
 authorize sending context or saving it.
 
-Before a substantive turn with no prior context, call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
+Before a substantive turn with no prior context, call `recall_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
 
 If activation returns a map, read it as an index of what exists. Pull by ref
-with `read_memory` or use `ask_memory` before answering; cite the refs you use.
+with `read_memory` or use `search_memory` before answering; cite the refs you use.
 
 After new evidence, a task change, or continuation restoration, judge whether
 the context needs refresh. When the exposed tool supports it, set
@@ -177,8 +178,8 @@ One applicable authored writer resolves with its own unit or parent guards; one 
 The due fingerprint is not a unit fingerprint; preserve existing authority gates.
 See [engagement](references/engagement.md) for stale context and the exact operations.
 When knowledge about an identified subject is still missing, use
-`ask_memory(detail="compact", rerank=false)`, then `read_memory` for
-selected hits. Use `ask_memory(deep=true)` for a bounded synthesis context, and
+`search_memory(detail="compact", rerank=false)`, then `read_memory` for
+selected hits. Use `search_memory(deep=true)` for a bounded synthesis context, and
 request graph enrichment or full diagnostics only when needed. Keep retrieval
 quiet; cite useful hits. A miss means "not found in what I searched", never proof
 of absence; try adjacent terms, a known path, or `scope="vault"` when warranted.

@@ -82,7 +82,7 @@ def test_public_readmes_explain_data_handling_and_all_product_links(tmp_path: Pa
             assert definition[key] in readme
         assert "Data handling" in readme
         assert "OAuth" in readme
-        assert "activate_context" in readme
+        assert "recall_context" in readme
         assert "hooks" in readme.lower()
 
 
@@ -221,7 +221,7 @@ def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_pat
     )
     registrations = json.loads((package / "hooks/hooks.json").read_text())["hooks"]
     for event, fields, expected in (
-        ("UserPromptSubmit", {"prompt": "continue"}, "activate_context"),
+        ("UserPromptSubmit", {"prompt": "continue"}, "recall_context"),
         (
             "Stop",
             {"last_assistant_message": "We settled the adapter boundary."},

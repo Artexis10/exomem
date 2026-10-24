@@ -123,7 +123,7 @@ def build_capabilities_markdown() -> str:
             "| "
             + " | ".join(
                 [
-                    _cell(command.name),
+                    _cell(command.public_name),
                     str(command.tier),
                     _cell(_surfaces(command)),
                     mode,
@@ -177,7 +177,7 @@ def build_capabilities_markdown() -> str:
             )
         lines.extend(
             [
-                f"### `{name}`",
+                f"### `{command.public_name}`",
                 "",
                 guidance,
                 "",
@@ -196,6 +196,7 @@ def build_capabilities_markdown() -> str:
             "## Notes",
             "",
             "- A `*` suffix in the parameter list means the parameter is required.",
+            "- Routes name implementation leaves. Previous public spellings remain callable; discovery recommends preferred spellings.",
             "- Tier 2 commands are advanced governance administration and file/data operations exposed only when the surface enables tier 2.",
             "- Destructive commands are writes that can replace, move, delete, or bulk-fix content.",
             "",

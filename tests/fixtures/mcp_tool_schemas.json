@@ -7,117 +7,8 @@
       "type": "object"
     }
   },
-  "activate_context": {
-    "description": "Compile bounded authorized context; abstain rather than guess.\n\nReuse live recall policy and held context. For long threads/attachments,\nuse conversation as needed. origin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "turn": {
-          "default": "",
-          "description": "Human turn verbatim; never a summary. Empty abstains.",
-          "type": "string"
-        },
-        "max_chars": {
-          "default": 4000,
-          "description": "Prose cap clamped to 500..8,000; overflow becomes pointers.",
-          "type": "integer"
-        },
-        "purpose": {
-          "type": "string",
-          "description": "Visibility; never ranking."
-        },
-        "continuity": {
-          "type": "string",
-          "description": "Prior token unchanged; drop on compaction/new session."
-        },
-        "anchor": {
-          "type": "string",
-          "description": "Visible compiled ref for an established prior subject, ambiguity or correction. Hidden and ineligible refs refuse alike."
-        },
-        "include_timings": {
-          "default": false,
-          "description": "Stage timings.",
-          "type": "boolean"
-        },
-        "client": {
-          "type": "string",
-          "description": "Lowercase client label; invalid labels ignored."
-        },
-        "session": {
-          "type": "string",
-          "description": "Stable opaque conversation ID; max 256 chars."
-        },
-        "workspace": {
-          "type": "string",
-          "description": "Thread project key; max 256 chars."
-        },
-        "conversation": {
-          "additionalProperties": false,
-          "properties": {
-            "focus": {
-              "description": "Assistant-authored subject cue; separate from user words.",
-              "maxLength": 240,
-              "type": "string"
-            },
-            "recent": {
-              "description": "Relevant excerpts, newest last; 2,400 characters total.",
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "role": {
-                    "enum": [
-                      "user",
-                      "assistant"
-                    ],
-                    "type": "string"
-                  },
-                  "text": {
-                    "description": "Max 600 user or 300 assistant characters.",
-                    "maxLength": 600,
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "role",
-                  "text"
-                ],
-                "type": "object"
-              },
-              "maxItems": 6,
-              "type": "array"
-            },
-            "refs": {
-              "description": "Canonical page references already read.",
-              "items": {
-                "maxLength": 1024,
-                "type": "string"
-              },
-              "maxItems": 12,
-              "type": "array"
-            }
-          },
-          "type": "object",
-          "description": "All optional: focus (one line/240 chars; current subjects and attachment names/objects),\nrefs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history."
-        },
-        "trigger": {
-          "default": "user_turn",
-          "description": "user_turn: initial recall. task_refresh: keep turn; task in focus; intent_resolution qualifies human intent separately.",
-          "enum": [
-            "user_turn",
-            "task_refresh"
-          ],
-          "type": "string"
-        },
-        "initiator": {
-          "type": "string",
-          "description": "Caller label; no authority. Invalid labels ignored."
-        }
-      },
-      "type": "object"
-    }
-  },
   "adopt_vault": {
-    "description": "Adopt a vault; never replace originals.\n\nDefault scans only. Copy/compile write governed KB material with original\npath/hash provenance.",
+    "description": "Scan or import; preserve originals.\n\nDefault scan-only reads; other modes write. Copies retain path/hash provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -189,7 +80,7 @@
     }
   },
   "adoption_studio": {
-    "description": "Run a governed, resumable Adoption Studio session over existing material.\n\nNever rewrites, moves or deletes originals. `plan` previews the exact\nimports and `apply` commits exactly that plan or refuses. `status` is the\nread-only default; `start` is guarded.\n\nstart scans; select chooses files; plan previews; apply atomically copies\ninto Sources; cancel closes pre-apply; finish proves recall. Then work-item\nreads context, propose submits proposals, apply-proposal approves one.\nDetails: references/operations.md.",
+    "description": "Review and import existing material in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nsave run state or material. Plan previews exact imports; apply commits that plan or refuses.\n\nstart scans; select chooses files; plan previews; apply atomically copies\ninto Sources; cancel closes pre-apply; finish proves recall. Then work-item\nreads context, propose submits proposals, apply-proposal approves one.\nDetails: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -328,200 +219,8 @@
       "type": "object"
     }
   },
-  "ask_memory": {
-    "description": "Retrieve evidence for a known information gap.\n\nSearch compiled knowledge and originals. deep=true returns packed context.\nactivate_context compiles initial turn context; read_memory opens selected\nrefs. Returns evidence, not an answer. Help: bootstrap(profile=\"full\").",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "query": {
-          "default": "",
-          "description": "Question or search phrase. Empty means recent/filtered recall.",
-          "type": "string"
-        },
-        "types": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Page types."
-        },
-        "projects": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Project keys."
-        },
-        "tags": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Tags."
-        },
-        "speakers": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Diarized speakers."
-        },
-        "file_types": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Artifact kinds, e.g. pdf, csv."
-        },
-        "exclude_file_types": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Artifact kinds to drop."
-        },
-        "categories": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Unit categories, e.g. config."
-        },
-        "kinds": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Unit kinds, e.g. decision."
-        },
-        "source_kinds": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "What the artifact IS (open vocabulary)."
-        },
-        "domains": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "What it is ABOUT (open vocabulary)."
-        },
-        "relations": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Typed-edge relations (e.g. supports, supersedes), OR'd."
-        },
-        "relation_of": {
-          "type": "string",
-          "description": "Anchor path; restrict `relations` to pages connected to it."
-        },
-        "relation_direction": {
-          "default": "any",
-          "description": "outbound, inbound or any.",
-          "type": "string"
-        },
-        "filters": {
-          "type": "object",
-          "description": "Structured page/unit metadata filters."
-        },
-        "result_level": {
-          "default": "auto",
-          "description": "auto, page, unit or mixed.",
-          "type": "string"
-        },
-        "limit": {
-          "default": 15,
-          "description": "Max hits.",
-          "type": "integer"
-        },
-        "continuation": {
-          "type": "string",
-          "description": "Token from a prior recall page."
-        },
-        "scope": {
-          "default": "kb",
-          "description": "kb, vault or kb-only.",
-          "type": "string"
-        },
-        "mode": {
-          "default": "hybrid",
-          "description": "hybrid, keyword or vector.",
-          "type": "string"
-        },
-        "detail": {
-          "default": "compact",
-          "description": "compact or full.",
-          "type": "string"
-        },
-        "deep": {
-          "default": false,
-          "description": "Return a packed context for reasoning.",
-          "type": "boolean"
-        },
-        "graph": {
-          "default": true,
-          "description": "Graph-neighbour ranking in hybrid/vector search.",
-          "type": "boolean"
-        },
-        "rerank": {
-          "type": "boolean",
-          "description": "Force or suppress reranking; omit for auto."
-        },
-        "rerank_max_candidates": {
-          "description": "Scorer input bound, result limit to 300.",
-          "maximum": 300,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "prefer_compiled": {
-          "default": true,
-          "description": "Prefer compiled over raw sources.",
-          "type": "boolean"
-        },
-        "prefer_active": {
-          "default": true,
-          "description": "Prefer active over superseded.",
-          "type": "boolean"
-        },
-        "prefer_used": {
-          "default": false,
-          "description": "Apply a usage boost.",
-          "type": "boolean"
-        },
-        "widen_outside_kb": {
-          "default": false,
-          "description": "With scope=\"kb\", also reserve slots for curated pages outside the KB.",
-          "type": "boolean"
-        },
-        "graph_enrich": {
-          "default": false,
-          "description": "With deep, include graph neighborhoods.",
-          "type": "boolean"
-        },
-        "include_timings": {
-          "default": false,
-          "description": "Include retrieval timings.",
-          "type": "boolean"
-        },
-        "explain": {
-          "default": false,
-          "description": "Add retrieval-plan and ranking evidence.",
-          "type": "boolean"
-        },
-        "purpose": {
-          "type": "string",
-          "description": "Declared purpose; governance may widen or narrow visibility."
-        }
-      },
-      "type": "object"
-    }
-  },
   "bootstrap": {
-    "description": "Return Exomem's API contract and live account settings.\n\nUse when engagement or capabilities are unknown or changed. Describes this\nservice, not host assistant policy or built-in memory; grants no authority.\nDoes not inspect vault content. Full includes a public reference index.",
+    "description": "Read Exomem's contract and live settings when missing or changed; reuse while current.\n\nDescribes this service, not host policy or built-in memory; grants no authority.\nReads no vault content. Full includes the public reference index.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -536,7 +235,7 @@
         },
         "skill_contract": {
           "type": "string",
-          "description": "Session digest; missing/stale falls back to compact."
+          "description": "Session digest; missing/stale returns compact plus session_profile_unavailable."
         },
         "section": {
           "type": "string",
@@ -547,7 +246,7 @@
     }
   },
   "browse_memory": {
-    "description": "Browse vault folders; read-only.",
+    "description": "Browse folders; read-only.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -585,14 +284,14 @@
         },
         "cursor": {
           "type": "string",
-          "description": "A next_cursor, to continue."
+          "description": "A next_cursor."
         }
       },
       "type": "object"
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a compilation proposal.\n\n`source_kind` (what it IS) is required; `domain` (what it is ABOUT) is\noptional. Both are open vocabularies: a new slug registers.",
+    "description": "Save raw source material; optionally prepare a note.\n\ncontent is text; files are client handles (locally: exomem attach --lane\nsource). Stored losslessly in Sources/. Proof goes to preserve_evidence or\npreserve_artifacts; choose by role, not transport. compile_guidance=true\nreturns a proposal; reuse it instead of calling prepare_note.\n\n`source_kind` (what it IS) is required; `domain` (what it is ABOUT) is optional.\nBoth are open vocabularies; new slugs register.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -627,7 +326,7 @@
         },
         "compile_guidance": {
           "default": false,
-          "description": "Return a compilation proposal.",
+          "description": "Return a proposal; skip another prepare_note call.",
           "type": "boolean"
         },
         "suggested_title": {
@@ -728,29 +427,6 @@
       "type": "object"
     }
   },
-  "compile_source": {
-    "description": "Plan a sourced note; read-only.\n\nReturns skeleton/related pages; write with remember.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "sources": {
-          "description": "Source paths or wikilinks.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "suggested_title": {
-          "type": "string",
-          "description": "Title override."
-        }
-      },
-      "required": [
-        "sources"
-      ],
-      "type": "object"
-    }
-  },
   "configure_memory": {
     "description": "Inspect or change saved Exomem engagement for this vault.\n\nSet/clear only on an explicit user setting-change request. Recall, capture,\ninstallation and missing hooks grant none. Inspect first; use its revision.\nChanges recall/capture eagerness for this identity, never authority or compute.",
     "inputSchema": {
@@ -797,7 +473,7 @@
     }
   },
   "connect_memory": {
-    "description": "Find relations, graph context or entities; propose or accept connections.\n\nProposals are read-only; create-entity and accept-relation are additive writes.",
+    "description": "Find relations, graph context or entities.\n\nSuggestions/resolution read; create-entity and accept-relation add knowledge.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1049,8 +725,211 @@
       "type": "object"
     }
   },
-  "edit_memory": {
-    "description": "Edit an existing memory page with an auditable reason.\n\nSmall corrections, sections, strings, opinion rows or frontmatter;\nsubstantial rewrites use replace_memory.\n\nSource edits validate the final sources against authorized Source/Evidence;\nunrelated edits leave legacy citations alone.\n\n`RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with\n`validate_only=true`, then commit unchanged with\n`transition_token=<returned transition_token>`,\n`relation_disposition=\"reviewed_none\"`,\n`relation_review_hash=<returned relation_review_hash>` (not the page\ncontent hash) and a `relation_review_reason`. Or author a relation in the body:\n`## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`;\nDataview `supports:: [[...]]` is not supported relation syntax.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+  "create_note": {
+    "description": "Save a durable conclusion as compiled knowledge.\n\nDistill decisions, findings, failures, patterns, experiments and production logs.\nRaw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v9 sha256:5c51c091751dfca2645a71fa607dd16eb23a6a68b16fb55b37df18c9503f6949]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "description": "Markdown body after frontmatter. Wikilink the people, organisations, places, equipment and products this note names, whether or not a page exists yet.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "note_type": {
+          "default": "insight",
+          "description": "research-note, insight, failure, pattern, experiment, or production-log.",
+          "type": "string"
+        },
+        "project": {
+          "type": "string",
+          "description": "Required for research-note. (any slug; unknown keys auto-register on first use)"
+        },
+        "projects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Cross-project keys. (any slug; unknown keys auto-register on first use)"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Wikilinks to governed pages this draws from, e.g. [\"Knowledge Base/Sources/Articles/2026-05-18-example\"]; each gets this note in its `ingested_into:`. Omitting on research-note, insight, failure or pattern only warns."
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "pattern_type": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "started": {
+          "type": "string"
+        },
+        "duration": {
+          "type": "string"
+        },
+        "hypothesis": {
+          "type": "string"
+        },
+        "n": {
+          "type": "integer"
+        },
+        "concluded": {
+          "type": "string"
+        },
+        "medium": {
+          "type": "string"
+        },
+        "recorded": {
+          "type": "string"
+        },
+        "published": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "editor": {
+          "type": "string"
+        },
+        "bridge_of": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Source paths or stable refs for a cross-domain bridge; requires bridge_scope and bridge_review."
+        },
+        "bridge_scope": {
+          "type": "string"
+        },
+        "bridge_review": {
+          "type": "string"
+        },
+        "suggestions": {
+          "default": false,
+          "description": "Off by default. `suggestions=true` also returns pages to link (read under `response_detail='full'`); costs one retrieval pass.",
+          "type": "boolean"
+        },
+        "project_category": {
+          "type": "string"
+        },
+        "validate_only": {
+          "default": false,
+          "description": "Return an immutable creation draft without writing.",
+          "type": "boolean"
+        },
+        "draft_id": {
+          "type": "string"
+        },
+        "draft_hash": {
+          "type": "string"
+        },
+        "draft_token": {
+          "type": "string",
+          "description": "From validate_only."
+        },
+        "relation_disposition": {
+          "type": "string",
+          "description": "Reviewed relation outcome for commit."
+        },
+        "relation_review_hash": {
+          "type": "string",
+          "description": "Draft hash the review covers."
+        },
+        "relation_review_reason": {
+          "type": "string",
+          "description": "Audit reason for reviewed-none."
+        },
+        "vocabulary_decision": {
+          "additionalProperties": false,
+          "properties": {
+            "evidence_fingerprint": {
+              "description": "Fingerprint returned by vocabulary_preparation.",
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "outcome": {
+              "enum": [
+                "reuse",
+                "create",
+                "defer"
+              ]
+            },
+            "canonical": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "evidence_fingerprint",
+            "outcome",
+            "canonical"
+          ],
+          "type": "object"
+        },
+        "summary": {
+          "type": "string",
+          "description": "Optional one-line page description, at most 1024 characters."
+        },
+        "topics": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Domain key or list of keys; new keys register with this write."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Success detail: compact (default), full, or legacy.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "title"
+      ],
+      "type": "object"
+    }
+  },
+  "edit_note": {
+    "description": "Edit an existing memory page with an auditable reason.\n\nSmall corrections, sections, strings, opinion rows or frontmatter;\nsubstantial rewrites use supersede_note.\n\nSource edits validate the final sources against authorized Source/Evidence;\nunrelated edits leave legacy citations alone.\n\n`RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with\n`validate_only=true`, then commit unchanged with\n`transition_token=<returned transition_token>`,\n`relation_disposition=\"reviewed_none\"`,\n`relation_review_hash=<returned relation_review_hash>` (not the page\ncontent hash) and a `relation_review_reason`. Or author a relation in the body:\n`## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`;\nDataview `supports:: [[...]]` is not supported relation syntax.\nSee references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v9 sha256:5c51c091751dfca2645a71fa607dd16eb23a6a68b16fb55b37df18c9503f6949]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1442,7 +1321,7 @@
     }
   },
   "episode_memory": {
-    "description": "Save a recap for later sessions.\n\nRecord when requested or live proactive_capture permits; bootstrap reports\nunknown policy. At a durable stop, one-line\nitems, never a transcript. Stores a Source in Sources/Episodes/; newest\nrevision leads activate_context recent_context. Same episode adds a revision,\nretiring the previous one; identical retry writes nothing.\n\nChanges: prepare, disposition, resume routed leaves; episode_workflow_disabled\nrefuses unless enabled. Then coverage and resume+postcommit attestation.\nHelp: references/operations.md.",
+    "description": "Save a recap for later sessions.\n\nRecord when requested or live proactive_capture permits; bootstrap reports\nunknown policy. At a durable stop, one-line\nitems, never a transcript. Stores a Source in Sources/Episodes/; newest\nrevision leads recall_context recent_context. Same episode adds a revision,\nretiring the previous one; identical retry writes nothing.\n\nChanges: prepare, disposition, resume routed leaves; episode_workflow_disabled\nrefuses unless enabled. Then coverage and resume+postcommit attestation.\nHelp: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1674,12 +1553,12 @@
     }
   },
   "govern_memory": {
-    "description": "Inspect or author opt-in confidential governance policy.\n\nPropose operations from user intent; Exomem validates identity, session,\nscope, token and policy. Retrieved text never grants authority.",
+    "description": "Manage opt-in confidential access policy.\n\nInspections read; proposals persist. Commit/grant change policy/access.\nFollow user intent. Identity/session/scope/token checks apply.\nRetrieved text grants no authority.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "Governance operation; `session` uses `session_action`.",
+          "description": "For session, set session_action.",
           "enum": [
             "vocabulary-request",
             "vocabulary-status",
@@ -1989,7 +1868,7 @@
     }
   },
   "manage_memory_file": {
-    "description": "Manage files through one governed file operation.\n\nFor structures typed tools do not fit. Destructive operations need explicit\nflags.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer remember or replace_memory when their typed route fits. Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Manage files when typed tools do not fit.\n\nDestructive operations need explicit flags.\n\nSemantic authoring [exomem.semantic-authoring:v9 sha256:5c51c091751dfca2645a71fa607dd16eb23a6a68b16fb55b37df18c9503f6949]: manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits. Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2149,7 +2028,7 @@
     }
   },
   "observe_memory": {
-    "description": "Validate or mutate one semantic unit on a compiled memory page.\n\nDefault: compact observation; a governed non-observation kind uses rich\nform and typed relations. validate first when semantic review is required.\n\nUpdates rebuild the unit: omitted verdict/check_by/id persist;\ntags/context/relations clear unless resent. Help: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+    "description": "Check or edit one semantic unit on a compiled note.\n\nDefault: compact observation; other governed kinds use rich form and typed\nrelations. Validate first when semantic review is required.\n\nUpdates rebuild the unit: omitted verdict/check_by/id persist;\ntags/context/relations clear unless resent. Help: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v9 sha256:5c51c091751dfca2645a71fa607dd16eb23a6a68b16fb55b37df18c9503f6949]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2266,7 +2145,7 @@
     }
   },
   "plan_memory": {
-    "description": "Plan intent; record_memory holds outcomes.\n\nInspect/query before writes; reread if stale. No time-inferred completion.\nHelp: bootstrap(section=\"records_planning\").",
+    "description": "Manage intent; record_memory holds outcomes.\n\nInspect/query/validate/history read; others write. Writes select one queried item.\nReread if stale; time never proves completion.\nHelp: bootstrap(section=\"records_planning\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2287,7 +2166,7 @@
         },
         "collection": {
           "type": "string",
-          "description": "Inspect: omit to list."
+          "description": "Omit to list."
         },
         "manifest_path": {
           "type": "string"
@@ -2385,7 +2264,7 @@
         },
         "expected_container_hash": {
           "type": "string",
-          "description": "inspect/query snapshot."
+          "description": "Returned snapshot."
         },
         "acknowledged_gap_codes": {
           "items": {
@@ -2398,11 +2277,11 @@
         },
         "changes": {
           "type": "object",
-          "description": "Update fields."
+          "description": "Update."
         },
         "transition": {
           "type": "object",
-          "description": "Triage fields."
+          "description": "Triage."
         },
         "expected_item_version": {
           "type": "string",
@@ -2421,6 +2300,29 @@
       },
       "required": [
         "action"
+      ],
+      "type": "object"
+    }
+  },
+  "prepare_note": {
+    "description": "Prepare a sourced note without saving.\n\nReturns skeleton/related pages; save with create_note.\nReuse capture_source(compile_guidance=true).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "description": "Source paths or wikilinks.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "suggested_title": {
+          "type": "string",
+          "description": "Title override."
+        }
+      },
+      "required": [
+        "sources"
       ],
       "type": "object"
     }
@@ -2594,7 +2496,7 @@
     }
   },
   "process_media": {
-    "description": "Reconcile governed media, inspect status, or retry after remediation.\n\nExtraction normally runs automatically.",
+    "description": "Check governed media; retry after remediation.\n\nStatus reads; process/retry change extraction state. Extraction normally runs automatically.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2727,7 +2629,7 @@
     }
   },
   "read_memory": {
-    "description": "Read a page or exact semantic unit selected by recall or known ref.\n\nunit_ref returns that current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.\nAlso reads the paged views exomem://map, exomem://map/topic/<domain key>\nand exomem://map/unfiled.",
+    "description": "Read a selected page, semantic unit or view.\n\nunit_ref returns the current unit, parent citation/lifecycle and up to\n2,400 context characters. Missing/stale/ambiguous/superseded refs report\nstatus; never substituted. Without unit_ref, returns the page.\nAlso reads the paged views exomem://map, exomem://map/topic/<domain key>\nand exomem://map/unfiled.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2783,8 +2685,117 @@
       "type": "object"
     }
   },
+  "recall_context": {
+    "description": "Recall bounded authorized context; abstain if uncertain.\n\nReuse held policy/context; conversation supplies relevant thread/attachment excerpts.\norigin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "turn": {
+          "default": "",
+          "description": "Human turn verbatim; never a summary. Empty abstains.",
+          "type": "string"
+        },
+        "max_chars": {
+          "default": 4000,
+          "description": "Prose cap clamped to 500..8,000; overflow becomes pointers.",
+          "type": "integer"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Visibility; never ranking."
+        },
+        "continuity": {
+          "type": "string",
+          "description": "Prior token unchanged; drop on compaction/new session."
+        },
+        "anchor": {
+          "type": "string",
+          "description": "Visible compiled ref for an established prior subject, ambiguity or correction. Hidden and ineligible refs refuse alike."
+        },
+        "include_timings": {
+          "default": false,
+          "description": "Stage timings.",
+          "type": "boolean"
+        },
+        "client": {
+          "type": "string",
+          "description": "Lowercase client label; invalid labels ignored."
+        },
+        "session": {
+          "type": "string",
+          "description": "Stable opaque conversation ID; max 256 chars."
+        },
+        "workspace": {
+          "type": "string",
+          "description": "Thread project key; max 256 chars."
+        },
+        "conversation": {
+          "additionalProperties": false,
+          "properties": {
+            "focus": {
+              "description": "Assistant-authored subject cue; separate from user words.",
+              "maxLength": 240,
+              "type": "string"
+            },
+            "recent": {
+              "description": "Relevant excerpts, newest last; 2,400 characters total.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "user",
+                      "assistant"
+                    ],
+                    "type": "string"
+                  },
+                  "text": {
+                    "description": "Max 600 user or 300 assistant characters.",
+                    "maxLength": 600,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "role",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "maxItems": 6,
+              "type": "array"
+            },
+            "refs": {
+              "description": "Canonical page references already read.",
+              "items": {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              "maxItems": 12,
+              "type": "array"
+            }
+          },
+          "type": "object",
+          "description": "All optional: focus (one line/240 chars; current subjects and attachment names/objects),\nrefs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history."
+        },
+        "trigger": {
+          "default": "user_turn",
+          "description": "user_turn: initial recall. task_refresh: keep turn; task in focus; intent_resolution qualifies human intent separately.",
+          "enum": [
+            "user_turn",
+            "task_refresh"
+          ],
+          "type": "string"
+        },
+        "initiator": {
+          "type": "string",
+          "description": "Caller label; no authority. Invalid labels ignored."
+        }
+      },
+      "type": "object"
+    }
+  },
   "record_memory": {
-    "description": "Store observed state; Planning uses plan_memory, originals use Sources/Evidence.\n\nDescribe/propose before create.",
+    "description": "Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.\n\nDescribe/validate/inspect/query/history and import preview/status read.\nPropose before create. Others write or hold candidates.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2808,14 +2819,14 @@
         },
         "collection": {
           "type": "string",
-          "description": "Target; omit for describe, inventory or new-manifest validate/create."
+          "description": "Omit for inventory or new-manifest validate/create."
         },
         "manifest_path": {
           "type": "string"
         },
         "manifest_text": {
           "type": "string",
-          "description": "Full manifest for validate/create/revise."
+          "description": "Manifest for validate/create/revise."
         },
         "why": {
           "type": "string",
@@ -2886,11 +2897,11 @@
         },
         "item_key": {
           "type": "string",
-          "description": "Update UUID; append derives identity from natural key."
+          "description": "Update UUID; append uses the natural key."
         },
         "expected_container_hash": {
           "type": "string",
-          "description": "Current container hash for guarded writes."
+          "description": "Current snapshot for guarded writes."
         },
         "expected_manifest_hash": {
           "type": "string",
@@ -2979,19 +2990,19 @@
         },
         "expected_item_version": {
           "type": "string",
-          "description": "Update item version."
+          "description": "Queried item version."
         },
         "refresh_presentation": {
           "type": "boolean",
-          "description": "Guarded managed Markdown rebuild."
+          "description": "Rebuild managed Markdown with guards."
         },
         "held": {
           "type": "string",
-          "description": "Resume append/update (item/changes override; null removes a field); discard deletes it."
+          "description": "Resume append/update; item/changes override, null removes; discard deletes."
         },
         "hold": {
           "type": "boolean",
-          "description": "False refuses; otherwise invalid candidates are held."
+          "description": "False refuses; otherwise hold invalid candidates."
         },
         "rows": {
           "items": {
@@ -3036,190 +3047,324 @@
       "type": "object"
     }
   },
-  "remember": {
-    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nFor distilled decisions, findings, failures, patterns, experiments and\nproduction logs. Raw material goes to `capture_source`; proof-bearing\nartifacts to `preserve_evidence`/`preserve_artifacts`.\n\nsources must resolve to authorized governed Source/Evidence: URLs, remote\nIDs and derivative summaries are not originals. Capture first and cite its\npath/ref, or use an empty list. UNRESOLVED_SOURCE_CITATION writes nothing.\nDetails: references/writing.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+  "review_item_context": {
+    "description": "Read one review item's target, provenance, relations and history.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "content": {
-          "description": "Markdown body after frontmatter. Wikilink the people, organisations, places, equipment and products this note names, whether or not a page exists yet.",
+        "ref": {
+          "description": "exomem://review/<id>, including adoption/<id> or upkeep/<id>.",
           "type": "string"
         },
-        "title": {
-          "type": "string"
-        },
-        "slug": {
-          "type": "string"
-        },
-        "note_type": {
-          "default": "insight",
-          "description": "research-note, insight, failure, pattern, experiment, or production-log.",
-          "type": "string"
-        },
-        "project": {
+        "expected_fingerprint": {
           "type": "string",
-          "description": "Required for research-note. (any slug; unknown keys auto-register on first use)"
+          "description": "Reviewed fingerprint; mismatch requires refresh."
         },
-        "projects": {
+        "max_body_chars": {
+          "default": 4000,
+          "description": "Body cap.",
+          "type": "integer"
+        },
+        "max_related_pages": {
+          "default": 8,
+          "description": "Related-summary cap.",
+          "type": "integer"
+        },
+        "max_graph_nodes": {
+          "default": 30,
+          "description": "Node cap.",
+          "type": "integer"
+        },
+        "max_graph_edges": {
+          "default": 60,
+          "description": "Edge cap.",
+          "type": "integer"
+        },
+        "max_history": {
+          "default": 10,
+          "description": "History cap.",
+          "type": "integer"
+        },
+        "max_evolution_versions": {
+          "default": 10,
+          "description": "Supersession version cap.",
+          "type": "integer"
+        },
+        "continuation": {
+          "type": "string",
+          "description": "Vocabulary evidence only."
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    }
+  },
+  "review_memory": {
+    "description": "Review health, provenance, drift and backlog.\n\nAttention reads; repairs use maintain_memory. Vocabulary path/query/family\nsubmits a meaning question: requires write access, grants no page or vocabulary mutation authority.\n\nmode=\"audit\", categories=[\"unresolved_source_citation\"] finds citations\nunresolved to authorized governed Source/Evidence; never reconstruct originals.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "attention",
+          "description": "vocabulary records questions; item/write-advisory-result need ref. No authority: apply through connect_memory accept-relation, adoption_studio apply-proposal or triage_memory. Modes: references/governance.md.",
+          "enum": [
+            "attention",
+            "activation",
+            "item",
+            "audit",
+            "dispositions",
+            "provenance",
+            "evolution",
+            "compilation",
+            "stale",
+            "contradiction",
+            "unprocessed-sources",
+            "relation-debt",
+            "relation-queue",
+            "adoption",
+            "upkeep",
+            "plan-progress",
+            "write-advisory-result",
+            "vocabulary"
+          ],
+          "type": "string"
+        },
+        "categories": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "Cross-project keys. (any slug; unknown keys auto-register on first use)"
+          "description": "Category filter (attention, activation, audit) or upkeep family."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Result cap; vocabulary defaults to 4, other modes 25."
+        },
+        "continuation": {
+          "type": "string",
+          "description": "Opaque vocabulary pagination token."
+        },
+        "query": {
+          "default": "",
+          "description": "Topic for evolution when `path` is absent; in vocabulary mode, the meaning question to record.",
+          "type": "string"
         },
         "sources": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "Wikilinks to governed pages this draws from, e.g. [\"Knowledge Base/Sources/Articles/2026-05-18-example\"]; each gets this note in its `ingested_into:`. Omitting on research-note, insight, failure or pattern only warns."
+          "description": "Source paths for compilation."
         },
-        "tags": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "suggested_title": {
+          "type": "string",
+          "description": "Compilation title hint."
         },
-        "status": {
+        "tag": {
+          "type": "string",
+          "description": "Provenance tag shorthand."
+        },
+        "key": {
+          "type": "string",
+          "description": "Provenance key filter."
+        },
+        "value": {
+          "type": "string",
+          "description": "Provenance value filter."
+        },
+        "path": {
+          "type": "string",
+          "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns."
+        },
+        "state": {
+          "default": "open",
+          "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
           "type": "string"
         },
-        "severity": {
+        "ref": {
+          "type": "string",
+          "description": "`exomem://review/<id>` for item mode (upkeep refs revalidate one item) or `exomem://write-advisory-result/<id>` for write-advisory-result; for a vocabulary relation question, a current relation-queue candidate ref alongside its source path."
+        },
+        "detail": {
+          "default": "actionable",
+          "description": "Audit output detail.",
+          "enum": [
+            "actionable",
+            "full"
+          ],
           "type": "string"
         },
-        "pattern_type": {
-          "type": "string"
-        },
-        "domain": {
-          "type": "string"
-        },
-        "started": {
-          "type": "string"
-        },
-        "duration": {
-          "type": "string"
-        },
-        "hypothesis": {
-          "type": "string"
-        },
-        "n": {
+        "legacy_sample_limit": {
+          "default": 5,
+          "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
+          "maximum": 50,
+          "minimum": 0,
           "type": "integer"
         },
-        "concluded": {
+        "family": {
+          "type": "string",
+          "description": "Vocabulary family for a meaning question; with `mode=\"vocabulary\"` requires `path` and `query`; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration."
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Success detail: compact (default), full, or legacy.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "schema_memory": {
+    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\nContracts describe recurring fields, units and relations. Inference reads unless\nsave=true; overwrite needs the current hash. For a vocabulary registry: inspect lists the live vocabulary\nand usage; propose previews a delta; save applies upsert, alias or deprecate\nwith expected_hash and why; history lists kept versions; restore reverts one\nwithout rewriting pages.\nOperations: references/operation-routing.md.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "description": "Operation for the subject; see references/operation-routing.md.",
+          "enum": [
+            "infer",
+            "validate",
+            "diff",
+            "inventory",
+            "inspect",
+            "resolve",
+            "preview",
+            "save",
+            "refresh",
+            "save-entity-types",
+            "resolve-entity-type",
+            "propose-relation",
+            "save-relations",
+            "census",
+            "propose",
+            "save-roles",
+            "save-conventions",
+            "history",
+            "restore"
+          ],
           "type": "string"
         },
-        "medium": {
+        "name": {
+          "type": "string",
+          "description": "Saved workflow key."
+        },
+        "subject": {
+          "default": "contract",
+          "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
           "type": "string"
         },
-        "recorded": {
-          "type": "string"
+        "project": {
+          "type": "string",
+          "description": "Project scope for inference."
         },
-        "published": {
-          "type": "string"
+        "page_type": {
+          "type": "string",
+          "description": "Page-type scope for inference."
         },
-        "host": {
-          "type": "string"
-        },
-        "editor": {
-          "type": "string"
-        },
-        "bridge_of": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Source paths or stable refs for a cross-domain bridge; requires bridge_scope and bridge_review."
-        },
-        "bridge_scope": {
-          "type": "string"
-        },
-        "bridge_review": {
-          "type": "string"
-        },
-        "suggestions": {
+        "save": {
           "default": false,
-          "description": "Off by default. `suggestions=true` also returns pages to link (read under `response_detail='full'`); costs one retrieval pass.",
+          "description": "Legacy inference flag; true is refused for workflow contracts.",
           "type": "boolean"
         },
-        "project_category": {
-          "type": "string"
+        "expected_hash": {
+          "type": "string",
+          "description": "Current registry hash (relations, workflow save/refresh,\nroles_hash or conventions_hash for save-roles/save-conventions)."
         },
-        "validate_only": {
+        "strict": {
           "default": false,
-          "description": "Return an immutable creation draft without writing.",
+          "description": "In validate mode, signal a failing outcome on findings.",
           "type": "boolean"
         },
-        "draft_id": {
-          "type": "string"
-        },
-        "draft_hash": {
-          "type": "string"
-        },
-        "draft_token": {
+        "compare_to": {
           "type": "string",
-          "description": "From validate_only."
+          "description": "In diff mode, compare to this saved contract."
         },
-        "relation_disposition": {
+        "proposal": {
+          "type": "object",
+          "description": "Reviewed definition, delta or override document for the\noperation. propose-relation requires requested_label, parent,\ndescription and direction (directed or symmetric); pass the mapping\ndirectly, no wrapper."
+        },
+        "why": {
           "type": "string",
-          "description": "Reviewed relation outcome for commit."
+          "description": "Audit reason for saves and refresh."
         },
-        "relation_review_hash": {
-          "type": "string",
-          "description": "Draft hash the review covers."
+        "include_model_suggestions": {
+          "default": false,
+          "description": "Add response-only relation suggestions.",
+          "type": "boolean"
         },
-        "relation_review_reason": {
-          "type": "string",
-          "description": "Audit reason for reviewed-none."
-        },
-        "vocabulary_decision": {
+        "context": {
           "additionalProperties": false,
           "properties": {
-            "evidence_fingerprint": {
-              "description": "Fingerprint returned by vocabulary_preparation.",
-              "pattern": "^[0-9a-f]{64}$",
+            "project": {
               "type": "string"
             },
-            "outcome": {
-              "enum": [
-                "reuse",
-                "create",
-                "defer"
-              ]
+            "domain": {
+              "type": "string"
             },
-            "canonical": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "activity": {
+              "type": "string"
             }
           },
-          "required": [
-            "evidence_fingerprint",
-            "outcome",
-            "canonical"
-          ],
-          "type": "object"
+          "type": "object",
+          "description": "Workflow resolve mapping with keys project, domain, activity."
         },
-        "summary": {
+        "date_from": {
           "type": "string",
-          "description": "Optional one-line page description, at most 1024 characters."
+          "description": "Inclusive ISO bound for relation evidence."
         },
-        "topics": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
+        "date_to": {
+          "type": "string",
+          "description": "Inclusive ISO bound for relation evidence."
+        },
+        "continuation": {
+          "type": "string",
+          "description": "Opaque candidate continuation."
+        },
+        "limit": {
+          "default": 20,
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer",
+          "description": "Candidate budget."
+        },
+        "query": {
+          "type": "string",
+          "description": "Evidence query for resolve-entity-type."
+        },
+        "requested_type": {
+          "type": "string",
+          "description": "Entity-type label for resolve-entity-type."
+        },
+        "vocabulary_ref": {
+          "type": "string",
+          "description": "Vocabulary decision for a registry save."
+        },
+        "vocabulary_fingerprint": {
+          "type": "string",
+          "description": "Reviewed vocabulary fingerprint; grants no write."
+        },
+        "detail": {
+          "enum": [
+            "counts",
+            "keys"
           ],
-          "description": "Domain key or list of keys; new keys register with this write."
+          "type": "string",
+          "description": "Census detail; keys adds predicate keys."
+        },
+        "version": {
+          "type": "string",
+          "description": "Kept version from `history`, for `restore`."
+        },
+        "registry_scope": {
+          "type": "string",
+          "description": "Public instance token or canonical private Scope ID; grants no authority."
         },
         "response_detail": {
           "default": "compact",
@@ -3233,14 +3378,205 @@
         }
       },
       "required": [
-        "content",
-        "title"
+        "operation"
       ],
       "type": "object"
     }
   },
-  "replace_memory": {
-    "description": "Supersede compiled memory with a new version.\n\nThe old page stays readable and points to the new one. Use for a changed\nconclusion; small edits go to `edit_memory`.\n\nReplacement sources must resolve to authorized governed Source/Evidence,\neven if old citations did not. Capture originals first or pass an empty list\n(UNRESOLVED_SOURCE_CITATION). Details: references/supersession.md.\n\nSemantic authoring [exomem.semantic-authoring:v8 sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d]: Every new, replaced, or activated compiled note in the live class needs at least one valid, non-empty semantic unit. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with one primary open-vocabulary category; rich form is `## <Governed Kind>` with a substantive body. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
+  "search_memory": {
+    "description": "Search compiled knowledge and originals for an evidence gap.\n\nReuse recall_context; read_memory opens selected refs. deep=true packs context.\nResults are bounded; a miss covers only this query/scope. Evidence is not an answer.\nHelp: bootstrap(profile=\"full\").",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "default": "",
+          "description": "Question or search phrase. Empty means recent/filtered recall.",
+          "type": "string"
+        },
+        "types": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Page types."
+        },
+        "projects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Project keys."
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Tags."
+        },
+        "speakers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Diarized speakers."
+        },
+        "file_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Artifact kinds, e.g. pdf, csv."
+        },
+        "exclude_file_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Artifact kinds to drop."
+        },
+        "categories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Unit categories, e.g. config."
+        },
+        "kinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Unit kinds, e.g. decision."
+        },
+        "source_kinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "What the artifact IS (open vocabulary)."
+        },
+        "domains": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "What it is ABOUT (open vocabulary)."
+        },
+        "relations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Typed-edge relations (e.g. supports, supersedes), OR'd."
+        },
+        "relation_of": {
+          "type": "string",
+          "description": "Anchor path; restrict `relations` to pages connected to it."
+        },
+        "relation_direction": {
+          "default": "any",
+          "description": "outbound, inbound or any.",
+          "type": "string"
+        },
+        "filters": {
+          "type": "object",
+          "description": "Structured page/unit metadata filters."
+        },
+        "result_level": {
+          "default": "auto",
+          "description": "auto, page, unit or mixed.",
+          "type": "string"
+        },
+        "limit": {
+          "default": 15,
+          "description": "Max hits.",
+          "type": "integer"
+        },
+        "continuation": {
+          "type": "string",
+          "description": "Token from a prior recall page."
+        },
+        "scope": {
+          "default": "kb",
+          "description": "kb, vault or kb-only.",
+          "type": "string"
+        },
+        "mode": {
+          "default": "hybrid",
+          "description": "hybrid, keyword or vector.",
+          "type": "string"
+        },
+        "detail": {
+          "default": "compact",
+          "description": "compact or full.",
+          "type": "string"
+        },
+        "deep": {
+          "default": false,
+          "description": "Return a packed context for reasoning.",
+          "type": "boolean"
+        },
+        "graph": {
+          "default": true,
+          "description": "Graph-neighbour ranking in hybrid/vector search.",
+          "type": "boolean"
+        },
+        "rerank": {
+          "type": "boolean",
+          "description": "Force or suppress reranking; omit for auto."
+        },
+        "rerank_max_candidates": {
+          "description": "Scorer input bound, result limit to 300.",
+          "maximum": 300,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "prefer_compiled": {
+          "default": true,
+          "description": "Prefer compiled over raw sources.",
+          "type": "boolean"
+        },
+        "prefer_active": {
+          "default": true,
+          "description": "Prefer active over superseded.",
+          "type": "boolean"
+        },
+        "prefer_used": {
+          "default": false,
+          "description": "Apply a usage boost.",
+          "type": "boolean"
+        },
+        "widen_outside_kb": {
+          "default": false,
+          "description": "With scope=\"kb\", also reserve slots for curated pages outside the KB.",
+          "type": "boolean"
+        },
+        "graph_enrich": {
+          "default": false,
+          "description": "With deep, include graph neighborhoods.",
+          "type": "boolean"
+        },
+        "include_timings": {
+          "default": false,
+          "description": "Include retrieval timings.",
+          "type": "boolean"
+        },
+        "explain": {
+          "default": false,
+          "description": "Add retrieval-plan and ranking evidence.",
+          "type": "boolean"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Declared purpose; governance may widen or narrow visibility."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "supersede_note": {
+    "description": "Supersede compiled memory with a new version.\n\nThe old page stays readable and points to the new one. Use for a changed\nconclusion; small edits go to `edit_note`.\n\nReplacement sources must resolve to authorized governed Source/Evidence,\neven if old citations did not. Capture originals first or pass an empty list\n(UNRESOLVED_SOURCE_CITATION). Details: references/supersession.md.\n\nSemantic authoring [exomem.semantic-authoring:v9 sha256:5c51c091751dfca2645a71fa607dd16eb23a6a68b16fb55b37df18c9503f6949]: Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material. Live compiled creates, replacements and transitions to live need a valid nonempty semantic unit; pending pages may remain unit-free. A post-activation compliant page cannot lose its final valid semantic unit. Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Compact: `## Observations` then `- [category] content #tags (context) ^anchor`; one open category. Rich: `## <Governed Kind>`. Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation `missing_semantic_unit`: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. `empty_rich_unit`: Add substantive body content or remove the empty recognized heading. Keys/examples: call bootstrap(profile=\"full\").",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3426,342 +3762,6 @@
       "type": "object"
     }
   },
-  "review_item_context": {
-    "description": "Read one review item's target, provenance, relations and history.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "ref": {
-          "description": "exomem://review/<id>, including adoption/<id> or upkeep/<id>.",
-          "type": "string"
-        },
-        "expected_fingerprint": {
-          "type": "string",
-          "description": "Reviewed fingerprint; mismatch requires refresh."
-        },
-        "max_body_chars": {
-          "default": 4000,
-          "description": "Body cap.",
-          "type": "integer"
-        },
-        "max_related_pages": {
-          "default": 8,
-          "description": "Related-summary cap.",
-          "type": "integer"
-        },
-        "max_graph_nodes": {
-          "default": 30,
-          "description": "Node cap.",
-          "type": "integer"
-        },
-        "max_graph_edges": {
-          "default": 60,
-          "description": "Edge cap.",
-          "type": "integer"
-        },
-        "max_history": {
-          "default": 10,
-          "description": "History cap.",
-          "type": "integer"
-        },
-        "max_evolution_versions": {
-          "default": 10,
-          "description": "Supersession version cap.",
-          "type": "integer"
-        },
-        "continuation": {
-          "type": "string",
-          "description": "Vocabulary evidence only."
-        }
-      },
-      "required": [
-        "ref"
-      ],
-      "type": "object"
-    }
-  },
-  "review_memory": {
-    "description": "Review memory health, provenance, drift, or source backlog.\n\nDefault attention is read-only; repairs use maintain_memory. Vocabulary\npath/query/family submits a meaning question: requires write access,\ngrants no page or vocabulary mutation authority.\n\nmode=\"audit\", categories=[\"unresolved_source_citation\"] finds citations\nunresolved to authorized governed Source/Evidence; never reconstruct originals.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "default": "attention",
-          "description": "vocabulary records questions; item/write-advisory-result need ref. No authority: apply through connect_memory accept-relation, adoption_studio apply-proposal or triage_memory. Modes: references/governance.md.",
-          "enum": [
-            "attention",
-            "activation",
-            "item",
-            "audit",
-            "dispositions",
-            "provenance",
-            "evolution",
-            "compilation",
-            "stale",
-            "contradiction",
-            "unprocessed-sources",
-            "relation-debt",
-            "relation-queue",
-            "adoption",
-            "upkeep",
-            "plan-progress",
-            "write-advisory-result",
-            "vocabulary"
-          ],
-          "type": "string"
-        },
-        "categories": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Category filter (attention, activation, audit) or upkeep family."
-        },
-        "limit": {
-          "type": "integer",
-          "description": "Result cap; vocabulary defaults to 4, other modes 25."
-        },
-        "continuation": {
-          "type": "string",
-          "description": "Opaque vocabulary pagination token."
-        },
-        "query": {
-          "default": "",
-          "description": "Topic for evolution when `path` is absent; in vocabulary mode, the meaning question to record.",
-          "type": "string"
-        },
-        "sources": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Source paths for compilation."
-        },
-        "suggested_title": {
-          "type": "string",
-          "description": "Compilation title hint."
-        },
-        "tag": {
-          "type": "string",
-          "description": "Provenance tag shorthand."
-        },
-        "key": {
-          "type": "string",
-          "description": "Provenance key filter."
-        },
-        "value": {
-          "type": "string",
-          "description": "Provenance value filter."
-        },
-        "path": {
-          "type": "string",
-          "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns."
-        },
-        "state": {
-          "default": "open",
-          "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-          "type": "string"
-        },
-        "ref": {
-          "type": "string",
-          "description": "`exomem://review/<id>` for item mode (upkeep refs revalidate one item) or `exomem://write-advisory-result/<id>` for write-advisory-result; for a vocabulary relation question, a current relation-queue candidate ref alongside its source path."
-        },
-        "detail": {
-          "default": "actionable",
-          "description": "Audit output detail.",
-          "enum": [
-            "actionable",
-            "full"
-          ],
-          "type": "string"
-        },
-        "legacy_sample_limit": {
-          "default": 5,
-          "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
-          "maximum": 50,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "family": {
-          "type": "string",
-          "description": "Vocabulary family for a meaning question; with `mode=\"vocabulary\"` requires `path` and `query`; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration."
-        },
-        "response_detail": {
-          "default": "compact",
-          "description": "Success detail: compact (default), full, or legacy.",
-          "enum": [
-            "compact",
-            "full",
-            "legacy"
-          ],
-          "type": "string"
-        }
-      },
-      "type": "object"
-    }
-  },
-  "schema_memory": {
-    "description": "Infer, validate, diff, or save governed memory schemas and workflow contracts.\n\nContracts describe recurring fields, units and relations; write validation\nstays unchanged. Inference is read-only unless save=true; overwrite needs\nthe current hash. For a vocabulary registry: inspect lists the live vocabulary\nand usage; propose previews a delta; save applies upsert, alias or deprecate\nwith expected_hash and why; history lists kept versions; restore reverts one\nwithout rewriting pages.\nOperations: references/operation-routing.md.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "operation": {
-          "description": "Operation for the subject; see references/operation-routing.md.",
-          "enum": [
-            "infer",
-            "validate",
-            "diff",
-            "inventory",
-            "inspect",
-            "resolve",
-            "preview",
-            "save",
-            "refresh",
-            "save-entity-types",
-            "resolve-entity-type",
-            "propose-relation",
-            "save-relations",
-            "census",
-            "propose",
-            "save-roles",
-            "save-conventions",
-            "history",
-            "restore"
-          ],
-          "type": "string"
-        },
-        "name": {
-          "type": "string",
-          "description": "Saved workflow key."
-        },
-        "subject": {
-          "default": "contract",
-          "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
-          "type": "string"
-        },
-        "project": {
-          "type": "string",
-          "description": "Project scope for inference."
-        },
-        "page_type": {
-          "type": "string",
-          "description": "Page-type scope for inference."
-        },
-        "save": {
-          "default": false,
-          "description": "Legacy inference flag; true is refused for workflow contracts.",
-          "type": "boolean"
-        },
-        "expected_hash": {
-          "type": "string",
-          "description": "Current registry hash (relations, workflow save/refresh,\nroles_hash or conventions_hash for save-roles/save-conventions)."
-        },
-        "strict": {
-          "default": false,
-          "description": "In validate mode, signal a failing outcome on findings.",
-          "type": "boolean"
-        },
-        "compare_to": {
-          "type": "string",
-          "description": "In diff mode, compare to this saved contract."
-        },
-        "proposal": {
-          "type": "object",
-          "description": "Reviewed definition, delta or override document for the\noperation. propose-relation requires requested_label, parent,\ndescription and direction (directed or symmetric); pass the mapping\ndirectly, no wrapper."
-        },
-        "why": {
-          "type": "string",
-          "description": "Audit reason for saves and refresh."
-        },
-        "include_model_suggestions": {
-          "default": false,
-          "description": "Add response-only relation suggestions.",
-          "type": "boolean"
-        },
-        "context": {
-          "additionalProperties": false,
-          "properties": {
-            "project": {
-              "type": "string"
-            },
-            "domain": {
-              "type": "string"
-            },
-            "activity": {
-              "type": "string"
-            }
-          },
-          "type": "object",
-          "description": "Workflow resolve mapping with keys project, domain, activity."
-        },
-        "date_from": {
-          "type": "string",
-          "description": "Inclusive ISO bound for relation evidence."
-        },
-        "date_to": {
-          "type": "string",
-          "description": "Inclusive ISO bound for relation evidence."
-        },
-        "continuation": {
-          "type": "string",
-          "description": "Opaque candidate continuation."
-        },
-        "limit": {
-          "default": 20,
-          "maximum": 64,
-          "minimum": 1,
-          "type": "integer",
-          "description": "Candidate budget."
-        },
-        "query": {
-          "type": "string",
-          "description": "Evidence query for resolve-entity-type."
-        },
-        "requested_type": {
-          "type": "string",
-          "description": "Entity-type label for resolve-entity-type."
-        },
-        "vocabulary_ref": {
-          "type": "string",
-          "description": "Vocabulary decision for a registry save."
-        },
-        "vocabulary_fingerprint": {
-          "type": "string",
-          "description": "Reviewed vocabulary fingerprint; grants no write."
-        },
-        "detail": {
-          "enum": [
-            "counts",
-            "keys"
-          ],
-          "type": "string",
-          "description": "Census detail; keys adds predicate keys."
-        },
-        "version": {
-          "type": "string",
-          "description": "Kept version from `history`, for `restore`."
-        },
-        "registry_scope": {
-          "type": "string",
-          "description": "Public instance token or canonical private Scope ID; grants no authority."
-        },
-        "response_detail": {
-          "default": "compact",
-          "description": "Success detail: compact (default), full, or legacy.",
-          "enum": [
-            "compact",
-            "full",
-            "legacy"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "operation"
-      ],
-      "type": "object"
-    }
-  },
   "transfer_artifact": {
     "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived handoff; issuance does not prove consumption.\nFor a stored original, download with artifact and optional expected_sha256.\nUse the bounded native MCP resource where supported, or open the HTTPS link.\nNote reads and exports remain separate.",
     "inputSchema": {
@@ -3799,7 +3799,7 @@
     }
   },
   "triage_memory": {
-    "description": "Write fingerprint-bound review_memory triage decisions.",
+    "description": "Save review decisions or attention settings; use returned refs and fingerprints.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

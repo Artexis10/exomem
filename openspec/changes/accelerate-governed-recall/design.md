@@ -525,6 +525,22 @@ it with the current path on the reference corpus.
   admitted unit on every query. It is old debt from the #1649 review, and
   slice 6.6 computes those statistics once per catalogue generation and
   admitted set.
+
+  Mixed recall also freezes its combined page and unit slots before canonical
+  hydration. Each lane retains its original collection limit and rank. Managed
+  keyword groups provide their emitted page identities; non-reranked semantic
+  recall uses its proved metadata prefix. The existing fusion weights and unit
+  cap choose the combined pool. Only selected pages and unit parents are read.
+  Lost evidence leaves an empty slot; it cannot promote another rank or move a
+  truncation annotation to another hit.
+
+  This boundary currently covers nonempty managed keyword recall and semantic
+  recall with complete ranking metadata and no shortcut page filters. Widening,
+  post-selection date filters, empty-query browse, semantic keyword fallback
+  and possible reranking retain
+  their existing paths. Reranking needs canonical passages before fusion, so
+  moving it would change the ranking contract. These paths remain unoptimized;
+  they receive no read-budget exemption, and task 6.6 stays open.
 - **Dense search.** The vector lane asks for 3 x `candidate_k` chunk rows and
   hydrates every row, although it retains only the best chunk per file.
   Frame collapse moves auxiliary values; it does not inspect chunk text.

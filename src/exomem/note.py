@@ -49,7 +49,6 @@ from . import (
     relation_review,
     semantic_units,
     semantic_writes,
-    source_closure,
     tag_variants,
     temporal,
     vocabulary_resolution,
@@ -411,7 +410,7 @@ def _build_write_feedback(
     }
     if not suggestions_requested:
         suggestions_feedback["route"] = {
-            "tool": "remember",
+            "tool": "create_note",
             "args": {"suggestions": True, "response_detail": "full"},
         }
 
@@ -1854,6 +1853,7 @@ def note(
             predecessor_path=_predecessor_path,
             predecessor_content_hash=_predecessor_content_hash,
             vocabulary_binding=domain_binding,
+            resolver=resolver,
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise NoteError(
@@ -1946,14 +1946,6 @@ def note(
     if log_plan.rotation_note is not None:
         warnings.append(log_plan.rotation_note)
     if validate_only:
-        closure = source_closure.inspect_source_closure(root, preflight.source)
-        if not closure.closed:
-            raise NoteError(
-                source_closure.UNRESOLVED_CODE,
-                [],
-                source_closure.UNRESOLVED_MESSAGE,
-                closure.public_details(),
-            )
         log.info(
             "note write timings mode=validate note_type=%s preflight_ms=%.1f",
             note_type,

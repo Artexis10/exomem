@@ -297,6 +297,7 @@ def prepare_source_closure(
     prior_markdown: str | None = None,
     required: bool = True,
     authorize_path: Callable[[str], bool] | None = None,
+    resolver: vault.WikilinkResolver | None = None,
 ) -> SourceClosurePlan:
     """Prepare deterministic guarded back-references before writer authority."""
     root = Path(vault_root)
@@ -307,9 +308,12 @@ def prepare_source_closure(
         root,
         final_markdown,
         authorize_path=authorize_path,
+        resolver=resolver,
     )
     prior = (
-        inspect_source_closure(root, prior_markdown, authorize_path=authorize_path)
+        inspect_source_closure(
+            root, prior_markdown, authorize_path=authorize_path, resolver=resolver
+        )
         if prior_markdown is not None
         else SourceClosureInspection((), (), ())
     )

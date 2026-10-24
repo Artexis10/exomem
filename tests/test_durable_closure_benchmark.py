@@ -555,8 +555,9 @@ def test_ack_accounting_excludes_validation_and_status_previews() -> None:
     assert benchmark.is_mutation_ack("edit_memory", {"operation": {"kind": "replace_string"}}) is True
 
 
-def test_missing_required_public_tool_is_a_refusal_not_a_reduced_workflow() -> None:
-    missing = benchmark.required_tools_missing({"remember", "ask_memory"})
+@pytest.mark.parametrize("names", ({"remember", "ask_memory"}, {"create_note", "search_memory"}))
+def test_missing_required_public_tool_is_a_refusal_not_a_reduced_workflow(names) -> None:
+    missing = benchmark.required_tools_missing(names)
 
     assert missing == ["preserve_artifacts", "process_media", "read_memory"]
 

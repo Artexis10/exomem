@@ -105,7 +105,7 @@ def test_the_local_listener_answers_first_with_the_local_token(
     seen = _record_requests(monkeypatch, _ok)
 
     assert hook._gather_hits_with_lane("what did I conclude?") == (HITS, "local")
-    assert seen == [("http://127.0.0.1:8764/api/ask_memory", f"Bearer {LOCAL_TOKEN}")]
+    assert seen == [("http://127.0.0.1:8764/api/search_memory", f"Bearer {LOCAL_TOKEN}")]
 
 
 def test_a_failed_local_request_falls_back_to_the_lifted_key_for_one_release(
@@ -124,8 +124,8 @@ def test_a_failed_local_request_falls_back_to_the_lifted_key_for_one_release(
 
     assert hook._gather_hits_with_lane("prompt") == (HITS, "rest")
     assert seen == [
-        ("http://127.0.0.1:8764/api/ask_memory", f"Bearer {LOCAL_TOKEN}"),
-        ("http://127.0.0.1:8765/api/ask_memory", "Bearer lifted-owner-key"),
+        ("http://127.0.0.1:8764/api/search_memory", f"Bearer {LOCAL_TOKEN}"),
+        ("http://127.0.0.1:8765/api/search_memory", "Bearer lifted-owner-key"),
     ]
 
 
@@ -138,7 +138,7 @@ def test_the_local_rung_never_follows_exomem_host(
     seen = _record_requests(monkeypatch, _ok)
 
     assert hook._gather_hits_with_lane("prompt")[1] == "local"
-    assert [url for url, _ in seen] == ["http://127.0.0.1:8764/api/ask_memory"]
+    assert [url for url, _ in seen] == ["http://127.0.0.1:8764/api/search_memory"]
 
 
 def test_the_local_port_can_come_from_the_managed_service_env(
@@ -151,7 +151,7 @@ def test_the_local_port_can_come_from_the_managed_service_env(
     seen = _record_requests(monkeypatch, _ok)
 
     assert hook._gather_hits_with_lane("prompt")[1] == "local"
-    assert seen[0][0] == "http://127.0.0.1:9764/api/ask_memory"
+    assert seen[0][0] == "http://127.0.0.1:9764/api/search_memory"
 
 
 @pytest.mark.parametrize(
@@ -172,7 +172,7 @@ def test_without_a_usable_token_and_port_the_local_rung_is_skipped(
     seen = _record_requests(monkeypatch, _ok)
 
     assert hook._gather_hits_with_lane("prompt")[1] == "rest"
-    assert [url for url, _ in seen] == ["http://127.0.0.1:8765/api/ask_memory"]
+    assert [url for url, _ in seen] == ["http://127.0.0.1:8765/api/search_memory"]
 
 
 def test_working_set_mode_uses_the_same_local_rung(
@@ -187,7 +187,7 @@ def test_working_set_mode_uses_the_same_local_rung(
     )
 
     assert hook._gather_packet_with_lane("turn", "") == (packet, "local")
-    assert seen == [("http://127.0.0.1:8764/api/activate_context", f"Bearer {LOCAL_TOKEN}")]
+    assert seen == [("http://127.0.0.1:8764/api/recall_context", f"Bearer {LOCAL_TOKEN}")]
 
 
 def test_the_shipped_script_injects_hits_from_the_local_listener(tmp_path: Path) -> None:
@@ -252,5 +252,5 @@ def test_the_shipped_script_injects_hits_from_the_local_listener(tmp_path: Path)
     assert proc.returncode == 0, proc.stderr
     context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Notes/local.md" in context
-    assert requests == [("/api/ask_memory", f"Bearer {LOCAL_TOKEN}")]
+    assert requests == [("/api/search_memory", f"Bearer {LOCAL_TOKEN}")]
     assert LOCAL_TOKEN not in proc.stdout + proc.stderr
