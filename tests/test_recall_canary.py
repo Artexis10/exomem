@@ -758,6 +758,89 @@ def test_mcp_cli_emits_only_content_free_json_and_structured_warning(tmp_path, m
         assert secret not in output.out + output.err
 
 
+@pytest.mark.parametrize("cause_kind", ["http", "protocol", "timeout"])
+def test_cli_preserves_typed_initialization_failure_without_private_error_data(
+    tmp_path, monkeypatch, capsys, cause_kind
+):
+    import fastmcp
+    import httpx2 as httpx
+    from mcp.shared.exceptions import MCPError
+
+    request = httpx.Request(
+        "POST",
+        "https://example.invalid/mcp?token=example-secret",
+        headers={"Authorization": "Bearer example-secret"},
+    )
+    if cause_kind == "http":
+        cause = httpx.HTTPStatusError(
+            "example-secret",
+            request=request,
+            response=httpx.Response(401, text="private-response", request=request),
+        )
+    elif cause_kind == "protocol":
+        cause = MCPError(
+            code=-32601, message="example-secret", data={"target": str(request.url)}
+        )
+    else:
+        cause = httpx.ReadTimeout("example-secret", request=request)
+    wrapped = RuntimeError("private-wrapper")
+    wrapped.__cause__ = ExceptionGroup("private-group", [cause])
+
+    class FailedConnection:
+        async def __aenter__(self):
+            raise wrapped
+
+        async def __aexit__(self, *args):
+            raise AssertionError("The connection never entered")
+
+        async def call_tool(self, *args, **kwargs):
+            raise AssertionError("Initialization must finish before a case call")
+
+    monkeypatch.setattr(fastmcp, "Client", lambda *args, **kwargs: FailedConnection())
+    monkeypatch.setenv("TEST_CANARY_TOKEN", "example-secret")
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps([_canary_case()]))
+
+    status = gate.main(
+        [
+            "--mcp-url", "https://example.invalid/mcp", "--cases", str(path),
+            "--token-env", "TEST_CANARY_TOKEN", "--package-mode", "source",
+            "--check", "availability",
+        ]
+    )
+
+    output = capsys.readouterr()
+    report = json.loads(output.out)
+    assert status == 1
+    assert report["failure"] == "session-failed"
+    assert report["failure_phase"] == "connect"
+    assert report["cases"][0]["attempts"] == []
+    assert report["availability"] == "unattempted"
+    assert report["failure_details"] == {
+        "http_status_codes": [401] if cause_kind == "http" else [],
+        "mcp_error_codes": [-32601] if cause_kind == "protocol" else [],
+        "timeout_observed": cause_kind == "timeout",
+        "transport_error_observed": cause_kind == "timeout",
+        "chain_truncated": False,
+    }
+    for secret in (
+        "example-secret", "example.invalid", "private-response", "private-wrapper",
+        "private-group", "private-question", "private-reference",
+    ):
+        assert secret not in output.out + output.err
+
+
+def test_connection_error_details_bound_duplicate_groups_and_cycles():
+    cause = RuntimeError("private-cause")
+    cause.__context__ = cause
+    grouped = ExceptionGroup("private-group", [cause] * 20)
+    details = gate._connection_failure_details(grouped)
+    assert details["chain_truncated"] is True
+    assert details["http_status_codes"] == []
+    assert details["mcp_error_codes"] == []
+    assert "private" not in json.dumps(details)
+
+
 def test_one_successful_sample_proves_availability_without_accepting_latency(tmp_path):
     from fastmcp import FastMCP
 
