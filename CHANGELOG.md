@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.141.0](https://github.com/Artexis10/exomem/compare/v0.140.0...v0.141.0) (2026-10-24)
+
+
+### Features
+
+* **connect:** author typed relations when creating an entity ([#2058](https://github.com/Artexis10/exomem/issues/2058)) ([fd3dea0](https://github.com/Artexis10/exomem/commit/fd3dea0ec86cfa7369642e012f9f495b82c502e6))
+
+
+### Bug Fixes
+
+* retain content-free Cloud export failure reasons ([#2055](https://github.com/Artexis10/exomem/issues/2055)) ([6bbc9b1](https://github.com/Artexis10/exomem/commit/6bbc9b1ff5a460d58a1d6fc0dea26ff01f3e9d18))
+
 ## [0.140.0](https://github.com/Artexis10/exomem/compare/v0.139.0...v0.140.0) (2026-10-24)
 
 
