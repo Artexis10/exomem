@@ -2,11 +2,7 @@
 {{- if not .Values.cloudGateway.enabled }}
 {{- fail "cloudGateway.transferTools.enabled requires cloudGateway.enabled" }}
 {{- end }}
-{{- range $cidr := list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "169.254.0.0/16" }}
-{{- if not (has $cidr $.Values.cells.jobEgressExcept) }}
-{{- fail (printf "cloudGateway.transferTools requires cells.jobEgressExcept to include %s" $cidr) }}
-{{- end }}
-{{- end }}
+{{- include "exomem.requirePrivateRangesDenied" (dict "root" . "feature" "cloudGateway.transferTools") }}
 {{- end }}
 {{- if .Values.cloudGateway.enabled }}
 apiVersion: v1

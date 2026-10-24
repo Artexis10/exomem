@@ -13,7 +13,7 @@ Each tool description SHALL teach the workflow: which import routes exist and th
 #### Scenario: The assistant discovers the tools
 
 - **WHEN** a client lists tools on a Cloud cell
-- **THEN** both tools appear with these annotations, closed `action` enums and UUID-typed id inputs
+- **THEN** both tools appear with these annotations, closed `action` enums and id inputs that are UUID strings, validated by the gateway before any request
 - **AND** no tool accepts a free-form command, path or URL
 
 #### Scenario: The handoff names every route and its limit

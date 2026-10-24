@@ -32,7 +32,9 @@ def _surfaces(command) -> str:
         labels.append("REST")
     if "cli" in command.surfaces:
         labels.append("CLI")
-    return ", ".join(labels) or "-"
+    text = ", ".join(labels) or "-"
+    # The registry's executor attribute declares which commands only an Exomem Cloud cell lists.
+    return f"{text} (Cloud only)" if command.cloud_only else text
 
 
 def _params(command) -> str:
