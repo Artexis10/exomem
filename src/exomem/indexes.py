@@ -43,6 +43,10 @@ INDEX_COUNTS_HEADER = "## Counts"
 LOG_SEPARATOR = "\n---\n"
 
 
+def sources_index_path(vault_root: Path) -> Path:
+    return kb_root(vault_root) / "Sources" / "index.md"
+
+
 def _rewritten_in_place(text: str, rewrite: Callable[[str], str]) -> str:
     r"""Run an LF-only section rewriter without changing the document's endings.
 
@@ -106,7 +110,7 @@ def compute_updates(
     """
     kb = kb_root(vault_root)
     sources_dir = kb / "Sources"
-    sources_index = sources_dir / "index.md"
+    sources_index = sources_index_path(vault_root)
     top_index = kb / "index.md"
     log_file = kb / "log.md"
 
@@ -820,7 +824,7 @@ def compute_subindex_writes(
         new_top_text = render_wikilinks_for_vault(new_top_text, vault_root)
 
     # Sources/index.md refresh.
-    sources_index = sources_dir / "index.md"
+    sources_index = sources_index_path(vault_root)
     if sources_index.exists():
         try:
             current, guard = read_guarded_text(vault_root, sources_index)

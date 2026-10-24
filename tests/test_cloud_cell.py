@@ -111,13 +111,14 @@ async def _call_tool(
     name: str,
     arguments: dict,
     request_id: int = 2,
+    metadata: dict | None = None,
 ) -> httpx.Response:
     return await _mcp_call(
         client,
         token=token,
         request_id=request_id,
         method="tools/call",
-        params={"name": name, "arguments": arguments},
+        params={"name": name, "arguments": arguments, **({"_meta": metadata} if metadata is not None else {})},
     )
 
 
@@ -973,3 +974,73 @@ def test_verified_cloud_owner_requires_current_configured_cell(vault: Path, monk
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL_ID)
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "0")
     assert principal_module.resolve_mcp_principal().audience_id != "owner"
+
+
+def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vault, monkeypatch):
+    import socket
+    import time
+
+    from exomem import command_surface, writer_lease
+
+    monkeypatch.setattr(socket.socket, "connect", lambda *_a, **_k: pytest.fail("outbound network access"))
+    for name in ("EXOMEM_DISABLE_EMBEDDINGS", "EXOMEM_DISABLE_MEDIA_EXTRACTION", "EXOMEM_DISABLE_CLIP"):
+        monkeypatch.setenv(name, "1")
+    inputs = {
+        "title": "Service record", "content": "An immutable source body", "source_kind": "session",
+        "source_identity": {"system": "archive", "record_id": "item-4", "revision": "r2"},
+    }
+    mcp, _ = _build_cloud_server(monkeypatch, previous_token=PREVIOUS_TOKEN)
+
+    async def calls(instance, *, restart):
+        app = instance.http_app(stateless_http=True, json_response=True)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://cell.local") as client:
+                await _initialize(client, token=TOKEN)
+                if restart:
+                    return [await _call_tool(client, token=PREVIOUS_TOKEN, name="capture_source", arguments=inputs,
+                                             metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "new-attempt"})]
+                first = await _call_tool(client, token=TOKEN, name="capture_source", arguments=inputs,
+                                         metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "attempt-1"})
+                rotated = await _call_tool(client, token=PREVIOUS_TOKEN, name="capture_source", arguments=inputs,
+                                           request_id=3, metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "attempt-1"})
+                changed = await _call_tool(client, token=TOKEN, name="capture_source",
+                                           arguments={**inputs, "content": "Conflicting input"}, request_id=4,
+                                           metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "attempt-1"})
+                promoted = await _call_tool(
+                    client, token=TOKEN, name="manage_memory_file", request_id=5,
+                    arguments={"operation": "move", "old_path": first.json()["result"]["structuredContent"]["source"]["path"],
+                               "new_path": "Knowledge Base/Evidence/Archive/records/service-record.md",
+                               "promotion_reason": "The captured record now supports a documented claim.",
+                               "response_detail": "legacy"},
+                )
+                return [first, rotated, changed, promoted]
+
+    try:
+        first, rotated, changed, promoted = asyncio.run(calls(mcp, restart=False))
+    finally:
+        _teardown_activation(mcp)
+    original = first.json()["result"]["structuredContent"]
+    assert original["capture_outcome"] == "created", first.text
+    replay = rotated.json()["result"]["structuredContent"]
+    assert replay["source"] == original["source"]
+    assert replay["capture_outcome"] == "created"
+    assert "IDEMPOTENCY_KEY_REUSED" in changed.text
+    assert promoted.json()["result"]["structuredContent"]["new_path"] == "Knowledge Base/Evidence/Archive/records/service-record.md", promoted.text
+    assert not (vault / original["source"]["path"]).exists()
+    before = {p: p.read_bytes() for lane in ("Sources", "Evidence")
+              for p in (vault / "Knowledge Base" / lane).rglob("*.md")}
+
+    writer_lease.reset_managers_for_tests()
+    restarted, _ = _build_cloud_server(monkeypatch, previous_token=PREVIOUS_TOKEN)
+    writer_lease.get_manager().idempotency.clock = lambda: time.time() + 90_000
+    try:
+        recovered, = asyncio.run(calls(restarted, restart=True))
+    finally:
+        _teardown_activation(restarted)
+    result = recovered.json()["result"]["structuredContent"]
+    assert result["capture_outcome"] == "reused", recovered.text
+    assert result["source"]["ref"] == original["source"]["ref"]
+    assert result["source"]["path"] == "Knowledge Base/Evidence/Archive/records/service-record.md"
+    assert result["mutated"] is False
+    assert {p: p.read_bytes() for lane in ("Sources", "Evidence")
+            for p in (vault / "Knowledge Base" / lane).rglob("*.md")} == before

@@ -28,6 +28,7 @@ import os
 import re
 import time
 from collections.abc import Mapping
+from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
@@ -82,6 +83,7 @@ from . import (
     query_log,
     retrieval_models,
     semantic_census,
+    source_capture,
     upload_tokens,
     vault,
     vocabulary_resolution,
@@ -3694,27 +3696,37 @@ def _add_source(
     domain: str | None,
     projects: list[str] | None,
     raw_protection: bool = False,
+    source_identity: source_capture.SourceIdentity | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind."""
     try:
-        result = add_module.add(
-            vault_root,
-            source_schema,
-            content=content,
-            source_type=kind,
-            title=title,
-            slug=slug,
-            url=url,
-            tags=tags,
-            why_captured=why_captured,
-            domain=domain,
-            projects=projects,
-            raw_protection=raw_protection,
-        )
+        from .writer_lease import active_manager, active_mutation_request_id
+
+        guard = active_manager().mutation_guard(
+            vault_root, request_id=active_mutation_request_id(),
+            operation="capture_source_identity", holder_kind="command",
+        ) if source_identity is not None else nullcontext()
+        with guard:
+            result = add_module.add(
+                vault_root,
+                source_schema,
+                content=content,
+                source_type=kind,
+                title=title,
+                slug=slug,
+                url=url,
+                tags=tags,
+                why_captured=why_captured,
+                domain=domain,
+                projects=projects,
+                raw_protection=raw_protection,
+                source_identity=source_identity,
+            )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
         raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
-    query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
+    if result.capture_outcome != "reused":
+        query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
     return result.as_dict()
 
 
@@ -8061,34 +8073,35 @@ def op_capture_source(
     files: _OptionalClientArtifactFiles = (),  # noqa: B006 - read-only
     adoption: _OptionalArtifactAdoption = None,
     raw_protection: bool = False,
+    source_identity: source_capture.SourceIdentity | None = None,
 ) -> dict:
-    """Save raw source material; optionally prepare a note.
+    """Save raw text or file handles losslessly in Sources/.
 
-    content is text; files are client handles (locally: exomem attach --lane
-    source). Stored losslessly in Sources/. Proof goes to preserve_evidence or
-    preserve_artifacts; choose by role, not transport. compile_guidance=true
+    Proof goes to preserve_evidence or preserve_artifacts. source_kind is
+    required; domain is optional. Both accept new slugs. compile_guidance
     returns a proposal; reuse it instead of calling prepare_note.
-
-    `source_kind` (what it IS) is required; `domain` (what it is ABOUT) is optional.
-    Both are open vocabularies; new slugs register.
 
     Args:
         content: Raw text. Supply this or `files`, not both.
-        source_type: Alias of source_kind; supply either. Open vocabulary, not a closed
-            set.
-        url: Required for kinds that declare it, such as article, paper, video.
+        source_type: Alias of source_kind; conflicts are refused.
+        url: Required when the source kind declares it.
         tags: Secondary labels; not for kind, domain or project.
-        compile_guidance: Return a proposal; skip another prepare_note call.
+        compile_guidance: Return a reusable proposal.
         suggested_title: Title hint for the proposal.
-        source_kind: What it IS, lowercase slug: the closest known kind or a
-            new one. Differing values with source_type are refused.
+        source_kind: What it IS; open lowercase slug, including new kinds.
         domain: What it is ABOUT, lowercase slug.
         projects: Project keys served; never affects storage.
         files: Client file handles, captured instead of `content`.
         adoption: Selects exactly one supplied handle. Establishes eligibility,
             not write consent; agent-initiated use obeys proactive_capture.
         raw_protection: Keep the original owner-only until a whole-artifact release.
+        source_identity: Opaque text identity; identical inputs reuse the Source indefinitely.
     """
+    if source_identity is not None:
+        if files or adoption is not None:
+            raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")
+        source_identity = source_capture.validate_identity(source_identity)
+        source_capture.require_authority(vault_root)
     # Resolved before any byte is fetched or written, for files and text alike.
     kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
     if files or adoption is not None:
@@ -8124,8 +8137,12 @@ def op_capture_source(
         domain=domain,
         projects=projects,
         raw_protection=raw_protection,
+        source_identity=source_identity,
     )
     out: dict = {"source": source}
+    if source_identity is not None:
+        out["capture_outcome"] = source["capture_outcome"]
+        out["mutated"] = source["capture_outcome"] == "created"
     # The terminal reads these from the leaf's top level.
     for key in ("vocabulary_resolution", "vocabulary_receipt"):
         if key in source:
