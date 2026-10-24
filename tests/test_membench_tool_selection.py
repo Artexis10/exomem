@@ -41,7 +41,7 @@ from membench.utility.tool_selection.cases import (
     dev_cases_from_plan,
     generate_heldout,
 )
-from membench.utility.tool_selection.resolve import grouped_resolver, resolve_call
+from membench.utility.tool_selection.resolve import grouped_resolver, product_resolver, resolve_call
 from membench.utility.tool_selection.score import (
     CaseResult,
     answer_matches,
@@ -433,6 +433,29 @@ def test_calls_resolve_through_the_injected_resolver_and_refusals_come_from_resu
     assert result.first_correct_ordinal == 2
     assert result.unresolved_calls == 1
     assert (result.schema_bytes, result.input_tokens, result.output_tokens) == (90_000, 1000, 50)
+
+
+def test_the_product_resolver_reads_each_shape_as_its_server_does() -> None:
+    resolver = product_resolver()
+
+    nested_query = resolve_call(
+        resolver, "read_records", {"operation": {"kind": "query", "collection": "c"}}, "nested"
+    )
+    flat_append = resolve_call(
+        resolver,
+        "change_records",
+        {"action": "append", "collection": "c", "item": {"a": 1}, "why": "log it"},
+        "flat",
+    )
+    write_sent_to_read_tool = resolve_call(
+        resolver, "read_records", {"operation": {"kind": "append", "collection": "c"}}, "nested"
+    )
+    flat_form_under_nested = resolve_call(resolver, "read_records", {"action": "query", "collection": "c"}, "nested")
+
+    assert (nested_query.command, nested_query.action, nested_query.read_only) == ("record_memory", "query", True)
+    assert (flat_append.command, flat_append.action, flat_append.read_only) == ("record_memory", "append", False)
+    assert not write_sent_to_read_tool.resolved
+    assert not flat_form_under_nested.resolved
 
 
 def test_resolution_reports_the_command_the_action_and_whether_it_reads() -> None:

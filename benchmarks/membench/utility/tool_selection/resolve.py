@@ -2,12 +2,11 @@
 
 Every arm lists different tool names and argument shapes for the same logical
 operation, so scoring never reads a tool name. It asks a resolver, injected as a
-parameter, what a call means: ``resolver(public_name, arguments)`` returns the
+parameter, what a call means: ``resolver(public_name, arguments, shape)`` returns the
 grouped product command and the flat grouped arguments, as the server's own
-translation does. The production resolver is the product's
+translation does for that tool shape. The production resolver is the product's
 ``command_surface.resolve_invocation``; ``grouped_resolver`` is the same
-contract for today's grouped spelling alone and serves tests and the grouped arm
-until the product ships ``resolve_invocation``.
+contract for today's grouped spelling alone and serves tests.
 
 The product also owns the read-or-write decision (``invocation_is_read_only``)
 and the selector name that carries the action, so neither is restated here.
@@ -19,7 +18,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-Resolver = Callable[[str, Mapping[str, Any]], "tuple[Any, dict[str, Any]]"]
+Resolver = Callable[[str, Mapping[str, Any], str], "tuple[Any, dict[str, Any]]"]
 
 
 class UnresolvedTool(LookupError):
@@ -29,14 +28,16 @@ class UnresolvedTool(LookupError):
 def product_resolver() -> Resolver:
     """The product's rendering-aware resolver; imported at run time, never at load."""
 
-    try:
-        from exomem.command_surface import resolve_invocation
-    except ImportError as error:
-        raise RuntimeError(
-            "exomem.command_surface.resolve_invocation is not in this build; "
-            "use --resolver grouped for the grouped arm only"
-        ) from error
-    return resolve_invocation
+    from exomem.command_surface import resolve_invocation
+    from exomem.commands import product_commands_for
+
+    commands = product_commands_for("mcp")
+
+    def resolve(name: str, arguments: Mapping[str, Any], shape: str):
+        # The arm names the shape its server rendered, so a call is read as that server read it.
+        return resolve_invocation(name, arguments, commands, shape=shape)
+
+    return resolve
 
 
 def grouped_resolver() -> Resolver:
@@ -47,7 +48,7 @@ def grouped_resolver() -> Resolver:
 
     commands = product_commands_for("mcp")
 
-    def resolve(name: str, arguments: Mapping[str, Any]):
+    def resolve(name: str, arguments: Mapping[str, Any], shape: str = "grouped"):
         command = resolve_command(name, commands)
         if command is None:
             raise UnresolvedTool(name)
@@ -74,13 +75,18 @@ class ResolvedCall:
     read_only: bool | None = None
 
 
-def resolve_call(resolver: Resolver, name: str, arguments: Mapping[str, Any] | None) -> ResolvedCall:
+def resolve_call(
+    resolver: Resolver, name: str, arguments: Mapping[str, Any] | None, shape: str = "grouped"
+) -> ResolvedCall:
+    from exomem.cli_ops import OpError
     from exomem.commands import invocation_is_read_only
     from exomem.governance import egress
 
     try:
-        command, flat = resolver(name, arguments or {})
-    except (UnresolvedTool, KeyError, ValueError, TypeError):
+        command, flat = resolver(name, arguments or {}, shape)
+    except (LookupError, OpError, ValueError, TypeError):
+        # LookupError covers UnresolvedTool and the product's UnresolvedInvocation;
+        # OpError is the command's own argument refusal, which the server returns too.
         return ResolvedCall(False)
     selector = egress.selector_for_command(command.name)
     action = flat.get(selector) if selector else None

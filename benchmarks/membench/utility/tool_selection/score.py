@@ -271,7 +271,7 @@ def score_session(
     result.calls = len(calls)
     targets = {(op.command, op.action, op.mode) for op in key.target_ops}
     for call in calls:
-        resolved = resolve_call(resolver, str(call["name"]), call.get("arguments"))
+        resolved = resolve_call(resolver, str(call["name"]), call.get("arguments"), session["arm"])
         served = call["outcome"] == "served" and not call["errored"]
         if not resolved.resolved:
             result.unresolved_calls += 1
