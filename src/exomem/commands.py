@@ -10302,6 +10302,8 @@ def op_adoption_studio(
         raise
 
 
+# Tool names and `action` values of the two transfer tools are a closed protocol set that the
+# Cloud gateway also implements; they are not a vocabulary a vault or customer extends.
 def op_observe_transfer(
     vault_root: Path,
     action: Literal["status", "import_handoff"] = "status",
@@ -12838,7 +12840,13 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "intent": "Assess or import an existing vault safely.",
         "route": {"tool": "adopt_vault", "args": {"mode": "scan-only"}},
         "safety": "scan-only by default; copy/compile modes require explicit options and preserve originals",
-        "advanced": ["browse_memory", "prepare_note", "adoption_studio"],
+        "advanced": [
+            "browse_memory",
+            "prepare_note",
+            "adoption_studio",
+            "observe_transfer",
+            "transfer_memory",
+        ],
     },
     "maintain": {
         "intent": "Check vault health and repair drift only when explicitly requested.",
