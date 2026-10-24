@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.142.0](https://github.com/Artexis10/exomem/compare/v0.141.0...v0.142.0) (2026-10-24)
+
+
+### Features
+
+* **cloud:** serve import and export control as Cloud MCP tools ([#2059](https://github.com/Artexis10/exomem/issues/2059)) ([c55bb5d](https://github.com/Artexis10/exomem/commit/c55bb5dbdf8da030058d6d607aec4eb2eba63101))
+* learn from context misses and keep frontmatter list appends valid ([#2066](https://github.com/Artexis10/exomem/issues/2066)) ([050f749](https://github.com/Artexis10/exomem/commit/050f7495c566e06fc3760f2ca12c5187f1e20339))
+
+
+### Bug Fixes
+
+* **collection-store:** keep file writers admitted on a legacy replica ([#2065](https://github.com/Artexis10/exomem/issues/2065)) ([ad85443](https://github.com/Artexis10/exomem/commit/ad85443278f6ee06a6cb1288ad13046cf172f2df))
+* **curation:** prepare a proposal outside the vault boundary and recheck bindings at the seal ([#2064](https://github.com/Artexis10/exomem/issues/2064)) ([932b94e](https://github.com/Artexis10/exomem/commit/932b94e43c6d54a269cc5e13c54c2097216e6a02))
+* **due:** scope a batch's silence to its own invocation ([#2073](https://github.com/Artexis10/exomem/issues/2073)) ([83b53ff](https://github.com/Artexis10/exomem/commit/83b53ff210d67466a391729495460d377eb6897c))
+* **history:** report stale name lookup and schedule its refresh ([#2061](https://github.com/Artexis10/exomem/issues/2061)) ([47cb406](https://github.com/Artexis10/exomem/commit/47cb406c1dccd38ca6322b4a63a4eb26e17864e1))
+* **origin:** schedule the lookup build on a stale name refusal and answer writers with a retryable code ([#2069](https://github.com/Artexis10/exomem/issues/2069)) ([fa545fe](https://github.com/Artexis10/exomem/commit/fa545fea798e2b4e5679b95097a581fe81262f65))
+* preserve checkpoint recovery and index audit boundaries ([#2048](https://github.com/Artexis10/exomem/issues/2048)) ([0ee6234](https://github.com/Artexis10/exomem/commit/0ee6234917b9f68b88b10f7a0b583b1c053384e2))
+* **relations:** keep authored entity edges visible and teach specific relations ([#2062](https://github.com/Artexis10/exomem/issues/2062)) ([c331e47](https://github.com/Artexis10/exomem/commit/c331e47c4ee2bd59fd3424010be287f295d6cbc3))
+* **writer-lease:** answer a narrowed command's lost grant as fenced ([#2072](https://github.com/Artexis10/exomem/issues/2072)) ([f59917d](https://github.com/Artexis10/exomem/commit/f59917d741aff2d3701612a7782bfa81b29bb89d))
+* **writer-lease:** renew a standalone grant with the store capability it acquired with ([#2070](https://github.com/Artexis10/exomem/issues/2070)) ([28b2fd3](https://github.com/Artexis10/exomem/commit/28b2fd31d328e68657d0202f14e7827924d7841d))
+
+
+### Performance
+
+* **recall:** keep vault-sized work off read requests ([#2068](https://github.com/Artexis10/exomem/issues/2068)) ([21985c2](https://github.com/Artexis10/exomem/commit/21985c24a3afe157e2b5acf7509c9298d1ecdfae))
+
 ## [0.141.0](https://github.com/Artexis10/exomem/compare/v0.140.0...v0.141.0) (2026-10-24)
 
 

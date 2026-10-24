@@ -2,7 +2,7 @@
   "name": "exomem-cloud",
   "displayName": "Exomem",
   "description": "Exomem is a living knowledge base for your AI assistants, not a dump of chat history. It preserves decisions, sources, evidence, relationships, plans, and useful conclusions as organised knowledge you can revisit, correct, and build on.\n\nAs you work, Exomem helps your assistant bring relevant context forward, connect ideas, identify what has changed, and preserve lasting outcomes when your settings and assistant support it. Answers can point back to the notes and evidence behind them. Outdated information can be reviewed or superseded instead of silently piling up.\n\nPick up projects in another conversation or across supported AI assistants connected to the same Exomem account. Exomem does not automatically import your past conversations or access arbitrary files on your device. Connect an existing Exomem Cloud account; registration, invitations, and billing are handled separately on the website.",
-  "version": "0.141.0",
+  "version": "0.142.0",
   "author": {
     "name": "Substrate Systems OÜ",
     "url": "https://substratesystems.io"
