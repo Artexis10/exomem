@@ -39,28 +39,36 @@
 - [ ] 3.4 Select residency from measured RSS and cold/warm costs; verify encoder output identity, CPU-cap compliance and documented rollback.
 - [ ] 3.5 Localize overdue activation intervals through a bounded isolated reproduction; record the responsible work, including packet finalization. Reuse `RequestBudget` checks in controllable loops/waits and existing safe deferral paths; retain managed index rebuild deferral. Verify packet or existing budget abstention returns within the absolute deadline; classify every overrun as failed and unresolved. Preserve canonical mutation immunity and exact terminal/component custody; keep an unsafe-to-bound repair open while independent work continues.
 - [ ] 3.6 Establish pending bars from current measurements where justified; verify recorded choices and keep remaining thresholds null and pending.
-- [ ] 3.7 Keep optional direct-read links off the foreground build path. Verify cold and evicted reads release permitted bodies with unknown inbound links, existing watcher recovery restores exact links, and mutation safety remains complete.
-- [ ] 3.8 Publish the free-text artifact census as a base and an add-only overlay (design decision 9).
+- [x] 3.7 Keep optional direct-read links off the foreground build path. Verify cold and evicted reads release permitted bodies with unknown inbound links, existing watcher recovery restores exact links, and mutation safety remains complete.
+  - Evidence: merged in #1880 (12cde6096) with the cold and evicted direct-read tests.
+- [x] 3.8 Publish the free-text artifact census as a base and an add-only overlay (design decision 9).
   - Add aliases from self-write registration and from watcher events, before their Markdown filters.
   - Rebuild the base in the background from event-named directories, plus a periodic walk.
   - Read the base and overlay without enumeration. Check path-shaped unresolved tokens once.
   - Keep the synchronous walk while unpublished. Cache tombstone aliases by lifecycle generation.
   - Verify: a service-written withheld artifact with the owner stopped; an external create after its event; a path-shaped token; removed-name shadowing; the unpublished fallback; no request-thread enumeration.
-- [ ] 3.9 Cache the admitted recall path set per admitted checkpoint, filled by catalogue publication. Shadow pending paths by set difference.
+  - Evidence: merged in #2068 (21985c24a); tests/test_artifact_census_publication.py.
+- [x] 3.9 Cache the admitted recall path set per admitted checkpoint, filled by catalogue publication. Shadow pending paths by set difference.
   - Verify: identity with a fresh selection at the same checkpoint; a cache miss on a policy change; pending-overlay visibility.
-- [ ] 3.10 Catch up the embedding matrix on the derived drain after a batch commits.
+  - Evidence: merged in #2068 (21985c24a); tests/test_admitted_recall_path_set.py.
+- [x] 3.10 Catch up the embedding matrix on the derived drain after a batch commits.
   - A request serves a lagging matrix only when its epoch, instance, space and policy match. It starts the single-flight catch-up in the background.
   - Verify: a stale serve never returns a changed path's text; own writes stay visible; a policy-identity change still refuses; the request thread runs no catch-up.
-- [ ] 3.11 On a due-state key miss, serve the newest build for the same vault, audience, resolution and purpose, after the existing re-checks. Schedule the refresh for the new key.
+  - Evidence: merged in #2068 (21985c24a); the catch-up runs on the background matrix loader, not the derived drain; tests/test_embedding_matrix_lag_serve.py.
+- [x] 3.11 On a due-state key miss, serve the newest build for the same vault, audience, resolution and purpose, after the existing re-checks. Schedule the refresh for the new key.
   - Verify: dismissals and removals apply at once; no reuse across audiences; served content equals a fresh build after the refresh.
-- [ ] 3.12 Use the non-building inbound lookup in context-pack neighbourhoods. On a miss, mark inbound neighbours incomplete and record demand.
+  - Evidence: merged in #2068 (21985c24a); tests/test_due_state_stale_reuse.py.
+- [x] 3.12 Use the non-building inbound lookup in context-pack neighbourhoods. On a miss, mark inbound neighbours incomplete and record demand.
   - When a patch bridge is incomplete, republish the patched index instead of emptying the cache.
   - Keep a reverse map from file to targets, so that a patch costs the change.
   - Verify: a self-written link appears without a rebuild; the explicit inbound command keeps its synchronous lookup; the patched index equals a full rebuild.
-- [ ] 3.13 Resolve references from the identity projection while it is stale. Keep owners under the knowledge-base trash folder in a table used only for references, outside the uniqueness checks.
+  - Evidence: merged in #2068 (21985c24a); a miss starts one background build instead of recording demand; tests/test_pack_inbound_recovery.py.
+- [x] 3.13 Resolve references from the identity projection while it is stale. Keep owners under the knowledge-base trash folder in a table used only for references, outside the uniqueness checks.
   - Verify: a trash-owned reference resolves with the census scan disabled; the path decision stays live.
-- [ ] 3.14 Keep proven pending rows from publication by path, after-hash, mtime and size, so that a rehydrate re-reads only changed bodies.
+  - Evidence: merged in #2068 (21985c24a); tests/test_memory_refs.py.
+- [x] 3.14 Keep proven pending rows from publication by path, after-hash, mtime and size, so that a rehydrate re-reads only changed bodies.
   - Verify: pending edits and deletes still hide stale rows.
+  - Evidence: merged in #2068 (21985c24a); tests/test_pending_recall_delta.py.
 - [ ] 3.17 Compute coverage flags relative to the caller's view: the activation `index_stale` and `lexical_evidence`, the direct-read `inbound: null`, and the context-pack inbound and outbound incomplete entries.
   - For a restricted caller, report a lag only when a changed path since the published generation is one the caller may see. Use the freshness delta and the existing release decision. The cost follows the lag, not the vault.
   - Verify: an owner write to a withheld page leaves a restricted caller's response unchanged; a write to a visible page is reported; owner responses are unchanged.
