@@ -767,6 +767,107 @@ def test_pending_publisher_reads_only_changed_paths(
     assert _keyword(vault, marker, limit=5) == [second_rel, first_rel]
 
 
+def _spy_markdown_reads(monkeypatch: pytest.MonkeyPatch, vault: Path) -> list[str]:
+    """Record the vault-relative Markdown files whose bytes are read."""
+    reads: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def _spy(self: Path):
+        try:
+            rel = self.resolve().relative_to(vault.resolve()).as_posix()
+        except (OSError, ValueError):
+            rel = ""
+        if rel.lower().endswith(".md"):
+            reads.append(rel)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _spy)
+    return reads
+
+
+def test_pending_rehydration_reads_only_bodies_that_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path
+    _seed_corpus(vault)
+    kept_rel = "Knowledge Base/Notes/rehydrate-kept.md"
+    edited_rel = "Knowledge Base/Notes/rehydrate-edited.md"
+    later_rel = "Knowledge Base/Notes/rehydrate-later.md"
+    kept_before = _page(title="Kept", body="Nothing yet.", updated="2026-08-01")
+    edited_before = _page(title="Edited", body="Nothing yet.", updated="2026-08-02")
+    later_before = _page(title="Later", body="Nothing yet.", updated="2026-08-03")
+    for rel, text in (
+        (kept_rel, kept_before), (edited_rel, edited_before), (later_rel, later_before)
+    ):
+        _write(vault, rel, text)
+    _prime(vault)
+
+    kept_after = _page(title="Kept", body="Revised once.", updated="2026-08-11")
+    edited_after = _page(title="Edited", body="Revised once.", updated="2026-08-12")
+    _publish_change(
+        vault,
+        batch_id="batch-rehydrate-first",
+        generation="generation-rehydrate-first",
+        changes=(
+            (kept_rel, kept_before, kept_after, None),
+            (edited_rel, edited_before, edited_after, None),
+        ),
+    )
+    pending = _pending_module()
+    assert pending.overlay(vault).ready
+
+    # One body changes outside the receipt, and a second batch publishes: the
+    # publication fences the cached overlay out, so the next request rehydrates.
+    _write(vault, edited_rel, _page(title="Edited", body="Hand edit.", updated="2026-08-13"))
+    later_after = _page(title="Later", body="Revised once.", updated="2026-08-14")
+    _publish_change(
+        vault,
+        batch_id="batch-rehydrate-second",
+        generation="generation-rehydrate-second",
+        changes=((later_rel, later_before, later_after, None),),
+    )
+    reads = _spy_markdown_reads(monkeypatch, vault)
+
+    rehydrated = pending.overlay(vault)
+
+    assert reads == [edited_rel]
+    assert set(rehydrated.rows) == {kept_rel, later_rel}
+    assert edited_rel in rehydrated.paths, "an unprovable body still suppresses the old row"
+    assert rehydrated.outcome == "degraded"
+
+
+def test_pending_delete_after_edit_is_not_resurrected_by_the_kept_body(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path
+    _seed_corpus(vault)
+    rel = "Knowledge Base/Notes/rehydrate-resurrect.md"
+    marker = "kappaprovenbodymarker"
+    before = _page(title="Resurrect", body="Nothing yet.", updated="2026-08-01")
+    _write(vault, rel, before)
+    _prime(vault)
+    edited = _page(title="Resurrect", body=f"Now records {marker}.", updated="2026-08-02")
+    _publish_change(
+        vault,
+        batch_id="batch-resurrect-edit",
+        generation="generation-resurrect-edit",
+        changes=((rel, before, edited, None),),
+    )
+    pending = _pending_module()
+    assert pending.overlay(vault).page(rel) is not None
+    assert _keyword(vault, marker) == [rel]
+
+    _publish_change(
+        vault,
+        batch_id="batch-resurrect-delete",
+        generation="generation-resurrect-delete",
+        changes=((rel, edited, None, None),),
+    )
+
+    assert pending.overlay(vault).page(rel) is None
+    assert _keyword(vault, marker) == []
+
+
 # --------------------------------------------------------------------------- #
 # Restart, overflow, corruption (mutation guards 2 and 3)
 # --------------------------------------------------------------------------- #

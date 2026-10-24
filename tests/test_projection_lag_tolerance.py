@@ -355,7 +355,7 @@ def test_admitted_catalog_refuses_a_mid_request_identity_change(
     _managed_runtime(monkeypatch)
     monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_kw: None)
     method = (
-        "recall_resolver_entries" if boundary == "projection"
+        "recall_admitted_paths" if boundary == "projection"
         else "_serve_from_ready_catalog_result"
     )
     original = getattr(lexstore.LexicalStore, method)

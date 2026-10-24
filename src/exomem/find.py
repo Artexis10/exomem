@@ -547,6 +547,7 @@ class FreshnessSnapshot:
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
+        self._visible_recall_paths: dict[str, frozenset[str]] = {}
         self._pending_recall_paths: frozenset[str] | None = None
         self._admitted: dict[tuple[str, Callable[[str], bool]], frozenset[str]] = {}
 
@@ -611,11 +612,16 @@ class FreshnessSnapshot:
         freshness registry supplies it without a walk; CLI/cold callers rebuild
         the same projection from the human-owned Markdown files.
         """
-        cached = self._recall_paths.get(scope)
-        if cached is None:
-            self._load_recall_projection(scope)
-            cached = self._recall_paths[scope]
-        return self._with_pending(cached)
+        visible = self._visible_recall_paths.get(scope)
+        if visible is None:
+            cached = self._recall_paths.get(scope)
+            if cached is None:
+                self._load_recall_projection(scope)
+                cached = self._recall_paths[scope]
+            # One request has one pending custody, so the shadowed set is
+            # built once per scope rather than once per consumer.
+            visible = self._visible_recall_paths[scope] = self._with_pending(cached)
+        return visible
 
     def admitted_paths(
         self, scope: str, admit_path: Callable[[str], bool],
@@ -692,7 +698,8 @@ class FreshnessSnapshot:
                 for rel_path in pending.current_paths()
                 if recall_policy.is_recall_candidate(self._root, self._root / rel_path)
             )
-        return frozenset(pending.shadow(projected)) | admitted
+        shadowed = pending.shadow_set(projected)
+        return shadowed | admitted if admitted else shadowed
 
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
@@ -719,16 +726,16 @@ class FreshnessSnapshot:
                         raise freshness.RecallProjectionUnavailable(
                             "admitted catalogue checkpoint is absent"
                         )
-                    published_entries = lexstore.get_store(self._root).recall_resolver_entries(
+                    published_paths = lexstore.get_store(self._root).recall_admitted_paths(
                         scope, expected
                     )
-                    if published_entries is None:
+                    if published_paths is None:
                         lexstore.request_repair(self._root)
                         raise freshness.RecallProjectionUnavailable(
                             "admitted catalogue projection is no longer available"
                         )
                     self._recall[scope] = expected
-                    self._recall_paths[scope] = frozenset(rel for rel, _title in published_entries)
+                    self._recall_paths[scope] = published_paths
                     _set_recall_projection_timing_outcome(self._timings, "admitted")
                     return
                 require_live = self._require_live_recall and not stale
@@ -6939,7 +6946,7 @@ def _keyword_match_paths(
             if persistent_k is not None:
                 persistent_k += len(pending.paths)
         else:
-            allowed_paths = set(pending.shadow(allowed_paths))
+            allowed_paths = set(pending.shadow_set(allowed_paths))
 
     def _merged(paths: list[str]) -> list[str]:
         if not merge_pending:
@@ -7883,6 +7890,11 @@ def unload_ram_caches(
         # noise into the number that says whether a governed write discarded
         # receipt-covered work.
         _CACHE.release()
+        # Keyed by the catalogue snapshot, so a correctness eviction cannot make
+        # it stale; only a caller handing memory back drops it.
+        from . import lexstore
+
+        lexstore.release_admitted_recall_paths()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()
