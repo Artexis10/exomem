@@ -7112,19 +7112,21 @@ def _op_activate_context_body(
             if anchor and trigger == "user_turn":
                 hits, lexical_state = [], "agent_choice"
             else:
+                # `None` for the owner, whose lexical state stays vault-wide.
+                reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
                 hits, lexical_state = working_set_runtime_module.lexical_evidence(
                     vault_root,
                     turn,
                     anchor_rows,
                     limit=(
                         egress_module.pool_limit(ACTIVATE_RETRIEVAL_LIMIT)
-                        if release_active
-                        or egress_module.caller_restricted(vault_root, purpose=purpose)
+                        if release_active or reader_view is not None
                         else ACTIVATE_RETRIEVAL_LIMIT
                     ),
                     freshness=lexical_freshness,
                     recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
                     selection=lexical_selection,
+                    visible=reader_view,
                 )
         lexical_seconds = max(0.0, time.monotonic() - lexical_started)
         if timings is not None and lexical_selection:
