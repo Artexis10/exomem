@@ -26,8 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import find as find_module
 from exomem import file_watcher, freshness, lexstore, readiness, warmup
+from exomem import find as find_module
 from exomem import reconcile as reconcile_module
 from exomem import vault as vault_module
 
@@ -189,6 +189,7 @@ def test_first_write_after_watcher_reseed_needs_no_catalog_repair(
     )
     assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
     assert lexstore.repair_progress(root) is None, "no catalog repair was needed"
+    assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
 
 
 def test_first_write_after_reconcile_reseed_needs_no_catalog_repair(
@@ -208,6 +209,7 @@ def test_first_write_after_reconcile_reseed_needs_no_catalog_repair(
     )
     assert readiness.retrieval_admission(root) == {"state": "ready", "admitted": True}
     assert lexstore.repair_progress(root) is None, "no catalog repair was needed"
+    assert lexstore.search_bm25(root, "quokkarestartmarker", k=3, scope="kb")
 
 
 def test_a_rebaseline_with_unindexed_rows_still_needs_full_repair(
