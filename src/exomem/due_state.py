@@ -2636,17 +2636,12 @@ def emission_ledger(vault_root: Path) -> dict[str, Any]:
 # batch scope
 # --------------------------------------------------------------------------
 
-#: Vaults currently inside a batch scope, with the nesting depth. A depth rather
-#: than a flag because a batch leaf can call another one, and the inner exit
-#: must not un-silence the outer batch. Its own lock: `_LOCK` is not reentrant
-#: and the emission governor consults this registry while holding it.
-_BATCH: dict[str, int] = {}
-_BATCH_LOCK = threading.Lock()
-#: The same scopes, counted per request rather than per vault. `_BATCH` is
-#: keyed by vault root and process-wide, so a user write that runs while a
-#: batch runs on another thread would read as part of it; this depth is bound
-#: to the context the scope was entered in.
-_IN_BATCH: ContextVar[int] = ContextVar("exomem_due_state_in_batch", default=0)
+#: The vaults this request's open batch scopes cover, innermost last. A stack
+#: rather than a flag because a batch leaf can call another one, and the inner
+#: exit must not un-silence the outer batch. Bound to the context the scope was
+#: entered in: a user write that runs beside a batch on another thread is its
+#: own invocation and keeps its own advisories.
+_IN_BATCH: ContextVar[tuple[str, ...]] = ContextVar("exomem_due_state_in_batch", default=())
 # Retained until the post-batch carrier consumes it; each outer scope starts a fresh set.
 _BATCH_PATHS: ContextVar[dict[str, set[str]] | None] = ContextVar(
     "exomem_due_state_batch_paths", default=None,
@@ -2674,39 +2669,28 @@ def batch_scope(vault_root: Path | None) -> Iterator[None]:
     change the counts legitimately emit N changed lines, which is the cadence
     the design asks for.
     """
-    key = str(vault_root or "")
     if not _IN_BATCH.get():
         _BATCH_PATHS.set({})
-    with _BATCH_LOCK:
-        _BATCH[key] = _BATCH.get(key, 0) + 1
-    depth = _IN_BATCH.set(_IN_BATCH.get() + 1)
+    depth = _IN_BATCH.set((*_IN_BATCH.get(), str(vault_root or "")))
     try:
         yield
     finally:
         _IN_BATCH.reset(depth)
-        with _BATCH_LOCK:
-            depth_left = _BATCH.get(key, 1) - 1
-            if depth_left > 0:
-                _BATCH[key] = depth_left
-            else:
-                _BATCH.pop(key, None)
 
 
 def batch_active(vault_root: Path | None) -> bool:
-    """Whether this vault is inside a batch scope right now."""
-    with _BATCH_LOCK:
-        return _BATCH.get(str(vault_root or ""), 0) > 0
+    """Whether this request is inside a batch scope for this vault."""
+    return str(vault_root or "") in _IN_BATCH.get()
 
 
 def in_batch_scope() -> bool:
-    """Whether THIS request is inside a batch scope.
+    """Whether this request is inside a batch scope for any vault.
 
-    Request-scoped where `batch_active` is process-wide: the heat projection
-    asks whether a governed commit is part of a bulk command, and a user's own
-    write that happens to run beside a maintenance pass on another thread is
+    The heat projection asks whether a governed commit is part of a bulk
+    command; a user's own write beside a maintenance pass on another thread is
     not.
     """
-    return _IN_BATCH.get() > 0
+    return bool(_IN_BATCH.get())
 
 
 # --------------------------------------------------------------------------
@@ -4008,6 +3992,4 @@ def reset_emission_state() -> None:
     with _LOCK:
         _EMISSION.clear()
         _UNPERSISTED.clear()
-    with _BATCH_LOCK:
-        _BATCH.clear()
     _BATCH_PATHS.set(None)

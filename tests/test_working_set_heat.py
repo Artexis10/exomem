@@ -881,8 +881,8 @@ def test_a_user_write_concurrent_with_a_batch_is_work(vault) -> None:
     worker.start()
     try:
         assert entered.wait(30)
-        # The process-wide flag says a batch is running; the request is not in it.
-        assert due_state.batch_active(vault)
+        # The batch belongs to the worker's request; this one is in no batch.
+        assert not due_state.batch_active(vault)
         assert not due_state.in_batch_scope()
         _edit(vault, INSIGHT, "is more robust than", "is steadier than")
     finally:
