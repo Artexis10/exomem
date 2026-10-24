@@ -4472,9 +4472,9 @@ class LeaseManager:
         self._last_coordinator_error: tuple[str, float] | None = None
         # Idle-release accounting (R5), both guarded by `self._lock`.
         # `_active_mutations` is incremented/decremented ONLY by
-        # `writer_authority_guard()` — the single choke point that also sets
-        # `_ACTIVE_WRITE_FENCE` — so `count == 0` provably means no
-        # outstanding fence anywhere in this process.
+        # `writer_authority_guard()`, which sets every command fence, so
+        # `count == 0` means no command holds a fence from that guard. The
+        # collection-store fence setters are not counted (see that guard).
         self._active_mutations = 0
         self._last_activity_monotonic = time.monotonic()
         self._collection_store = None
