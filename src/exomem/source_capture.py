@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
-from . import memory_refs, note_types, source_taxonomy, vault
+from . import indexes, memory_refs, note_types, source_taxonomy, vault
 
 
 class SourceIdentity(TypedDict):
@@ -104,6 +104,7 @@ def find_capture(root: Path, identity: SourceIdentity) -> tuple[str, str, str] |
 
     snapshots: dict[str, bytes] = {}
     parsed: dict[str, dict] = {}
+    frontmatter_free: set[str] = set()
     errors: set[str] = set()
     edges: dict[str, set[str]] = {}
     match: tuple[str, str, str] | None = None
@@ -129,17 +130,23 @@ def find_capture(root: Path, identity: SourceIdentity) -> tuple[str, str, str] |
                         unavailable()
                 for name in files:
                     page = Path(folder) / name
-                    # Markdown and index.md are fixed by the canonical page format.
-                    if page.suffix.lower() != ".md" or name == "index.md":
+                    # Markdown is fixed by the canonical page format.
+                    if page.suffix.lower() != ".md":
                         continue
                     relative = page.relative_to(root).as_posix()
                     edges[relative] = set()
                     try:
                         data, _guard = vault.read_bounded_guarded_bytes(root, relative, limit=page.lstat().st_size)
                         snapshots[relative] = data
-                        fields, _body, marker = vault.parse_frontmatter(data.decode("utf-8"), strict=True)
+                        text = data.decode("utf-8")
+                        fields, _body, marker = vault.parse_frontmatter(text, strict=True)
                         if marker is None:
-                            errors.add(relative)
+                            lines = text.removeprefix("\ufeff").splitlines()
+                            # The fixed YAML frontmatter opener cannot become catalog prose.
+                            if lines and lines[0] == "---":
+                                errors.add(relative)
+                            else:
+                                frontmatter_free.add(relative)
                         else:
                             parsed[relative] = fields
                     except (OSError, UnicodeError, RecursionError, vault.PathGuardError, vault.FrontmatterError):
@@ -203,6 +210,14 @@ def find_capture(root: Path, identity: SourceIdentity) -> tuple[str, str, str] |
         if canonical & errors:
             unavailable()
         for page in canonical:
+            if page in frontmatter_free:
+                lines = snapshots[page].decode("utf-8").splitlines()
+                # These headers are the fixed Sources catalog producer format.
+                if (root / page == indexes.sources_index_path(root)
+                        and indexes.SOURCES_BY_TYPE_HEADER in lines
+                        and indexes.SOURCES_RECENT_HEADER in lines):
+                    continue
+                unavailable()
             fields = parsed[page]
             if "source_identity" not in fields:
                 if "capture_input_digest" in fields:

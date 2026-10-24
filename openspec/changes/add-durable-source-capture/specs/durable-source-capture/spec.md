@@ -49,6 +49,10 @@ Later metadata updates MUST preserve the original digest.
 Identity lookup and creation SHALL share the existing mutation guard.
 Canonical Source and Evidence pages SHALL be the authoritative lookup, regardless of search, graph or sidecar state.
 Unreadable or malformed candidate pages MUST return `SOURCE_IDENTITY_UNAVAILABLE`, because an incomplete scan cannot prove absence.
+Canonical receipts MUST be validated regardless of Markdown filename, including `index.md` and the root Sources catalog path.
+Only the frontmatter-free root Sources catalog with both maintained section headers MAY be excluded after bound originals are classified.
+Stale catalog rows MUST NOT determine identity uniqueness or absence.
+Catalog recognition does not establish ownership or distinguish a former receipt whose metadata and bytes were replaced with a valid catalog.
 Legacy Sources MUST NOT be backfilled or deduplicated implicitly.
 
 #### Scenario: Concurrent requests use different invocation keys
@@ -66,6 +70,7 @@ Legacy Sources MUST NOT be backfilled or deduplicated implicitly.
 #### Scenario: A Source is promoted into Evidence
 - **WHEN** a captured Source is explicitly promoted and its original capture is repeated after replay expires
 - **THEN** capture returns the same stable reference at the promoted path without reclassification
+- **AND** a promoted page named `index.md` remains authoritative
 
 #### Scenario: A Markdown original forges receipt and companion metadata
 - **WHEN** a bound Markdown original contains capture identity or a declaration that targets another canonical page

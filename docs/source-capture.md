@@ -50,6 +50,13 @@ The local `exomem attach` command supports `--lane source` for file capture with
 An unreadable or malformed canonical Source candidate returns `SOURCE_IDENTITY_UNAVAILABLE`; indexes cannot prove capture absence.
 The scan checks canonical pages in Sources and Evidence. Verified companion bindings distinguish Markdown originals from canonical pages.
 An original's frontmatter cannot supply a capture receipt or classify another page.
+Canonical receipts remain authoritative at any Markdown filename, including `index.md`.
+The scan excludes the frontmatter-free `Sources/index.md` catalog only when its `## By type` and `## Recent captures` sections remain present.
+Catalog rows may be stale; they cannot prove capture absence.
+
+Catalog recognition does not establish ownership.
+Replacing all receipt metadata and bytes with a valid catalog makes the former receipt indistinguishable from a catalog.
+Removing either fixed section can make identity reconciliation unavailable; ordinary capture retains its existing authority rules.
 
 Identity-enabled capture requires existing whole-namespace content authority and the existing creation boundary.
 The proof checks RAW authority, the connector ceiling and the current local policy.

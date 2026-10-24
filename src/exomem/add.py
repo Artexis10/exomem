@@ -592,7 +592,7 @@ def add(
         )
     writes = [
         PlannedWrite(path=source_path, content=source_md),
-        PlannedWrite(path=kb / "Sources" / "index.md", content=update.sources_index_content),
+        PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
         PlannedWrite(path=kb / "index.md", content=top_index_final),
         PlannedWrite(path=kb / "log.md", content=update.log_content),
     ]

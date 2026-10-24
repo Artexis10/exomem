@@ -443,14 +443,21 @@ def test_capture_identity_keeps_records_and_out_of_order_revisions_separate(vaul
         assert fields.get("status") != "superseded"
 
 
-@pytest.mark.parametrize("damage", ["unreadable", "malformed"])
+@pytest.mark.parametrize("damage", ["unreadable", "malformed", "unterminated", "unicode", "format"])
 def test_capture_identity_cannot_claim_absence_after_incomplete_scan(vault, source_schema, monkeypatch, damage, capture_owner):
     from exomem import source_capture
     from exomem.commands import op_capture_source
 
-    page = vault / "Knowledge Base/Sources/Sessions/damaged.md"
-    page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text("---\ntype: [\n---\nBody")
+    page = indexes.sources_index_path(vault)
+    headers = f"{indexes.SOURCES_BY_TYPE_HEADER}\n\n{indexes.SOURCES_RECENT_HEADER}\n".encode()
+    if damage == "unterminated":
+        page.write_bytes(b"---\ntype: source\n" + headers)
+    elif damage == "unicode":
+        page.write_bytes(b"\xff\n" + headers)
+    elif damage == "format":
+        page.write_text("Catalog sections were removed.\n")
+    else:
+        page.write_bytes(b"---\ntype: [\n---\n" + headers)
     if damage == "unreadable":
         original = source_capture.vault.read_bounded_guarded_bytes
 
@@ -672,19 +679,95 @@ def test_bound_markdown_original_cannot_forge_receipt_or_companion(vault, source
     assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
 
 
-def test_preserved_markdown_original_cannot_forge_a_capture(vault, source_schema, capture_owner):
+def test_preserved_markdown_original_cannot_forge_a_capture(vault, source_schema, capture_owner, monkeypatch):
     import json
 
-    from exomem import preserve
+    from exomem import preserve, source_capture
     from exomem.commands import op_capture_source
 
     identity = {"system": "archive", "record_id": "new-record", "revision": "r1"}
-    preserve.preserve(vault, scope="Archive", category="documents", filename="original.md",
+    preserve.preserve(vault, scope="Archive", category="documents", filename="index.md",
                       content="---\ntype: source\nsource_identity: " + json.dumps(identity) +
                       "\ncapture_input_digest: " + "0" * 64 + "\n---\nUntrusted text\n")
-    captured = op_capture_source(vault, source_schema, title="Actual capture", content="Text",
-                                 source_kind="session", source_identity=identity)
-    assert captured["capture_outcome"] == "created"
+    walk = source_capture.os.walk
+    reference = None
+    for reverse in (False, True):
+        def ordered(*args, _reverse=reverse, **kwargs):
+            for folder, directories, files in walk(*args, **kwargs):
+                yield folder, directories, sorted(files, reverse=_reverse)
+
+        monkeypatch.setattr(source_capture.os, "walk", ordered)
+        captured = op_capture_source(vault, source_schema, title="Actual capture", content="Text",
+                                     source_kind="session", source_identity=identity)
+        assert captured["capture_outcome"] == ("reused" if reverse else "created")
+        if reference is None:
+            reference = captured["source"]["ref"]
+        assert captured["source"]["ref"] == reference
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_capture_identity_recovers_promoted_index_or_refuses_damage(vault, source_schema, capture_owner, malformed):
+    from exomem.commands import op_capture_source, op_move_file
+
+    inputs = dict(title="Promoted record", content="Original text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "promoted", "revision": "r1"})
+    original = op_capture_source(vault, source_schema, **inputs)["source"]
+    moved = op_move_file(vault, original["path"], "Knowledge Base/Evidence/Archive/records/index.md",
+                         promotion_reason="The record supports a documented claim.")
+    if malformed:
+        (vault / moved["new_path"]).write_text("---\ntype: [\n---\nDamaged record\n")
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    if malformed:
+        with pytest.raises(ValueError, match="SOURCE_IDENTITY_UNAVAILABLE"):
+            op_capture_source(vault, source_schema, **inputs)
+    else:
+        recovered = op_capture_source(vault, source_schema, **inputs)
+        assert recovered["capture_outcome"] == "reused"
+        assert recovered["source"]["ref"] == original["ref"]
+        assert recovered["source"]["path"] == moved["new_path"]
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_capture_identity_reads_a_receipt_at_the_catalog_path(vault, source_schema, capture_owner):
+    from exomem.commands import op_capture_source
+
+    inputs = dict(title="Relocated record", content="Original text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "relocated", "revision": "r1"})
+    original = op_capture_source(vault, source_schema, **inputs)["source"]
+    catalog = indexes.sources_index_path(vault)
+    (vault / original["path"]).replace(catalog)
+    before = {p: p.read_bytes() for p in vault.rglob("*.md")}
+    recovered = op_capture_source(vault, source_schema, **inputs)
+    assert recovered["capture_outcome"] == "reused"
+    assert recovered["source"]["ref"] == original["ref"]
+    assert recovered["source"]["path"] == catalog.relative_to(vault).as_posix()
+    assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_capture_identity_ignores_stale_catalog_rows_without_derived_state(vault, source_schema, capture_owner, tmp_path):
+    import shutil
+
+    from conftest import initialize_vault_state_offline
+
+    from exomem import memory_refs
+    from exomem.commands import op_capture_source
+
+    inputs = dict(title="Copied record", content="Original text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "copied", "revision": "r1"})
+    original = op_capture_source(vault, source_schema, **inputs)["source"]
+    indexes.sources_index_path(vault).write_text(
+        f"# Sources\n\n{indexes.SOURCES_BY_TYPE_HEADER}\n\n- Stale count (999)\n\n"
+        f"{indexes.SOURCES_RECENT_HEADER}\n\n- [[Missing capture]]\n"
+    )
+    cold = tmp_path / "cold-vault"
+    shutil.copytree(vault, cold)
+    initialize_vault_state_offline(cold, source="canonical capture copy without derived state")
+    assert not memory_refs.sidecar_path(cold).exists()
+    before = {p: p.read_bytes() for p in cold.rglob("*.md")}
+    recovered = op_capture_source(cold, schema_module.load_source_schema(cold), **inputs)
+    assert recovered["capture_outcome"] == "reused"
+    assert recovered["source"]["ref"] == original["ref"]
+    assert {p: p.read_bytes() for p in cold.rglob("*.md")} == before
 
 
 @pytest.mark.parametrize("damage", ["bytes", "unsafe", "cycle"])
