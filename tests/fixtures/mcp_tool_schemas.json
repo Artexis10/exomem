@@ -735,6 +735,13 @@
           "type": "string",
           "description": "create-entity instance selector; public or a canonical private Scope ID."
         },
+        "relations": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array",
+          "description": "create-entity only. Typed {kind, target} edges; connections stay relates_to."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",

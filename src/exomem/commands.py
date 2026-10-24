@@ -4964,6 +4964,7 @@ def op_link(
     facets: _EntityFacetsArgument = None,
     aliases: list[str] | None = None,
     registry_scope: str | None = None,
+    relations: list[dict] | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -4994,6 +4995,9 @@ def op_link(
         connections: List of vault-relative wikilink targets to put under
             `## Relations` as conservative `relates_to` edges. Same path
             conventions as `note.sources`.
+        relations: `{kind, target}` objects written under `## Relations` as
+            `- kind [[target]]`; kind is a registered relation key, target
+            follows `connections` conventions.
         (per-type fields): see the bullet list above.
         identity_decision: `{outcome: "distinct", candidate_fingerprint}` when
             the name already denotes other active entities and this is a
@@ -5046,6 +5050,7 @@ def op_link(
             facets=facets,
             aliases=aliases,
             registry_scope=registry_scope,
+            relations=relations,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -9844,6 +9849,7 @@ def op_connect_memory(
     facets: _EntityFacetsArgument = None,
     entity_family: str | None = None,
     registry_scope: str | None = None,
+    relations: list[dict] | None = None,
 ) -> dict | list[dict]:
     """Find relations, graph context or entities.
 
@@ -9865,9 +9871,12 @@ def op_connect_memory(
         entity_family: Registry family: resolve-entity matches its leaf types;
             context and graph-context keep only its entity neighbours.
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
+        relations: create-entity only. Typed {kind, target} edges; connections stay relates_to.
     """
     if registry_scope is not None and operation != "create-entity":
         raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
+    if relations is not None and operation != "create-entity":
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: relations requires create-entity")
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation in {"create-entity", "accept-relation"},
@@ -10082,6 +10091,7 @@ def op_connect_memory(
             facets=facets,
             aliases=aliases,
             registry_scope=registry_scope,
+            relations=relations,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
