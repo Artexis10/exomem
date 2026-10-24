@@ -66,6 +66,24 @@ from membench.utility.switch_eval.tap import __file__ as TAP_SCRIPT
 
 from exomem.runtime_resources import CPU_THREADS_ENV
 
+
+def test_arm_filters_keep_published_read_tools_and_remove_only_activation_from_pull_only() -> None:
+    from exomem.commands import product_commands_for
+
+    commands = {command.name: command for command in product_commands_for("mcp")}
+    published = {command.public_name for command in commands.values()}
+    activation = commands["activate_context"].public_name
+    search = commands["ask_memory"].public_name
+    specs = arm_specs()
+
+    assert set(specs["A"].tools) <= published
+    assert specs["A"].tools == specs["M"].tools
+    assert activation in specs["A"].tools
+    assert search in specs["P"].tools
+    assert set(specs["P"].tools) == set(specs["A"].tools) - {activation}
+    assert protocol.ACTIVATION_TOOL == protocol.P_FILTERED_TOOL == activation
+
+
 # A stand-in MCP server: answers initialize, tools/list and tools/call; with
 # --crash-on-call exits mid-call, as a crashing server under test would, and
 # with --exit-at-start exits before it reads a message, as a broken build would.
@@ -1469,3 +1487,298 @@ def test_an_interrupted_arm_copy_retries_from_the_shared_baseline(
         layout.arm_tree("M", "snapshot") / "state" / "index.sqlite"
     ).read_bytes() == b"built state"
     assert not (layout.arm_tree("M", "snapshot") / "state" / "state").exists()
+
+
+@pytest.fixture
+def seed_build_round(tmp_path: Path) -> tuple[Layout, Layout, Path]:
+    from membench.utility.switch_eval import state
+
+    from exomem import state_migration, state_paths
+
+    layout, donor = Layout(tmp_path / "run"), Layout(tmp_path / "archive")
+    source = tmp_path / "snapshot"
+    source.mkdir()
+    (source / "page.md").write_text("Frozen content.")
+    baseline = donor.shared_tree("snapshot")
+    (baseline / "vault").mkdir(parents=True)
+    (baseline / "vault" / "page.md").write_text("Frozen content.")
+    state_dir = baseline / "state" / state_paths.vault_state_key(layout.slot / "vault")
+    state_dir.mkdir(parents=True)
+    (state_dir / "vectors.bin").write_bytes(b"expensive compatible vectors")
+    (state_dir / "lexical.sqlite").write_bytes(b"previous lexical schema")
+    descriptors = state_migration.declared_descriptor_ids()
+    (state_dir / state_migration.MANIFEST_NAME).write_text(json.dumps({
+        "version": state_migration.MANIFEST_VERSION,
+        "vault_identity": state_paths.vault_state_key(layout.slot / "vault"),
+        "state": "complete", "descriptors": list(descriptors),
+        "families": {name: {"status": "complete"} for name in descriptors},
+    }))
+    record = {
+        "tree": "snapshot", "profile": state.profile_settings(arm_specs()["P"].profile),
+        "snapshot_digest": state.tree_digest(source),
+        "state_digest": state.tree_digest(baseline / "state"),
+        "vault_digest": state.tree_digest(baseline / "vault"),
+        "vault_signature_digest": state.signature_digest(baseline / "vault"),
+        "build": {"vectors": {"state": "current"}},
+        "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
+        "cpu_threads": 6, "resumed": True,
+        "vector_build": {"run": str(tmp_path / "first-round"), "cpu_threads": 6, "resumed": True},
+        "preparation": {"cpu_threads": 2, "resumed": False},
+    }
+    (baseline / "state.json").write_text(json.dumps(record))
+    return layout, donor, source
+
+
+def test_seeded_state_republishes_and_captures_each_arm_with_original_vector_provenance(
+    seed_build_round: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from types import SimpleNamespace
+
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import state
+
+    from exomem import state_paths
+
+    layout, donor, source = seed_build_round
+    baseline = donor.shared_tree("snapshot")
+    metadata = (baseline / "state.json").read_bytes()
+    original = json.loads(metadata)
+    captures, builds = [], []
+    specs = arm_specs()
+    inputs = {"arms": ["P", "M"], "trees": {"snapshot": {"path": str(source)}}}
+    monkeypatch.setattr(cli, "_context", lambda path: (
+        layout, inputs, [SimpleNamespace(tree="snapshot")], [], specs,
+    ))
+    monkeypatch.setattr(cli, "_stage", lambda *args: None)
+    monkeypatch.setattr(state, "effective_online_cpus", lambda: 2)
+
+    def built(*args, **kwargs):
+        state_dir = layout.slot / "state" / state_paths.vault_state_key(layout.slot / "vault")
+        assert (state_dir / "vectors.bin").read_bytes() == b"expensive compatible vectors"
+        assert (state_dir / "lexical.sqlite").read_bytes() == b"previous lexical schema"
+        (state_dir / "lexical.sqlite").write_bytes(b"current lexical schema")
+        builds.append(kwargs["env"][CPU_THREADS_ENV])
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({
+            "vectors": {"state": "current", "chunks_processed": 0},
+            "owner_coverage": {"available": False, "reason": "catalogue_unavailable"},
+        }), "")
+
+    def surface(slot, spec, **kwargs):
+        captures.append(spec.arm_id)
+        return {"fresh": spec.arm_id}
+
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", surface)
+    monkeypatch.setattr(state, "prove_quiescence", lambda *args, **kwargs: {
+        "content_unchanged": True, "signatures_unchanged": True,
+    })
+    assert cli.main([
+        "state", "--run", str(layout.run), "--cpu-threads", "1",
+        "--seed-build-from", str(donor.run),
+    ]) == 0
+    record = json.loads((layout.shared_tree("snapshot") / "state.json").read_text())
+    assert builds == ["1"]
+    assert captures == ["P", "M"]
+    assert record["vector_build"] == original["vector_build"]
+    assert (record["cpu_threads"], record["resumed"]) == (6, True)
+    assert record["preparation"] == {"cpu_threads": 1, "resumed": False}
+    assert record["seed_build"]["donor_run"] == str(donor.run)
+    assert (baseline / "state.json").read_bytes() == metadata
+    assert state.tree_digest(baseline / "state") == original["state_digest"]
+    assert not (baseline / "vault").exists()
+    assert not (layout.shared_tree("snapshot") / "seed-build.json").exists()
+    assert state.signature_digest(layout.shared_tree("snapshot") / "vault") == original["vault_signature_digest"]
+    assert "catalogue_unavailable" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("legacy_settings, expected_settings", [
+    ({}, ("unrecorded", "unrecorded")),
+    ({"cpu_threads": None, "resumed": False}, (None, False)),
+])
+def test_seed_and_score_preserve_unknown_legacy_settings_separately_from_explicit_defaults(
+    seed_build_round: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+    legacy_settings: dict, expected_settings: tuple,
+) -> None:
+    from membench.utility.switch_eval import __main__ as cli
+    from membench.utility.switch_eval import audit, judge, state
+
+    layout, donor, source = seed_build_round
+    metadata = donor.shared_tree("snapshot") / "state.json"
+    original = json.loads(metadata.read_text())
+    del original["cpu_threads"], original["resumed"], original["vector_build"], original["preparation"]
+    original.update(legacy_settings)
+    metadata.write_text(json.dumps(original))
+    case = _case("legacy-settings")
+    inputs = {
+        "arms": ["P"], "trees": {"snapshot": {"path": str(source)}},
+        "repeats": 1, "seed": 0, "harness_digest": "fixture-harness",
+    }
+    monkeypatch.setattr(cli, "_context", lambda path: (layout, inputs, [case], [], arm_specs()))
+    monkeypatch.setattr(cli, "_stage", lambda *args: None)
+    monkeypatch.setattr(state, "effective_online_cpus", lambda: 2)
+    monkeypatch.setattr(state.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
+        args[0], 0, json.dumps({"vectors": {"state": "current"}}), "",
+    ))
+    monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {})
+    monkeypatch.setattr(state, "prove_quiescence", lambda *args, **kwargs: {
+        "content_unchanged": True, "signatures_unchanged": True,
+    })
+    assert cli.main([
+        "state", "--run", str(layout.run), "--cpu-threads", "1",
+        "--seed-build-from", str(donor.run),
+    ]) == 0
+    record = json.loads((layout.shared_tree("snapshot") / "state.json").read_text())
+    assert (record.get("cpu_threads", "unrecorded"), record.get("resumed", "unrecorded")) == expected_settings
+    origin = record["vector_build"]
+    assert (origin.get("cpu_threads", "unrecorded"), origin.get("resumed", "unrecorded")) == expected_settings
+    assert record["preparation"] == {"cpu_threads": 1, "resumed": False}
+
+    session = _session(layout, case.case_id, "P", 1, AttemptResult(ACTOR_FAILURE, "timeout"))
+    monkeypatch.setattr(cli, "_standing", lambda *args: (
+        {session["session_id"]: session}, None, {"seed": 0, "inputs_digest": "fixture-inputs"},
+    ))
+    monkeypatch.setattr(judge, "resolved_verdicts", lambda *args: {})
+    monkeypatch.setattr(audit, "load_audit", lambda *args, **kwargs: None)
+    assert cli.main(["score", "--run", str(layout.run)]) == 0
+    scored = json.loads((layout.score / "score.json").read_text())["state_builds"]["snapshot"]
+    assert (scored.get("cpu_threads", "unrecorded"), scored.get("resumed", "unrecorded")) == expected_settings
+    assert scored["vector_build"] == origin
+    assert scored["preparation"] == record["preparation"]
+
+
+@pytest.mark.parametrize("mismatch", ["identity", "profile", "state", "snapshot", "manifest", "custody"])
+def test_seed_mismatches_refuse_before_moving_the_original_vault(
+    seed_build_round: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+) -> None:
+    from membench.utility.switch_eval import state
+
+    from exomem import state_migration
+
+    layout, donor, source = seed_build_round
+    baseline = donor.shared_tree("snapshot")
+    metadata = baseline / "state.json"
+    record = json.loads(metadata.read_text())
+    manifest = next((baseline / "state").rglob(state_migration.MANIFEST_NAME))
+    if mismatch == "custody":
+        (donor.run / "slot-vault.json").write_text("{}")
+    elif mismatch == "identity":
+        payload = json.loads(manifest.read_text())
+        payload["vault_identity"] = "different-serving-path"
+        manifest.write_text(json.dumps(payload))
+        record["state_digest"] = state.tree_digest(baseline / "state")
+    elif mismatch == "manifest":
+        manifest.unlink()
+        record["state_digest"] = state.tree_digest(baseline / "state")
+    elif mismatch == "state":
+        (manifest.parent / "vectors.bin").write_bytes(b"changed vectors")
+    else:
+        record[mismatch if mismatch == "profile" else "snapshot_digest"] = "changed"
+    metadata.write_text(json.dumps(record))
+    monkeypatch.setattr(state, "_rename_vault", lambda *args: pytest.fail("vault moved before validation"))
+    with pytest.raises(state.StateError):
+        state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                        parent_env={}, seed_build_from=donor.run)
+    assert (baseline / "vault" / "page.md").read_text() == "Frozen content."
+    assert not layout.slot.exists()
+    assert not (layout.shared_tree("snapshot") / "seed-build.json").exists()
+
+
+@pytest.mark.parametrize("interruption", ["rename", "builder", "surface", "proof"])
+def test_seed_interruption_returns_custody_and_retries_from_the_retained_donor(
+    seed_build_round: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
+    from membench.utility.switch_eval import state
+
+    layout, donor, source = seed_build_round
+    baseline = donor.shared_tree("snapshot")
+    original_state = state.tree_digest(baseline / "state")
+    interrupted = False
+    rename = state._rename_vault
+
+    def interrupt(stage):
+        nonlocal interrupted
+        if stage == interruption and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt()
+
+    def move(*args):
+        interrupt("rename")
+        return rename(*args)
+
+    def built(*args, **kwargs):
+        assert state.tree_digest(layout.slot / "state") == original_state
+        (layout.slot / "state" / "preparation-write").write_text("discard before retry")
+        interrupt("builder")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({"vectors": {"state": "current"}}), "")
+
+    def surface(*args, **kwargs):
+        interrupt("surface")
+        return {}
+
+    def proof(*args, **kwargs):
+        interrupt("proof")
+        return {"content_unchanged": True, "signatures_unchanged": True}
+
+    monkeypatch.setattr(state, "_rename_vault", move)
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", surface)
+    monkeypatch.setattr(state, "prove_quiescence", proof)
+    with pytest.raises(KeyboardInterrupt):
+        state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                        parent_env={}, seed_build_from=donor.run)
+    target = layout.shared_tree("snapshot")
+    assert (target / "seed-build.json").is_file()
+    assert not (target / "state.json").exists()
+    assert not (layout.run / "slot-vault.json").exists()
+    assert not (layout.slot / "vault").exists()
+    assert state.tree_digest(baseline / "state") == original_state
+    with pytest.raises(state.StateError, match="--seed-build-from"):
+        state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source, parent_env={})
+    state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                    parent_env={}, seed_build_from=donor.run)
+    assert (target / "vault" / "page.md").read_text() == "Frozen content."
+    assert not (target / "state" / "state").exists()
+    assert state.tree_digest(baseline / "state") == original_state
+
+
+def test_seed_rejects_an_archive_inside_the_slot_before_cleanup_can_delete_it(
+    seed_build_round: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from membench.utility.switch_eval import state
+
+    layout, donor, source = seed_build_round
+    nested = layout.slot / "archive"
+    nested.parent.mkdir(parents=True)
+    donor.run.rename(nested)
+    baseline = Layout(nested).shared_tree("snapshot")
+    before = state.tree_digest(baseline)
+    monkeypatch.setattr(state, "_rename_vault", lambda *args: pytest.fail("vault moved before topology validation"))
+    with pytest.raises(state.StateError, match="disjoint"):
+        state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                        parent_env={}, seed_build_from=nested)
+    assert state.tree_digest(baseline) == before
+
+
+def test_seed_preparation_cannot_bless_a_builder_write_to_the_original_vault(
+    seed_build_round: tuple[Layout, Layout, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from membench.utility.switch_eval import state
+
+    layout, donor, source = seed_build_round
+
+    def built(*args, **kwargs):
+        (layout.slot / "vault" / "page.md").write_text("Unexpected builder write.")
+        return subprocess.CompletedProcess(args[0], 0, json.dumps({"vectors": {"state": "current"}}), "")
+
+    monkeypatch.setattr(state.subprocess, "run", built)
+    monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {})
+    monkeypatch.setattr(state, "prove_quiescence", lambda *args, **kwargs: pytest.fail("changed vault was blessed"))
+    with pytest.raises(state.StateError, match="vault digest changed"):
+        state.build_arm(layout, arm_specs()["P"], tree="snapshot", source_vault=source,
+                        parent_env={}, seed_build_from=donor.run)
+    assert (layout.slot / "vault" / "page.md").read_text() == "Unexpected builder write."
+    assert (layout.run / "slot-vault.json").is_file()
+    assert not (layout.shared_tree("snapshot") / "state.json").exists()
