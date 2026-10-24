@@ -138,11 +138,11 @@ def test_input_changed_during_terminal_check_cannot_return_a_proof(
     """The last text check may wait; the input bytes still need checking after it."""
     binding = _write(vault, "Original evidence.\n")
 
-    def change_during_check(root: Path, value: str) -> bool:
+    def change_during_check(root: Path, value: str) -> str:
         _write(root, "Concurrent replacement.\n")
-        return True
+        return egress.TEXT_RELEASED
 
-    monkeypatch.setattr(origin_bindings.retained_inputs, "exact_text_visible", change_during_check)
+    monkeypatch.setattr(origin_bindings.retained_inputs, "exact_text_verdict", change_during_check)
     with request_scope(RequestPrincipal(audience_id="client-a")):
         with pytest.raises(provenance.OriginError, match="ORIGIN_INPUT_UNAVAILABLE"):
             origin_bindings.resolve_origin_input(vault, binding)

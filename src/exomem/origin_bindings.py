@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import note_types, provenance, retained_inputs, source_closure
+from . import note_types, provenance, retained_inputs, source_closure, working_set_runtime
 from .episode_recovery import EpisodeInputOwner
+from .governance import egress
 from .vault import PathGuard, PlannedWrite, parse_frontmatter
 
 if TYPE_CHECKING:
@@ -84,6 +85,26 @@ def _unavailable() -> provenance.OriginError:
     return provenance.OriginError("ORIGIN_INPUT_UNAVAILABLE", "retained input is unavailable")
 
 
+def _text_refused(vault_root: Path, verdict: str) -> provenance.OriginError:
+    """The refusal for input text the name gate would not release.
+
+    Only a stale name lookup is retryable, and only where a build owner exists to
+    end it, so the gate's request is worth waiting for. A restricted caller is
+    not told: the lookup state flips on any write, withheld pages included, so
+    telling it would reveal writes, as recall withholds its vault generation.
+    """
+    if (
+        verdict == egress.TEXT_LOOKUP_STALE
+        and working_set_runtime.has_build_owner()
+        and not egress.caller_restricted(vault_root)
+    ):
+        return provenance.OriginError(
+            "ORIGIN_INPUT_LOOKUP_STALE",
+            "linked names could not be checked yet; retry the same write shortly",
+        )
+    return _unavailable()
+
+
 def resolve_origin_input(
     vault_root: Path, binding: object, *, disclosure: bool = False
 ) -> OriginInputProof:
@@ -122,8 +143,9 @@ def resolve_origin_input(
         if end > len(text):
             raise provenance.OriginError("ORIGIN_INPUT_STALE", "retained input span changed")
         text = text[start:end]
-    if not retained_inputs.exact_text_visible(vault_root, text):
-        raise _unavailable()
+    verdict = retained_inputs.exact_text_verdict(vault_root, text)
+    if verdict != egress.TEXT_RELEASED:
+        raise _text_refused(vault_root, verdict)
     root = retained.canonical
     journal_guard = None
     if str(page.frontmatter.get("source_type") or "").casefold() == "episode":

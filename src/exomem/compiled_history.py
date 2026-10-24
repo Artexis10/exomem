@@ -322,8 +322,7 @@ def read(
 def _lookup_marker(root: Path, scan_start: Any, scan_end: Any) -> str | None:
     """Name the lookup state when it alone may have refused name-linked entries.
 
-    Both readings bracket the scan, and the gate refuses on any checkpoint change,
-    so they must agree on the whole checkpoint, not only the stamp. The state is
+    Both readings bracket the scan (`working_set_runtime.lookup_settled`). The state is
     vault-wide and says nothing about this page's entries, but it flips on any
     write, withheld pages included, so a restricted caller does not receive it,
     as recall withholds its vault generation.
@@ -331,10 +330,7 @@ def _lookup_marker(root: Path, scan_start: Any, scan_end: Any) -> str | None:
     from . import working_set_runtime as runtime
     from .governance import egress
 
-    if (
-        scan_start.state == scan_end.state == runtime.LOOKUP_CURRENT
-        and scan_start.checkpoint == scan_end.checkpoint
-    ):
+    if runtime.lookup_settled(scan_start, scan_end):
         return None
     if egress.caller_restricted(root):
         return None

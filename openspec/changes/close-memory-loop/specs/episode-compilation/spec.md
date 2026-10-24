@@ -375,10 +375,27 @@ SHALL NOT invalidate its own binding. Ordinary refusal at either checkpoint SHAL
 leave no committed origin-bearing effect and SHALL preserve existing rollback
 and interruption semantics, without promising cross-file power-loss atomicity.
 
+Origin authoring and projection check a retained input's prose names against the vault-wide name lookup, as a direct read does.
+A refusal for a stale lookup SHALL request the stamped lookup build in the background, without walking the vault on the caller's thread.
+The name gate SHALL report why it refused, and only a refusal caused by the stale lookup is retryable.
+An unrestricted writer so refused, on a runtime that schedules that build, SHALL receive the retryable `ORIGIN_INPUT_LOOKUP_STALE`, and the same write SHALL commit once the build lands.
+Every other refusal SHALL keep `ORIGIN_INPUT_UNAVAILABLE`: a restricted caller, a runtime with no build owner and a lookup that no build can settle, and, once the lookup is current, a scrubbed credential or a withheld or missing target. Text that also carries a prose name can first receive one retryable refusal while that name is unchecked.
+A caller that can have content withheld gets no retry signal, because the lookup state changes on every write.
+A projected read SHALL still remove the whole payload of an input so refused, and SHALL restore it once the build lands.
+
 #### Scenario: One turn becomes four pages
 
 - **WHEN** a single episode is preserved as a Source, entity facet, focused note and Records item
 - **THEN** those four destinations contribute one origin to recurrence pressure rather than four independent mentions
+
+#### Scenario: A write leaves a name-linked retained input unchecked
+
+- **WHEN** an unrestricted writer binds an origin carrier to a Source whose text links a page by name, right after any other knowledge-base write
+- **THEN** the write is refused with `ORIGIN_INPUT_LOOKUP_STALE` and the refusal schedules the stamped lookup build
+- **AND** once the build lands, the same write commits
+- **AND** a restricted caller in the same state receives `ORIGIN_INPUT_UNAVAILABLE`
+- **AND** a Source whose text a scrubber changes receives `ORIGIN_INPUT_UNAVAILABLE` in the same state, because no build can lift that refusal
+- **AND** a projected read in that window removes the payload and restores it once the build lands
 
 #### Scenario: One episode discusses two independent original sources
 
