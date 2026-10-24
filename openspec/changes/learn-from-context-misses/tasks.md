@@ -2,9 +2,9 @@
 
 ## 1. Portable workflow
 
-- [ ] 1.1 Add the generic workflow reference and scaffold link; verify diagnosis, authority, receipt, and recheck guidance against every scenario.
+- [x] 1.1 Add the generic workflow reference and scaffold link; verify diagnosis, authority, receipt, and recheck guidance against every scenario.
 - [ ] 1.2 Add an optional collection example using the existing manifest schema; verify validation and mapping to a differently named incident schema.
-- [ ] 1.3 Run the scaffold leak guard and public-artifact privacy gate; verify that only invented examples ship.
+- [x] 1.3 Run the scaffold leak guard and public-artifact privacy gate; verify that only invented examples ship.
 
 ## 2. Isolated workflow verification
 
