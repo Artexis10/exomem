@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Durable Source capture
 
 Service callers can supply `source_identity` to reconcile a text capture after a lost response, restart or expired invocation replay.
