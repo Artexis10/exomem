@@ -358,6 +358,7 @@ def build_state(vault: Path) -> dict:
     catalogue = context_catalogue.rebuild()
     result = {
         "vault_digest": final_content,
+        "product_source": product_source_identity(),
         "convergence": convergence,
         "vectors": vectors,
         "anchors": len(publication.anchors),
@@ -946,6 +947,11 @@ def build_tree(
             raise StateError(f"tree {tree}: state builder lacks final vault coverage identity")
         if tree_digest(slot.vault) != published_content:
             raise StateError(f"tree {tree}: vault changed after final vector coverage; preserved {slot.vault}")
+        observed_source = build.get("product_source")
+        if checkpoint is not None and (
+            not isinstance(observed_source, dict) or observed_source != checkpoint["product_source"]
+        ):
+            raise StateError(f"tree {tree}: builder product source is missing or differs from checkpoint intent")
         surface_out = layout.arm_tree(spec.arm_id, tree)
         surface = capture_surface(slot, spec, env=env, out=surface_out)
         if tree_digest(slot.vault) != published_content:
@@ -965,6 +971,8 @@ def build_tree(
             "vault_signature_digest": signature_digest(slot.vault),
             "build": build,
         }
+        if isinstance(observed_source, dict):
+            record["product_source"] = observed_source
         # The build-record schema fixes these fields; absent donor fields stay unknown.
         build_settings = {"cpu_threads": cpu_threads, "resumed": resumed}
         if seed is not None:
@@ -988,7 +996,6 @@ def build_tree(
                     **({"product_source": checkpoint["predecessor_product_source"]}
                        if "predecessor_product_source" in checkpoint else {}),
                 },
-                product_source=checkpoint["product_source"],
                 preparation={"cpu_threads": cpu_threads, "resumed": resumed},
             )
         record.update(build_settings)
