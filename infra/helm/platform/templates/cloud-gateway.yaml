@@ -1,3 +1,13 @@
+{{- if .Values.cloudGateway.transferTools.enabled }}
+{{- if not .Values.cloudGateway.enabled }}
+{{- fail "cloudGateway.transferTools.enabled requires cloudGateway.enabled" }}
+{{- end }}
+{{- range $cidr := list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "169.254.0.0/16" }}
+{{- if not (has $cidr $.Values.cells.jobEgressExcept) }}
+{{- fail (printf "cloudGateway.transferTools requires cells.jobEgressExcept to include %s" $cidr) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if .Values.cloudGateway.enabled }}
 apiVersion: v1
 kind: ServiceAccount
@@ -78,6 +88,13 @@ spec:
             {{- end }}
             - name: EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED
               value: {{ .Values.cloudGateway.marketplaceReviewerAccessEnabled | toString | quote }}
+            {{- if .Values.cloudGateway.transferTools.enabled }}
+            # add-cloud-transfer-tools: the gateway answers observe_transfer and
+            # transfer_memory itself, by calling EXOMEM_PUBLIC_BASE_URL over HTTPS
+            # with the caller's own bearer. Unset, calls pass through to the cell.
+            - name: EXOMEM_CLOUD_TRANSFER_TOOLS_ENABLED
+              value: "true"
+            {{- end }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -215,7 +232,8 @@ spec:
           protocol: TCP
     # D5: "The gateway may egress only to cell pods on 8765 and the control
     # database on 5432." Scoped to explicit addresses, matching
-    # gateway.databaseEgressCidrs' pattern -- not an unrestricted rule.
+    # gateway.databaseEgressCidrs' pattern -- not an unrestricted rule. With
+    # cloudGateway.transferTools.enabled, a dated amendment adds 443 below.
     - to:
         {{- range .Values.cloudGateway.databaseEgressCidrs }}
         - ipBlock:
@@ -224,4 +242,21 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
+    {{- if .Values.cloudGateway.transferTools.enabled }}
+    # add-cloud-transfer-tools amends D5 for this one flag: the gateway also
+    # calls Substrate's public web API (cloudGateway.publicBaseUrl) on 443.
+    # That host sits behind a CDN with no stable address to pin, so the rule is
+    # any public address on 443 and none of the private, carrier-grade NAT or
+    # link-local ranges (cells.jobEgressExcept, guarded above), which keeps
+    # cluster, node and metadata addresses unreachable. Off, this rule is
+    # absent and D5 holds unchanged.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- .Values.cells.jobEgressExcept | toYaml | nindent 14 }}
+      ports:
+        - port: 443
+          protocol: TCP
+    {{- end }}
 {{- end }}

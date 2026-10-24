@@ -306,7 +306,17 @@ cloudGateway:
   trustedIngressSourceValue: ""
   # D5: the gateway may egress only to cell pods on 8765 and the control
   # database on 5432 -- explicit addresses, matching gateway.databaseEgressCidrs.
+  # Amended by add-cloud-transfer-tools for `transferTools.enabled` alone.
   databaseEgressCidrs: []
+  # add-cloud-transfer-tools: the gateway answers the observe_transfer and
+  # transfer_memory MCP tools by calling the Substrate web API at publicBaseUrl.
+  # On adds egress TCP 443 to public addresses (every range in
+  # cells.jobEgressExcept stays denied) and sets
+  # EXOMEM_CLOUD_TRANSFER_TOOLS_ENABLED. Off, the gateway egress and env are
+  # unchanged and tool calls pass through to the cell. Turn it on only with a
+  # gateway image that implements the tools.
+  transferTools:
+    enabled: false
   # Database admission allowlists the K3s server node's public /32, so the
   # gateway must egress from that node, as cellctl does. The selector means
   # "the server node" only while the foundation has exactly one.
