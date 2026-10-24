@@ -2,6 +2,23 @@
 
 ## ADDED Requirements
 
+### Requirement: Shared index collection preserves caller boundaries
+The shared working-set index SHALL collect owner-derived inputs inside the existing internal-producer scope, limited to collection in its write path. The scope SHALL restore the prior principal and disclosure collector on success and failure. It SHALL NOT replace authorization held by an active operation. External reads SHALL retain caller-view filtering, disclosure and historical admission.
+
+#### Scenario: Maintenance collects governed inputs
+- **WHEN** an internal index rebuild or update collects governed records
+- **THEN** it retains the shared inputs without creating a caller disclosure audit event
+- **AND** subsequent external reads still apply caller authorization and emit their required disclosure
+
+#### Scenario: An active restricted operation cannot become the producer
+- **WHEN** a restricted caller's active operation reaches shared index collection
+- **THEN** the existing authorization mismatch refusal remains authoritative
+- **AND** the operation cannot publish an owner-derived sidecar through elevated caller authority
+
+#### Scenario: Collection fails
+- **WHEN** shared input collection raises an exception
+- **THEN** the prior principal and disclosure collector are restored
+
 ### Requirement: Packet modes
 Activation SHALL serve one of two packet modes, `anchors` and `maps`, selected by the process setting `EXOMEM_ACTIVATION_PACKET`. When the setting is absent, activation SHALL serve `anchors`.
 - These requirements SHALL bind both modes:

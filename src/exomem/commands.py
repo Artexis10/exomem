@@ -9892,7 +9892,7 @@ def op_connect_memory(
     """
     if registry_scope is not None and operation != "create-entity":
         raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
-    if relations and operation != "create-entity":
+    if relations not in (None, []) and operation != "create-entity":
         raise ValueError("INVALID_SCHEMA_ARGUMENT: relations requires create-entity")
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -10327,6 +10327,68 @@ def op_adoption_studio(
         if code is not None and reason is not None:
             raise ValueError(f"{code}: {reason}") from exc
         raise
+
+
+# Tool names and `action` values of the two transfer tools are a closed protocol set that the
+# Cloud gateway also implements; they are not a vocabulary a vault or customer extends.
+def op_observe_transfer(
+    vault_root: Path,
+    action: Literal["status", "import_handoff"] = "status",
+    import_id: str | None = None,
+) -> dict:
+    """Check or start moving material into or out of this Exomem Cloud memory.
+
+    Read-only. The Cloud gateway answers from your account, not this vault. It never
+    returns file bytes, upload URLs or download links.
+
+    1. import_handoff: the open import (one at a time) and the routes for sending bytes.
+       cli: needs a shell, `age` on PATH and a local browser sign-in; takes a folder or ZIP.
+       browser: Home page on a desktop, folders only, within one page session; phones
+       cannot upload folders.
+       attachments: chat or phone attachments go through preserve_artifacts or
+       capture_source, within their per-call bounds.
+    2. status: the latest import (or import_id) and the export; poll it while an import runs.
+    3. When status shows an adopt import `done`, run adoption_studio start on the `next`
+       path (`_Imports/<id>`), then adoption_studio finish.
+    When an export is ready, status gives a Home link and a CLI command to download it.
+
+    Args:
+        action: status (default) or import_handoff.
+        import_id: UUID; status only. Omit for the latest import.
+    """
+    from .command_surface import gateway_required_error
+
+    raise gateway_required_error("observe_transfer")
+
+
+def op_transfer_memory(
+    vault_root: Path,
+    action: Literal["import_cancel", "import_discard", "export_request"],
+    import_id: str | None = None,
+    export_id: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Cancel or discard an import, or request an export of this Exomem Cloud memory.
+
+    The Cloud gateway runs it against your account, not this vault. Check progress
+    with observe_transfer. It never returns file bytes or download links.
+
+    import_cancel: stops an open import; no confirm.
+    import_discard: permanently deletes the staged originals; needs confirm=true.
+    export_request: packs your memory, pauses your assistants while it packs and
+    replaces any ready export. Call it without confirm for the effects and a fresh
+    export_id; ask the owner; then repeat with confirm=true and that export_id
+    (the same id is safe to retry). Download from Home or `exomem cloud export`.
+
+    Args:
+        action: import_cancel, import_discard or export_request.
+        import_id: UUID; required for import_cancel and import_discard.
+        export_id: UUID; export_request only. Reuse the id the preview returned.
+        confirm: true runs import_discard or export_request; false only previews.
+    """
+    from .command_surface import gateway_required_error
+
+    raise gateway_required_error("transfer_memory")
 
 
 def op_maintain_memory(
@@ -12805,7 +12867,13 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "intent": "Assess or import an existing vault safely.",
         "route": {"tool": "adopt_vault", "args": {"mode": "scan-only"}},
         "safety": "scan-only by default; copy/compile modes require explicit options and preserve originals",
-        "advanced": ["browse_memory", "prepare_note", "adoption_studio"],
+        "advanced": [
+            "browse_memory",
+            "prepare_note",
+            "adoption_studio",
+            "observe_transfer",
+            "transfer_memory",
+        ],
     },
     "maintain": {
         "intent": "Check vault health and repair drift only when explicitly requested.",
@@ -13404,6 +13472,40 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         ("get_video_frames",),
         {"public_title": "Read video frames", "surface": "advanced", "actions": ("ask",), "first_run_safe": True},
     ),
+    (
+        "observe_transfer",
+        op_observe_transfer,
+        1,
+        False,
+        False,
+        None,
+        _M,
+        (),
+        {
+            "public_title": "Check or start an import or export",
+            "surface": "advanced",
+            "actions": ("adopt",),
+            "first_run_safe": True,
+            "executor": "control_plane",
+        },
+    ),
+    (
+        "transfer_memory",
+        op_transfer_memory,
+        1,
+        True,
+        False,
+        None,
+        _M,
+        (),
+        {
+            "public_title": "Cancel or discard an import, or request an export",
+            "surface": "advanced",
+            "actions": ("adopt",),
+            "first_run_safe": False,
+            "executor": "control_plane",
+        },
+    ),
 )
 
 
@@ -13424,7 +13526,14 @@ def _build_product_commands() -> tuple[Command, ...]:
                 replace(param, choices=values) if param.name == selector else param
                 for param in params
             )
-        response_detail = "full" if name == "govern_memory" else "compact" if writes else None
+        # A control-plane command reads and writes no vault, so it has no vault-write detail level.
+        response_detail = (
+            "full"
+            if name == "govern_memory"
+            else "compact"
+            if writes and meta.get("executor", "cell") == "cell"
+            else None
+        )
         if name == "edit_memory":
             params = tuple(
                 Param(
@@ -13535,6 +13644,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 path_roles=reserved_paths_module.path_roles_for_command(name),
                 restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
+                executor=meta.get("executor", "cell"),
             )
         )
     return tuple(cmds)
@@ -13596,10 +13706,22 @@ def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, .
     return tuple(c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1))
 
 
-def product_commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
-    """Product commands exposed on a public surface, honoring tier-2 opt-out."""
+def product_commands_for(
+    surface: str, *, expose_tier2: bool = True, cloud: bool = False
+) -> tuple[Command, ...]:
+    """Product commands exposed on a public surface, honoring tier-2 opt-out.
+
+    `cloud=True` is the one definition of the Cloud cell surface: the product
+    surface minus `CLOUD_SURFACE_EXCLUSIONS`, plus the Cloud-only commands that
+    the gateway serves from the control plane. Every other surface omits those.
+    """
     return tuple(
-        c for c in PRODUCT_COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1)
+        c
+        for c in PRODUCT_COMMANDS
+        if surface in c.surfaces
+        and (expose_tier2 or c.tier == 1)
+        and (cloud or not c.cloud_only)
+        and not (cloud and c.name in CLOUD_SURFACE_EXCLUSIONS)
     )
 
 

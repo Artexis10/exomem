@@ -64,6 +64,12 @@ The envelope has no total or examined-count field.
 Every result carries `coverage: unverified`, because a readable subset cannot prove complete retention.
 Absent, denied, corrupt and unreadable entries remain indistinguishable; current-page authority grants no exception for historical diagnostics.
 A read skips versions not older than the continuation without opening them, then opens and admits entries newest first.
+Admitting a prior text that links a page by name needs current lookup evidence (below), and any knowledge-base write leaves that evidence stale until a stamped activation-index build records the new freshness key.
+Before this repair only a recall or a context view asked for that build, so a same-turn edit followed by a history read reported `unavailable` while the revisions were retained.
+The reader now reads lookup currency before and after its scan and reports `lookup: stale` or `lookup: unavailable` when it was not current.
+On `stale` it schedules the stamped build through the managed single-flight owner; it never walks the vault on its own thread, so an unmanaged reader only reports.
+The marker is vault-wide and says nothing about the page's entries, but it flips on every write, withheld pages included, so a restricted caller does not receive it, as recall withholds its vault generation.
+A caller repeats the same call to retry; paging on would skip the refused entries, and a build already in flight with an older key can need one more repeat.
 A page read stops after the page plus one further admitted entry, which sets `truncated`.
 A unit-scoped read must open an entry to learn whether it touches the unit, so one call examines at most 2 x (page size + 1) admitted entries, about the cost of a page read.
 When that cap is reached first, the read returns the matches found and sets `truncated`.

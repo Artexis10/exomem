@@ -297,6 +297,36 @@ def test_the_gateway_egresses_on_8765_only_to_cell_pods_in_cell_namespaces() -> 
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_transfer_tools_open_gateway_443_to_public_addresses_only_when_switched_on() -> None:
+    # add-cloud-transfer-tools: default off, the gateway keeps exactly its D5
+    # egress and env. On, it also reaches the web API on 443, never a private range.
+    values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))
+    assert values["cloudGateway"]["transferTools"] == {"enabled": False}
+    off = _helm_template()
+    assert "EXOMEM_CLOUD_TRANSFER_TOOLS_ENABLED" not in _gateway_env(off)
+
+    on = _helm_template("--set", "cloudGateway.transferTools.enabled=true")
+    gateway_on = _find(on, "NetworkPolicy", "exomem-cloud-gateway")["spec"]
+    gateway_off = _find(off, "NetworkPolicy", "exomem-cloud-gateway")["spec"]
+    assert gateway_on["egress"][: len(gateway_off["egress"])] == gateway_off["egress"]
+    https, = gateway_on["egress"][len(gateway_off["egress"]):]
+    assert https["ports"] == [{"port": 443, "protocol": "TCP"}]
+    assert https["to"] == [{"ipBlock": {"cidr": "0.0.0.0/0", "except": values["cells"]["jobEgressExcept"]}}]
+    assert _gateway_env(on)["EXOMEM_CLOUD_TRANSFER_TOOLS_ENABLED"] == {
+        "name": "EXOMEM_CLOUD_TRANSFER_TOOLS_ENABLED", "value": "true",
+    }
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("setting", ["cells.jobEgressExcept=[]", "cloudGateway.enabled=false"])
+def test_transfer_tools_refuse_to_open_443_without_the_private_exceptions_or_a_gateway(setting: str) -> None:
+    flag = "--set-json" if setting.endswith("]") else "--set"
+    result = _helm_template_result("--set", "cloudGateway.transferTools.enabled=true", flag, setting)
+    assert result.returncode != 0, setting
+    assert "transferTools" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_renders() -> None:
     # Security MED-1: the policy pins NetworkPolicies, the Secret, the PVC,
     # the quota and pod-template placement to cellctl's own renderer, and

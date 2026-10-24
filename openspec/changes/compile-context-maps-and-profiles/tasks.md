@@ -32,3 +32,11 @@
 - [ ] 5.3 Make the freeze commit: protocol, arm hashes, hashed held-out ids, groups, and the power step's spread, sizes, δ values and simulated pass rates.
 - [ ] 5.4 Run the frozen held-out evaluation once, blind.
 - [ ] 5.5 If it passes, modify the "Packet modes" requirement's default, switch the default through the release line, then replay field reports on the installed release.
+
+## 6. Preparation recovery
+
+- [ ] 6.1 Scope shared working-set collection as an internal producer. Prove that maintenance keeps audit files unchanged while external reads retain disclosure and authorization.
+- [ ] 6.2 Add explicit successor preparation from an unproven checkpoint. Preserve the failed archive and opaque inputs, and refuse ordinary retry before destructive fallback.
+- [ ] 6.3 Converge media before publication and verify exact final vector coverage through existing product checks. Prove same-mtime edits and new media parents cannot inherit stale coverage.
+- [ ] 6.4 Qualify the integrated source through independent review and current CI, then verify bounded recovery and fresh quiescence before any development generation.
+- [ ] 6.5 File the evaluation reads' receipts out of the vault into run evidence, and prove that a governed vault returns with identical bytes and signatures after the startup proof and after a session (design, amendment 9).

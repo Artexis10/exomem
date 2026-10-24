@@ -160,13 +160,35 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         discover_agent_envelope,
     )
 
-    from .arms import arm_specs, profile_settings
+    from .arms import DEFAULT_HOOK_MODE, DEFAULT_PROFILE, arm_specs, profile_settings
     from .cases import load_cases
     from .session import arm_files, plan_sessions, session_argv
-    from .state import Layout, tree_digest
+    from .state import Layout, StateError, prepare_checkpoint_import, tree_digest
 
     _refuse_api_key(os.environ)
     layout = Layout.at(Path(args.run))
+    if args.import_checkpoint_from:
+        # These options define the fixed prepare CLI; import preserves their recorded values.
+        if any(getattr(args, name) is not None for name in (
+            "key", "cases", "tree", "actor_model", "arms", "repeats", "seed", "hook_mode",
+            "profile", "case_ids", "claude", "claude_launcher",
+        )):
+            raise SystemExit("checkpoint import takes recorded experimental inputs; omit other prepare options")
+        try:
+            prepare_checkpoint_import(layout, Path(args.import_checkpoint_from), harness_digest=_harness_digest())
+        except (StateError, OSError, ValueError) as error:
+            raise SystemExit(f"refused: {error}") from error
+        print(f"prepared {layout.run} from unproven checkpoint {Path(args.import_checkpoint_from).resolve()}")
+        return 0
+    if (layout.run / "checkpoint-import.json").exists():
+        raise SystemExit("pending checkpoint import requires --import-checkpoint-from before prepare retry")
+    if not all((args.key, args.cases, args.tree, args.actor_model)):
+        raise SystemExit("prepare requires --key, --cases, --tree and --actor-model")
+    args.arms = args.arms if args.arms is not None else ",".join(protocol.ARM_IDS)
+    args.repeats = args.repeats if args.repeats is not None else protocol.REPEATS
+    args.seed = args.seed if args.seed is not None else 0
+    args.hook_mode = args.hook_mode if args.hook_mode is not None else DEFAULT_HOOK_MODE
+    args.profile = args.profile if args.profile is not None else DEFAULT_PROFILE
     arm_ids = tuple(args.arms.split(","))
     unknown = [arm for arm in arm_ids if arm not in protocol.ARM_IDS]
     if unknown or len(set(arm_ids)) != len(arm_ids):
@@ -224,11 +246,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     inputs = _as_json(
         {
             "design": protocol.DESIGN,
-            "protocol": {
-                name: getattr(protocol, name)
-                for name in dir(protocol)
-                if name.isupper() and isinstance(getattr(protocol, name), (int, float, str, tuple))
-            },
+            "protocol": protocol.snapshot(),
             "harness_digest": _harness_digest(),
             "actor_model": args.actor_model,
             "client": {
@@ -316,14 +334,23 @@ def _arm_hashes(layout, inputs, specs, trees) -> dict:
 
 
 def cmd_state(args: argparse.Namespace) -> int:
-    from .state import StateError, build_arm, validate_build_cpu_threads
+    from .state import (
+        StateError,
+        build_arm,
+        require_checkpoint_selection,
+        require_default_kb_dirname,
+        validate_build_cpu_threads,
+    )
 
     try:
         validate_build_cpu_threads(args.cpu_threads)
+        require_default_kb_dirname()
     except StateError as error:
         raise SystemExit(f"refused: {error}") from error
 
     layout, inputs, cases, _plan, specs = _context(Path(args.run))
+    checkpoint_from = Path(args.checkpoint_from) if args.checkpoint_from else None
+    require_checkpoint_selection(layout, checkpoint_from)
     _stage(layout, inputs, "state")
     needed = sorted({case.tree for case in cases})
     for tree in needed:
@@ -337,6 +364,7 @@ def cmd_state(args: argparse.Namespace) -> int:
                 parent_env=os.environ,
                 cpu_threads=args.cpu_threads,
                 seed_build_from=Path(args.seed_build_from) if args.seed_build_from else None,
+                checkpoint_from=checkpoint_from,
             )
             print(
                 f"arm {arm} tree {tree}: state {record['state_digest'][:16]} vault {record['vault_digest'][:16]} (shared tree build {record['build_seconds']} s)"
@@ -348,6 +376,10 @@ def cmd_state(args: argparse.Namespace) -> int:
             if record.get("seed_build") is not None:
                 print(f"tree {tree}: seed {json.dumps(record['seed_build'], sort_keys=True)}")
                 print(f"tree {tree}: vector origin {json.dumps(record['vector_build'], sort_keys=True)}; preparation {json.dumps(record['preparation'], sort_keys=True)}")
+            if record.get("checkpoint") is not None:
+                print(f"tree {tree}: unproven checkpoint {json.dumps(record['checkpoint'], sort_keys=True)}; preparation {json.dumps(record['preparation'], sort_keys=True)}")
+            if record["build"].get("vectors", {}).get("coverage") is not None:
+                print(f"tree {tree}: final vector coverage {json.dumps(record['build']['vectors']['coverage'], sort_keys=True)}")
             processed = record["build"].get("vectors", {}).get("chunks_processed")
             print(f"tree {tree}: vector chunks processed (encoded or copied): {processed if processed is not None else 'unavailable'}")
             print(f"tree {tree}: owner coverage {json.dumps(record['build'].get('owner_coverage', {'available': False}), sort_keys=True)}")
@@ -414,11 +446,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_session,
         write_arm_files,
     )
+    from .state import StateError, require_default_kb_dirname
 
     layout, inputs, cases, plan, specs = _context(Path(args.run))
     _stage(layout, inputs, None if args.dry_run else "run")
     parent = dict(os.environ)
     _refuse_api_key(parent)
+    try:
+        require_default_kb_dirname()
+    except StateError as error:
+        raise SystemExit(f"refused: {error}") from error
     trees = sorted({case.tree for case in cases})
     hashes = _arm_hashes(layout, inputs, specs, trees)
 
@@ -714,7 +751,7 @@ def _score(layout, inputs, cases, plan, specs, args) -> dict:
         # This projection follows the fixed build-record schema; absent fields stay unknown.
         state_builds[tree] = {
             key: record[key]
-            for key in ("cpu_threads", "resumed", "vector_build", "preparation", "seed_build")
+            for key in ("cpu_threads", "resumed", "vector_build", "preparation", "seed_build", "checkpoint", "product_source")
             if key in record
         }
         if "vectors" in record.get("build", {}):
@@ -866,8 +903,6 @@ def _power_settings(
 
 def main(argv: Sequence[str] | None = None) -> int:
     from .arms import (
-        DEFAULT_HOOK_MODE,
-        DEFAULT_PROFILE,
         HOOK_MODE_MCP,
         HOOK_MODE_WORKING_SET,
         RETRIEVAL_PROFILES,
@@ -885,31 +920,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     p = sub.add_parser("prepare", help="record the run's inputs and plan")
     p.add_argument("--run", required=True)
+    p.add_argument("--import-checkpoint-from", help="import opaque inputs from an archived failed preparation")
     p.add_argument(
-        "--key", action="append", required=True, help="SPLIT=PATH of a key file (repeatable)"
+        "--key", action="append", help="SPLIT=PATH of a key file (repeatable)"
     )
     p.add_argument(
-        "--cases", action="append", required=True, help="a case file quoting the turns (repeatable)"
+        "--cases", action="append", help="a case file quoting the turns (repeatable)"
     )
     p.add_argument(
         "--tree",
         action="append",
-        required=True,
         help="NAME=PATH[@DIGEST] of a vault copy (repeatable)",
     )
-    p.add_argument("--actor-model", required=True, help="the pinned actor model ID")
-    p.add_argument("--arms", default=",".join(protocol.ARM_IDS))
-    p.add_argument("--repeats", type=int, default=protocol.REPEATS)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--actor-model", help="the pinned actor model ID")
+    p.add_argument("--arms")
+    p.add_argument("--repeats", type=int)
+    p.add_argument("--seed", type=int)
     p.add_argument(
         "--hook-mode",
-        default=DEFAULT_HOOK_MODE,
         choices=(HOOK_MODE_MCP, HOOK_MODE_WORKING_SET),
         help="the deployed retrieve hook's mode, shared by A and M",
     )
     p.add_argument(
         "--profile",
-        default=DEFAULT_PROFILE,
         choices=tuple(RETRIEVAL_PROFILES),
         help="the retrieval profile every arm's server runs with",
     )
@@ -924,10 +957,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     p = sub.add_parser("state", help="build each tree once and capture each arm surface")
     p.add_argument("--run", required=True)
-    p.add_argument(
+    donor = p.add_mutually_exclusive_group()
+    donor.add_argument(
         "--seed-build-from",
         help="republish an archived run's baseline at its original absolute slot path",
     )
+    donor.add_argument("--checkpoint-from", help="publish retained unproven state from the prepared checkpoint archive")
     p.add_argument(
         "--cpu-threads",
         type=int,

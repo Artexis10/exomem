@@ -2786,13 +2786,16 @@ class WorkingSetIndex:
         # other's way, so it is never reset: the next write replaces it.
         _PENDING_MANIFESTS.set([None])
         from . import project_keys
+        from .governance import principal
 
         # Bind the published identity to exactly the snapshot that derives the
         # anchors, even if YAML changes again during the background walk.
         project_registry = project_keys.load_project_registry(self.vault_root)
-        candidates, edges, page_names, term_counts = self._collect(
-            project_registry=project_registry, reuse=not full
-        )
+        # Shared inputs derive from the owner; external serves apply caller authorization.
+        with principal.owner_local_producer(self.vault_root, "working_set_index"):
+            candidates, edges, page_names, term_counts = self._collect(
+                project_registry=project_registry, reuse=not full
+            )
         foreground_priority.check_cancelled()
         rows = _catalogue_rows(candidates, edges, page_names, term_counts)
         terms_text = {candidate.anchor_id: " ".join(candidate.terms) for candidate in candidates}

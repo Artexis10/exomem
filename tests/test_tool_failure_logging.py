@@ -48,7 +48,7 @@ def _bound(monkeypatch, *, read_only: bool = False):
     def leaf(vault):  # noqa: ANN001, ARG001
         raise AssertionError("invoke seam should replace the leaf")
 
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=read_only)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=read_only, executor="cell")
     bound = command_surface.bind_vault(leaf, object(), command=command)
     monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "bearer:abc")
     monkeypatch.setattr(

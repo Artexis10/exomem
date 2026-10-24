@@ -43,7 +43,8 @@ SECTION_BYTE_CEILINGS = {
 }
 
 #: `cloud` is the reduced surface an Exomem Cloud cell serves: the product surface
-#: minus `CLOUD_SURFACE_EXCLUSIONS`, so a rule naming an excluded command vanishes there.
+#: minus `CLOUD_SURFACE_EXCLUSIONS` plus the Cloud-only commands, so a rule naming an
+#: excluded command vanishes there.
 SURFACES = (None, "claude-code", "cloud")
 CARRYING = ("balanced", "maximal")
 
@@ -82,9 +83,7 @@ def _bootstrap(monkeypatch, level: str, surface: str | None, *, populated: bool 
             profile="product-cloud",
             tier2_enabled=True,
             product_commands=tuple(
-                command.public_name
-                for command in commands.product_commands_for("mcp")
-                if command.name not in commands.CLOUD_SURFACE_EXCLUSIONS
+                command.public_name for command in commands.product_commands_for("mcp", cloud=True)
             ),
         )
         with capabilities.active_surface(descriptor):

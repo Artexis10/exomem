@@ -1,0 +1,72 @@
+{
+  "observe_transfer": {
+    "description": "Check or start moving material into or out of this Exomem Cloud memory.\n\nRead-only. The Cloud gateway answers from your account, not this vault. It never\nreturns file bytes, upload URLs or download links.\n\n1. import_handoff: the open import (one at a time) and the routes for sending bytes.\n   cli: needs a shell, `age` on PATH and a local browser sign-in; takes a folder or ZIP.\n   browser: Home page on a desktop, folders only, within one page session; phones\n   cannot upload folders.\n   attachments: chat or phone attachments go through preserve_artifacts or\n   capture_source, within their per-call bounds.\n2. status: the latest import (or import_id) and the export; poll it while an import runs.\n3. When status shows an adopt import `done`, run adoption_studio start on the `next`\n   path (`_Imports/<id>`), then adoption_studio finish.\nWhen an export is ready, status gives a Home link and a CLI command to download it.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "default": "status",
+          "description": "status (default) or import_handoff.",
+          "enum": [
+            "status",
+            "import_handoff"
+          ],
+          "type": "string"
+        },
+        "import_id": {
+          "type": "string",
+          "description": "UUID; status only. Omit for the latest import."
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Check or start an import or export",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  "transfer_memory": {
+    "description": "Cancel or discard an import, or request an export of this Exomem Cloud memory.\n\nThe Cloud gateway runs it against your account, not this vault. Check progress\nwith observe_transfer. It never returns file bytes or download links.\n\nimport_cancel: stops an open import; no confirm.\nimport_discard: permanently deletes the staged originals; needs confirm=true.\nexport_request: packs your memory, pauses your assistants while it packs and\nreplaces any ready export. Call it without confirm for the effects and a fresh\nexport_id; ask the owner; then repeat with confirm=true and that export_id\n(the same id is safe to retry). Download from Home or `exomem cloud export`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "import_cancel, import_discard or export_request.",
+          "enum": [
+            "import_cancel",
+            "import_discard",
+            "export_request"
+          ],
+          "type": "string"
+        },
+        "import_id": {
+          "type": "string",
+          "description": "UUID; required for import_cancel and import_discard."
+        },
+        "export_id": {
+          "type": "string",
+          "description": "UUID; export_request only. Reuse the id the preview returned."
+        },
+        "confirm": {
+          "default": false,
+          "description": "true runs import_discard or export_request; false only previews.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Cancel or discard an import, or request an export",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  }
+}

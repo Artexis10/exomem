@@ -8,7 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_connector_boundary import PUBLIC
 from test_connector_boundary import configured_boundary as configured_boundary
+from test_latency_gate import _seed_freshness_live
 from test_observe_memory import (
     PAGE,
     UNTYPED_PAGE,
@@ -22,12 +24,14 @@ from exomem import (
     append_to_file,
     commands,
     compiled_history,
+    readiness,
     registry_history,
     semantic_index,
     semantic_language_registry,
     semantic_writes,
     vault,
     vocabulary_auxiliaries,
+    working_set_runtime,
 )
 from exomem.governance.principal import library_scope, owner_principal, request_scope
 
@@ -612,6 +616,71 @@ def test_denied_project_prior_matches_absent_history_in_the_complete_read(
     assert hidden == absent
     assert "private interpretation" not in json.dumps(hidden, default=str)
     assert "private rationale" not in json.dumps(hidden, default=str)
+
+
+LINKED_PAGE = "Knowledge Base/Notes/Legacy/window.md"
+LINKED_SOURCE = (
+    "---\ntitle: Window\nstatus: active\nproject: public-project\n"
+    "exomem_id: 00000000-0000-4000-8000-0000000000a1\nupdated: 2026-07-15\n---\n\n"
+    "The window is 30 minutes, as [[Ada Lovelace]] measured.\n"
+)
+
+
+def _linked_page_with_current_lookup(root: Path) -> None:
+    """A name-linked page under a live registry, with the index a recall has just stamped."""
+    _write_page(root, rel=LINKED_PAGE, source=LINKED_SOURCE)
+    _seed_freshness_live(root)
+    with request_scope(owner_principal(surface="mcp")):
+        commands.op_activate_context(root, turn="What is the window?")
+        current = commands.op_read_memory(root, path=PUBLIC, include_history=True)
+    assert "lookup" not in current["revision_history"]
+
+
+def _edit_window(root: Path) -> None:
+    commands.op_edit_memory(
+        root, path=LINKED_PAGE, why="A source corrected the window.",
+        operation={"kind": "replace_string", "old_string": "30 minutes", "new_string": "45 minutes"},
+    )
+
+
+def test_a_name_linked_prior_refused_right_after_a_write_reads_once_the_stamped_build_lands(
+    configured_boundary, vault: Path, monkeypatch,
+) -> None:
+    """Any write leaves name lookup stale; history says so and asks for the build that heals it."""
+    _, authenticate = configured_boundary
+    _linked_page_with_current_lookup(vault)
+    with request_scope(authenticate("full")):
+        _edit_window(vault)
+        stale = commands.op_read_memory(vault, path=LINKED_PAGE, include_history=True)
+        no_history = commands.op_read_memory(vault, path=PUBLIC, include_history=True)
+        monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+        commands.op_read_memory(vault, path=LINKED_PAGE, include_history=True)
+        working_set_runtime.join_builds(vault)
+        healed = commands.op_read_memory(vault, path=LINKED_PAGE, include_history=True)
+
+    stale, no_history, healed = (r["revision_history"] for r in (stale, no_history, healed))
+    assert (stale["status"], stale["returned"], stale["lookup"]) == ("unavailable", 0, "stale")
+    # Vault-wide: a page with nothing retained reports the same state.
+    assert (no_history["status"], no_history["lookup"]) == ("unavailable", "stale")
+    assert (healed["status"], healed["returned"]) == ("retained", 1)
+    assert "lookup" not in healed
+    assert healed["revisions"][0]["prior"]["source"] == LINKED_SOURCE
+
+
+def test_a_restricted_caller_gets_no_write_revealing_lookup_marker(
+    configured_boundary, vault: Path,
+) -> None:
+    """Lookup state flips on every write, withheld pages included, like recall's vault generation."""
+    _, authenticate = configured_boundary
+    _linked_page_with_current_lookup(vault)
+    with request_scope(authenticate("full")):
+        _edit_window(vault)
+    with request_scope(authenticate("limited")):
+        limited = commands.op_read_memory(vault, path=LINKED_PAGE, include_history=True)
+
+    history = limited["revision_history"]
+    assert (history["status"], history["returned"]) == ("unavailable", 0)
+    assert "lookup" not in history
 
 
 def test_retained_bridge_cannot_borrow_the_current_bridge_approval(vault: Path) -> None:

@@ -1063,17 +1063,12 @@ def direct_text_references_visible(
 
     checkpoint = None
     if names:
-        from .. import freshness, working_set_index, working_set_runtime
+        from .. import working_set_runtime
 
-        checkpoint = freshness.live_recall_checkpoint(root, "kb")
-        if checkpoint is None:
+        lookup = working_set_runtime.name_lookup(root)
+        if lookup.state != working_set_runtime.LOOKUP_CURRENT:
             return False
-        stamp = working_set_runtime._key_text(
-            (checkpoint.triple, checkpoint.policy_version, checkpoint.access_policy_fingerprint)
-        )
-        index = working_set_index.WorkingSetIndex(root)
-        if not index.available() or index.freshness_stamp() != stamp:
-            return False
+        checkpoint = lookup.checkpoint
         try:
             resolved = _resolved_prose_names(root, names)
         except WorkingSetResolutionUnavailable:
@@ -1968,6 +1963,12 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
     """
     boundary = connector_boundary.permits_filter(vault_root, who)
     return lambda path: boundary(path) and raw_protection.permits(vault_root, path, who)
+
+
+def name_lookup_required(vault_root: Path) -> bool:
+    """Whether `direct_text_references_visible` resolves prose names through the lookup index."""
+    root = Path(vault_root)
+    return not _file_policy_empty(root, policy_module.load(root))
 
 
 def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None = None) -> bool:
@@ -5944,6 +5945,10 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "query_dataset",
         "read_media",
         "list_trash",
+        # Control-plane commands: the cell reads no vault for them and only ever
+        # answers CLOUD_GATEWAY_REQUIRED, so there is no vault content to project.
+        "observe_transfer",
+        "transfer_memory",
     }
 )
 

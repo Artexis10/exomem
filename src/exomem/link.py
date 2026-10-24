@@ -392,7 +392,7 @@ def _render_entity(
         for kind, target in relations:
             lines.append(_relation_line(kind, target))
         for c in connections:
-            lines.append(f"- relates_to [[{c}]]")
+            lines.append(_relation_line("relates_to", c))
     lines.append("")
     return "\n".join(lines)
 
@@ -486,7 +486,7 @@ def _normalize_relations(
     the kind is registered and in scope stays the creation preflight's decision.
     Identical pairs collapse; different kinds for one target stay distinct.
     """
-    if not relations:
+    if relations is None:
         return [], []
     if not isinstance(relations, list):
         raise LinkError("INVALID_LINK", ["relations"], "relations must be a list of {kind, target}")
@@ -507,7 +507,7 @@ def _normalize_relations(
             [item["target"]], vault_root=vault_root, resolver=resolver
         )
         warnings.extend(warning for warning in target_warnings if warning not in warnings)
-        pair =(item["kind"].strip(), render_wikilink_target(targets[0], vault_root))
+        pair = (item["kind"].strip(), render_wikilink_target(targets[0], vault_root))
         parsed = markdown_relations.scan_markdown_relations(
             f"## Relations\n{_relation_line(*pair)}\n"
         ).candidates
@@ -841,7 +841,9 @@ def link(
     relation_pairs, relation_warnings = _normalize_relations(
         relations, vault_root=vault_root, resolver=resolver
     )
-    connection_warnings.extend(relation_warnings)
+    connection_warnings.extend(
+        warning for warning in relation_warnings if warning not in connection_warnings
+    )
     facet_values: list[tuple[str, list[str], bool]] = []
     for facet_name, value_kind, values, multi in declared_facets:
         if value_kind == "wikilink":
@@ -860,6 +862,7 @@ def link(
         why_clean, why_warnings = normalize_body_wikilinks(
             why_in_kb, vault_root, resolver=resolver
         )
+    connection_targets = [render_wikilink_target(item, vault_root) for item in connections_norm]
     source = _render_entity(
         entity_type=entity_type,
         name=display_name,
@@ -867,9 +870,7 @@ def link(
         why_in_kb=why_clean,
         date_iso=stamp_iso,
         tags=_clean_tags(tags),
-        connections=[
-            render_wikilink_target(item, vault_root) for item in connections_norm
-        ],
+        connections=connection_targets,
         relations=tuple(relation_pairs),
         affiliation=affiliation,
         relationship=relationship,
@@ -887,6 +888,26 @@ def link(
         aliases=aliases_clean,
         origin_metadata=origin_block,
     )
+    # Parse the rendered page once: an unclosed fence or a stray heading in the
+    # summary or why_in_kb must not hide the edges this call authored. The
+    # expected edges come from the rendered Relations block alone, so a malformed
+    # connection still reaches the preflight's own relation finding.
+    def _edges(markdown: str) -> set[tuple[str, str]]:
+        return {
+            (candidate.kind, candidate.target)
+            for candidate in markdown_relations.scan_markdown_relations(markdown).candidates
+            if candidate.canonical and candidate.grammar_valid
+        }
+
+    authored_block = (
+        source.rsplit("\n## Relations\n", 1)[1] if relation_pairs or connection_targets else ""
+    )
+    if not _edges("## Relations\n" + authored_block) <= _edges(source):
+        raise LinkError(
+            "INVALID_LINK",
+            ["summary", "why_in_kb"],
+            "summary or why_in_kb hides the Relations section; close every code fence",
+        )
     from .vault import parse_frontmatter
 
     written_metadata, _body, _marker = parse_frontmatter(source)
