@@ -56,7 +56,9 @@ def only_withheld(
         rel = freshness.registry_rel(vault_root, path)
         # `visible` keeps a path that is no longer a page (a deleted one), and a
         # path that cannot be decided counts as visible: the truthful answer
-        # when what the caller could have seen is unknown.
+        # when what the caller could have seen is unknown. No published state
+        # holds a reader's earlier verdict for a path (task 3.15's admitted sets
+        # will), so a deleted withheld page still reports.
         try:
             if rel is None or visible(rel):
                 return False
