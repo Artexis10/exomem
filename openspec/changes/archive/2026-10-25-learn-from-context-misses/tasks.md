@@ -15,5 +15,5 @@
 
 ## 3. Delivery and closure
 
-- [ ] 3.1 Complete exact independent review and green CI; merge and verify the installed generic workflow reference through the ordinary release line.
-- [ ] 3.2 Record the verified workflow outcome and remaining limits; synchronize the delta and archive with strict validation before and after.
+- [x] 3.1 Complete exact independent review and green CI; merge and verify the installed generic workflow reference through the ordinary release line.
+- [x] 3.2 Record the verified workflow outcome and remaining limits; synchronize the delta and archive with strict validation before and after.
