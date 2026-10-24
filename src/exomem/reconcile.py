@@ -764,6 +764,7 @@ def reconcile(
         from . import vault as vault_module
 
         freshness.rebaseline(vault_root)
+        lexstore.rebase_current_catalog_lineage(vault_root)
         vault_module.clear_inbound_index()
 
     # Receipt evidence is intentionally repaired only here, after ordinary

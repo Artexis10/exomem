@@ -965,7 +965,7 @@ def test_inherited_catalog_warm_restores_concurrent_read_journaling(tmp_path: Pa
     store = lexstore.get_store(tmp_path)
     assert store._quiesce_live_wal()
 
-    store.rebase_inherited_checkpoints()
+    store.rebase_current_checkpoints()
 
     with sqlite3.connect(store.path) as conn:
         assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
