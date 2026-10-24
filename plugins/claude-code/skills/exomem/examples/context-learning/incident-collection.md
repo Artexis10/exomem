@@ -34,7 +34,7 @@ item_schema:
     target_ref: {type: link}
     write_receipts: {type: array, items: {type: link}}
     retrieval_check: {type: link}
-    answer_check: {type: link}
+    later_answer: {type: link}
     open_question: {type: string}
 ---
 ```
@@ -51,7 +51,7 @@ Different collections can declare different names for these roles:
 | Source-backed expectation | `source_evidence` | `basis` |
 | Context that reached the agent | `available_context` | `observed_input` |
 | Committed correction evidence | `write_receipts` | `change_proof` |
-| Retrieval and ordinary-answer checks | `retrieval_check`, `answer_check` | `checks` |
+| Retrieval and ordinary-answer checks | `retrieval_check`, `later_answer` | `checks` |
 | Unresolved evidence or behavior | `open_question` | `remaining_work` |
 
 Read the existing schema and map these meanings with the agent's judgment.
