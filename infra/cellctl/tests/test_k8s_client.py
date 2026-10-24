@@ -147,7 +147,7 @@ def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(c
     export_id = "00000000-0000-4000-8000-000000000001"
     name = "export-00000000000040008000000000000001"
     report = {"error": "EXPORT_FAILED", "diagnostic": {"type": "PortabilityError", "function": "_fail",
-              "code": "RESOURCE_LIMIT_EXCEEDED", "limit": "max_file_bytes", "errno": 28,
+              "code": "RESOURCE_LIMIT_EXCEEDED", "limit": "max_file_bytes", "cause": "OSError", "errno": 28,
               "message": "private-record", "path": "/private-record", "url": "https://private-record"}}
     pod = _job_pod(name, snapshot_id=json.dumps(report))
     pod.status.phase = "Failed"
@@ -158,6 +158,7 @@ def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(c
 
     assert observed.failed
     assert "RESOURCE_LIMIT_EXCEEDED" in caplog.text and "max_file_bytes" in caplog.text
+    assert '"cause": "OSError"' in caplog.text and '"errno": 28' in caplog.text
     assert "private-record" not in caplog.text
 
 

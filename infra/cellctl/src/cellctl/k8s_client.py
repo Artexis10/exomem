@@ -283,7 +283,7 @@ class ClusterClient:
             safe = {}
             if isinstance(detail, dict):
                 # The closed diagnostic wire fields carry code identifiers, never free-form error text.
-                for key in ("type", "function", "code", "limit"):
+                for key in ("type", "function", "code", "limit", "cause"):
                     value = detail.get(key)
                     if isinstance(value, str) and len(value) <= 80 and value.isascii() and value.isidentifier():
                         safe[key] = value
