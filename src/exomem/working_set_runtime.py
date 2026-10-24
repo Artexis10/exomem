@@ -1057,6 +1057,40 @@ def material_term_budget():
     return replace(budget, max_units=96, max_stems=128, common_after_units=budget.max_units)
 
 
+def pin_lexical_checkpoint(
+    vault_root: Path, snapshot, visible: Callable[[str], bool] | None
+) -> freshness.RecallFreshnessCheckpoint:
+    """Decide, once for the request, the checkpoint every lexical read of it uses.
+
+    The request's recall checkpoint, except for a restricted reader (`visible`
+    given) whose catalogue trails it only by pages that reader may not see
+    (`view_lag`): that catalogue holds every page the reader may see as it is
+    now, so the reader is served at the checkpoint the catalogue published. The
+    lexical lane, its dependence check and the role lanes then read one
+    checkpoint, with no second readiness call to race a repair. The owner
+    (`visible` None), a catalogue at the request's checkpoint and any other
+    lag keep the request's checkpoint and its readiness gate.
+
+    The request schedules no repair for a lag that only withheld pages cause:
+    the writer that made it announces the page and converges the catalogue.
+    The release decision on each hit stays per request, on the live file.
+    """
+    request = snapshot.recall_checkpoint("kb")
+    if visible is None:
+        return request
+    from . import lexstore
+
+    published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
+    # The catalogue's own comparison of what a checkpoint serves: corpus and admission policy.
+    served = lexstore._checkpoint_state  # noqa: SLF001
+    if published is None or served(published) == served(request):
+        return request
+    if not view_lag.recall_lag_only_withheld(vault_root, "kb", published, visible):
+        return request
+    snapshot.pin_lexical_checkpoint("kb", published)
+    return published
+
+
 def lexical_evidence(
     vault_root: Path,
     turn: str,
@@ -1066,17 +1100,15 @@ def lexical_evidence(
     freshness=None,
     recall_checkpoint=None,
     selection: dict | None = None,
-    visible: Callable[[str], bool] | None = None,
 ):
     """Rank only anchor pages in the maintained full-page text index.
 
     This is own-page retrieval evidence, not a second vote for title overlap.
     Unavailable FTS never falls back to a corpus walk or foreground repair.
 
-    The state is the catalogue's readiness. A catalogue that trails serves no
-    hits and reads as it is, except for a restricted reader (`visible` given)
-    when it trails only by pages that reader may not see: it is current for
-    that reader, so it serves and reads `available` (`_reader_lexical_query`).
+    The state is the catalogue's readiness at `recall_checkpoint`. A catalogue
+    that trails it serves no hits and reads as it is. A restricted reader's
+    request names the checkpoint it can be served (`pin_lexical_checkpoint`).
 
     Bounded on any turn: at most `ACTIVATION_LEXICAL_MAX_TERMS` of the
     turn's units, the rarest in the knowledge base, carrying at most
@@ -1092,11 +1124,10 @@ def lexical_evidence(
         return [], "available"
     turn = working_set_index.subject_text(turn)
     try:
-        result = _reader_lexical_query(
+        result = _lexical_query(
             vault_root,
             turn,
             set(by_path),
-            visible=visible,
             limit=limit,
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
@@ -1158,36 +1189,6 @@ def _lexical_query(
     )
 
 
-def _reader_lexical_query(
-    vault_root: Path,
-    words: str,
-    paths: set[str],
-    *,
-    visible: Callable[[str], bool] | None,
-    **query,
-):
-    """`_lexical_query`, serving a restricted reader a catalogue that trails only by
-    pages that reader may not see.
-
-    Such a catalogue holds every page the reader may see as it is now, so a write
-    to a page it may not see changes neither the hits nor their state (`view_lag`).
-    The query then reads the catalogue at its own checkpoint, once. Every other
-    lag, and the owner (`visible` None), keep the readiness gate: no hits, `stale`.
-    The release decision on each hit stays per request, on the live file.
-    """
-    result = _lexical_query(vault_root, words, paths, **query)
-    readiness = result.readiness
-    if (
-        visible is None
-        or readiness.status != "stale"
-        or not view_lag.recall_lag_only_withheld(vault_root, "kb", readiness.published, visible)
-    ):
-        return result
-    return _lexical_query(
-        vault_root, words, paths, **{**query, "recall_checkpoint": readiness.published}
-    )
-
-
 def lexical_hits_without(
     vault_root: Path,
     turn: str,
@@ -1196,7 +1197,6 @@ def lexical_hits_without(
     *,
     freshness=None,
     recall_checkpoint=None,
-    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
     """Which of `pages` the activation lexical query still reaches for `turn`
     when the stems of the `left_out` words are not counted
@@ -1217,11 +1217,10 @@ def lexical_hits_without(
     if not pages:
         return frozenset()
     try:
-        result = _reader_lexical_query(
+        result = _lexical_query(
             vault_root,
             turn,
             set(pages),
-            visible=visible,
             limit=len(pages),
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,

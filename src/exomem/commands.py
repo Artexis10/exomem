@@ -7109,11 +7109,18 @@ def _op_activate_context_body(
         # counts only, so the diagnostic never carries the turn's words.
         lexical_selection: dict[str, int] = {}
         with find_types.timing_span(timings, "working_set.lexical"):
+            # `None` for the owner, whose lexical state stays vault-wide.
+            reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
+            # The one checkpoint every lexical read of this request uses: the lexical
+            # lane, the dependence check and the role lanes (through the snapshot).
+            lexical_checkpoint = (
+                working_set_runtime_module.pin_lexical_checkpoint(vault_root, snapshot, reader_view)
+                if snapshot
+                else None
+            )
             if anchor and trigger == "user_turn":
                 hits, lexical_state = [], "agent_choice"
             else:
-                # `None` for the owner, whose lexical state stays vault-wide.
-                reader_view = egress_module.visible_page_filter(vault_root, purpose=purpose)
                 hits, lexical_state = working_set_runtime_module.lexical_evidence(
                     vault_root,
                     turn,
@@ -7124,9 +7131,8 @@ def _op_activate_context_body(
                         else ACTIVATE_RETRIEVAL_LIMIT
                     ),
                     freshness=lexical_freshness,
-                    recall_checkpoint=(snapshot.recall_checkpoint("kb") if snapshot else None),
+                    recall_checkpoint=lexical_checkpoint,
                     selection=lexical_selection,
-                    visible=reader_view,
                 )
         lexical_seconds = max(0.0, time.monotonic() - lexical_started)
         if timings is not None and lexical_selection:

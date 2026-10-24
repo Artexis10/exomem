@@ -30,6 +30,7 @@ def only_withheld(
     visible: Callable[[str], bool],
     *,
     pending: bool = False,
+    withheld_before: Callable[[frozenset[str]], frozenset[str]] | None = None,
 ) -> bool:
     """Whether the lag `delta` names changes nothing this caller may see.
 
@@ -39,9 +40,16 @@ def only_withheld(
     `pending`, the external events the registry has observed but not yet
     published count as lag too.
 
+    `visible` keeps a path that is no longer a page, so a deleted page reads as
+    one the caller may see. `withheld_before`, when given, names which of the
+    deleted paths this caller's earlier verdict already held as withheld before
+    the page left; the caller never saw such a page, so its leaving changes
+    nothing it could see.
+
     True only when the delta is bridged, small and made wholly of paths that
-    `visible` rejects. Every other case reports the lag: an unbridgeable delta
-    says nothing about what changed, so the structure cannot be called complete.
+    `visible` rejects or `withheld_before` names. Every other case reports the
+    lag: an unbridgeable delta says nothing about what changed, so the structure
+    cannot be called complete.
     """
     if not delta.complete or getattr(delta, "requires_source_proof", False):
         return False
@@ -52,19 +60,31 @@ def only_withheld(
         paths |= freshness.external_pending_paths(vault_root)
     if len(paths) > MAX_DECIDED_PATHS:
         return False
+    deleted = set(delta.deleted) - set(delta.changed) if withheld_before is not None else set()
+    proven: frozenset[str] | None = None
     for path in paths:
         rel = freshness.registry_rel(vault_root, path)
-        # `visible` keeps a path that is no longer a page (a deleted one), and a
-        # path that cannot be decided counts as visible: the truthful answer
-        # when what the caller could have seen is unknown. No published state
-        # holds a reader's earlier verdict for a path (task 3.15's admitted sets
-        # will), so a deleted withheld page still reports.
+        # A path that cannot be decided counts as visible: the truthful answer
+        # when what the caller could have seen is unknown.
         try:
-            if rel is None or visible(rel):
+            if rel is None:
                 return False
+            if visible(rel):
+                if path not in deleted:
+                    return False
+                if proven is None:
+                    proven = withheld_before(_rels(vault_root, deleted))
+                if rel not in proven:
+                    return False
         except Exception:  # noqa: BLE001 - an undecidable path is counted visible
             return False
     return True
+
+
+def _rels(vault_root: Path, paths: set[Any]) -> frozenset[str]:
+    return frozenset(
+        rel for path in paths if (rel := freshness.registry_rel(vault_root, path)) is not None
+    )
 
 
 def recall_lag_only_withheld(
@@ -88,4 +108,31 @@ def recall_lag_only_withheld(
         current.access_policy_fingerprint,
     ):
         return False
-    return only_withheld(vault_root, freshness.recall_delta_since(vault_root, scope, built), visible)
+    return only_withheld(
+        vault_root,
+        freshness.recall_delta_since(vault_root, scope, built),
+        visible,
+        withheld_before=_held_withheld(vault_root, scope, built, visible),
+    )
+
+
+def _held_withheld(
+    vault_root: Path,
+    scope: str,
+    built: freshness.RecallFreshnessCheckpoint,
+    visible: Callable[[str], bool],
+) -> Callable[[frozenset[str]], frozenset[str]] | None:
+    """What the lexical catalogue's published verdicts already hold as withheld for this caller.
+
+    Valid only while the catalogue is at `built`, which the proof itself
+    re-checks. A caller that offers no admission identity has no published
+    verdicts, so none of its deleted paths is proven.
+    """
+    from . import lexstore
+    from .published_admission import admission_of
+
+    admission = admission_of(visible)
+    if admission is None:
+        return None
+    store = lexstore.get_store(vault_root)
+    return lambda paths: store.published_withheld_paths(scope, built, admission, paths)

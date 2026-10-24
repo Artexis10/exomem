@@ -7505,8 +7505,11 @@ def visible_page_filter(
     withheld pages. A reference to an existing or erased page is decided.
     """
     keep = restricted_release_filter(vault_root, principal=principal, purpose=purpose)
-    if keep is None:
-        return None
+    return None if keep is None else page_filter_over(vault_root, keep)
+
+
+def page_filter_over(vault_root: Path, keep: Callable[[str], bool]) -> Callable[[str], bool]:
+    """`visible_page_filter` over a release decision `keep` that the caller already built."""
     root = Path(vault_root)
     offered = admission_of(keep)
 

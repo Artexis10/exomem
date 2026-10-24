@@ -1104,10 +1104,6 @@ class CatalogReadiness:
     status: str
     complete: bool
     backend: str
-    #: The checkpoint the sidecar held when it trailed the requested one, so a
-    #: reader can ask which changes it lacks (`view_lag`). None for every other
-    #: verdict, which leaves the cause unknown. Not part of the verdict itself.
-    published: Any = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3527,12 +3523,15 @@ def eligibility_metadata_result(
     parents_only: bool = False,
     include_ranking: bool = False,
     include_occurrences: bool = False,
+    recall_checkpoint: Any | None = None,
 ) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
     """Exact filter views and parent hints from one proven catalogue snapshot.
 
     `parents_only` reads no filter view: its rows carry only the parent and
     `updated`, for a caller that decides on parents alone (recall admission).
     `include_ranking` adds snapshot-bound search and interpretation inputs.
+    `recall_checkpoint` names the published projection to read, as for
+    `search_bm25_result`.
     """
     if not _catalog_usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
@@ -3545,6 +3544,7 @@ def eligibility_metadata_result(
             include_occurrences=include_occurrences,
         ),
         "lexical eligibility metadata query failed (%s); filter eligibility declines",
+        recall_checkpoint=recall_checkpoint,
     )
 
 
@@ -8828,7 +8828,7 @@ class LexicalStore:
                 # The stored checkpoint differs from the target; the worker's catch-up
                 # must prove it exactly current, or the full pass runs.
                 _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
-            return CatalogReadiness("stale", False, backend_name, published=checkpoint)
+            return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(
                 e,
@@ -9215,6 +9215,44 @@ class LexicalStore:
             return None
         verdicts = self._publish_verdicts(plan, admission)
         return frozenset(path for path, allowed in verdicts.items() if allowed)
+
+    def published_withheld_paths(
+        self,
+        scope: str,
+        checkpoint: Any | None,
+        admission: Admission,
+        paths: Set[str],
+    ) -> frozenset[str]:
+        """The `paths` that `admission`'s identity already holds as withheld at `checkpoint`.
+
+        A proof, not a decision: it reads published verdicts and decides nothing,
+        publishes nothing, schedules nothing and opens no page. A path is named
+        only while the sidecar is the one `checkpoint` names and the verdict
+        entry is the one for this exact catalogue generation, so the verdict
+        describes the row as it stands. Tombstones sit in the identity, so an
+        erased page is never named. The caller treats every other path as
+        undecided, and an undecided path is one it may see.
+        """
+        identity = admission.identity()
+        backend_name = backend()
+        if (
+            identity is None or not paths or backend_name == "python"
+            or self._failed or not self.path.exists()
+        ):
+            return frozenset()
+        try:
+            with self._query_connection() as conn:
+                if not self._recall_checkpoint_current(conn, scope, checkpoint):
+                    return frozenset()
+                generation = self._snapshot_generation(conn)
+        except sqlite3.Error as error:
+            self._catalog_readiness_error(error, backend_name, schedule_repair=False)
+            return frozenset()
+        with self._term_frequency_cache_lock:
+            entry = self._published_verdicts.get((scope, identity))
+        if entry is None or entry.generation != generation:
+            return frozenset()
+        return frozenset(path for path in paths if entry.allowed.get(path) is False)
 
     @staticmethod
     def _page_signatures(conn: sqlite3.Connection, col: str) -> dict[str, tuple]:
