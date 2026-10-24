@@ -9,6 +9,11 @@ becoming indexable units. Observation category is open vocabulary, page `tags`
 remain secondary retrieval labels, and a valid non-empty block headed by a
 governed rich kind is the alternative when richer semantics are intended.
 
+Each `## Relations` line below shows one registered relation that often fits that
+page type; it is an example, not a default. State the meaning the note actually
+has with the registered relation that fits (resolve it first), use `relates_to`
+only for a real generic connection, and write no edge when no meaning is known.
+
 ## source
 
 **Location:** `Sources/<Kind>/` — the directory is a *projection* of `source_type`, with `domain` adding one level below it when present, e.g. `Sources/Articles/`, `Sources/Papers/`, `Sources/Reports/Travel/`, `Sources/Invoices/Equipment/`. The semantic metadata is authoritative; the folder is derived from it and is never deeper than `Sources/<Kind>/<Domain>/`.
@@ -86,7 +91,7 @@ The substance. Multiple subsections OK.
 
 ## Relations
 
-- relates_to [[Knowledge Base/Entities/Concepts/Agentic RAG]]
+- about_entity [[Knowledge Base/Entities/Concepts/Agentic RAG]]
 
 ## Open threads
 
@@ -139,7 +144,7 @@ What could weaken or invalidate this insight.
 
 ## Relations
 
-- relates_to [[...]]
+- derived_from [[...]]
 ```
 
 ## failure
@@ -186,7 +191,7 @@ What changed (or should change) to prevent recurrence.
 
 ## Relations
 
-- relates_to [[...]]
+- caused_by [[...]]
 ```
 
 ## pattern
@@ -233,7 +238,7 @@ Conditions where it's a regression.
 
 ## Relations
 
-- relates_to [[...]]
+- mitigates [[...]]
 ```
 
 ## experiment
@@ -300,7 +305,7 @@ What you learned. May be inconclusive — that's a valid result.
 
 ## Relations
 
-- relates_to [[...]]
+- tests [[...]]
 ```
 
 ### Closing the loop: predictions, check dates, and verdicts
@@ -422,7 +427,7 @@ Filled once outcomes have settled. What worked, what to keep / change / drop nex
 
 ## Relations
 
-- relates_to [[...]]
+- implements [[...]]
 ```
 
 ### Production-log vs experiment
@@ -523,7 +528,7 @@ What this person is relevant to in your work.
 
 ## Relations
 
-- relates_to [[...]]
+- member_of [[...]]
 ```
 
 `## Contact` is optional. Keep contact details in `[contact]` units there, never in
@@ -531,7 +536,8 @@ the summary or in `fact` units: activation serves them only when the turn asks t
 the person.
 
 On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical
-topic-to-person edge. Entity-side `relates_to` remains valid connective tissue.
+topic-to-person edge. On the entity page, prefer a specific relation such as
+`member_of`; `relates_to` stays honest only for a real generic connection.
 
 ### Organizations
 
@@ -586,7 +592,7 @@ What this commits us to and what it forecloses.
 
 ## Relations
 
-- relates_to [[...]]
+- resolves [[...]]
 ```
 
 ## Naming conventions summary
