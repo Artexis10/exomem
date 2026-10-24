@@ -1702,6 +1702,37 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     assert titles(service.root, CID) == ["Canonical", "Late committed"]
 
 
+def test_accepted_store_work_can_finish_its_bulk_dependency(service, monkeypatch):
+    """A caller waiting for accepted work must not keep that work's bulk dependency parked."""
+    from contextlib import contextmanager
+
+    from exomem import foreground_priority
+
+    caller = threading.current_thread()
+    queue_wait_finished = threading.Event()
+    awaiting_bulk = foreground_priority.awaiting_bulk
+
+    @contextmanager
+    def observe_queue_wait():
+        with awaiting_bulk():
+            yield
+        if threading.current_thread() is caller:
+            queue_wait_finished.set()
+
+    monkeypatch.setattr(foreground_priority, "awaiting_bulk", observe_queue_wait)
+
+    def finish_bulk_dependency():
+        assert queue_wait_finished.wait(5), "the caller did not finish its queue wait"
+        with foreground_priority.foreground():
+            with foreground_priority.outside_foreground(), foreground_priority.bulk():
+                foreground_priority.yield_to_foreground()
+                return foreground_priority.foreground_elsewhere()
+
+    server = runtime._server(service.root)
+    with foreground_priority.foreground():
+        assert server.call(finish_bulk_dependency, wake_maintenance=False) is False
+
+
 def test_queued_mutation_timeout_never_executes(service, monkeypatch):
     """A request refused before acceptance must leave no later row behind."""
     import threading

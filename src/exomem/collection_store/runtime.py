@@ -1156,7 +1156,12 @@ class StoreServer:
                         # Do not retain the request through an exception/traceback cycle.
                         del error
                 self._condition.wait(remaining)
-        if not request.done.wait(max(0.0, completion_deadline - time.monotonic())):
+        # The worker owns accepted work's priority; a waiting caller must not park its bulk dependencies.
+        waiting = (foreground_priority.awaiting_bulk if foreground_priority._holds_a_boundary()
+                   else foreground_priority.outside_foreground)
+        with waiting():
+            completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
+        if not completed:
             # Accepted work survives the wait deadline so its outcome and replay remain owned.
             raise OpError(
                 "MUTATION_ACKNOWLEDGEMENT_PENDING",
@@ -1201,6 +1206,8 @@ class StoreServer:
     def _run(self):
         try:
             while not self._stopping():
+                # Routing demand can precede queue insertion; yield outside every checkout before checking the queue.
+                foreground_priority.yield_to_foreground()
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
@@ -1240,8 +1247,10 @@ class StoreServer:
             return False
         with self._condition:
             notified = any(not checked for checked in self._view_changes.values())
-        return notified or (self._ticks["views"] <= now and self._edit_back is not None
-                            and self._edit_back.wait(now) <= 0)
+        return notified or (self._ticks["views"] <= now and (
+            self._views_after is not None or self._views_passes == 1
+            or self._edit_back is not None and self._edit_back.wait(now) <= 0
+        ))
 
     def take_view_hints(self):
         """Transfer retained path/move/directory hints and the overflow flag to the store's census.
@@ -1610,14 +1619,18 @@ class StoreServer:
                     self._views_after, self._views_passes = None, 0
                     return min(wait, IMPORT_IDLE_SECONDS)
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                result = _mutate(self.root, writer.reconcile_views, limit=VIEW_BATCH_PATHS,
-                                 after=self._views_after, pending_only=True,
-                                 missing_ready=writer.handle.census(self.root).missing_ready if views else None)
+                # Finish one path even under continuous demand; release its boundary before checking for readers.
+                for _ in range(VIEW_BATCH_PATHS):
+                    result = _mutate(self.root, writer.reconcile_views, limit=1,
+                                     after=self._views_after, pending_only=True,
+                                     missing_ready=writer.handle.census(self.root).missing_ready if views else None)
+                    self._views_after = result["next_path"]
+                    if self._views_after is None or self._aside() or self._stopping():
+                        break
         except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
             logger.warning("pending collection views could not publish; retrying later", exc_info=True)
             self._views_after = None
             return min(wait, IMPORT_RETRY_SECONDS)
-        self._views_after = result["next_path"]
         if self._views_after is None:
             self._views_passes += 1
         return min(wait, 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS)
