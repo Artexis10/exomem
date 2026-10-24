@@ -2,11 +2,7 @@
 {{- fail "cloudGateway.artifactTransportEnabled requires artifactBroker.enabled" }}
 {{- end }}
 {{- if .Values.artifactBroker.enabled }}
-{{- range $cidr := list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "169.254.0.0/16" }}
-{{- if not (has $cidr $.Values.cells.jobEgressExcept) }}
-{{- fail (printf "artifactBroker requires cells.jobEgressExcept to include %s" $cidr) }}
-{{- end }}
-{{- end }}
+{{- include "exomem.requirePrivateRangesDenied" (dict "root" . "feature" "artifactBroker") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

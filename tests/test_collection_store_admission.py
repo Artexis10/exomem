@@ -119,6 +119,31 @@ def test_completed_admission_keeps_its_published_intent_and_file_authority(produ
     assert replica.file_writer_marker(session.root) == authority.read_marker(session.root)
 
 
+@pytest.mark.parametrize("published", ["before_epoch_bookkeeping", "under_an_older_lease_epoch"])
+def test_file_authority_follows_the_published_lease_epoch(producer, published):
+    """A replica from before the epoch keys still admits file writers; one from an older epoch does not.
+
+    Without the first, a follower whose store producer stays closed never regains the writer lease.
+    """
+    from exomem.collection_store import replica, schema
+
+    session, manager, _ = producer
+    assert create(producer)["status"] == "marker_admitted"
+    with manager.mutation_guard(session.root), manager._collection_store.checkout() as writer:
+        result = replica.publish_replica(
+            session.root, writer.handle, authority_check=lambda: True, deadline=time.monotonic() + 5,
+        )
+    assert result.status == "published", result
+    with closing(sqlite3.connect(session.path)) as store, store:
+        if published == "before_epoch_bookkeeping":
+            store.execute("DELETE FROM store_meta WHERE key IN (?,?)",
+                          (schema.META_PUBLISHED_REPLICA_EPOCH, schema.META_PUBLISHED_INTENT_SHA256))
+        else:
+            store.execute("UPDATE store_meta SET value='next' WHERE key=?", (schema.META_LEASE_EPOCH,))
+    expected = authority.read_marker(session.root) if published == "before_epoch_bookkeeping" else None
+    assert replica.file_writer_marker(session.root) == expected
+
+
 def test_new_intent_during_completed_intent_verification_does_not_borrow_its_proof(producer, monkeypatch):
     """A concurrent export remains pending even when the installed copy holds a completed create."""
     from exomem.collection_store import replica

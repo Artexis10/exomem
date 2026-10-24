@@ -549,6 +549,89 @@ def test_cloud_tool_list_allows_staged_adoption(
         _teardown_activation(mcp)
 
 
+def test_only_a_cloud_cell_lists_the_control_plane_transfer_tools(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gateway serves these tools, so a cell lists them for the registry's schemas
+    and annotations. A local server that listed them would offer tools nothing answers."""
+    transfer_tools = {"observe_transfer", "transfer_memory"}
+    assert {c.public_name for c in commands_module.PRODUCT_COMMANDS if c.cloud_only} == transfer_tools
+
+    mcp, _ = _build_cloud_server(monkeypatch)
+    try:
+        cloud = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    finally:
+        _teardown_activation(mcp)
+    assert transfer_tools <= set(cloud)
+    observe, transfer = cloud["observe_transfer"], cloud["transfer_memory"]
+
+    def hints(tool) -> dict:
+        wire = tool.to_mcp_tool().model_dump(mode="json", by_alias=True, exclude_none=True)
+        return {k: wire["annotations"][k] for k in ("readOnlyHint", "destructiveHint", "openWorldHint")}
+
+    assert hints(observe) == {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
+    assert hints(transfer) == {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False}
+    assert observe.parameters["properties"]["action"]["enum"] == ["status", "import_handoff"]
+    assert transfer.parameters["properties"]["action"]["enum"] == [
+        "import_cancel",
+        "import_discard",
+        "export_request",
+    ]
+    assert transfer.parameters["required"] == ["action"]
+
+    monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
+    local = server.build_server(require_auth=False)
+    try:
+        assert not transfer_tools & {tool.name for tool in asyncio.run(local.list_tools())}
+    finally:
+        _teardown_activation(local)
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_a_transfer_call_that_reaches_a_cell_is_refused_before_the_writer_lease(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, read_only: bool
+) -> None:
+    """The write tool must answer CLOUD_GATEWAY_REQUIRED even on a read-only cell, which
+    would otherwise answer CLOUD_CELL_READ_ONLY. Tripping `invoke_command` proves the
+    refusal comes before the dispatcher that takes the lease and writes receipts."""
+    from exomem import writer_lease
+
+    def dispatcher_must_not_run(*args, **kwargs):
+        raise AssertionError("a control-plane command reached the writer-lease dispatcher")
+
+    monkeypatch.setattr(writer_lease, "invoke_command", dispatcher_must_not_run)
+    mcp, _ = _build_cloud_server(monkeypatch, read_only=read_only)
+    try:
+        app = mcp.http_app(stateless_http=True, json_response=True)
+
+        async def scenario():
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://cell.local"
+                ) as client:
+                    await _initialize(client, token=TOKEN)
+                    observe = await _call_tool(
+                        client, token=TOKEN, name="observe_transfer", arguments={}, request_id=3
+                    )
+                    transfer = await _call_tool(
+                        client,
+                        token=TOKEN,
+                        name="transfer_memory",
+                        arguments={"action": "export_request", "confirm": True},
+                        request_id=4,
+                    )
+                    return observe, transfer
+
+        for response in asyncio.run(scenario()):
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["isError"] is False, result
+            assert result["structuredContent"]["success"] is False
+            assert result["structuredContent"]["error"]["code"] == "CLOUD_GATEWAY_REQUIRED"
+    finally:
+        _teardown_activation(mcp)
+
+
 def test_cloud_never_registers_legacy_aliases_even_with_the_opt_in_set(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

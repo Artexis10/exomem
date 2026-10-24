@@ -159,6 +159,7 @@ _CREATE_ENTITY_FIELDS = frozenset(
         "decision_status",
         "identity_decision",
         "facets",
+        "relations",
     }
 )
 _ACCEPT_RELATION_FIELDS = frozenset({"ref", "expected_hash", "why", "expected_fingerprint"})

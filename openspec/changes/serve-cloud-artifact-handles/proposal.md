@@ -8,7 +8,7 @@ Cloud exposes file-handle preservation but its runtime cannot resolve or retriev
 
 - Add an internal artifact broker that uses the existing safe-fetch implementation and streams only exact gateway-authorized HTTPS file handles.
 - Carry a short-lived, cell-bound fetch grant in a private gateway header, never in tool arguments or public responses.
-- Permit runtime egress only to the broker's fixed port. Keep cell DNS, internet, metadata and cross-cell access denied; leave gateway public egress denied.
+- Permit runtime egress only to the broker's fixed port. Keep cell DNS, internet, metadata and cross-cell access denied; leave gateway public egress denied (amended 2026-10-24 by `add-cloud-transfer-tools`: denied unless `cloudGateway.transferTools.enabled` is set, which adds TCP 443 to public addresses except `cells.jobEgressExcept`).
 - Stage broker responses through the current artifact loops and commit through the existing Sources/Evidence writers and canonical receipts.
 - Let one fleet switch give every cell, including cells created later, the broker after it has served an explicit canary list. The list keeps working beside the switch.
 - Keep transport configuration default-off. Missing broker configuration or unavailable transport reports a bounded artifact failure, never a successful preservation or direct-network fallback. Ordinary tools and desktop retrieval are unchanged.
