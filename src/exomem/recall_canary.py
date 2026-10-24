@@ -512,6 +512,35 @@ def validate_target(value: str | None) -> None:
         raise ValueError("invalid target")
 
 
+def _http_diagnostics_factory(observations):
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    async def observe_response(response):
+        # Bound protocol metadata; URLs, headers and bodies never enter the report.
+        if len(observations["responses"]) >= 16:
+            observations["truncated"] = True
+            return
+        try:
+            observations["responses"].append(
+                {
+                    "method": response.request.method,
+                    "status_code": response.status_code,
+                    "observed_at": time.time(),
+                }
+            )
+        except Exception:  # noqa: BLE001 - optional diagnostics must not change a response
+            observations["capture_incomplete"] = True
+
+    def client_factory(headers=None, timeout=None, auth=None, follow_redirects=False):
+        # The transport constrains redirects per request; preserve the SDK client defaults.
+        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        client.event_hooks.setdefault("response", []).append(observe_response)
+        observations["client_created"] = True
+        return client
+
+    return client_factory
+
+
 def run_cli(args) -> int:
     from exomem.log_events import JsonLinesFormatter
 
@@ -552,9 +581,17 @@ def run_cli(args) -> int:
             # logs can contain remote errors, endpoint URLs or server material.
             previous_logging = logging.root.manager.disable
             logging.disable(logging.CRITICAL)
+            http_observations = {
+                "client_created": False,
+                "responses": [],
+                "truncated": False,
+                "capture_incomplete": False,
+            }
             try:
                 transport = StreamableHttpTransport(
-                    args.mcp_url, headers={"Authorization": f"Bearer {token}"}
+                    args.mcp_url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    httpx_client_factory=_http_diagnostics_factory(http_observations),
                 )
                 report = asyncio.run(
                     run_mcp_canary(
@@ -583,6 +620,7 @@ def run_cli(args) -> int:
                 }
             finally:
                 logging.disable(previous_logging)
+            report["http_transport_observations"] = http_observations
             _canary_warning(report)
     report.setdefault("started_at", started)
     report.setdefault("ended_at", time.time())

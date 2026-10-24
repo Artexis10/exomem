@@ -841,6 +841,76 @@ def test_connection_error_details_bound_duplicate_groups_and_cycles():
     assert "private" not in json.dumps(details)
 
 
+@pytest.mark.parametrize(
+    ("http_status", "mcp_error", "truncated"),
+    [(401, -32603, False), (200, -32603, False), (307, -32600, True)],
+)
+def test_cli_distinguishes_http_refusal_from_jsonrpc_error_before_sdk_mapping(
+    tmp_path, monkeypatch, capsys, http_status, mcp_error, truncated
+):
+    import httpx2 as httpx
+
+    clients = []
+
+    def reply(request):
+        assert request.headers["Authorization"] == "Bearer example-secret"
+        if http_status == 307:
+            return httpx.Response(307, headers={"Location": "/mcp"}, text="private-response")
+        if http_status == 200 and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": json.loads(request.content)["id"],
+                    "error": {"code": -32603, "message": "private-response"},
+                },
+            )
+        return httpx.Response(http_status, text="private-response")
+
+    class OfflineHTTPClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(reply), **kwargs)
+            clients.append(self)
+
+    monkeypatch.setattr(httpx, "AsyncClient", OfflineHTTPClient)
+    monkeypatch.setenv("TEST_CANARY_TOKEN", "example-secret")
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([_canary_case()]))
+    status = gate.main(
+        [
+            "--mcp-url", "https://example.invalid/mcp", "--cases", str(cases),
+            "--token-env", "TEST_CANARY_TOKEN", "--package-mode", "source",
+            "--check", "availability",
+        ]
+    )
+
+    output = capsys.readouterr()
+    report = json.loads(output.out)
+    assert status == 1
+    assert report["failure_phase"] == "connect"
+    assert report["failure_details"]["mcp_error_codes"] == [mcp_error]
+    assert report["failure_details"]["http_status_codes"] == []
+    assert report["cases"][0]["attempts"] == []
+    observed = report["http_transport_observations"]
+    assert observed["client_created"] is True
+    assert observed["truncated"] is truncated
+    assert observed["capture_incomplete"] is False
+    if truncated:
+        assert len(observed["responses"]) == 16
+    assert any(
+        response["method"] == "POST" and response["status_code"] == http_status
+        for response in observed["responses"]
+    )
+    assert all(
+        report["started_at"] <= response["observed_at"] <= report["ended_at"]
+        for response in observed["responses"]
+    )
+    assert clients and all(client.is_closed for client in clients)
+    assert all(client.follow_redirects is False for client in clients)
+    for secret in ("example-secret", "example.invalid", "private-response", "private-question"):
+        assert secret not in output.out + output.err
+
+
 def test_one_successful_sample_proves_availability_without_accepting_latency(tmp_path):
     from fastmcp import FastMCP
 
