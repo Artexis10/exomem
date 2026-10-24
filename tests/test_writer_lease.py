@@ -3928,11 +3928,17 @@ class Clock:
         return self.value
 
 
-@pytest.mark.parametrize("takeover", [False, True], ids=["renew", "fenced"])
+@pytest.mark.parametrize("loss", [None, "noticed", "lapsed", "unnoticed"],
+                         ids=["renew", "fenced", "lapsed", "taken-unnoticed"])
 def test_cli_curation_preparation_keeps_lease_authority_without_applying_notes(
-    tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch, capsys, takeover: bool
+    tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch, capsys, loss: str | None
 ) -> None:
-    """A proposal must survive preparation that outlasts its initial lease."""
+    """A proposal must survive preparation that outlasts its initial lease.
+
+    A grant lost during preparation fences the proposal, whether this replica's
+    renewer saw the loss (`noticed`) or only the coordinator knows it: the grant
+    lapsed (`lapsed`) or another writer took it (`unnoticed`) while renewals failed.
+    """
     from exomem import __main__ as cli_main
     from exomem import curation
 
@@ -3958,12 +3964,23 @@ def test_cli_curation_preparation_keeps_lease_authority_without_applying_notes(
             renewed.set()
             return record
 
-    monkeypatch.setattr(client, "renew", record_renewal)
+    def failing_renewal(token: int) -> LeaseRecord:
+        raise OpError("WRITER_COORDINATOR_UNAVAILABLE", "coordinator unreachable")
+
+    monkeypatch.setattr(
+        client, "renew", record_renewal if loss in (None, "noticed") else failing_renewal
+    )
     real_prepare = curation._prepare_step
 
     def slow_preparation(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         prepared = real_prepare(*args, **kwargs)
-        if takeover:
+        if loss in ("lapsed", "unnoticed"):
+            with clock_lock:
+                clock.value = 111
+                if loss == "unnoticed":
+                    assert store.acquire("main", "other-writer", 10)["fencing_token"] == 2
+            return prepared
+        if loss == "noticed":
             with clock_lock:
                 clock.value = 111
                 assert store.acquire("main", "other-writer", 10)["fencing_token"] == 2
@@ -4001,11 +4018,14 @@ def test_cli_curation_preparation_keeps_lease_authority_without_applying_notes(
             "--plan", json.dumps(plan), "--json",
         ])
         terminal = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-        if takeover:
+        if loss is not None:
             assert code == 1, terminal
             assert terminal["error"]["code"] == "WRITER_FENCED"
-            assert store.status("main")["fencing_token"] == 2
-            assert store.status("main")["holder"] == "other-writer"
+            runs = curation.CurationStore(vault).root
+            assert not runs.exists() or not any(runs.iterdir())
+            if loss != "lapsed":
+                assert store.status("main")["fencing_token"] == 2
+                assert store.status("main")["holder"] == "other-writer"
         else:
             assert code == 0, terminal
             proposed = terminal["data"]
