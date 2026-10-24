@@ -1,0 +1,232 @@
+{
+ "case": {
+  "case_id": "plan-triage-item-s101",
+  "params": {
+   "horizon": "week",
+   "items": [
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "critical",
+     "status": "active",
+     "title": "Audit the release notes"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "medium",
+     "status": "blocked",
+     "title": "Draft the release notes"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "month",
+     "priority": "high",
+     "status": "active",
+     "title": "Ship the onboarding guide"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "quarter",
+     "priority": "critical",
+     "status": "planned",
+     "title": "Ship the pricing page"
+    }
+   ],
+   "target": 3
+  },
+  "seed": 101,
+  "template": "plan-triage-item"
+ },
+ "case_id": "plan-triage-item-s101",
+ "end_state_after": {
+  "collections": {
+   "Knowledge Base/Planning/Work/_collection.md": {
+    "fields": {
+     "area": {
+      "required": false,
+      "type": "string"
+     },
+     "commitment": {
+      "required": false,
+      "type": "string"
+     },
+     "health": {
+      "required": false,
+      "type": "string"
+     },
+     "horizon": {
+      "required": false,
+      "type": "string"
+     },
+     "kind": {
+      "required": false,
+      "type": "string"
+     },
+     "lifecycle": {
+      "required": false,
+      "type": "string"
+     },
+     "parent": {
+      "required": false,
+      "type": "string"
+     },
+     "priority": {
+      "required": false,
+      "type": "string"
+     },
+     "status": {
+      "required": false,
+      "type": "string"
+     },
+     "title": {
+      "required": true,
+      "type": "string"
+     }
+    },
+    "natural_key": [
+     "title"
+    ],
+    "profile": "planning",
+    "rows": [
+     {
+      "commitment": "committed",
+      "health": "unknown",
+      "horizon": "month",
+      "kind": "outcome",
+      "lifecycle": "active",
+      "priority": "high",
+      "status": "active",
+      "title": "Ship the onboarding guide"
+     },
+     {
+      "commitment": "committed",
+      "health": "unknown",
+      "horizon": "week",
+      "kind": "outcome",
+      "lifecycle": "active",
+      "priority": "critical",
+      "status": "active",
+      "title": "Audit the release notes"
+     },
+     {
+      "commitment": "committed",
+      "health": "unknown",
+      "horizon": "week",
+      "kind": "outcome",
+      "lifecycle": "active",
+      "priority": "critical",
+      "status": "active",
+      "title": "Ship the pricing page"
+     },
+     {
+      "commitment": "committed",
+      "health": "unknown",
+      "horizon": "week",
+      "kind": "outcome",
+      "lifecycle": "active",
+      "priority": "medium",
+      "status": "blocked",
+      "title": "Draft the release notes"
+     }
+    ],
+    "title": "Planning work"
+   }
+  }
+ },
+ "end_state_before": {
+  "collections": {
+   "Knowledge Base/Planning/Work/_collection.md": {
+    "fields": {
+     "area": {
+      "required": false,
+      "type": "string"
+     },
+     "commitment": {
+      "required": false,
+      "type": "string"
+     },
+     "health": {
+      "required": false,
+      "type": "string"
+     },
+     "horizon": {
+      "required": false,
+      "type": "string"
+     },
+     "kind": {
+      "required": false,
+      "type": "string"
+     },
+     "lifecycle": {
+      "required": false,
+      "type": "string"
+     },
+     "parent": {
+      "required": false,
+      "type": "string"
+     },
+     "priority": {
+      "required": false,
+      "type": "string"
+     },
+     "status": {
+      "required": false,
+      "type": "string"
+     },
+     "title": {
+      "required": true,
+      "type": "string"
+     }
+    },
+    "natural_key": [
+     "title"
+    ],
+    "profile": "planning",
+    "rows": [
+     {
+      "commitment": "committed",
+      "health": "unknown",
+      "horizon": "month",
+      "kind": "outcome",
+      "lifecycle": "active",
+      "priority": "high",
+      "status": "active",
+      "title": "Ship the onboarding guide"
+     },
+     {
+      "commitment": "committed",
+      "health": "unknown",
+      "horizon": "week",
+      "kind": "outcome",
+      "lifecycle": "active",
+      "priority": "critical",
+      "status": "active",
+      "title": "Audit the release notes"
+     },
+     {
+      "commitment": "committed",
+      "health": "unknown",
+      "horizon": "week",
+      "kind": "outcome",
+      "lifecycle": "active",
+      "priority": "medium",
+      "status": "blocked",
+      "title": "Draft the release notes"
+     },
+     {
+      "commitment": "considering",
+      "health": "unknown",
+      "horizon": "quarter",
+      "kind": "outcome",
+      "lifecycle": "active",
+      "priority": "critical",
+      "status": "planned",
+      "title": "Ship the pricing page"
+     }
+    ],
+    "title": "Planning work"
+   }
+  }
+ }
+}

@@ -1,0 +1,157 @@
+{
+  "_about": "Draw pools for case parameters. Test data the generator samples from, not a vocabulary any code branches on; edit this file to change what new cases draw.",
+  "trackers": [
+    {
+      "title": "Coffee log",
+      "dir": "Coffee",
+      "measure": "cups"
+    },
+    {
+      "title": "Run log",
+      "dir": "Runs",
+      "measure": "km"
+    },
+    {
+      "title": "Sleep log",
+      "dir": "Sleep",
+      "measure": "hours"
+    },
+    {
+      "title": "Reading log",
+      "dir": "Reading",
+      "measure": "pages"
+    },
+    {
+      "title": "Water log",
+      "dir": "Water",
+      "measure": "glasses"
+    },
+    {
+      "title": "Practice log",
+      "dir": "Practice",
+      "measure": "minutes"
+    }
+  ],
+  "notes": [
+    "morning",
+    "after lunch",
+    "before bed",
+    "weekend",
+    "commute",
+    "with a friend",
+    "rushed",
+    "slow day"
+  ],
+  "new_collections": [
+    {
+      "title": "Mood log",
+      "dir": "Mood",
+      "topic": "daily mood",
+      "date_field": "logged_on",
+      "number_field": "score",
+      "number_kind": "whole",
+      "text_field": "comment"
+    },
+    {
+      "title": "Gym sessions",
+      "dir": "Gym",
+      "topic": "gym sessions",
+      "date_field": "trained_on",
+      "number_field": "weight_kg",
+      "number_kind": "decimal",
+      "text_field": "exercise"
+    },
+    {
+      "title": "Plant watering",
+      "dir": "Plants",
+      "topic": "watering the plants",
+      "date_field": "watered_on",
+      "number_field": "millilitres",
+      "number_kind": "whole",
+      "text_field": "plant"
+    },
+    {
+      "title": "Spending log",
+      "dir": "Spending",
+      "topic": "small purchases",
+      "date_field": "spent_on",
+      "number_field": "amount_eur",
+      "number_kind": "decimal",
+      "text_field": "shop"
+    },
+    {
+      "title": "Meeting notes index",
+      "dir": "Meetings",
+      "topic": "meetings",
+      "date_field": "held_on",
+      "number_field": "attendees",
+      "number_kind": "whole",
+      "text_field": "subject"
+    }
+  ],
+  "plan_verbs": [
+    "Draft",
+    "Review",
+    "Ship",
+    "Plan",
+    "Test",
+    "Document",
+    "Migrate",
+    "Archive",
+    "Prototype",
+    "Audit"
+  ],
+  "plan_objects": [
+    "the onboarding guide",
+    "the pricing page",
+    "the billing export",
+    "the release notes",
+    "the backup runbook",
+    "the search index",
+    "the partner brief",
+    "the support macros",
+    "the quarterly report",
+    "the data model"
+  ],
+  "plan_states": [
+    {
+      "status": "candidate",
+      "commitment": "uncommitted",
+      "horizons": [
+        "inbox"
+      ]
+    },
+    {
+      "status": "planned",
+      "commitment": "considering",
+      "horizons": [
+        "week",
+        "month",
+        "quarter"
+      ]
+    },
+    {
+      "status": "active",
+      "commitment": "committed",
+      "horizons": [
+        "week",
+        "month",
+        "quarter"
+      ]
+    },
+    {
+      "status": "blocked",
+      "commitment": "committed",
+      "horizons": [
+        "week",
+        "month"
+      ]
+    }
+  ],
+  "priorities": [
+    "low",
+    "medium",
+    "high",
+    "critical"
+  ]
+}

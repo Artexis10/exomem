@@ -1,0 +1,9 @@
+{
+  "calls": 4.333333333333333,
+  "input_tokens": 223495.33333333334,
+  "output_tokens": 672.0,
+  "schema_bytes": 92197.0,
+  "sessions": 3,
+  "source": "3 live grouped sessions, 2026-10-24 smoke run (Claude Code 2.1.310, model claude-sonnet-5-5, tool search off)",
+  "wall_seconds": 13.265333333333333
+}

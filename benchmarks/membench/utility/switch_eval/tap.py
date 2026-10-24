@@ -38,6 +38,9 @@ BUDGET_REFUSAL = (
 )
 #: The text a call to a tool outside the arm's filter receives.
 FILTER_REFUSAL = "Refused: this tool is not available in this session."
+#: An ``--allow`` entry that admits every tool the server lists, for a harness
+#: whose arms are the server's own surfaces and need no client-side filter.
+ALLOW_ALL = "*"
 
 #: The MCP handshakes whose answer carries the server instructions: the
 #: session-based ``initialize`` and the stateless ``server/discover`` that a
@@ -180,6 +183,9 @@ class Tap:
         self._pending: dict[object, tuple[str, dict]] = {}
         self._pending_lock = threading.Lock()
 
+    def allowed(self, name: object) -> bool:
+        return ALLOW_ALL in self.allow or name in self.allow
+
     def to_client(self, message: dict) -> None:
         with self._out_lock:
             sys.stdout.write(json.dumps(message) + "\n")
@@ -223,7 +229,7 @@ class Tap:
                 "name": name,
                 "arguments": params.get("arguments"),
             }
-            if name not in self.allow:
+            if not self.allowed(name):
                 self.log.write("call", outcome="refused_filtered", **call)
                 self._refuse(request_id, FILTER_REFUSAL)
                 return
@@ -357,9 +363,9 @@ class Tap:
                 )
             elif method == "tools/list" and isinstance(result, dict):
                 tools = result.get("tools") or []
-                kept = [tool for tool in tools if tool.get("name") in self.allow]
+                kept = [tool for tool in tools if self.allowed(tool.get("name"))]
                 withheld = sorted(
-                    str(tool.get("name")) for tool in tools if tool.get("name") not in self.allow
+                    str(tool.get("name")) for tool in tools if not self.allowed(tool.get("name"))
                 )
                 message = {**message, "result": {**result, "tools": kept}}
                 self.log.write("tools_list", tools=kept, withheld=withheld)
@@ -391,7 +397,9 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-ready-gate", action="store_true", help="capture discovery without recall probes"
     )
     parser.add_argument(
-        "--allow", required=True, help="comma-separated tool names the arm may see and call"
+        "--allow",
+        required=True,
+        help="comma-separated tool names the arm may see and call, or * for every listed tool",
     )
     parser.add_argument("--server-stderr", required=True, type=Path)
     parser.add_argument("server", nargs=argparse.REMAINDER, help="-- then the server argv")
