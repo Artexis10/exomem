@@ -8,7 +8,17 @@ Connect observed context failures to source-backed data corrections and later an
 
 ### Requirement: A miss remains linked to its evidence
 
-The agent workflow SHALL link an observed miss, source-backed expectation, available context, proposed correction, write receipts, and verification evidence in an existing incident collection. Missing evidence SHALL remain explicit. Collection manifests SHALL own field names and lifecycle values.
+A source-backed correction SHALL NOT require an incident record. When the user asks to record or learn from the miss, a workflow skill engages this workflow, or the live engagement policy delegates filing an observed outcome, the agent workflow SHALL link the observed miss, source-backed expectation, available context, correction, write receipts, and verification evidence in an existing incident collection. Missing evidence SHALL remain explicit. Collection manifests SHALL own field names and lifecycle values.
+
+#### Scenario: The user asks only for the fix
+
+- **WHEN** the user reports a wrong answer and asks only that the notes be fixed
+- **THEN** the agent makes the source-backed correction with its reason, and files no incident unless the live engagement policy delegates it
+
+#### Scenario: The user asks to record the miss
+
+- **WHEN** the user asks to record the miss and an existing incident collection fits
+- **THEN** the agent maps the evidence onto that collection's declared fields and records what it did not verify
 
 #### Scenario: A failure lacks its original delivered context
 

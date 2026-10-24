@@ -1,6 +1,7 @@
 # Learn from a context miss
 
 Use this workflow when an observed miss or source-backed feedback calls a durable conclusion or its delivery into question.
+Make the source-backed correction whenever the feedback supports one. File the miss in an incident collection only when the user asks, a workflow engages this procedure, or the live engagement policy delegates filing observed outcomes.
 For new material, first use the existing capture and compilation workflow in [writing](writing.md).
 Use this procedure when that material supports a correction or exposes a context failure.
 The active agent diagnoses and writes through existing tools. This procedure adds no background learner or automatic correction.
@@ -69,6 +70,7 @@ Do not run an optional check without its required capacity, evidence, and author
 
 Keep committed data, successful retrieval, and useful downstream answers distinct in the incident's declared fields and evidence links.
 These distinctions do not require new field names or lifecycle values.
+When the manifest does not define what a lifecycle value means, choose the value that does not overstate the check, and name the check you performed.
 A successful write alone cannot close a miss; a failed later answer remains visible.
 An unavailable check stays unresolved while ordinary recall remains available.
 
