@@ -351,18 +351,6 @@ def test_a_stray_csv_quote_rejects_only_its_own_record(store):
     assert stored == {"2026-03-01": 100, "2026-03-03": 300, "2026-03-04": 400}
 
 
-def test_every_import_answer_discloses_the_pre_ga_reimport_risk(store):
-    """An owner who imports a large export is never told that a pre-GA format change can require
-    re-importing it into a NEW collection, and so discards the preserved source (design O2)."""
-    setup(store, ndjson([{"id": "one"}]))
-    request = {"source_ref": SOURCE, "format": "ndjson", "mapping": MAPPING}
-    preview = call(store, owner_principal(), mode="preview", **request)
-    job = start(store)
-    run(store)
-    answers = {"preview": preview, "start": job, "status": status(store, job)}
-    assert {mode: bool(answer.get("reimport_risk")) for mode, answer in answers.items()} == dict.fromkeys(answers, True)
-
-
 @pytest.mark.parametrize("fmt", ["ndjson", "json-array"])
 def test_nesting_deeper_than_32_refuses_before_decoding(store, fmt):
     """Without a depth cap a hostile row reaches the recursive decoder and value walkers."""

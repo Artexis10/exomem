@@ -1095,6 +1095,7 @@ def parse_manifest_bytes(
     data: bytes,
     *,
     records_reader_version: int = RECORDS_READER_VERSION,
+    planning_values: PlanningValues | None = None,
 ) -> CollectionManifest:
     """Parse a manifest from caller-held bytes bound by a guarded read."""
     root = Path(vault_root)
@@ -1124,7 +1125,8 @@ def parse_manifest_bytes(
     # reader version) returning an immutable value. One Records append re-resolves
     # its manifest a dozen times from the same held bytes.
     key = (str(root), rel, f"{digest}:{records_reader_version}")
-    planning_values = PlanningValues(root)
+    if planning_values is None:
+        planning_values = PlanningValues(root)
     cached = _MANIFEST_PARSE_CACHE.get(key)
     if cached is not None and planning_values.matches(cached[1]):
         return cached[0]

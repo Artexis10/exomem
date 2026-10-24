@@ -456,7 +456,8 @@ def test_the_cloud_cell_surface_keeps_the_doctrine(vault: Path) -> None:
     """A synthetic descriptor proves the filter; the Cloud cell surface is the product.
 
     The surface is the one `server.build_server` publishes for a cloud cell: the
-    product surface minus `CLOUD_SURFACE_EXCLUSIONS`.
+    product surface minus `CLOUD_SURFACE_EXCLUSIONS`
+    plus the Cloud-only commands (`product_commands_for(..., cloud=True)`).
     """
     _assert_doctrine_intact(
         ActiveSurfaceDescriptor(
@@ -464,9 +465,7 @@ def test_the_cloud_cell_surface_keeps_the_doctrine(vault: Path) -> None:
             profile="product-cloud",
             tier2_enabled=True,
             product_commands=tuple(
-                command.name
-                for command in commands.product_commands_for("mcp")
-                if command.name not in commands.CLOUD_SURFACE_EXCLUSIONS
+                command.name for command in commands.product_commands_for("mcp", cloud=True)
             ),
         ),
         vault,

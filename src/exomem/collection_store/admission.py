@@ -788,6 +788,8 @@ def migrate_route(vault_root, *, step, deadline=None):
             raise ValueError("a handoff's migration needs its deadline, and only a handoff has one")
 
         def work(session, manager, fence_client):
+            # The final source proof can outlast one lease; the offline owner stops renewal after handoff.
+            manager.start_renewer()
             return migration.cutover(session, manager, fence_client, deadline=deadline)
 
         result = _offline_owner(root, "migrate", work)
@@ -972,28 +974,37 @@ def _offline_owner(root, operation, work, *, operator=True, drain_views=True):
     _require_no_service(config, operation)
     # Its own holder, so the coordinator arbitrates against an idle-released service that
     # re-acquires mid-step rather than handing both processes one token.
-    config = replace(config, replica_id=config.replica_id + writer_lease.OFFLINE_OWNER_SUFFIX)
+    # This finite owner acquires only for its step and keeps that grant until close.
+    config = replace(config, replica_id=config.replica_id + writer_lease.OFFLINE_OWNER_SUFFIX,
+                     preferred_writer=False, idle_release_seconds=0)
     with production_session(root) as session:
         manager = writer_lease.LeaseManager(config)
         close_options = {} if drain_views else {"drain_views": False}
         try:
-            result = work(session, manager, fence_client)
-        except BaseException:
-            # The refusal is the answer; an unadmitted token keeps its lease until it expires.
-            with suppress(Exception):
-                manager.close(**close_options)
-            raise
-        try:
-            manager.close(**close_options)
-        except OpError as error:
-            if operation == "migrate" and result.get("status") != "marker_admitted":
-                # A migrate that admitted nothing has no head to hand off; the report must not hide.
-                result = {**result, "lease": "expires", "lease_reason": error.code}
-            elif operation != "rollback" or result["status"] != "disabled":
+            try:
+                result = work(session, manager, fence_client)
+            except BaseException:
+                # The refusal is the answer; an unadmitted token keeps its lease until it expires.
+                with suppress(Exception):
+                    manager.close(**close_options)
                 raise
-            else:
-                # The local disable already committed; a failed handoff must not hide it.
-                result = {**result, "publication": "pending", "reason": error.code}
+            try:
+                manager.close(**close_options)
+            except OpError as error:
+                if operation == "migrate" and result.get("status") != "marker_admitted":
+                    # A migrate that admitted nothing has no head to hand off; the report must not hide.
+                    result = {**result, "lease": "expires", "lease_reason": error.code}
+                elif operation != "rollback" or result["status"] != "disabled":
+                    raise
+                else:
+                    # The local disable already committed; a failed handoff must not hide it.
+                    result = {**result, "publication": "pending", "reason": error.code}
+        finally:
+            # Close finishes its flush before renewal stops and the producer session releases custody.
+            manager._stop.set()
+            renewer = manager._renewer
+            if renewer is not None and renewer.is_alive():
+                renewer.join()
     return result
 
 

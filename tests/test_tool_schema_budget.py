@@ -28,8 +28,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # contract (five authoring tools) and the retained-history read and observe fields,
 # then by 80 for browse_memory's page fields (`limit`, `cursor`), then by 650 for the
 # registry selector enums on six selector tools, then by 150 for read_memory's derived
-# view refs and `continuation` field, then by 225 for create_note's `summary` and `topics` fields.
-TOTAL_BUDGET = 92_755
+# view refs and `continuation` field, then by 225 for create_note's `summary` and `topics` fields,
+# then by 150 for connect_memory's typed create-entity `relations`.
+TOTAL_BUDGET = 92_905
 
 #: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
 # Registry selector enums (close-mcp-tool-selectors) raise six selector tools' ceilings.
@@ -39,7 +40,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "create_note": 5650,
     "supersede_note": 4825,
     "manage_memory_file": 4650,
-    "connect_memory": 4325,
+    "connect_memory": 4475,
     "episode_memory": 4200,
     "record_memory": 4165,
     "search_memory": 4025,
@@ -69,6 +70,22 @@ TOOL_CEILINGS: dict[str, int] = {
     "coordination_status": 500,
     "viewer_map": 3325,
 }
+
+#: A Cloud cell serves the local surface minus `CLOUD_SURFACE_EXCLUSIONS` plus the Cloud-only
+#: control-plane tools, so its budget is the local one re-based on exactly those differences.
+#: The only new numbers are the ceilings of the two tools that no other surface lists.
+CLOUD_ONLY_CEILINGS: dict[str, int] = {
+    "observe_transfer": 1600,
+    "transfer_memory": 1650,
+}
+
+
+def _cloud_total_budget() -> int:
+    from exomem import commands
+
+    withheld = sum(TOOL_CEILINGS[name] for name in commands.CLOUD_SURFACE_EXCLUSIONS)
+    return TOTAL_BUDGET - withheld + sum(CLOUD_ONLY_CEILINGS.values())
+
 
 AUTHORING_TOOLS = frozenset(
     {"create_note", "supersede_note", "edit_note", "observe_memory", "manage_memory_file"}
@@ -114,6 +131,21 @@ def test_every_tool_stays_under_its_ceiling(server) -> None:
     ]
     assert not over, "over ceiling: " + "; ".join(over)
     assert sum(TOOL_CEILINGS.values()) <= TOTAL_BUDGET
+
+
+def test_cloud_surface_stays_under_its_budget_and_ceilings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Cloud tool list is what a hosted client resends each turn; the local gates above
+    never build it, so a Cloud-only tool could grow unmeasured."""
+    rows = _measure_module().measure(_wires(_build_server(monkeypatch, tmp_path, cloud=True)))
+    ceilings = {**TOOL_CEILINGS, **CLOUD_ONLY_CEILINGS}
+    total = sum(row["total"] for row in rows)
+    assert total <= _cloud_total_budget(), f"Cloud surface is {total:,} B, budget {_cloud_total_budget():,} B"
+    unbudgeted = sorted(row["name"] for row in rows if row["name"] not in ceilings)
+    assert not unbudgeted, f"Cloud tools without a ceiling: {unbudgeted}"
+    over = [f"{r['name']}: {r['total']:,} > {ceilings[r['name']]:,}" for r in rows if r["total"] > ceilings[r["name"]]]
+    assert not over, "over ceiling: " + "; ".join(over)
 
 
 def test_semantic_authoring_contract_is_carried_once_per_authoring_tool(server) -> None:

@@ -95,7 +95,6 @@ def coordinator_url(tmp_path):
 def service(tmp_path, monkeypatch, coordinator_url):
     """A managed service's environment: its vault, state root and writer lease, and no operator credential."""
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(OPERATOR, raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
@@ -898,6 +897,11 @@ def test_a_migrator_the_supervisor_stopped_after_it_published_leaves_the_vault_s
         "state": "ran", "outcome": "pending", "code": "timed_out",
         "first_attempt": {"outcome": "pending", "code": "timed_out"}}
     assert authority.read_marker(root) is None and (fence().enrolled, fence().generation) == (True, 1)
+    # The stopped migrator renewed until its exit; its last grant must expire before service admission.
+    deadline = time.monotonic() + 10
+    while lease().holder is not None:
+        assert time.monotonic() < deadline, "the stopped migrator's lease did not expire"
+        time.sleep(0.05)
     serving = Service(root, writer_lease.start_server_lifecycle())
     try:
         with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):

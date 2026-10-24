@@ -2913,7 +2913,7 @@ def _orchestrate(args: argparse.Namespace) -> int:
                 # Disabled wheels stage the release capability only in their test installation.
                 print(
                     "product-e2e: S1 Records summary journey "
-                    "(capability, enrolment, import, fields, copy, adoption, rollback)"
+                    "(capability, enrolment, import, fields, copy, adoption, rollback, migration)"
                 )
                 s1_journey = run_phase(
                     "records summary journey",
@@ -2926,6 +2926,11 @@ def _orchestrate(args: argparse.Namespace) -> int:
                         str(executable),
                         "--older-python",
                         args.older_python,
+                        *(
+                            ["--compatible-python", args.compatible_python]
+                            if args.compatible_python
+                            else []
+                        ),
                         "--vault",
                         str(s1 / "vault"),
                         "--work",
@@ -2995,6 +3000,10 @@ def main() -> int:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument(
         "--older-python", default=os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON", "")
+    )
+    parser.add_argument(
+        "--compatible-python", default="",
+        help="the earlier wheel installation for SQLite rollback qualification",
     )
     parser.add_argument("--http-server", default="")
     parser.add_argument("--vault", default="")

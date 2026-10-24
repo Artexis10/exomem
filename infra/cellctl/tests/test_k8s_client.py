@@ -142,6 +142,25 @@ def _client(*, hold_started_at: str | None, jobs: dict, pods: list) -> ClusterCl
     return client
 
 
+def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(caplog):
+    """Defect: deleting a failed export Job loses its cause, or its log exposes private report fields."""
+    export_id = "00000000-0000-4000-8000-000000000001"
+    name = "export-00000000000040008000000000000001"
+    report = {"error": "EXPORT_FAILED", "diagnostic": {"type": "PortabilityError", "function": "_fail",
+              "code": "RESOURCE_LIMIT_EXCEEDED", "limit": "max_file_bytes", "errno": 28,
+              "message": "private-record", "path": "/private-record", "url": "https://private-record"}}
+    pod = _job_pod(name, snapshot_id=json.dumps(report))
+    pod.status.phase = "Failed"
+    pod.status.container_statuses[0].state.terminated.exit_code = 1
+    client = _client(hold_started_at=None, jobs={name: _job(failed=True)}, pods=[pod])
+
+    observed = client.observe_export_job(NAMESPACE, export_id)
+
+    assert observed.failed
+    assert "RESOURCE_LIMIT_EXCEEDED" in caplog.text and "max_file_bytes" in caplog.text
+    assert "private-record" not in caplog.text
+
+
 def test_claim_observation_reads_status_capacity_and_filesystem_resize_condition() -> None:
     from cellctl.storage_config import DEFAULT_STORAGE, LEGACY_CLASS
 

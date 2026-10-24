@@ -46,7 +46,6 @@ class Client:
 
 
 def test_idle_release_waits_for_preview_read_borrower(tmp_path, monkeypatch):
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     root = tmp_path / "vault"
     (root / "Knowledge Base").mkdir(parents=True)
     client = Client()
@@ -68,8 +67,7 @@ def test_idle_release_waits_for_preview_read_borrower(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def runtime(tmp_path, monkeypatch):
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
+def runtime(tmp_path):
     root = tmp_path / "vault"
     (root / "Knowledge Base").mkdir(parents=True)
     client = Client()
@@ -872,7 +870,6 @@ def test_stale_cached_writer_is_not_retired_with_an_unfinished_transaction(runti
 def test_standalone_preview_close_drains_without_claiming_or_closing_store(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     root = tmp_path / "vault"
     (root / "Knowledge Base").mkdir(parents=True)
     client = Client()
@@ -903,7 +900,6 @@ def test_standalone_preview_close_drains_without_claiming_or_closing_store(tmp_p
 
 
 def test_standalone_close_from_borrower_stays_pending(tmp_path, monkeypatch):
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     root = tmp_path / "vault"
     (root / "Knowledge Base").mkdir(parents=True)
     client = Client()
@@ -947,10 +943,9 @@ class CoordinatorClient:
 
 
 @pytest.fixture
-def coordinated(tmp_path, monkeypatch):
+def coordinated(tmp_path):
     from exomem.lease_coordinator import SQLiteLeaseStore
 
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     root = tmp_path / "vault"
     (root / "Knowledge Base").mkdir(parents=True)
     config = LeaseConfig(

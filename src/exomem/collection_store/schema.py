@@ -2,7 +2,7 @@
 
 The store is the single source of truth for structured collections once a
 vault migrates (OpenSpec ``move-structured-collections-to-sqlite``, design
-§2 and §16). Until the GA gate it is dark: nothing routes to it.
+§2 and §16).
 
 Contract held here, not in the writers:
 

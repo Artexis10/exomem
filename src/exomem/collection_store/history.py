@@ -11,7 +11,7 @@ from itertools import islice
 from pathlib import Path
 
 from .. import mutation_terminal, records
-from . import chain, tokens, typed_storage
+from . import chain, tokens, typed_storage, types
 
 # A6 fixes the generated history page limits.
 MAIN_ENTRIES = 200
@@ -338,11 +338,22 @@ def agent_history(writer, manifest):
             complete = False
             continue
         if txn["legacy_event_json"] is not None:
-            key = json.loads(txn["legacy_event_json"]).get("item_key")
+            legacy_event = json.loads(txn["legacy_event_json"])
+            key = legacy_event.get("item_key")
             if key is not None:
                 current = writer.connection.execute("SELECT row_id FROM items WHERE collection_id=? AND item_key=?",
                                                      (manifest.collection_id, key)).fetchone()
-                if current is None or not released(current[0]):
+                if current is None:
+                    # Only unrestricted readers can release an imported event with no current row metadata.
+                    identity = f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}"
+                    permitted = (egress.unrestricted_content_access(writer.root, writer._operation.who)
+                                 and governance.content_available(
+                                     legacy_event["canonical_path"], identity,
+                                     writer._operation.access, writer._operation.access_blocked,
+                                     writer._operation.tombstones))
+                else:
+                    permitted = released(current[0])
+                if not permitted:
                     complete = False
                     continue
         if txn["operation"] == "legacy_import" and txn["legacy_event_json"] is None:

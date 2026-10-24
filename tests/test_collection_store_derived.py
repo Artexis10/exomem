@@ -345,7 +345,6 @@ def test_a_request_in_flight_holds_the_rebuild_and_the_store_still_answers_at_on
 @pytest.fixture
 def derived(tmp_path, monkeypatch):
     """An in-process derived collection with an invented three-day export preserved for it."""
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 3)
     opened = []
 

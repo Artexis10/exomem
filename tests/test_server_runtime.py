@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import subprocess
 import sys
 import textwrap
 import threading
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1089,7 +1091,7 @@ def test_media_startup_reconciliation_uses_writer_authority(
 
 
 def test_media_startup_hashing_yields_foreground_guard_then_commits_guarded(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     from exomem import writer_lease
 
@@ -1097,6 +1099,7 @@ def test_media_startup_hashing_yields_foreground_guard_then_commits_guarded(
     binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "startup-large.m4a"
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"large-enough-for-blocked-startup-provenance")
+    initialize_vault_state_offline(vault, source="media startup guard fixture")
     state_dir = tmp_path / "state"
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=state_dir),
@@ -1138,8 +1141,21 @@ def test_media_startup_hashing_yields_foreground_guard_then_commits_guarded(
 
     startup = threading.Thread(target=start)
     startup.start()
-    assert hash_started.wait(1.0)
     try:
+        if not hash_started.wait(1.0):
+            frame = sys._current_frames().get(startup.ident)
+            stack = (
+                "".join(traceback.format_stack(frame, limit=12))
+                if frame is not None else "<thread exited>"
+            )
+            warnings = [
+                record.getMessage() for record in caplog.records[-8:]
+                if record.levelno >= logging.WARNING
+            ]
+            pytest.fail(
+                f"startup missed provenance hook: alive={startup.is_alive()}, "
+                f"errors={[type(error).__name__ for error in errors]}, warnings={warnings}\n{stack}"
+            )
         with contender.mutation_guard(
             vault,
             request_id="foreground-during-startup-hash",

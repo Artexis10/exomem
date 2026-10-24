@@ -1063,17 +1063,12 @@ def direct_text_references_visible(
 
     checkpoint = None
     if names:
-        from .. import freshness, working_set_index, working_set_runtime
+        from .. import working_set_runtime
 
-        checkpoint = freshness.live_recall_checkpoint(root, "kb")
-        if checkpoint is None:
+        lookup = working_set_runtime.name_lookup(root)
+        if lookup.state != working_set_runtime.LOOKUP_CURRENT:
             return False
-        stamp = working_set_runtime._key_text(
-            (checkpoint.triple, checkpoint.policy_version, checkpoint.access_policy_fingerprint)
-        )
-        index = working_set_index.WorkingSetIndex(root)
-        if not index.available() or index.freshness_stamp() != stamp:
-            return False
+        checkpoint = lookup.checkpoint
         try:
             resolved = _resolved_prose_names(root, names)
         except WorkingSetResolutionUnavailable:
@@ -1968,6 +1963,12 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
     """
     boundary = connector_boundary.permits_filter(vault_root, who)
     return lambda path: boundary(path) and raw_protection.permits(vault_root, path, who)
+
+
+def name_lookup_required(vault_root: Path) -> bool:
+    """Whether `direct_text_references_visible` resolves prose names through the lookup index."""
+    root = Path(vault_root)
+    return not _file_policy_empty(root, policy_module.load(root))
 
 
 def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None = None) -> bool:
@@ -5931,6 +5932,10 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "query_dataset",
         "read_media",
         "list_trash",
+        # Control-plane commands: the cell reads no vault for them and only ever
+        # answers CLOUD_GATEWAY_REQUIRED, so there is no vault content to project.
+        "observe_transfer",
+        "transfer_memory",
     }
 )
 
@@ -7921,14 +7926,31 @@ def filter_withheld_entries(
         if operation is None:
             from ..collection_store import runtime as store_runtime
 
-            if (not store_runtime.served(vault_root) or inspection_evidence.root != vault_root.resolve()
+            if (inspection_evidence.root != vault_root.resolve()
                     or inspection_evidence.principal != (principal if principal is not None else effective_principal())):
+                canonical_governance.OperationAuthorization.refuse()
+            if inspection_evidence.history is not None:
+                def recheck_history():
+                    return filter_withheld_entries(
+                        vault_root, payload, principal=principal, purpose=purpose,
+                        _artifact_scan_demand=_artifact_scan_demand,
+                        explicit_reference_markup=explicit_reference_markup,
+                        _current_parent_binding=_current_parent_binding)
+
+                if writer is not None:
+                    with writer.read_collection(inspection_evidence.history.collection_id):
+                        return recheck_history()
+                server = store_runtime.projection_route(vault_root, inspection_evidence.history.manifest_path)
+                if server is None:
+                    canonical_governance.OperationAuthorization.refuse()
+                return server.call(recheck_history, read_only=True, wake_maintenance=False)
+            if not store_runtime.served(vault_root):
                 canonical_governance.OperationAuthorization.refuse()
             # Only a store writer in this process seals an inspection, and the serving store
             # thread admitted it in the dispatcher's pass. A caller's later pass, such as the
             # MCP layer's, has no bound operation to repeat that admission with.
             return payload
-        inspection_evidence = operation.validate_inspection_projection(payload, writer.handle)
+        inspection_evidence = operation.validate_inspection_projection(payload, writer.handle, writer=writer)
         metadata_evidence = inspection_evidence
     metadata_references = dict(metadata_evidence.references) if metadata_evidence is not None else {}
     policy = operation.policy if operation is not None else policy_module.load(vault_root)
@@ -8210,6 +8232,7 @@ def filter_withheld_entries(
         ):
             return None
         if (location == ("source_versions",) and inspection_evidence is not None
+                and inspection_evidence.history is None
                 and _is_admitted_source_versions(node)):
             # Exact admitted metadata has no ordinary references or nested text.
             # The always-on credential scrubber still visits every string later.

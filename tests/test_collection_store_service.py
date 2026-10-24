@@ -159,7 +159,6 @@ def _served_vault(tmp_path, monkeypatch):
     """A/B in files and the service's environment, before the owner enrols summary C."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(OPERATOR, raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
@@ -245,7 +244,6 @@ def test_first_offline_collection_creation_preserves_trashed_declarations(tmp_pa
     """A recoverable declaration in trash cannot block enrollment of a new store."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     (root / "Knowledge Base/_Schema").mkdir(parents=True)
     (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")
@@ -275,7 +273,6 @@ def test_an_offline_create_after_a_retire_enrols_the_next_fence_generation(tmp_p
     because its first create cuts from generation 0 and refuses the retired generation."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
     monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
     (root / "Knowledge Base/_Schema").mkdir(parents=True)
     (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")
@@ -1366,6 +1363,13 @@ def test_served_field_release_and_summary_use_canonical_authority_without_previe
     assert "exomem_view" not in page["frontmatter"]
     with pytest.raises(ValueError, match="NOT_FOUND"):
         recipient("read_memory", path=manifest_path())
+
+    def summary_published():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT state FROM projection_state WHERE path=?", (path,)).fetchone() == ("current",)
+
+    # The owner reads physical bytes, which must match the latest canonical render.
+    _until(summary_published)
     assert "exomem_view" in call(root, "read_memory", path=path)["frontmatter"]
     assert recipient("read_memory", path=A_PATH)["path"] == A_PATH
     basis = call(root, "record_memory", action="inspect", collection=CID)["field_release_basis"]
@@ -1705,6 +1709,37 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     assert titles(service.root, CID) == ["Canonical", "Late committed"]
 
 
+def test_accepted_store_work_can_finish_its_bulk_dependency(service, monkeypatch):
+    """A caller waiting for accepted work must not keep that work's bulk dependency parked."""
+    from contextlib import contextmanager
+
+    from exomem import foreground_priority
+
+    caller = threading.current_thread()
+    queue_wait_finished = threading.Event()
+    awaiting_bulk = foreground_priority.awaiting_bulk
+
+    @contextmanager
+    def observe_queue_wait():
+        with awaiting_bulk():
+            yield
+        if threading.current_thread() is caller:
+            queue_wait_finished.set()
+
+    monkeypatch.setattr(foreground_priority, "awaiting_bulk", observe_queue_wait)
+
+    def finish_bulk_dependency():
+        assert queue_wait_finished.wait(5), "the caller did not finish its queue wait"
+        with foreground_priority.foreground():
+            with foreground_priority.outside_foreground(), foreground_priority.bulk():
+                foreground_priority.yield_to_foreground()
+                return foreground_priority.foreground_elsewhere()
+
+    server = runtime._server(service.root)
+    with foreground_priority.foreground():
+        assert server.call(finish_bulk_dependency, wake_maintenance=False) is False
+
+
 def test_queued_mutation_timeout_never_executes(service, monkeypatch):
     """A request refused before acceptance must leave no later row behind."""
     import threading
@@ -1729,6 +1764,13 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch):
             assert busy.value.code == "COLLECTION_STORE_BUSY"
             assert busy.value.details["status"] == "retryable"
             assert busy.value.details["committed"] is False
+            diagnostic = busy.value.details["store_thread"]
+            assert diagnostic["alive"] is True and diagnostic["queued_requests"] == 0
+            assert diagnostic["stack_status"] == "captured" and diagnostic["frames"]
+            assert all(set(frame) == {"module", "function", "line"}
+                       and frame["module"].startswith("exomem.") for frame in diagnostic["frames"])
+            assert str(service.root) not in str(busy.value)
+            assert "Never accepted" not in str(busy.value)
         finally:
             release.set()
             occupied.result(timeout=5)

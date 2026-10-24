@@ -19,7 +19,9 @@ def test_name_resolution_preserves_filtered_command_identity() -> None:
         assert resolve_command(command.name, (command,)) is command
         assert resolve_command(command.public_name, ()) is None
         assert resolve_command(command.name, ()) is None
-    assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 33
+    # 33 commands on every surface plus the 2 that only a Cloud cell lists.
+    assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 35
+    assert len(commands.product_commands_for("mcp")) == 33
     assert sum(command.public_name != command.name for command in commands.PRODUCT_COMMANDS) == 6
 
 
@@ -37,11 +39,10 @@ def test_mcp_discovery_and_both_names_reach_guarded_execution(vault, monkeypatch
     async def exercise():
         async with Client(mcp) as client:
             discovered = {tool.name for tool in await client.list_tools()}
-            for command in commands.product_commands_for("mcp"):
-                if cloud and command.name in commands.CLOUD_SURFACE_EXCLUSIONS:
-                    assert command.name not in discovered
-                    assert await mcp.get_tool(command.name) is None
-                    continue
+            for excluded in commands.CLOUD_SURFACE_EXCLUSIONS if cloud else ():
+                assert excluded not in discovered
+                assert await mcp.get_tool(excluded) is None
+            for command in commands.product_commands_for("mcp", cloud=cloud):
                 assert command.public_name in discovered
                 if command.public_name != command.name:
                     assert command.name not in discovered

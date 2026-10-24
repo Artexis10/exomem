@@ -920,15 +920,109 @@ def test_a_watcher_save_burst_with_restored_stat_applies_before_the_full_pass(se
     assert server._edit_back._next_full > time.monotonic() + 40
 
 
+def test_pending_view_publication_yields_to_a_waiting_query(served, monkeypatch):
+    """A pending view window must release a reader before it starts another slow path."""
+    from contextlib import contextmanager
+
+    from exomem import mutation_lock
+    from exomem.collection_store import runtime
+    from exomem.collection_store.writer import CollectionWriter
+
+    root = served.root
+    server = runtime._server(root)
+    publish = threading.Event()
+    first_render = threading.Event()
+    continue_first = threading.Event()
+    continue_later = threading.Event()
+    query_waiting = threading.Event()
+    query_done = threading.Event()
+    query_result, errors, first_path = [], [], []
+    tick = runtime.StoreServer._views_tick
+
+    def paused_tick(current):
+        return tick(current) if publish.is_set() else 0.05
+
+    monkeypatch.setattr(runtime.StoreServer, "_views_tick", paused_tick)
+    server.call(lambda: None, wake_maintenance=False)
+    for title in ("First", "Second"):
+        owner(root, "record_memory", action="append", collection=CID,
+              item={"title": title, "count": 1}, why="capture")
+    before = store_rows(root, "SELECT txn_id FROM txns ORDER BY txn_id")
+    render = CollectionWriter._render_view
+
+    def slow_later_path(writer, projection, manifest):
+        if threading.current_thread() is server.thread and projection["kind"] == "item":
+            if not first_path:
+                first_path.append(projection["path"])
+                first_render.set()
+                assert continue_first.wait(10), "the first publication was not released"
+            elif projection["path"] != first_path[0]:
+                assert continue_later.wait(10), "the later publication was not released"
+        return render(writer, projection, manifest)
+
+    def query():
+        try:
+            query_result.append(owner(root, "record_memory", action="query", collection=CID))
+        except Exception as error:
+            errors.append((type(error).__name__, getattr(error, "code", None),
+                           getattr(error, "message", None), getattr(error, "details", None)))
+        finally:
+            query_done.set()
+
+    reader = threading.Thread(target=query)
+    boundary = served.service.manager._mutation_coordinator_for(root)
+    boundary_state = mutation_lock._state_for(boundary.lock_path)
+    waiting = mutation_lock._waiting
+
+    @contextmanager
+    def observe_query_wait(state):
+        with waiting(state):
+            if threading.current_thread() is reader and state is boundary_state:
+                query_waiting.set()
+            yield
+
+    monkeypatch.setattr(CollectionWriter, "_render_view", slow_later_path)
+    monkeypatch.setattr(mutation_lock, "_waiting", observe_query_wait)
+    try:
+        publish.set()
+        assert first_render.wait(10), "pending item publication did not start"
+        reader.start()
+        assert query_waiting.wait(10), "the query did not enter its ownership wait"
+        continue_first.set()
+        assert query_done.wait(10), "the foreground query did not complete"
+        if errors:
+            print(json.dumps({"view_publication_query_refusal": errors}, sort_keys=True), flush=True)
+        assert not errors, errors
+        assert sorted(row["title"] for row in query_result[0]["rows"]) == ["First", "Second"]
+        assert store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE kind='item' AND state='pending'")[0][0] > 0
+    finally:
+        continue_first.set()
+        continue_later.set()
+        if reader.ident is not None:
+            reader.join(10)
+    assert not reader.is_alive()
+    until(lambda: store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state='pending'") == [(0,)])
+    assert store_rows(root, "SELECT txn_id FROM txns ORDER BY txn_id") == before
+
+
 def test_continuously_queued_requests_do_not_starve_a_notified_view_edit(served, monkeypatch):
     """Defect: a busy service always takes the next request and never applies a settled saved view."""
     from exomem import file_watcher
     from exomem.collection_store import runtime
+    from exomem.collection_store.writer import CollectionWriter
 
     root = served.root
     monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
     server = runtime._server(root)
     until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
+    apply_edit = CollectionWriter.apply_view_edit
+
+    def edit_after_completed_publication_passes(writer, *args, **kwargs):
+        # A settled edit can follow a completed wake while the request queue remains busy.
+        server._views_after, server._views_passes = None, 2
+        return apply_edit(writer, *args, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "apply_view_edit", edit_after_completed_publication_passes)
     _, path = published_view(root, "Busy", count=1)
     pumping = threading.Event()
     pumping.set()
@@ -948,6 +1042,9 @@ def test_continuously_queued_requests_do_not_starve_a_notified_view_edit(served,
         path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: 2"))
         file_watcher.FileWatcher(root)._record(path, deleted=False)
         until(lambda: store_rows(root, "SELECT row_version FROM items") == [(2,)], seconds=6)
+        until(lambda: store_rows(root, "SELECT state FROM projection_state WHERE path=?",
+                                (path.relative_to(root).as_posix(),)) == [("current",)], seconds=6)
+        assert b"count: 2" in path.read_bytes()
         assert pumping.is_set()
         assert store_rows(root, "SELECT operation FROM txns WHERE operation='view_edit'") == [("view_edit",)]
     finally:

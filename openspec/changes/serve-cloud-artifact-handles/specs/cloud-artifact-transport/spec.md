@@ -24,7 +24,7 @@ The gateway SHALL authorize broker retrieval only for actual authenticated `capt
 
 ### Requirement: Runtime networking remains confined
 
-Cells SHALL reach only the configured internal broker on its fixed port for artifact retrieval. Runtime DNS, public internet, metadata and other-cell access MUST remain denied. The broker SHALL have no vault mount, database credential, cell-token root or Kubernetes API access. Gateway public egress MUST remain denied.
+Cells SHALL reach only the configured internal broker on its fixed port for artifact retrieval. Runtime DNS, public internet, metadata and other-cell access MUST remain denied. The broker SHALL have no vault mount, database credential, cell-token root or Kubernetes API access. Gateway public egress MUST remain denied. *Amended 2026-10-24 by `add-cloud-transfer-tools`:* only when the platform chart sets `cloudGateway.transferTools.enabled` (default `false`), the gateway MAY also egress on TCP 443 to public addresses, excluding every `cells.jobEgressExcept` range, to reach the Substrate web API. Cells, the broker and artifact transport are unaffected.
 
 #### Scenario: A cell attempts unrelated network access
 - **WHEN** a runtime tries DNS, direct HTTPS, metadata or another cell

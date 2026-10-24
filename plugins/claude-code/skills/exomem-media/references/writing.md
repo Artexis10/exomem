@@ -13,6 +13,8 @@ Resolve entity candidates against the active entity registry and selected knowle
   relation workflow for a new connection. If none matches, use
   `connect_memory(operation="create-entity")` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
+  Pass known meaning as `relations=[{"kind": ..., "target": ...}]`;
+  `connections` always writes the generic `relates_to`.
   An unregistered-type finding supplies `proposal` and `expected_hash`; save
   those exact values through the governed
   `schema_memory(operation="save-entity-types")` leaf with `why`, never by
@@ -471,6 +473,7 @@ Use replacement only when another page should become the current answer, under t
 The semantic writer keeps prior Markdown in the correction's atomic transition.
 `read_memory(include_history=true)` returns `revision_history` separately from the existing page operation log.
 Add `unit_ref` to inspect one unit's revisions; use `history_limit` and `history_continuation` for bounded pages.
+A result with `lookup: stale` could not check linked names yet; repeat the same call shortly, not the continuation, before you treat history as absent.
 Entity and legacy corrections use their existing authorized edit owner.
 Records corrections use `record_memory(action="update")` and its retained row history.
 For observed-state corrections, follow the independent Records discovery route in

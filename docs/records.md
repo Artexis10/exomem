@@ -87,11 +87,12 @@ Invalid or stale edits become held corrections. History pages are read-only;
 the service replaces edits to those pages with their canonical render.
 
 After migration, the service stamps imported views through normal publication.
-Migration itself leaves their files unchanged.
+Migration itself leaves their files unchanged. `validate` checks a proposed
+declaration without saving it and returns the current guards for `revise`.
 
 Reverse export restores exact imported bytes for collections without native
 mutations, including after automatic stamping. A governed file move counts as
-a native mutation. Keep an archive-aware release for application rollback.
+a native mutation. Keep a qualified archive-aware release for application rollback.
 Returning to file authority uses whole-vault export and its eligibility rules.
 
 Each collection has `_history.md` with its newest 200 released transitions.

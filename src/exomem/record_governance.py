@@ -1733,7 +1733,7 @@ def _inventory_coverage(
     authorize: Callable[[str], bool],
     *,
     observations: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], Any]:
     """Inventory-grade coverage: counts only, and `None` when items are unreadable.
 
     A collection this sweep cannot read has no honest committed count, and zero
@@ -1741,35 +1741,17 @@ def _inventory_coverage(
     same keys, so the hole is named rather than filled.
     """
     from . import due_state
-    from .collection_store.governance import RELEASE_LIMIT
-
     writer = selected_writer(root, manifest)
     if writer is not None:
-        limited = False
         # One snapshot and the caller's authorization for this collection's counts.
         with writer.read_snapshot():
-            try:
-                release = writer._operation.summary_release(manifest.collection_id)
-            except collections.CollectionError as error:
-                if error.code != RELEASE_LIMIT:
-                    raise
-                release, limited = None, True
-            if limited:
-                # Row policy varies past the release bound: the counts are unknown, not zero.
-                committed = held = None
-            elif release is not None:
-                # Summary counts come from the store without reading a row.
-                committed = release.released
-                held = sum(decision.level >= 6 for _subject, decision in release.held)
-            else:
-                items, _, held_ids = writer._operation.authorized_rows(manifest.collection_id)
-                committed, held = len(items), len(held_ids)
+            (committed, held), selection = writer._operation.inventory_selection(manifest.collection_id)
         if observations is None:
             observations = due_state.collection_observation_coverage(
                 root, str(manifest.path), authorize_path=authorize
             )
         return {"committed": committed, "held": held,
-                "unreflected": len(observations["unreflected"])}
+                "unreflected": len(observations["unreflected"])}, selection
     try:
         snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
         committed: int | None = len(snapshot.records)
@@ -1781,7 +1763,7 @@ def _inventory_coverage(
     )
     return {
         key: coverage[key] for key in ("committed", "held", "unreflected")
-    }
+    }, None
 
 
 def _presentation_inspection(
@@ -1862,23 +1844,26 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
     observations = due_state._collection_observation_coverages(
         root, (str(manifest.path) for manifest in manifests), authorize_path=authorize
     )
+    inventory, selections = [], []
+    for manifest in manifests:
+        coverage, selection = _inventory_coverage(
+            root, manifest, authorize, observations=observations[str(manifest.path)])
+        inventory.append({
+            "collection_id": manifest.collection_id,
+            "title": manifest.title,
+            "manifest_path": manifest.path,
+            "semantic_profile": manifest.semantic_profile,
+            "lifecycle": manifest.lifecycle,
+            "storage_strategy": manifest.storage.strategy,
+            "natural_key": list(manifest.schema.natural_key),
+            **coverage,
+        })
+        if selection is not None:
+            selections.append(selection)
     payload = {
         "kind": f"{semantic_profile}_inventory",
         "report_only": True,
-        "collections": [
-            {
-                "collection_id": manifest.collection_id,
-                "title": manifest.title,
-                "manifest_path": manifest.path,
-                "semantic_profile": manifest.semantic_profile,
-                "lifecycle": manifest.lifecycle,
-                "storage_strategy": manifest.storage.strategy,
-                "natural_key": list(manifest.schema.natural_key),
-                **_inventory_coverage(root, manifest, authorize,
-                                      observations=observations[str(manifest.path)]),
-            }
-            for manifest in manifests
-        ],
+        "collections": inventory,
         # A manifest this sweep could not read is listed under every profile
         # unless the store's marker records its profile: whichever inventory
         # was asked for, an unread file of unknown profile is a hole in the
@@ -1914,6 +1899,10 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
             "arguments": {"action": "describe"},
         },
     }
+    if selections:
+        writer = bound_writer(root)
+        with writer.read_snapshot():
+            return writer._operation.inventory_evidence(payload, writer.handle, selections)
     return payload
 
 

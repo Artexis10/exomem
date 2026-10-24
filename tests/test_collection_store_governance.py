@@ -17,6 +17,36 @@ from exomem.governance.principal import RequestPrincipal, owner_principal, reque
 from exomem.record_memory import record_memory
 
 
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_builtin_reads_resolve_ownership_with_a_vault_added_planning_horizon(store, profile):
+    """A custom Planning view must not re-enter ownership or field admission during a read."""
+    from exomem.collection_store import connection
+    from exomem.plan_memory import plan_memory
+    from exomem.planning_values import registry_path
+
+    create(store)
+    overlay = registry_path(store.root)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text("schema_version: 1\nentries:\n  horizon.release-cycle: {}\n")
+    planning = manifest_text("planning").replace(CID, OTHER).replace(
+        "\n---\n",
+        "\nviews:\n  next-cycle:\n    query:\n      filters: [{column: horizon, op: eq, value: release-cycle}]\n---\n",
+    )
+    store.create_collection(manifest_path("planning"), planning, why="plan the next cycle", scaffold=False)
+    store.reconcile_views()
+
+    # A restarted reader has no manifest cached by creation or publication.
+    store.handle.close()
+    with (connection.open_writer(store.handle.path, lease_check=lambda: True) as reopened,
+          request_scope(owner_principal(surface="mcp")), preview_store(store.root, reopened)):
+        facade, cid = (record_memory, CID) if profile == "records" else (plan_memory, OTHER)
+        result = facade(store.root, "inspect", collection=cid)
+
+    assert result["contract"]["collection_id"] == cid
+    if profile == "planning":
+        assert any(view["name"] == "next-cycle" for view in result["saved_views"])
+
+
 def test_quarantined_hold_requires_unrestricted_owner_despite_a_broad_grant(store, monkeypatch):
     """Unproven detached bytes must not inherit an open manifest or a recipient's grant authority."""
     from test_collection_store_edit_back import passes
@@ -1125,7 +1155,6 @@ def test_hidden_row_allocation_cannot_change_limited_collection_observations(tmp
     from exomem.collection_store import connection
     from exomem.collection_store.writer import CollectionWriter
 
-    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     observations = []
     for hidden_position in (None, "before", "after"):
         root = tmp_path / str(hidden_position)

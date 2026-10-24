@@ -17,6 +17,8 @@ A private replay of twelve field reports measured the gap on one live vault. Its
 - Probe a **turn slice** (profiles selected by meaning from the turn) on development cases only; it ships only through its own frozen evaluation. Test a pull-instructions arm with no map, so the context catalogue must earn its cost, and sample ordinary turns beside known misses, so the switch cannot win only on cases the current packet failed.
 - Tell clients to read the map, pull profiles, pages and units by ref or by their own `ask_memory` queries, and cite refs.
 - Keep the anchor-first packet as the default until a frozen, paired evaluation of first answers decides the switch.
+- Build shared index inputs inside the existing internal-producer scope. Keep caller authorization and disclosure at every external read.
+- Recover an unproven state checkpoint through a separate successor path that preserves the failed attempt and earns fresh publication and quiescence proof.
 
 ## Capabilities
 

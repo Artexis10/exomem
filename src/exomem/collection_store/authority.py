@@ -414,6 +414,12 @@ def _export_intent(intent):
 
 
 def pending_create(conn):
+    """Read the pending marker intent through its shared decoder."""
+    row = conn.execute("SELECT value FROM store_meta WHERE key=?", (PENDING_CREATE,)).fetchone()
+    return None if row is None else parse_pending_create(row[0])
+
+
+def parse_pending_create(raw):
     """The one pending marker intent, with its closed ``kind`` and the ``collections`` it names.
 
     Version 1 is a create of one collection, as every release has written it. Version 2
@@ -421,11 +427,8 @@ def pending_create(conn):
     or an export of the routed collections back to files; a release without the export
     refuses its intent as invalid, so it never serves a store that an export owns.
     """
-    row = conn.execute("SELECT value FROM store_meta WHERE key=?", (PENDING_CREATE,)).fetchone()
-    if row is None:
-        return None
     try:
-        intent = json.loads(row[0])
+        intent = json.loads(raw)
         if isinstance(intent, dict) and type(intent.get("version")) is int and intent["version"] == 2 \
                 and intent.get("kind") == EXPORT:
             return _export_intent(intent)
