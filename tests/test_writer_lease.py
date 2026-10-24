@@ -3928,6 +3928,151 @@ class Clock:
         return self.value
 
 
+@pytest.mark.parametrize("takeover", [False, True], ids=["renew", "fenced"])
+def test_cli_curation_preparation_keeps_lease_authority_without_applying_notes(
+    tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch, capsys, takeover: bool
+) -> None:
+    """A proposal must survive preparation that outlasts its initial lease."""
+    from exomem import __main__ as cli_main
+    from exomem import curation
+
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    client = StoreClient(store, "desktop")
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example", vault_id="main", replica_id="desktop",
+            state_dir=tmp_path / "writer-state", ttl_seconds=10,
+        ),
+        client=client,
+    )
+    monkeypatch.setattr(writer_lease_module, "get_manager", lambda: manager)
+    monkeypatch.setattr(manager, "_renew_interval_seconds", lambda: 0.01)
+    renewed = threading.Event()
+    clock_lock = threading.Lock()
+    real_renew = client.renew
+
+    def record_renewal(token: int) -> LeaseRecord:
+        with clock_lock:
+            record = real_renew(token)
+            renewed.set()
+            return record
+
+    monkeypatch.setattr(client, "renew", record_renewal)
+    real_prepare = curation._prepare_step
+
+    def slow_preparation(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        prepared = real_prepare(*args, **kwargs)
+        if takeover:
+            with clock_lock:
+                clock.value = 111
+                assert store.acquire("main", "other-writer", 10)["fencing_token"] == 2
+                renewed.clear()
+            assert renewed.wait(_OBSERVE_SECONDS)
+            return prepared
+        # Advance the coordinator clock, rather than sleeping through a real TTL.
+        for at in (107, 114):
+            with clock_lock:
+                clock.value = at
+                renewed.clear()
+            assert renewed.wait(_OBSERVE_SECONDS), "CLI did not renew during preparation"
+            assert store.status("main")["expires_at"] > at
+        return prepared
+
+    monkeypatch.setattr(curation, "_prepare_step", slow_preparation)
+    before = {p.relative_to(vault): p.read_bytes() for p in (vault / "Knowledge Base/Notes").rglob("*.md")}
+    plan = {
+        "version": 1,
+        "title": "Preserve a coherent conclusion",
+        "steps": [{
+            "step_id": "new-conclusion", "kind": "create-note",
+            "args": {
+                "title": "Coherent conclusion", "slug": "coherent-conclusion",
+                "note_type": "insight",
+                "content": "## Observations\n\n- [finding] Keep one coherent conclusion together. ^coherent-conclusion\n",
+                "relation_disposition": "reviewed_none",
+                "relation_review_reason": "This independent conclusion has no supported relation.",
+            },
+        }],
+    }
+    try:
+        code = cli_main.main([
+            "maintain_memory", "--mode", "curation", "--curation-action", "propose",
+            "--plan", json.dumps(plan), "--json",
+        ])
+        terminal = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        if takeover:
+            assert code == 1, terminal
+            assert terminal["error"]["code"] == "WRITER_FENCED"
+            assert store.status("main")["fencing_token"] == 2
+            assert store.status("main")["holder"] == "other-writer"
+        else:
+            assert code == 0, terminal
+            proposed = terminal["data"]
+            preview = curation.preview(vault, run_id=proposed["run_id"])
+            assert preview["plan_id"] == proposed["plan_id"]
+            assert preview["plan_fingerprint"] == proposed["plan_fingerprint"]
+            assert curation.status(vault, run_id=proposed["run_id"])["phase"] == "proposed"
+            assert store.status("main")["fencing_token"] == 1
+            assert store.status("main")["holder"] == "desktop"
+        assert {p.relative_to(vault): p.read_bytes() for p in (vault / "Knowledge Base/Notes").rglob("*.md")} == before
+    finally:
+        manager.close()
+
+
+def test_exiting_one_guard_preserves_overlapping_guard_renewal(tmp_path: Path, monkeypatch) -> None:
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    client = StoreClient(store, "desktop")
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example", vault_id="main", replica_id="desktop",
+            state_dir=tmp_path / "writer-state", ttl_seconds=10,
+        ), client=client,
+    )
+    monkeypatch.setattr(manager, "_renew_interval_seconds", lambda: 0.01)
+    first_entered = threading.Event()
+    leave_first = threading.Event()
+    renewed = threading.Event()
+    clock_lock = threading.Lock()
+    real_renew = client.renew
+
+    def record_renewal(token: int) -> LeaseRecord:
+        with clock_lock:
+            record = real_renew(token)
+            renewed.set()
+            return record
+
+    monkeypatch.setattr(client, "renew", record_renewal)
+
+    def first_guard() -> None:
+        with manager.writer_authority_guard():
+            first_entered.set()
+            assert leave_first.wait(_HOLD_SECONDS)
+
+    first = threading.Thread(target=first_guard)
+    first.start()
+    try:
+        assert first_entered.wait(_OBSERVE_SECONDS)
+        with manager.writer_authority_guard():
+            leave_first.set()
+            first.join(_OBSERVE_SECONDS)
+            assert not first.is_alive()
+            for at in (107, 114):
+                with clock_lock:
+                    clock.value = at
+                    renewed.clear()
+                assert renewed.wait(_OBSERVE_SECONDS)
+                assert store.status("main")["expires_at"] > at
+            manager.validate_fencing_token(1)
+        assert store.status("main")["fencing_token"] == 1
+        assert store.status("main")["holder"] == "desktop"
+    finally:
+        leave_first.set()
+        first.join(_HOLD_SECONDS)
+        manager.close()
+
+
 def _reclaim_replica(
     store: SQLiteLeaseStore,
     tmp_path: Path,
