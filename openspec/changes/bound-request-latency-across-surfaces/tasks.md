@@ -61,6 +61,9 @@
   - Verify: a trash-owned reference resolves with the census scan disabled; the path decision stays live.
 - [ ] 3.14 Keep proven pending rows from publication by path, after-hash, mtime and size, so that a rehydrate re-reads only changed bodies.
   - Verify: pending edits and deletes still hide stale rows.
+- [ ] 3.17 Compute coverage flags relative to the caller's view: the activation `index_stale` and `lexical_evidence`, the direct-read `inbound: null`, and the context-pack inbound and outbound incomplete entries.
+  - For a restricted caller, report a lag only when a changed path since the published generation is one the caller may see. Use the freshness delta and the existing release decision. The cost follows the lag, not the vault.
+  - Verify: an owner write to a withheld page leaves a restricted caller's response unchanged; a write to a visible page is reported; owner responses are unchanged.
 - [ ] 3.15 Publish admitted sets for structured eligibility and the activation carry. Key them by audience, purpose, grants, tombstone generation and catalogue generation. Patch them from catalogue deltas, and abstain on a key mismatch.
   - Verify: a revoked or retagged page leaves the next request's eligibility and rarity.
   - This is a separate slice from 3.8-3.14.

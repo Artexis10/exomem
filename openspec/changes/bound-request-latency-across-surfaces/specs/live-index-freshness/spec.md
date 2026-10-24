@@ -68,8 +68,11 @@ write path in proportion to the change or through the pending-visibility overlay
 another source SHALL become visible within the publisher's bound, and periodic reconciliation SHALL
 bound missed events. A structure without a published generation MUST NOT read as empty: the read
 SHALL keep its synchronous path or report incomplete coverage. Release, revocation and
-access-policy decisions SHALL remain per request. Explicit offline callers and deployments with
-event-maintained indexes disabled MAY keep their synchronous paths.
+access-policy decisions SHALL remain per request. A response flag that reports a structure as stale,
+lagging, warming or incomplete SHALL be computed relative to the caller's view: for a restricted
+caller, it SHALL report the lag only when a changed path that the caller may see is missing, so
+that writes to material the caller may not see do not change the response. Explicit offline
+callers and deployments with event-maintained indexes disabled MAY keep their synchronous paths.
 
 #### Scenario: A caller's own write is visible on its next read
 
@@ -104,6 +107,14 @@ event-maintained indexes disabled MAY keep their synchronous paths.
 - **WHEN** a read request needs a derived structure that has no published generation
 - **THEN** the request keeps the structure's synchronous path or reports incomplete coverage
 - **AND** it never treats the structure as empty
+
+#### Scenario: Coverage flags follow the caller's view
+
+- **WHEN** a published generation is behind only by changes to paths that a restricted caller may
+  not see
+- **THEN** the caller's response reports that structure's coverage as complete
+- **AND** the response is the same as it would be with no such change
+- **AND** a lag that includes a path the caller may see is reported as incomplete or stale
 
 #### Scenario: Offline callers keep their synchronous paths
 
