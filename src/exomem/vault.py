@@ -6835,7 +6835,7 @@ def _vault_freshness_key(vault_root: Path):
 def _inbound_index(vault_root: Path, *, require_current: bool = False) -> _InboundIndexData:
     """The cached index, rebuilt when the vault's freshness key moves."""
     key = _vault_freshness_key(vault_root)
-    checkpoint = freshness.consumer_checkpoint(vault_root, "vault")
+    start = freshness.consumer_checkpoint(vault_root, "vault")
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
         state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
@@ -6844,33 +6844,84 @@ def _inbound_index(vault_root: Path, *, require_current: bool = False) -> _Inbou
         cached = _INBOUND_INDEX.get(root)
         if (
             cached and cached[0] == key
-            and (not require_current or cached[1].checkpoint == checkpoint)
+            and (not require_current or cached[1].checkpoint == start)
         ):
             return cached[1]
     data = _build_inbound_index(vault_root)
-    data.checkpoint = _inbound_checkpoint(vault_root, data, key, checkpoint)
+    if _catch_up_inbound(vault_root, data, start, key, state, generation):
+        return data
+    # Not proven current: a synchronous reader may still use it while the key holds.
     with _INBOUND_INDEX_LOCK:
         if state.generation == generation:
             _INBOUND_INDEX[root] = (key, data)
     return data
 
 
-def _inbound_checkpoint(
+#: Rounds in which a finished build replays the events that landed during it. A
+#: round reads only the paths of the new events, so a few rounds outpace a steady
+#: write stream; a burst beyond that leaves demand set for the owner's next pass.
+_INBOUND_CATCH_UP_ROUNDS = 8
+
+
+def _delta_rels(
+    vault_root: Path, delta: freshness.ConsumerDelta
+) -> tuple[list[str], list[str]] | None:
+    """The changed and deleted rels of a registry delta, or None if one lies outside the vault."""
+    changed = [_registry_rel(vault_root, path) for path in delta.changed]
+    deleted = [_registry_rel(vault_root, path) for path in delta.deleted]
+    rels = [*changed, *deleted]
+    if any(rel is None for rel in rels):
+        return None
+    return [rel for rel in changed if rel is not None], [rel for rel in deleted if rel is not None]
+
+
+def _catch_up_inbound(
     vault_root: Path,
     data: _InboundIndexData,
+    start: freshness.FreshnessCheckpoint,
     key: tuple[int, int, str],
-    checkpoint: freshness.FreshnessCheckpoint,
-) -> freshness.FreshnessCheckpoint | None:
-    # A skipped unreadable page cannot establish a complete link census.
-    if (
-        checkpoint.triple is not None
-        and checkpoint.triple == key
-        and len(data.known_rels) == key[0]
-        and freshness.consumer_checkpoint(vault_root, "vault") == checkpoint
-        and not freshness.external_pending(vault_root)
-    ):
-        return checkpoint
-    return None
+    state: _InboundGeneration,
+    generation: int,
+) -> bool:
+    """Bring a finished build up to the registry, then publish it if that is proven.
+
+    The build began at `start`, and files kept changing while it walked. Each
+    round replays the registry's delta from the last proven checkpoint through
+    the patch machinery, on the builder's own thread, and publishes only while
+    the registry has not moved since the proof. A write stream therefore no
+    longer discards a long build: every patch that ran while no index was
+    resident left its paths in the delta, and the delta is what is replayed.
+    """
+    from . import foreground_priority
+
+    # The registry must have described the disk the build walked, as the key did.
+    if start.triple is None or start.triple != key:
+        data.checkpoint = None
+        return False
+    data.checkpoint = start
+    root = str(vault_root.resolve())
+    for _ in foreground_priority.yielding_in_bulk(range(_INBOUND_CATCH_UP_ROUNDS)):
+        delta = freshness.delta_since(vault_root, "vault", data.checkpoint)
+        rels = _delta_rels(vault_root, delta) if delta.complete else None
+        if rels is None:
+            break
+        edit = _plan_inbound_edit(vault_root, *rels)
+        proven = _prove_inbound(vault_root, data, delta, edit)
+        data.apply(edit)
+        data.applied.update(edit.applied)
+        if not proven:
+            if freshness.consumer_checkpoint(vault_root, "vault") == delta.to:
+                break  # nothing more is coming: an unreadable page or a pending external change
+            continue
+        data.checkpoint, data.applied = delta.to, {}
+        with _INBOUND_INDEX_LOCK:
+            if state.generation != generation:
+                break
+            if freshness.consumer_checkpoint(vault_root, "vault") == delta.to:
+                _INBOUND_INDEX[root] = (delta.to.triple, data)
+                return True
+    data.checkpoint, data.applied = None, {}
+    return False
 
 
 def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
@@ -6921,6 +6972,26 @@ def _delta_applied(
     return True
 
 
+def _prove_inbound(
+    vault_root: Path,
+    data: _InboundIndexData,
+    delta: freshness.ConsumerDelta,
+    edit: _InboundEdit,
+) -> bool:
+    """Whether `data` after `edit` is the vault at the end of `delta`.
+
+    It holds when the data knows as many files as the registry, no external
+    change is pending, and the bytes applied to every path of the delta, now or
+    in an earlier patch, are the bytes the registry holds for it.
+    """
+    return (
+        delta.to.triple is not None
+        and data.count_after(edit) == delta.to.triple[0]
+        and not freshness.external_pending(vault_root)
+        and _delta_applied(vault_root, delta, {**data.applied, **edit.applied})
+    )
+
+
 def on_inbound_files_changed(
     vault_root: Path,
     changed_rels: Iterable[str],
@@ -6937,9 +7008,11 @@ def on_inbound_files_changed(
     it only ever mutates an index that already exists.
 
     The batch is read from disk first, then applied in one short critical
-    section; the cost follows the change, not the vault. The generation
-    advances before the read, so a build that started earlier cannot publish
-    and an eviction during the read revokes this patch.
+    section; the cost follows the change, not the vault. With resident data the
+    generation advances before the read, so a build that started earlier cannot
+    publish over it and an eviction during the read revokes this patch. With
+    none, nothing advances: a build in flight replays this event from the
+    registry's delta (`_catch_up_inbound`).
 
     The patched data is proven complete at the registry checkpoint `to` that
     its retained history bridges from the old one, provided every path in that
@@ -6962,11 +7035,11 @@ def on_inbound_files_changed(
     with _INBOUND_PATCH_LOCK:
         with _INBOUND_INDEX_LOCK:
             state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
-            state.generation += 1
-            generation = state.generation
             cached = _INBOUND_INDEX.get(root)
             if cached is None:
-                return
+                return  # a build in flight replays this event from the registry itself
+            state.generation += 1
+            generation = state.generation
         data = cached[1]
         bridge = (
             freshness.delta_since(vault_root, "vault", data.checkpoint)
@@ -6976,13 +7049,7 @@ def on_inbound_files_changed(
             _plan_inbound_edit(vault_root, changed_list, deleted_list)
             if bridge is not None and bridge.complete else None
         )
-        proven = (
-            edit is not None
-            and bridge.to.triple is not None
-            and data.count_after(edit) == bridge.to.triple[0]
-            and not freshness.external_pending(vault_root)
-            and _delta_applied(vault_root, bridge, {**data.applied, **edit.applied})
-        )
+        proven = edit is not None and _prove_inbound(vault_root, data, bridge, edit)
         with _INBOUND_INDEX_LOCK:
             if state.generation != generation or _INBOUND_INDEX.get(root) is not cached:
                 return
