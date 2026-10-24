@@ -10,8 +10,8 @@ on:
 
 concurrency:
   group: ci-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.ref) || github.event.pull_request.number || github.ref }}
-  # New pushes supersede PR feedback, but main/release evidence must finish.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # New PR and main pushes supersede feedback; dispatched and scheduled evidence finishes.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 env:
   # The store-blind release the collection-store gate runs as an actual older
