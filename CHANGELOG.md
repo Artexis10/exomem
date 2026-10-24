@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.138.0](https://github.com/Artexis10/exomem/compare/v0.137.0...v0.138.0) (2026-10-24)
+
+
+### Features
+
+* **bench:** seed evaluation rounds from retained state ([#2034](https://github.com/Artexis10/exomem/issues/2034)) ([775861b](https://github.com/Artexis10/exomem/commit/775861bb5beaf28ccef8b6aa10eae98ce137a2d6))
+
+
+### Bug Fixes
+
+* **ci:** retain successful journey recovery diagnostics ([#2039](https://github.com/Artexis10/exomem/issues/2039)) ([b9b423e](https://github.com/Artexis10/exomem/commit/b9b423e129329d624e7b1c75a5d6766bcf2fc292))
+* explain stable identity recovery for legacy edits ([#2038](https://github.com/Artexis10/exomem/issues/2038)) ([c465fab](https://github.com/Artexis10/exomem/commit/c465fab896058788ef4d102a33d90e6daca71117))
+
+
+### Performance
+
+* **recall:** hydrate only the frozen mixed recall selection ([2fb6bd8](https://github.com/Artexis10/exomem/commit/2fb6bd805d0a6790a5579aac98c57f5503e7fb89))
+
 ## [0.137.0](https://github.com/Artexis10/exomem/compare/v0.136.0...v0.137.0) (2026-10-24)
 
 
