@@ -4563,6 +4563,16 @@ class LeaseManager:
         except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
             return False
 
+    def _renew_claims_store_capability(self) -> bool:
+        """Claim the store capability on renew by the rule this process acquired with."""
+        if self._file_store_acquisition is not None:
+            # A server renews only for the publication it proved at acquisition.
+            marker = self._collection_file_marker(self._file_store_acquisition)
+            return marker is not None and marker == self._file_store_marker
+        # A standalone writer re-proves the acquire predicate on every renew, so a
+        # changed marker mid-guard is refused by the coordinator, not assumed.
+        return not self._serves_collection_store and self._offers_collection_store_capability()
+
     def _collection_file_marker(self, acquired=None, *, vault_root=None):
         try:
             from .collection_store import replica
@@ -6873,12 +6883,9 @@ class LeaseManager:
                 if fencing_token is None and self._collection_store is not None:
                     self._renew_collection_store(token)
                     continue
-                marker = (self._collection_file_marker(self._file_store_acquisition)
-                          if self._file_store_acquisition is not None else None)
                 record = self.client.renew(token, **(
                     {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
-                    if (self._file_store_acquisition is not None and marker is not None
-                        and marker == self._file_store_marker) else {}
+                    if self._renew_claims_store_capability() else {}
                 ))
                 with self._lock:
                     if self._fencing_token != token:

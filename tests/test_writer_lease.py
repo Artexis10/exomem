@@ -4020,6 +4020,90 @@ def test_cli_curation_preparation_keeps_lease_authority_without_applying_notes(
         manager.close()
 
 
+def test_cli_curation_preparation_keeps_lease_on_a_store_fenced_vault(
+    tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A standalone writer that acquired with the store capability must renew with it.
+
+    The coordinator refuses a capability-less renew under an enrolled store fence,
+    and the refused renew used to drop the CLI's own token mid-preparation.
+    """
+    from exomem import __main__ as cli_main
+    from exomem import curation
+
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    capability = writer_lease_module.COLLECTION_STORE_CAPABILITY
+    store.transition_collection_store_fence(
+        "main", expected_generation=0, capability=capability,
+        store_id="00000000-0000-4000-8000-000000000001",
+    )
+    renewed = threading.Event()
+    clock_lock = threading.Lock()
+
+    class FencedStoreClient(StoreClient):
+        def acquire(self, **claims: str) -> LeaseRecord:
+            return LeaseRecord.from_json(self.store.acquire("main", self.replica_id, 10, **claims))
+
+        def renew(self, fencing_token: int, **claims: str) -> LeaseRecord:
+            with clock_lock:
+                record = LeaseRecord.from_json(
+                    self.store.renew("main", self.replica_id, fencing_token, 10, **claims)
+                )
+                renewed.set()
+                return record
+
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example", vault_id="main", replica_id="desktop",
+            state_dir=tmp_path / "writer-state", ttl_seconds=10,
+        ),
+        client=FencedStoreClient(store, "desktop"),
+    )
+    monkeypatch.setattr(writer_lease_module, "get_manager", lambda: manager)
+    monkeypatch.setattr(manager, "_renew_interval_seconds", lambda: 0.01)
+    # This vault's file writes are proved unrelated to the store, as on a migrated vault.
+    monkeypatch.setattr(manager, "_offers_collection_store_capability", lambda: True)
+    real_prepare = curation._prepare_step
+
+    def slow_preparation(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        prepared = real_prepare(*args, **kwargs)
+        for at in (107, 114):
+            with clock_lock:
+                clock.value = at
+                renewed.clear()
+            assert renewed.wait(_OBSERVE_SECONDS), "CLI did not renew during preparation"
+            assert store.status("main")["expires_at"] > at
+        return prepared
+
+    monkeypatch.setattr(curation, "_prepare_step", slow_preparation)
+    plan = {
+        "version": 1,
+        "title": "Preserve a coherent conclusion",
+        "steps": [{
+            "step_id": "new-conclusion", "kind": "create-note",
+            "args": {
+                "title": "Coherent conclusion", "slug": "coherent-conclusion",
+                "note_type": "insight",
+                "content": "## Observations\n\n- [finding] Keep one coherent conclusion together. ^coherent-conclusion\n",
+                "relation_disposition": "reviewed_none",
+                "relation_review_reason": "This independent conclusion has no supported relation.",
+            },
+        }],
+    }
+    try:
+        code = cli_main.main([
+            "maintain_memory", "--mode", "curation", "--curation-action", "propose",
+            "--plan", json.dumps(plan), "--json",
+        ])
+        terminal = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert code == 0, terminal
+        assert curation.status(vault, run_id=terminal["data"]["run_id"])["phase"] == "proposed"
+        assert store.status("main")["fencing_token"] == 1
+    finally:
+        manager.close()
+
+
 def test_exiting_one_guard_preserves_overlapping_guard_renewal(tmp_path: Path, monkeypatch) -> None:
     clock = Clock()
     store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
