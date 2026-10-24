@@ -14,5 +14,9 @@
 
 ## 3. Integrated proof and closure
 
-- [ ] 3.1 Run the coordinated full test corpus, lint, package build and privacy checks; record actual results for delivery.
-- [ ] 3.2 Validate the OpenSpec tree strictly, synchronize and archive through the CLI, and validate again while preserving existing requirements.
+- [x] 3.1 Run the coordinated full test corpus, lint, package build and privacy checks; record actual results for delivery.
+- [x] 3.2 Validate the OpenSpec tree strictly, synchronize and archive through the CLI, and validate again while preserving existing requirements.
+
+CI run `40055119246` passed all core and harness shards, lint, build, and installed-wheel checks.
+The reviewed PR passed 33 checks; 13 checks skipped.
+Integrated checks passed 202 tests, and the final independent recheck passed 74 cases.
