@@ -1102,6 +1102,10 @@ class CatalogReadiness:
     status: str
     complete: bool
     backend: str
+    #: The checkpoint the sidecar held when it trailed the requested one, so a
+    #: reader can ask which changes it lacks (`view_lag`). None for every other
+    #: verdict, which leaves the cause unknown. Not part of the verdict itself.
+    published: Any = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -8761,7 +8765,7 @@ class LexicalStore:
                 # The stored checkpoint differs from the target; the worker's catch-up
                 # must prove it exactly current, or the full pass runs.
                 _schedule_runtime_catalog_repair(self.vault_root, lag_only=True)
-            return CatalogReadiness("stale", False, backend_name)
+            return CatalogReadiness("stale", False, backend_name, published=checkpoint)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(
                 e,

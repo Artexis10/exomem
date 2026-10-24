@@ -965,22 +965,11 @@ def _remember_stamp(
 def lag_is_withheld(root: Path, built_at: str, visible: Callable[[str], bool]) -> bool:
     """Whether a catalogue built at `built_at` is behind only by pages `visible` rejects.
 
-    The lag is read from the live registry and never walks. It counts as visible
-    when the stamp is unknown, the scope is not live, the access policy moved, or
-    the delta is not bridged, because each leaves what changed unknown.
+    An unknown stamp leaves the lag unknown, and an unknown lag is reported.
     """
     with _CACHE_LOCK:
         built = _STAMP_CHECKPOINTS.get((str(root.absolute()), built_at))
-    current = freshness.live_recall_checkpoint(root, "kb")
-    if built is None or current is None:
-        return False
-    # A policy change moves what every page releases, whichever pages were written.
-    if (built.policy_version, built.access_policy_fingerprint) != (
-        current.policy_version,
-        current.access_policy_fingerprint,
-    ):
-        return False
-    return view_lag.only_withheld(root, freshness.recall_delta_since(root, "kb", built), visible)
+    return view_lag.recall_lag_only_withheld(root, "kb", built, visible)
 
 
 #: (vault, fingerprint) pairs a re-embed was already scheduled for in this process.
@@ -1069,11 +1058,18 @@ def lexical_evidence(
     freshness=None,
     recall_checkpoint=None,
     selection: dict | None = None,
+    visible: Callable[[str], bool] | None = None,
 ):
     """Rank only anchor pages in the maintained full-page text index.
 
     This is own-page retrieval evidence, not a second vote for title overlap.
     Unavailable FTS never falls back to a corpus walk or foreground repair.
+
+    The state is the catalogue's readiness. For a restricted reader (`visible`
+    given), a catalogue that trails only by pages that reader may not see reads
+    `available`, so a write to a withheld page does not flip it (`view_lag`).
+    Only the reported state changes: the readiness gate still serves no hits
+    from a catalogue that trails.
 
     Bounded on any turn: at most `ACTIVATION_LEXICAL_MAX_TERMS` of the
     turn's units, the rarest in the knowledge base, carrying at most
@@ -1099,7 +1095,16 @@ def lexical_evidence(
             selection=selection,
         )
         if not result.readiness.complete:
-            return [], result.readiness.status
+            readiness = result.readiness
+            if (
+                visible is not None
+                and readiness.status == "stale"
+                and view_lag.recall_lag_only_withheld(
+                    vault_root, "kb", readiness.published, visible
+                )
+            ):
+                return [], "available"
+            return [], readiness.status
         hits = [
             find_types.Hit(
                 path=path,

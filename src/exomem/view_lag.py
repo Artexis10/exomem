@@ -63,3 +63,27 @@ def only_withheld(
         except Exception:  # noqa: BLE001 - an undecidable path is counted visible
             return False
     return True
+
+
+def recall_lag_only_withheld(
+    vault_root: Path,
+    scope: str,
+    built: freshness.RecallFreshnessCheckpoint | None,
+    visible: Callable[[str], bool],
+) -> bool:
+    """Whether a structure published at recall checkpoint `built` trails only by withheld pages.
+
+    The lag is read from the live registry and never walks. It counts as visible
+    when `built` is unknown, the scope is not live, the access policy moved, or
+    the delta is not bridged, because each leaves what changed unknown.
+    """
+    current = freshness.live_recall_checkpoint(vault_root, scope)
+    if built is None or current is None:
+        return False
+    # A policy change moves what every page releases, whichever pages were written.
+    if (built.policy_version, built.access_policy_fingerprint) != (
+        current.policy_version,
+        current.access_policy_fingerprint,
+    ):
+        return False
+    return only_withheld(vault_root, freshness.recall_delta_since(vault_root, scope, built), visible)

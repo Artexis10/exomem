@@ -301,6 +301,44 @@ def test_a_withheld_write_marks_the_owner_activation_packet_stale(
     assert _activate(activation.vault, restricted=False)["generation"]["index_stale"] is True
 
 
+def _lexical_flag(vault: Path, *, restricted: bool = True) -> str:
+    return _activate(vault, restricted=restricted)["generation"]["lexical_evidence"]
+
+
+def test_a_withheld_write_leaves_the_restricted_lexical_flag_as_it_was(
+    activation: SimpleNamespace,
+) -> None:
+    """The lexical catalogue lags the registry here; only the flag is caller-relative."""
+    before = _lexical_flag(activation.vault)
+    assert before == "available"
+
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert _lexical_flag(activation.vault) == before
+
+
+def test_a_visible_write_marks_the_restricted_lexical_flag_stale(
+    activation: SimpleNamespace,
+) -> None:
+    _lexical_flag(activation.vault)
+    page = activation.vault / "Knowledge Base/Products/Cargo Sled.md"
+    _write_as_the_service_does(
+        activation.vault, "Knowledge Base/Products/Cargo Sled.md",
+        page.read_text(encoding="utf-8") + "\nAn added line.\n",
+    )
+
+    assert _lexical_flag(activation.vault) == "stale"
+
+
+def test_a_withheld_write_marks_the_owner_lexical_flag_stale(
+    activation: SimpleNamespace,
+) -> None:
+    _lexical_flag(activation.vault, restricted=False)
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert _lexical_flag(activation.vault, restricted=False) == "stale"
+
+
 def test_a_lag_with_no_remembered_stamp_is_reported_to_the_restricted_reader(
     activation: SimpleNamespace,
 ) -> None:
