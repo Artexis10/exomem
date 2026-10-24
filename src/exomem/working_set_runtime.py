@@ -873,6 +873,7 @@ def ensure_index(
     freshness_stamp: str = "",
     recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
     visible: Callable[[str], bool] | None = None,
+    registry_visible: bool = True,
 ) -> tuple[str, working_set_index.WorkingSetIndex | None, bool]:
     """Return a usable, current index — or say why there is not one yet.
 
@@ -883,7 +884,9 @@ def ensure_index(
 
     `recall_checkpoint` is the registry checkpoint `freshness_stamp` was derived
     from. For a reader other than the owner (`visible` given), a catalogue that
-    is behind only by pages that reader may not see is not stale for it.
+    is behind only by pages that reader may not see is not stale for it. A
+    project-registry edit is no page, so it stays a lag for every such reader
+    unless its view omits what the registry defines (`registry_visible=False`).
     """
     if working_set_index.disabled():
         return DISABLED, None, False
@@ -930,9 +933,14 @@ def ensure_index(
     if registry_changed or (freshness_stamp and index.freshness_stamp() != freshness_stamp):
         built_at = index.freshness_stamp()
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
-        # A project-registry edit is not a page, so it is stale for every reader.
-        if not refreshed and visible is not None and not registry_changed:
-            return READY, index, not lag_is_withheld(root, built_at, visible)
+        if not refreshed and visible is not None:
+            # The anchors packet serves the path-less project anchors to every reader
+            # (`anchor_visible`), so only a caller that omits them may ignore an edit.
+            registry_lag = registry_changed and registry_visible
+            pages_moved = bool(freshness_stamp) and built_at != freshness_stamp
+            return READY, index, registry_lag or (
+                pages_moved and not lag_is_withheld(root, built_at, visible)
+            )
         return READY, index, not refreshed
     if _managed():
         _schedule_reembed(root, index, freshness_stamp=freshness_stamp)
@@ -965,22 +973,11 @@ def _remember_stamp(
 def lag_is_withheld(root: Path, built_at: str, visible: Callable[[str], bool]) -> bool:
     """Whether a catalogue built at `built_at` is behind only by pages `visible` rejects.
 
-    The lag is read from the live registry and never walks. It counts as visible
-    when the stamp is unknown, the scope is not live, the access policy moved, or
-    the delta is not bridged, because each leaves what changed unknown.
+    An unknown stamp leaves the lag unknown, and an unknown lag is reported.
     """
     with _CACHE_LOCK:
         built = _STAMP_CHECKPOINTS.get((str(root.absolute()), built_at))
-    current = freshness.live_recall_checkpoint(root, "kb")
-    if built is None or current is None:
-        return False
-    # A policy change moves what every page releases, whichever pages were written.
-    if (built.policy_version, built.access_policy_fingerprint) != (
-        current.policy_version,
-        current.access_policy_fingerprint,
-    ):
-        return False
-    return view_lag.only_withheld(root, freshness.recall_delta_since(root, "kb", built), visible)
+    return view_lag.recall_lag_only_withheld(root, "kb", built, visible)
 
 
 #: (vault, fingerprint) pairs a re-embed was already scheduled for in this process.
@@ -1069,11 +1066,17 @@ def lexical_evidence(
     freshness=None,
     recall_checkpoint=None,
     selection: dict | None = None,
+    visible: Callable[[str], bool] | None = None,
 ):
     """Rank only anchor pages in the maintained full-page text index.
 
     This is own-page retrieval evidence, not a second vote for title overlap.
     Unavailable FTS never falls back to a corpus walk or foreground repair.
+
+    The state is the catalogue's readiness. A catalogue that trails serves no
+    hits and reads as it is, except for a restricted reader (`visible` given)
+    when it trails only by pages that reader may not see: it is current for
+    that reader, so it serves and reads `available` (`_reader_lexical_query`).
 
     Bounded on any turn: at most `ACTIVATION_LEXICAL_MAX_TERMS` of the
     turn's units, the rarest in the knowledge base, carrying at most
@@ -1089,10 +1092,11 @@ def lexical_evidence(
         return [], "available"
     turn = working_set_index.subject_text(turn)
     try:
-        result = _lexical_query(
+        result = _reader_lexical_query(
             vault_root,
             turn,
             set(by_path),
+            visible=visible,
             limit=limit,
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
@@ -1154,6 +1158,36 @@ def _lexical_query(
     )
 
 
+def _reader_lexical_query(
+    vault_root: Path,
+    words: str,
+    paths: set[str],
+    *,
+    visible: Callable[[str], bool] | None,
+    **query,
+):
+    """`_lexical_query`, serving a restricted reader a catalogue that trails only by
+    pages that reader may not see.
+
+    Such a catalogue holds every page the reader may see as it is now, so a write
+    to a page it may not see changes neither the hits nor their state (`view_lag`).
+    The query then reads the catalogue at its own checkpoint, once. Every other
+    lag, and the owner (`visible` None), keep the readiness gate: no hits, `stale`.
+    The release decision on each hit stays per request, on the live file.
+    """
+    result = _lexical_query(vault_root, words, paths, **query)
+    readiness = result.readiness
+    if (
+        visible is None
+        or readiness.status != "stale"
+        or not view_lag.recall_lag_only_withheld(vault_root, "kb", readiness.published, visible)
+    ):
+        return result
+    return _lexical_query(
+        vault_root, words, paths, **{**query, "recall_checkpoint": readiness.published}
+    )
+
+
 def lexical_hits_without(
     vault_root: Path,
     turn: str,
@@ -1162,6 +1196,7 @@ def lexical_hits_without(
     *,
     freshness=None,
     recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
     """Which of `pages` the activation lexical query still reaches for `turn`
     when the stems of the `left_out` words are not counted
@@ -1182,10 +1217,11 @@ def lexical_hits_without(
     if not pages:
         return frozenset()
     try:
-        result = _lexical_query(
+        result = _reader_lexical_query(
             vault_root,
             turn,
             set(pages),
+            visible=visible,
             limit=len(pages),
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,

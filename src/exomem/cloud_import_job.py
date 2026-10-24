@@ -184,7 +184,14 @@ def run_import(
                         expect_bytes=request.declared_bytes, expect_files=request.declared_files,
                     )
             except ArchiveRefused:
-                if process.poll() not in (None, 0):
+                # age can close its output before it exits, so one poll races a wrong key. Its output is
+                # closed here: a decryptor still writing dies of SIGPIPE (a negative code), never 1. The
+                # 10 s bound covers an age still waiting on a stalled feed; the refusal then stands.
+                try:
+                    code = process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    code = None
+                if code is not None and code > 0:
                     raise ArchiveRefused("ARCHIVE_UNDECRYPTABLE", "decrypt") from None
                 raise
             # The stopped-cell Job deadline bounds the feed and decryptor before any vault write.
