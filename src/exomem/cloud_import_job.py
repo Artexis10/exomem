@@ -185,7 +185,8 @@ def run_import(
                     )
             except ArchiveRefused:
                 # age can close its output before it exits, so one poll races a wrong key. Its output is
-                # closed here: a decryptor still writing dies of SIGPIPE (a negative code), never 1.
+                # closed here: a decryptor still writing dies of SIGPIPE (a negative code), never 1. The
+                # 10 s bound covers an age still waiting on a stalled feed; the refusal then stands.
                 try:
                     code = process.wait(timeout=10)
                 except subprocess.TimeoutExpired:

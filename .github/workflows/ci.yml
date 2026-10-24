@@ -164,7 +164,8 @@ jobs:
         # far under the 30-minute job budget it exists to protect.
         timeout-minutes: 6
         run: |
-          scripts/ci-apt-install.sh bubblewrap
+          # age: the protected-import suite skips without the real age and age-keygen.
+          scripts/ci-apt-install.sh bubblewrap age
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
