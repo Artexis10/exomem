@@ -1,11 +1,11 @@
 {
-  "version": "0.137.0",
+  "version": "0.138.0",
   "skill_contract": "af52c0c7404f5a48a828e329a57063db3290dfe5344e2e5617b5fb35abffc645",
   "corpus_digest": "fd20791c3f7e899bcbddd8ef2d07212a2662204fb01beeac82ee8536580ded9c",
   "profile": "product-cloud",
   "resource": "https://exomem.substratesystems.io/mcp",
   "files": {
-    "claude/.claude-plugin/plugin.json": "c9d7aa27e4429153d00c0f002c50983cbe94bec6f882e9b3e5c1106ef9328465",
+    "claude/.claude-plugin/plugin.json": "edbfea1c201d35a9e720b2bbade85ccfe958f26610361fafaf286980ae4d518e",
     "claude/.mcp.json": "2cb290a4dcb2c7391aead34040e295a61aeb4d42924c111bcef1fbe77139a37e",
     "claude/LICENSE": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
     "claude/README.md": "30f2dc6baea5d6c84c7381ddd3e831892f8044e91071c1384b12720a7e279363",
@@ -195,13 +195,13 @@
     "claude/skills/exomem-review/references/vocabulary.md": "58c7b8cdfb32a146884f91ebf3d1f92208711d257f7717f282f2c2b2ac845ca2",
     "claude/skills/exomem-review/references/write-scope.md": "34694442ffa8ef7f6912847367c451ffe5c08cba4a3425f43844f84778a6b674",
     "claude/skills/exomem-review/references/writing.md": "279a765441199b08de311cacabcecd74172802ba66a541dd965330fcf637d0f5",
-    "claude.zip": "96c17c2e1988bf29c108a8d05f5d12aa4b7f4638d6cf919e811d6c49b37fbe9b",
+    "claude.zip": "265a2a08eefe34f4a160930546ff3a96f153b2bd218edad010033e015d8db2de",
     "openai/LICENSE": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
     "openai/README.md": "896bc10661855d8a125d64a0ca9bc4ea7462b799f3ef05d0f270e106f4bf7db0",
     "openai/assets/icon-small.png": "a71359a1bd315fc7575b3c8f655f01a905ba3ade181957650b922361b95df1a9",
     "openai/assets/icon.png": "33201ed915dbf2fd74fc4356e15741a123a91f8fa7ab4fd40d35b8420dda35e6",
     "openai/mcp.json": "cc1cee8db3dbc22e90a1acc860a35b8f9d1a3a6e24046a1052f49dc544abdb8b",
-    "openai/plugin.json": "74568de3b1fd1449453023cf515d516e63fabe30ad96e15ab2e1cb1189ea7800",
+    "openai/plugin.json": "05a70f4b408d2f722dd1a01d839a34c7b012043830cbb0835eaeab6f03a7a9ec",
     "openai/skills/exomem/SKILL.md": "4388cd25e13f4ffbb595d607af1fa403c5a983f2bb04403f733d1418de59f544",
     "openai/skills/exomem/project-keys.yaml": "49b2a102203e16988e0567e5f88714c0157b7ddd8e26ad5843edc0b850eb99cd",
     "openai/skills/exomem/references/audit-checks.md": "914fcb2077b70909a41cf08af1aa1018a2abd7ba2428089366c7ff50be484c4e",
@@ -383,6 +383,6 @@
     "openai/skills/exomem-review/references/vocabulary.md": "58c7b8cdfb32a146884f91ebf3d1f92208711d257f7717f282f2c2b2ac845ca2",
     "openai/skills/exomem-review/references/write-scope.md": "34694442ffa8ef7f6912847367c451ffe5c08cba4a3425f43844f84778a6b674",
     "openai/skills/exomem-review/references/writing.md": "279a765441199b08de311cacabcecd74172802ba66a541dd965330fcf637d0f5",
-    "openai.zip": "2e0da0de74597732cf03a0ec57ce6275986df1dacb01dbad0add3890339cb0c8"
+    "openai.zip": "a63d9ebde5217d4fa7d186471d9f11765f5e63d62daff72d2ca394e8d61369b1"
   }
 }
