@@ -36,6 +36,7 @@ from .. import (
 from .. import structured_collections as collections
 from ..governance import connector_boundary
 from ..governance.principal import effective_principal
+from ..planning_values import PlanningValues
 from ..query_engine.indexes import IndexDeclarationError
 from . import (
     chain,
@@ -320,8 +321,10 @@ class CollectionWriter:
             "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
             (row["collection_id"], row["manifest_version"]),
         ).fetchone()[0]
+        # Canonical reconstruction cannot re-enter the release check that needs this manifest.
         manifest = collections.parse_manifest_bytes(
-            self.root, row["manifest_path"], text.encode()
+            self.root, row["manifest_path"], text.encode(),
+            planning_values=PlanningValues(self.root, server_side=True),
         )
         if manifest.collection_id != row["collection_id"] or manifest.manifest_version.hash != epoch[6]:
             governance.OperationAuthorization.refuse()

@@ -20,6 +20,7 @@ from exomem.record_memory import record_memory
 @pytest.mark.parametrize("profile", ["records", "planning"])
 def test_builtin_reads_resolve_ownership_with_a_vault_added_planning_horizon(store, profile):
     """A custom Planning view must not re-enter ownership or field admission during a read."""
+    from exomem.collection_store import connection
     from exomem.plan_memory import plan_memory
     from exomem.planning_values import registry_path
 
@@ -34,11 +35,16 @@ def test_builtin_reads_resolve_ownership_with_a_vault_added_planning_horizon(sto
     store.create_collection(manifest_path("planning"), planning, why="plan the next cycle", scaffold=False)
     store.reconcile_views()
 
-    with request_scope(owner_principal(surface="mcp")), preview_store(store.root, store.handle):
+    # A restarted reader has no manifest cached by creation or publication.
+    store.handle.close()
+    with (connection.open_writer(store.handle.path, lease_check=lambda: True) as reopened,
+          request_scope(owner_principal(surface="mcp")), preview_store(store.root, reopened)):
         facade, cid = (record_memory, CID) if profile == "records" else (plan_memory, OTHER)
         result = facade(store.root, "inspect", collection=cid)
 
     assert result["contract"]["collection_id"] == cid
+    if profile == "planning":
+        assert any(view["name"] == "next-cycle" for view in result["saved_views"])
 
 
 def test_quarantined_hold_requires_unrestricted_owner_despite_a_broad_grant(store, monkeypatch):
