@@ -27,6 +27,46 @@ def _observer_identity(package_mode: str) -> dict[str, Any]:
     return package_identity(package_mode, role="observer-only")
 
 
+def _connection_failure_details(error: Exception) -> dict[str, Any]:
+    from httpx2 import HTTPStatusError, TimeoutException, TransportError
+    from mcp.shared.exceptions import MCPError
+
+    http_status_codes: set[int] = set()
+    mcp_error_codes: set[int] = set()
+    timeout_observed = transport_error_observed = truncated = False
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    # SDK cause chains can cycle or contain large groups. Inspect only bounded
+    # typed protocol fields; exception text, requests and responses stay private.
+    max_causes = 16
+    while pending and len(seen) < max_causes:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, HTTPStatusError):
+            http_status_codes.add(current.response.status_code)
+        if isinstance(current, MCPError):
+            mcp_error_codes.add(current.error.code)
+        if isinstance(current, (TimeoutError, TimeoutException)):
+            timeout_observed = True
+        if isinstance(current, TransportError):
+            transport_error_observed = True
+        if isinstance(current, BaseExceptionGroup):
+            truncated |= len(current.exceptions) > max_causes
+            pending.extend(current.exceptions[:max_causes])
+        cause = current.__cause__ or current.__context__
+        if cause is not None:
+            pending.append(cause)
+    return {
+        "http_status_codes": sorted(http_status_codes),
+        "mcp_error_codes": sorted(mcp_error_codes),
+        "timeout_observed": timeout_observed,
+        "transport_error_observed": transport_error_observed,
+        "chain_truncated": truncated or bool(pending),
+    }
+
+
 def _compile_response_schema(schema):
     from jsonschema import Draft202012Validator
     from referencing import Registry, Resource
@@ -309,9 +349,12 @@ async def run_mcp_canary(
             }
         )
     initialization_start = time.perf_counter()
+    # These phases describe the observer lifecycle, not the serving process.
+    phase = "connect"
     try:
         async with client:
             report["initialization_ms"] = (time.perf_counter() - initialization_start) * 1000
+            phase = "cases"
             for case, series in zip(cases, report["cases"], strict=True):
                 observations = []
                 for repetition in range(samples + int(warm_up)):
@@ -375,8 +418,11 @@ async def run_mcp_canary(
                 )
                 if series["availability"] in ("failed", "incomplete"):
                     break
-    except Exception:  # noqa: BLE001 - connection/session errors can contain credentials and targets
+            phase = "disconnect"
+    except Exception as exc:  # noqa: BLE001 - exception text can contain credentials and targets
         report["failure"] = "session-failed"
+        report["failure_phase"] = phase
+        report["failure_details"] = _connection_failure_details(exc)
         if report["initialization_ms"] is None:
             report["initialization_ms"] = (time.perf_counter() - initialization_start) * 1000
     report["ended_at"] = time.time()
@@ -466,6 +512,35 @@ def validate_target(value: str | None) -> None:
         raise ValueError("invalid target")
 
 
+def _http_diagnostics_factory(observations):
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    async def observe_response(response):
+        # Bound protocol metadata; URLs, headers and bodies never enter the report.
+        if len(observations["responses"]) >= 16:
+            observations["truncated"] = True
+            return
+        try:
+            observations["responses"].append(
+                {
+                    "method": response.request.method,
+                    "status_code": response.status_code,
+                    "observed_at": time.time(),
+                }
+            )
+        except Exception:  # noqa: BLE001 - optional diagnostics must not change a response
+            observations["capture_incomplete"] = True
+
+    def client_factory(headers=None, timeout=None, auth=None, follow_redirects=False):
+        # The transport constrains redirects per request; preserve the SDK client defaults.
+        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        client.event_hooks.setdefault("response", []).append(observe_response)
+        observations["client_created"] = True
+        return client
+
+    return client_factory
+
+
 def run_cli(args) -> int:
     from exomem.log_events import JsonLinesFormatter
 
@@ -506,9 +581,17 @@ def run_cli(args) -> int:
             # logs can contain remote errors, endpoint URLs or server material.
             previous_logging = logging.root.manager.disable
             logging.disable(logging.CRITICAL)
+            http_observations = {
+                "client_created": False,
+                "responses": [],
+                "truncated": False,
+                "capture_incomplete": False,
+            }
             try:
                 transport = StreamableHttpTransport(
-                    args.mcp_url, headers={"Authorization": f"Bearer {token}"}
+                    args.mcp_url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    httpx_client_factory=_http_diagnostics_factory(http_observations),
                 )
                 report = asyncio.run(
                     run_mcp_canary(
@@ -526,15 +609,18 @@ def run_cli(args) -> int:
                         check=check,
                     )
                 )
-            except Exception:  # noqa: BLE001 - client construction may include the target in its error
+            except Exception as exc:  # noqa: BLE001 - client errors can contain the target
                 report = {
                     "mode": "mcp-canary",
                     "verdict": "failed",
                     "check": check,
                     "failure": "invalid-client",
+                    "failure_phase": "client-setup",
+                    "failure_details": _connection_failure_details(exc),
                 }
             finally:
                 logging.disable(previous_logging)
+            report["http_transport_observations"] = http_observations
             _canary_warning(report)
     report.setdefault("started_at", started)
     report.setdefault("ended_at", time.time())
