@@ -203,17 +203,29 @@ def resolve_retained_input(
 
 
 @reader
-def exact_text_visible(vault_root: Path, value: str) -> bool:
-    """Check an exact selected representation without recording unreturned targets."""
+def exact_text_verdict(vault_root: Path, value: str) -> str:
+    """Check an exact selected representation without recording unreturned targets.
+
+    Answers an `egress.TEXT_*` verdict. Only the reference gate can answer
+    `TEXT_LOOKUP_STALE`; a redaction or a scrub that changes the text is final.
+    """
     principal = _principal()
-    if not egress.direct_text_references_visible(vault_root, value, principal=principal):
-        return False
+    verdict = egress.direct_text_references_verdict(vault_root, value, principal=principal)
+    if verdict != egress.TEXT_RELEASED:
+        return verdict
     with egress.disclosure_boundary(vault_root, "retained-input-reference-validation") as collector:
         redacted = egress.redact_withheld_references(vault_root, value, principal=principal)
         scrubbed = egress.postfilter("get", redacted, vault_root)
     if collector.credential_redactions:
         egress._record_credential_block(collector.credential_redactions)  # noqa: SLF001
-    return redacted == value and scrubbed == value
+    if redacted == value and scrubbed == value:
+        return egress.TEXT_RELEASED
+    return egress.TEXT_REFUSED
+
+
+def exact_text_visible(vault_root: Path, value: str) -> bool:
+    """Whether an exact selected representation is released unchanged."""
+    return exact_text_verdict(vault_root, value) == egress.TEXT_RELEASED
 
 
 @reader

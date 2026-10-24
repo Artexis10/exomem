@@ -377,9 +377,10 @@ and interruption semantics, without promising cross-file power-loss atomicity.
 
 Origin authoring and projection check a retained input's prose names against the vault-wide name lookup, as a direct read does.
 A refusal for a stale lookup SHALL request the stamped lookup build in the background, without walking the vault on the caller's thread.
-An unrestricted writer so refused SHALL receive the retryable `ORIGIN_INPUT_LOOKUP_STALE`, and the same write SHALL commit once the build lands.
-A caller that can have content withheld SHALL keep `ORIGIN_INPUT_UNAVAILABLE`, because the lookup state changes on every write.
-A lookup that no build can settle SHALL also keep `ORIGIN_INPUT_UNAVAILABLE`.
+The name gate SHALL report why it refused, and only a refusal caused by the stale lookup is retryable.
+An unrestricted writer so refused, on a runtime that schedules that build, SHALL receive the retryable `ORIGIN_INPUT_LOOKUP_STALE`, and the same write SHALL commit once the build lands.
+Every other refusal SHALL keep `ORIGIN_INPUT_UNAVAILABLE`: a scrubbed credential, a withheld or missing target, a restricted caller, a runtime with no build owner and a lookup that no build can settle.
+A caller that can have content withheld gets no retry signal, because the lookup state changes on every write.
 A projected read SHALL still remove the whole payload of an input so refused, and SHALL restore it once the build lands.
 
 #### Scenario: One turn becomes four pages
@@ -393,6 +394,7 @@ A projected read SHALL still remove the whole payload of an input so refused, an
 - **THEN** the write is refused with `ORIGIN_INPUT_LOOKUP_STALE` and the refusal schedules the stamped lookup build
 - **AND** once the build lands, the same write commits
 - **AND** a restricted caller in the same state receives `ORIGIN_INPUT_UNAVAILABLE`
+- **AND** a Source whose text a scrubber changes receives `ORIGIN_INPUT_UNAVAILABLE` in the same state, because no build can lift that refusal
 - **AND** a projected read in that window removes the payload and restores it once the build lands
 
 #### Scenario: One episode discusses two independent original sources

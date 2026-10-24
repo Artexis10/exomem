@@ -414,10 +414,12 @@ not a designated managed origin block.
 A retained input whose text links a page by name is released only against current name lookup evidence, and any knowledge-base write leaves that evidence stale until a stamped build lands.
 A refused check asks for that build itself: `egress.direct_text_references_visible` calls `working_set_runtime.request_lookup_refresh`, which is managed-only, single-flight and never builds on the caller's thread.
 That schedules a build; it does not rebuild an index inside recovery.
-Origin authoring brackets its check with two lookup readings and compares them with `working_set_runtime.lookup_settled`, the rule that history shares.
-An unsettled pair gives an unrestricted writer the retryable `ORIGIN_INPUT_LOOKUP_STALE` (HTTP 503).
+The gate reports its reason as one of three closed verdicts (`egress.direct_text_references_verdict`: released, refused, `lookup_stale`), and `retained_inputs.exact_text_verdict` adds its own redaction and scrub refusals as `refused`.
+Origin authoring reads that verdict and infers nothing from lookup readings: other causes of refusal are permanent while the lookup is stale.
+Only `lookup_stale` gives an unrestricted writer the retryable `ORIGIN_INPUT_LOOKUP_STALE` (HTTP 503), and only where a build owner exists (`working_set_runtime.has_build_owner`), because an unmanaged runtime schedules nothing.
 A restricted caller keeps `ORIGIN_INPUT_UNAVAILABLE`, because the state flips on every write, withheld pages included.
 A lookup with no live registry or index keeps it too, because no build can settle that.
+History keeps its own bracket, which shares the settled rule (`working_set_runtime.lookup_settled`).
 The code is not `ORIGIN_INPUT_STALE`: projection skips that code and would show a carrier whose input was refused, so the new code stays in the branch that removes the payload.
 
 ##### Origin-aware projector refresh

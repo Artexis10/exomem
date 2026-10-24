@@ -2614,6 +2614,11 @@ def name_lookup(vault_root: Path) -> NameLookup:
     return NameLookup(LOOKUP_CURRENT if current else LOOKUP_STALE, checkpoint, stamp, index_stamp)
 
 
+def has_build_owner() -> bool:
+    """Whether this runtime schedules the stamped build that `request_lookup_refresh` asks for."""
+    return _managed()
+
+
 def lookup_settled(scan_start: NameLookup, scan_end: NameLookup) -> bool:
     """Whether two readings that bracket a check found the lookup current throughout.
 

@@ -1018,19 +1018,29 @@ def _unwrap_reference(raw: str, *, is_wikilink_target: bool = False) -> tuple[st
     return text, explicit
 
 
-def direct_text_references_visible(
+# What the direct-text gate decided: released, refused for good, or refused only
+# because the name lookup was stale (a retry after the stamped build can lift it).
+TEXT_RELEASED = "released"
+TEXT_REFUSED = "refused"
+TEXT_LOOKUP_STALE = "lookup_stale"
+
+
+def direct_text_references_verdict(
     vault_root: Path,
     text: str,
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
-) -> bool:
+) -> str:
     """Prove every wikilink in returned direct-read text remains releasable.
 
     A governed body can name a page by title or alias, neither of which is a
     filesystem path.  The maintained working-set catalogue is the only bounded
     authority for that mapping.  Target checks never record a disclosure of
     content this direct read does not return.
+
+    Answers `TEXT_LOOKUP_STALE` when only a stale name lookup refused the text,
+    so a caller can tell a refusal a retry may lift from a permanent one.
     """
     root = Path(vault_root)
     policy = policy_module.load(root)
@@ -1038,12 +1048,12 @@ def direct_text_references_visible(
     for reference in _WIKILINK_ANYWHERE.findall(text):
         target, _ = _unwrap_reference(reference, is_wikilink_target=True)
         if not content_permits(root, target, who):
-            return False
+            return TEXT_REFUSED
     if _file_policy_empty(root, policy):
-        return True
+        return TEXT_RELEASED
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
-        return False
+        return TEXT_REFUSED
 
     paths: set[str] = set()
     names: set[str] = set()
@@ -1053,13 +1063,13 @@ def direct_text_references_visible(
         # `_unwrap_reference`'s docstring.
         target, _explicit = _unwrap_reference(raw, is_wikilink_target=True)
         if not target:
-            return False
+            return TEXT_REFUSED
         if target.endswith(".md"):
             paths.add(target)
         else:
             names.add(target)
     if len(paths) + len(names) > MAX_DIRECT_TEXT_REFERENCES:
-        return False
+        return TEXT_REFUSED
 
     checkpoint = None
     if names:
@@ -1069,24 +1079,27 @@ def direct_text_references_visible(
         if lookup.state != working_set_runtime.LOOKUP_CURRENT:
             # A refusal on staleness owes the stamped build that ends it; this only schedules one.
             working_set_runtime.request_lookup_refresh(root, lookup)
-            return False
+            # With no live registry or index no build can help, so that refusal is permanent.
+            if lookup.state == working_set_runtime.LOOKUP_STALE:
+                return TEXT_LOOKUP_STALE
+            return TEXT_REFUSED
         checkpoint = lookup.checkpoint
         try:
             resolved = _resolved_prose_names(root, names)
         except WorkingSetResolutionUnavailable:
-            return False
+            return TEXT_REFUSED
         if any(name not in resolved for name in names):
-            return False
+            return TEXT_REFUSED
         resolved_paths = {path for name in names for path in resolved[name]}
         if not resolved_paths or len(paths) + len(resolved_paths) > MAX_DIRECT_TEXT_REFERENCES:
-            return False
+            return TEXT_REFUSED
         paths |= resolved_paths
 
     grants_hash = _grants_hash(policy)
     declared_purpose = _declared_purpose(root, who, purpose)
     for path in paths:
         if lifecycle.is_tombstoned(root, path):
-            return False
+            return TEXT_REFUSED
         decision = _decide_path(
             root,
             path,
@@ -1098,13 +1111,27 @@ def direct_text_references_visible(
             authorization_context=who.verified_authorization_session,
         )
         if decision is None or decision.level < RELEASE_FLOOR:
-            return False
+            return TEXT_REFUSED
     if checkpoint is not None:
         from .. import freshness
 
         if not freshness.recall_checkpoint_is_current(root, "kb", checkpoint):
-            return False
-    return True
+            return TEXT_LOOKUP_STALE
+    return TEXT_RELEASED
+
+
+def direct_text_references_visible(
+    vault_root: Path,
+    text: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> bool:
+    """Whether every wikilink in returned direct-read text remains releasable."""
+    return (
+        direct_text_references_verdict(vault_root, text, principal=principal, purpose=purpose)
+        == TEXT_RELEASED
+    )
 
 
 def _is_plain_reference(raw: str, *, is_wikilink_target: bool) -> bool:

@@ -118,23 +118,29 @@ def _seed_governed(vault: Path) -> dict:
     return binding
 
 
-def test_a_restricted_caller_keeps_the_unavailable_refusal_for_a_stale_lookup(vault: Path) -> None:
+def test_a_restricted_caller_keeps_the_unavailable_refusal_for_a_stale_lookup(
+    vault: Path, monkeypatch
+) -> None:
     """Lookup state flips on every write, withheld pages included; a restricted audience gets no signal."""
     binding = _seed_governed(vault)
     with request_scope(READER):
         origin_bindings.resolve_origin_input(vault, binding)
     with request_scope(owner_principal(surface="mcp")):
         _unrelated_edit(vault)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     with request_scope(READER), pytest.raises(provenance.OriginError) as refused:
         origin_bindings.resolve_origin_input(vault, binding)
 
     assert refused.value.code == "ORIGIN_INPUT_UNAVAILABLE"
 
 
-def test_a_lookup_that_no_build_can_settle_is_not_a_retryable_refusal(vault: Path) -> None:
+def test_a_lookup_that_no_build_can_settle_is_not_a_retryable_refusal(
+    vault: Path, monkeypatch
+) -> None:
     """Without a live registry a retry cannot change the answer, so the writer is not asked to retry."""
     binding = _seed(vault)
     _write_source_rule(vault, ceiling=6)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     assert working_set_runtime.name_lookup(vault).state == working_set_runtime.LOOKUP_UNAVAILABLE
     with (
         request_scope(owner_principal(surface="mcp")),
@@ -143,6 +149,38 @@ def test_a_lookup_that_no_build_can_settle_is_not_a_retryable_refusal(vault: Pat
         origin_bindings.resolve_origin_input(vault, binding)
 
     assert refused.value.code == "ORIGIN_INPUT_UNAVAILABLE"
+
+
+def test_a_runtime_with_no_build_owner_does_not_ask_the_writer_to_retry(vault: Path) -> None:
+    """Only a managed runtime schedules the build, so for any other a retry would not help."""
+    binding = _seed_governed(vault)
+    with request_scope(owner_principal(surface="mcp")):
+        _unrelated_edit(vault)
+        assert working_set_runtime.name_lookup(vault).state == working_set_runtime.LOOKUP_STALE
+        with pytest.raises(provenance.OriginError) as refused:
+            origin_bindings.resolve_origin_input(vault, binding)
+
+    assert refused.value.code == "ORIGIN_INPUT_UNAVAILABLE"
+
+
+def test_a_refusal_unrelated_to_names_stays_unavailable_while_the_lookup_is_stale(
+    vault: Path, monkeypatch
+) -> None:
+    """A Source whose text a scrubber changes is refused for good, whatever the lookup says."""
+    binding = _write(
+        vault, "The call sent Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789.\n"
+    )
+    _write_page(vault, rel=UNRELATED, source=UNRELATED_SOURCE)
+    _write_source_rule(vault, ceiling=6)
+    _seed_freshness_live(vault)
+    _stamp(vault)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    with request_scope(owner_principal(surface="mcp")):
+        _unrelated_edit(vault)
+        assert working_set_runtime.name_lookup(vault).state == working_set_runtime.LOOKUP_STALE
+        refusal = _refusal(lambda: _remember(vault, binding))
+
+    assert refusal["code"] == "ORIGIN_INPUT_UNAVAILABLE"
 
 
 def _note_with_linked_carrier(vault: Path) -> tuple[dict, str]:
@@ -177,10 +215,13 @@ def test_a_reader_gets_the_carrier_back_once_the_refusal_scheduled_build_lands(
 
 
 def test_projection_removes_the_carrier_of_an_input_refused_for_a_stale_lookup(
-    vault: Path,
+    vault: Path, monkeypatch
 ) -> None:
     """The retryable refusal is not the skipped stale-binding code: the carrier stays withheld."""
     binding, note = _note_with_linked_carrier(vault)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    # No build may land between the two checks below.
+    monkeypatch.setattr(working_set_runtime, "request_lookup_refresh", lambda *args: None)
     with request_scope(owner_principal(surface="mcp")):
         _unrelated_edit(vault)
         text = (vault / note).read_text(encoding="utf-8")
