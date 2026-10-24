@@ -79,6 +79,7 @@ Facts verified against the code, including by the independent critic review of 2
    - The members of `CLOUD_SURFACE_EXCLUSIONS` are removed from the MCP server after registration.
    - Each entry uses the `SurfaceExclusion` shape: `command`; `reason`, stating what is technically broken; and `lifted_when`.
    - The current members are `transfer_artifact` and `read_media`; staged import enables `adopt_vault`.
+   - **Amendment (2026-10-24, `add-cloud-transfer-tools`):** a registry command that declares `executor: control_plane` is Cloud-only. The Cloud surface is the product surface minus `CLOUD_SURFACE_EXCLUSIONS`, plus those commands, built by one registry function. A cell answers a call for one with `CLOUD_GATEWAY_REQUIRED`; the Cloud gateway serves it.
    - `process_media` is served. Its `status`, `process` and `retry` operations use the cell's own media queue, pressure brakes and `EXOMEM_MEDIA_ENGINES` selection, so an engine that is off gets no work and a retry never returns over-budget work.
    - Legacy MCP aliases (`EXOMEM_MCP_LEGACY_COMPAT`) are never registered in cloud mode. A cell has no legacy clients, and aliases would re-expose the leaves of excluded commands.
 4. **Read-only mode.** With `EXOMEM_CLOUD_READ_ONLY=1` the cell refuses every mutating command with `CLOUD_CELL_READ_ONLY`, before vault access. Mutation is classified from the command registry, not from a copied list. Reads keep working.
@@ -221,7 +222,7 @@ Namespace `exo-cell-<cell_id>` holds:
   - the readiness probe is `GET /health/ready` and liveness is `GET /health`. A startup probe on `GET /health` allows 5 minutes (period 10 s, failure threshold 30) before liveness applies, so a slow cold start is not killed and misread as a failed canary. Resources come from values.
 - **Service** `cell`, ClusterIP, on 8765.
 
-Namespace `exomem-cloud` is default-deny too: one `podSelector: {}` policy denies all ingress and egress, and the cellctl and gateway policies each allow their own traffic in both directions. cellctl may egress only to the Kubernetes API, the control database on 5432 and object storage on 443. The gateway may egress only to cell pods on 8765 and the control database on 5432. Both get DNS. The gateway accepts ingress only from Traefik. The certificate Issuer uses DNS-01, so no ACME solver pod runs in the namespace.
+Namespace `exomem-cloud` is default-deny too: one `podSelector: {}` policy denies all ingress and egress, and the cellctl and gateway policies each allow their own traffic in both directions. cellctl may egress only to the Kubernetes API, the control database on 5432 and object storage on 443. The gateway may egress only to cell pods on 8765 and the control database on 5432. Both get DNS. **Amendment (2026-10-24, `add-cloud-transfer-tools`):** only when the chart sets `cloudGateway.transferTools.enabled` (default `false`), the gateway also egresses on TCP 443 to public addresses, excluding every `cells.jobEgressExcept` range, to call the Substrate web API. The chart refuses the flag without those exclusions. With the flag off, this paragraph holds as written. The gateway accepts ingress only from Traefik. The certificate Issuer uses DNS-01, so no ACME solver pod runs in the namespace.
 
 ### D6. Releases: one setting, a stateless rollout, restore-based rollback
 

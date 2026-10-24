@@ -695,17 +695,12 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             source_schema=runtime.source_schema,
             transfer_config=transfer_config,
         )
+    # A cell serves the product surface minus the technical exclusions (D1.3) plus
+    # the Cloud-only control-plane commands; registration below never sees the
+    # exclusions, and no other surface sees the Cloud-only commands.
     product_commands = commands_module.product_commands_for(
-        "mcp", expose_tier2=expose_tier2
+        "mcp", expose_tier2=expose_tier2, cloud=cloud
     )
-    if cloud:
-        # The served surface is the product surface minus the technical
-        # exclusions (D1.3); tool registration below never sees them.
-        product_commands = tuple(
-            command
-            for command in product_commands
-            if command.name not in commands_module.CLOUD_SURFACE_EXCLUSIONS
-        )
     mcp.add_middleware(PublicCommandNameMiddleware(product_commands))
     mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
     # Cloud traces retain their content-free form after name normalization.

@@ -231,7 +231,7 @@ def test_equivalent_nested_and_legacy_calls_share_digest_and_execute_once(
         calls.append(kwargs)
         return {"path": kwargs["path"]}
 
-    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False, executor="cell")
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
     )
@@ -274,7 +274,7 @@ def test_equivalent_nested_and_legacy_calls_share_digest_and_execute_once(
 
 
 def test_invalid_edit_fails_before_manager_or_mutation_boundary(monkeypatch) -> None:
-    command = SimpleNamespace(name="edit_memory", leaf=lambda *_a, **_k: None, read_only=False)
+    command = SimpleNamespace(name="edit_memory", leaf=lambda *_a, **_k: None, read_only=False, executor="cell")
     monkeypatch.setattr(
         writer_lease,
         "get_manager",
@@ -312,7 +312,7 @@ def test_invalid_edit_fails_before_manager_or_mutation_boundary(monkeypatch) -> 
 def test_invalid_batch_edit_fails_before_manager_or_mutation_boundary(
     monkeypatch: pytest.MonkeyPatch, edits: list, guidance: str
 ) -> None:
-    command = SimpleNamespace(name="edit_memory", leaf=lambda *_a, **_k: None, read_only=False)
+    command = SimpleNamespace(name="edit_memory", leaf=lambda *_a, **_k: None, read_only=False, executor="cell")
     monkeypatch.setattr(
         writer_lease,
         "get_manager",
@@ -633,7 +633,7 @@ def test_bound_validate_only_edit_bypasses_live_mutation_boundary(
         assert validate_only is operation["validate_only"]
         return {"validate_only": operation["validate_only"]}
 
-    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False, executor="cell")
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
         mutation_timeout_seconds=0.05,
@@ -681,7 +681,7 @@ def test_identical_pending_retry_waits_outside_mutation_boundary_and_replays(
         assert release.wait(_HOLD_SECONDS)
         return {"value": value}
 
-    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False, executor="cell")
     (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
@@ -1003,7 +1003,7 @@ def test_explicit_mcp_keys_are_isolated_by_verified_principal_and_vault(tmp_path
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     monkeypatch.setattr("fastmcp.server.dependencies.get_context", lambda: SimpleNamespace(
         request_context=SimpleNamespace(meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "same-key"}), session_id="connection-1"))
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False, executor="cell")
     for root, audience in ((tmp_path / "one", "first"), (tmp_path / "one", "second"), (tmp_path / "two", "first")):
         bound = command_surface.bind_vault(leaf, root, command=command)
         with principal_module.request_scope(principal_module.RequestPrincipal(audience_id=audience, surface="mcp")):
@@ -1265,7 +1265,7 @@ def test_bound_mcp_tool_passes_retry_scope(monkeypatch) -> None:
     def leaf(vault, *, value: int):  # noqa: ANN001
         return value
 
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False, executor="cell")
     bound = command_surface.bind_vault(leaf, object(), command=command)
     monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "bearer:abc")
     monkeypatch.setattr(
@@ -1293,7 +1293,7 @@ def test_bound_mcp_tool_returns_public_operation_error_as_failure_content(
     def leaf(vault):  # noqa: ANN001, ARG001
         raise AssertionError("invoke seam should replace the leaf")
 
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False, executor="cell")
     bound = command_surface.bind_vault(leaf, object(), command=command)
     public_error = OpError(
         "MUTATION_BUSY",
@@ -1325,7 +1325,7 @@ def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
     def leaf(vault):  # noqa: ANN001, ARG001
         raise AssertionError("invoke seam should replace the leaf")
 
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False, executor="cell")
     bound = command_surface.bind_vault(leaf, object(), command=command)
     refusal = SemanticWriteError(
         "RELATION_REVIEW_STABLE_ID_REQUIRED",
@@ -1356,7 +1356,7 @@ def test_bound_mcp_tool_does_not_flatten_unexpected_exception(
     def leaf(vault):  # noqa: ANN001, ARG001
         raise AssertionError("invoke seam should replace the leaf")
 
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False, executor="cell")
     bound = command_surface.bind_vault(leaf, object(), command=command)
     monkeypatch.setattr(
         "exomem.writer_lease.invoke_command",
@@ -1376,7 +1376,7 @@ def test_bound_mcp_tool_keeps_lost_authority_a_native_error(
     def leaf(vault):  # noqa: ANN001, ARG001
         raise AssertionError("invoke seam should replace the leaf")
 
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False, executor="cell")
     bound = command_surface.bind_vault(leaf, object(), command=command)
     monkeypatch.setattr(
         "exomem.writer_lease.invoke_command",
@@ -1393,11 +1393,11 @@ def test_fastmcp_busy_is_normal_tool_content_but_unexpected_fault_is_native(
     def leaf(vault):  # noqa: ANN001, ARG001
         raise AssertionError("invoke seam should replace the leaf")
 
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False, executor="cell")
     bound = command_surface.bind_vault(
         leaf, object(), name="mutate", command=command
     )
-    read_command = SimpleNamespace(name="inspect", leaf=leaf, read_only=True)
+    read_command = SimpleNamespace(name="inspect", leaf=leaf, read_only=True, executor="cell")
     read_bound = command_surface.bind_vault(
         leaf, object(), name="inspect", command=read_command
     )
@@ -1538,7 +1538,7 @@ def test_bound_mcp_committed_failure_replays_sanitized_without_second_leaf_call(
         calls += 1
         raise original from raw
 
-    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False, executor="cell")
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path))
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "session:one")

@@ -37,6 +37,7 @@ from exomem import server as server_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
+CLOUD_ONLY_FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_cloud_only_tool_schemas.json"
 TOOL_SURFACE_CONTRACT_PATH = REPO_ROOT / "src" / "exomem" / "tool_surface_contract.json"
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 DISCOVERY_FIELDS = (
@@ -52,7 +53,7 @@ DISCOVERY_FIELDS = (
 )
 
 
-def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, cloud: bool = False):
     """Build the server exactly as the fixture was captured (see module docstring)."""
     vault_root = tmp_path / "schema_vault"
     shutil.copytree(FIXTURE_VAULT, vault_root)
@@ -69,6 +70,12 @@ def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease")
     )
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault_root))
+    if cloud:
+        monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+        monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "schema-fixture")
+        monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", "x" * 40)
+    else:
+        monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
     return server_module.build_server(require_auth=False)
 
 
@@ -137,6 +144,32 @@ def test_live_tools_match_committed_baseline(
             "",
         )
     )
+
+
+def test_cloud_only_tools_match_committed_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Cloud gateway lane syncs its tool names and action enums from this file, so a
+    description, schema or annotation edit that skips `scripts/dump-tool-schemas.py`
+    would leave the gateway serving a contract the cell no longer lists."""
+    from exomem import commands as commands_module
+
+    names = {c.public_name for c in commands_module.PRODUCT_COMMANDS if c.cloud_only}
+    mcp = _build_server(monkeypatch, tmp_path, cloud=True)
+    live = {}
+    for tool in asyncio.run(mcp.list_tools()):
+        if tool.name in names:
+            wire = tool.to_mcp_tool().model_dump(mode="json", by_alias=True, exclude_none=True)
+            live[tool.name] = {
+                "description": wire["description"],
+                "inputSchema": wire["inputSchema"],
+                "annotations": wire["annotations"],
+            }
+    baseline = json.loads(CLOUD_ONLY_FIXTURE_PATH.read_text(encoding="utf-8"))
+    assert set(live) == set(baseline) == names
+    assert [_canonical(live[name]) for name in sorted(live)] == [
+        _canonical(baseline[name]) for name in sorted(baseline)
+    ], "Cloud-only tool drift; run scripts/dump-tool-schemas.py"
 
 
 def test_full_mcp_discovery_surface_matches_packaged_contract(
