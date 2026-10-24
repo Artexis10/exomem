@@ -9,6 +9,7 @@ lookup.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -196,6 +197,63 @@ def test_explicit_inbound_listing_still_builds_synchronously_when_no_index_is_li
     assert [item["path"] for item in listing.inbound] == [BACKLINKER]
 
 
+def test_a_pack_miss_starts_one_background_build_that_publishes_without_a_reconcile_pass(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reconcile pass is minutes away: a demanded miss must not wait for it.
+    A second miss, or that pass itself, must not start a second build of the vault."""
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    real_build = vault_module._build_inbound_index
+    started, release = threading.Event(), threading.Event()
+    builders: list[str] = []
+
+    def paused_build(root: Path):
+        builders.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(20)
+        return real_build(root)
+
+    monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
+
+    assert _pack_neighbours(served) == ([OUTLINKED], False)
+    assert started.wait(10), "the miss started no background build"
+    assert _pack_neighbours(served) == ([OUTLINKED], False)  # a second miss, mid-build
+    assert not vault_module.prime_inbound_index(served, eager=True)  # the reconcile pass defers
+
+    release.set()
+    assert find_module.await_recall_resolver_warm()
+
+    assert builders == ["exomem-inbound-index-warm"]
+    assert _pack_neighbours(served) == ([BACKLINKER, OUTLINKED], True)
+
+
+def test_a_pack_that_misses_only_while_a_patch_is_pending_does_not_start_a_rebuild(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each write leaves a short window before its patch runs. A whole-vault rebuild per
+    pack in that window would cost more than the patch that closes it."""
+    assert vault_module.prime_inbound_index(served, eager=True)
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    real_build = vault_module._build_inbound_index
+    builds: list[int] = []
+
+    def counted_build(root: Path):
+        builds.append(1)
+        return real_build(root)
+
+    monkeypatch.setattr(vault_module, "_build_inbound_index", counted_build)
+    fresh = "Knowledge Base/Notes/fresh.md"
+    _write_as_the_service_does(served, fresh, "# Fresh\n\n[[Notes/anchor]]\n")
+    find_module.on_resolver_files_changed(served, [fresh], [])  # the inbound patch is still to run
+
+    assert _pack_neighbours(served) == ([OUTLINKED], False)
+    assert find_module.await_recall_resolver_warm()
+
+    assert builds == []
+    vault_module.on_inbound_files_changed(served, [fresh], [])
+    assert _pack_neighbours(served) == (sorted([BACKLINKER, OUTLINKED, fresh]), True)
+
+
 def _forbid_resolver_builds(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(*_args, **_kwargs):
         raise AssertionError("a request thread built the link resolver")
@@ -230,7 +288,8 @@ def test_the_background_owner_rebuilds_the_resolver_a_pack_found_missing(
     assert find_module.await_recall_resolver_warm()
 
     _forbid_resolver_builds(monkeypatch)
-    assert _pack_gaps(served)[0] == [OUTLINKED]
+    # The same miss also restored the inbound index, so both sides are complete.
+    assert _pack_gaps(served) == ([BACKLINKER, OUTLINKED], [])
 
 
 def test_a_resolver_the_watcher_has_not_yet_patched_is_declined_not_served_stale(

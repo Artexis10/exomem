@@ -550,6 +550,10 @@ def _neighborhood(
             continue
         for link in inbound:
             _touch(link.path, page.rel_path, "in")
+    if INBOUND_INCOMPLETE_TRUNCATION in incomplete and vault_module.inbound_rebuild_needed(
+        vault_root
+    ):
+        find_module.schedule_inbound_rebuild(vault_root)
 
     items = sorted(
         neigh.values(),

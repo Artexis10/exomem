@@ -6733,6 +6733,9 @@ class _InboundGeneration:
     generation: int = 0
     demanded: threading.Event = field(default_factory=threading.Event)
     owned: bool = False  # a watcher owner is registered to recover this vault's index
+    # Held by the one owner pass building this vault's index: the reconcile pass and a
+    # pack-demanded background build both call `prime_inbound_index` and must not overlap.
+    building: threading.Lock = field(default_factory=threading.Lock)
 
 
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
@@ -6924,16 +6927,40 @@ def _catch_up_inbound(
     return False
 
 
+def inbound_rebuild_needed(vault_root: Path) -> bool:
+    """Whether only an owner build can restore this vault's index.
+
+    True when nothing is resident, or the resident data has no proven checkpoint.
+    Data that is resident under a checkpoint merely behind the registry is
+    completed by the patch the watcher is about to run, so a rebuild would repeat
+    work the patch does for the cost of the change.
+    """
+    with _INBOUND_INDEX_LOCK:
+        cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
+    return cached is None or cached[1].checkpoint is None
+
+
 def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
-    """Rebuild requested link metadata on the existing background owner."""
+    """Rebuild requested link metadata on the existing background owner.
+
+    At most one pass builds a vault's index at a time: a caller that finds
+    another pass running returns False, because that pass restores the index.
+    """
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
         state = _INBOUND_INDEX_GENERATIONS.get(root)
         if not eager and (state is None or not state.demanded.is_set()):
             return False
+        if state is None:
+            state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
     if freshness.generation(vault_root, "vault") is None or freshness.external_pending(vault_root):
         return False
-    data = _inbound_index(vault_root, require_current=True)
+    if not state.building.acquire(blocking=False):
+        return False
+    try:
+        data = _inbound_index(vault_root, require_current=True)
+    finally:
+        state.building.release()
     with _INBOUND_INDEX_LOCK:
         cached = _INBOUND_INDEX.get(root)
         return cached is not None and cached[1] is data and data.checkpoint is not None

@@ -7167,6 +7167,8 @@ _RECALL_RESOLVER_FOLLOWER_WAIT_SECONDS = 3.0
 _RECALL_RESOLVER_REBUILDS: set[Path] = set()
 #: Vaults with a broad-resolver background build running; same lock as above.
 _QUERY_RESOLVER_REBUILDS: set[Path] = set()
+#: Vaults with an inbound-index background build running; same lock as above.
+_INBOUND_INDEX_REBUILDS: set[Path] = set()
 
 
 def _follower_wait_seconds(*, allow_fallback: bool) -> float:
@@ -7248,12 +7250,31 @@ def _schedule_query_resolver_rebuild(root: Path) -> None:
     )
 
 
+def schedule_inbound_rebuild(vault_root: Path) -> None:
+    """Start at most one background inbound-index build per vault.
+
+    The immediate owner for a server's context pack that borrowed the index and
+    found none: the pack must not build it, and the watcher's reconcile pass
+    (minutes away) stays the backstop. `prime_inbound_index` is single-flight per
+    vault, so this thread and that pass never build concurrently.
+    """
+    from . import vault as vault_module
+
+    _schedule_resolver_warm(
+        vault_root,
+        _INBOUND_INDEX_REBUILDS,
+        vault_module.prime_inbound_index,
+        "exomem-inbound-index-warm",
+    )
+
+
 def _schedule_resolver_warm(
     root: Path,
     inflight: set[Path],
     build: Callable[[Path], object],
     thread_name: str,
 ) -> None:
+    """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`."""
     if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
         return
     key = Path(root)
@@ -7267,7 +7288,7 @@ def _schedule_resolver_warm(
             with foreground_priority.bulk():
                 build(key)
         except Exception as error:  # noqa: BLE001 - a daemon must not escape
-            log.warning("resolver background rebuild skipped (%s)", error)
+            log.warning("background rebuild skipped (%s)", error)
         finally:
             with _RECALL_REBUILD_LOCK:
                 inflight.discard(key)
@@ -7285,7 +7306,7 @@ def _schedule_resolver_warm(
 
 
 def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
-    """Block until no background resolver build is running.
+    """Block until no background resolver or inbound-index build is running.
 
     A quiesce seam, not a convergence helper: it says nothing about whether a
     resolver is now cached, only that no daemon thread is still walking a
@@ -7297,7 +7318,11 @@ def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while True:
         with _RECALL_REBUILD_LOCK:
-            if not (_RECALL_RESOLVER_REBUILDS or _QUERY_RESOLVER_REBUILDS):
+            if not (
+                _RECALL_RESOLVER_REBUILDS
+                or _QUERY_RESOLVER_REBUILDS
+                or _INBOUND_INDEX_REBUILDS
+            ):
                 return True
         if time.monotonic() >= deadline:
             return False
