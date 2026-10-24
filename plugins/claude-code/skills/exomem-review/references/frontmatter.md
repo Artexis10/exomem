@@ -59,6 +59,8 @@ keep the writer's existing page and response shape.
 | `domain` | optional | what the artifact is **about**, on an axis independent of `source_type`; same open, auto-registering vocabulary — e.g. `travel`, `health`, `finance`, `equipment`, `software` |
 | `projects` | optional | list of project keys this source serves; a source may serve several, and this never affects where it is filed |
 | `captured` | yes | ISO date — same as `created` for sources |
+| `source_identity` | optional | Opaque `system`, `record_id`, and `revision` strings for durable text capture reconciliation. Written only at capture. |
+| `capture_input_digest` | with identity | SHA-256 of the normalized original capture inputs. Metadata and back-reference updates preserve this digest. |
 | `url` | conditional | required for kinds whose registry entry sets `requires_url`, which ships true for `article`, `paper`, `video` |
 | `author` | optional | |
 | `ingested_into` | yes | list of wikilinks to compiled notes that cite this; starts as `[]` |

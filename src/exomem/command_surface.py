@@ -30,6 +30,9 @@ from .mutation_terminal import ResponseDetail
 
 _log = logging.getLogger(__name__)
 
+# Namespaced MCP tools/call metadata is transport state, never a tool argument.
+MCP_IDEMPOTENCY_META_KEY = "io.exomem/idempotency_key"
+
 # Signal channel from the synchronous MCP tool wrapper (below, runs in
 # FastMCP's anyio threadpool) to `CallTraceMiddleware` (server.py, runs in the
 # async request task): a ContextVar set inside the wrapper does NOT propagate
@@ -520,7 +523,21 @@ def bind_vault(
             # read-only invocation must never call `mcp_retry_scope()` at
             # all (a live dependency lookup), so the same value is reused
             # here for logging instead of a second, independent call.
-            retry_scope = None if invocation_read_only else mcp_retry_scope()
+            explicit_key = None if invocation_read_only else mcp_idempotency_key()
+            if explicit_key is not None and (
+                not principal.resolved
+                or principal.audience_id == principal_module.MOST_RESTRICTIVE_AUDIENCE
+            ):
+                raise authorization_request.AuthorizationContextUnavailable
+            retry_scope = (
+                None if invocation_read_only else
+                principal.audience_id if explicit_key is not None else mcp_retry_scope()
+            )
+            # Omitted transport metadata keeps the existing dispatcher call shape.
+            retry_options = {
+                "idempotency_key": explicit_key,
+                "idempotency_principal_scope": principal.audience_id,
+            } if explicit_key is not None else {}
             t0 = time.perf_counter()
             try:
                 call_spans.mark("command.leaf_start")
@@ -528,7 +545,8 @@ def bind_vault(
                     command,
                     *injected,
                     mutation_request_id=request_id,
-                    implicit_idempotency_scope=retry_scope,
+                    implicit_idempotency_scope=retry_scope if explicit_key is None else None,
+                    **retry_options,
                     **kwargs,
                 )
                 # Two spans that together are the leaf's `duration_ms`: the
@@ -632,6 +650,23 @@ def bind_vault(
         ann["return"] = resolved["return"]
     wrapper.__annotations__ = ann
     return wrapper
+
+
+def mcp_idempotency_key() -> str | None:
+    """Consume an explicit key without enlarging advertised tool schemas."""
+    from fastmcp.server.dependencies import get_context
+
+    try:
+        request_context = get_context().request_context
+    except (LookupError, RuntimeError):
+        return None
+    metadata = request_context.meta if request_context is not None else None
+    if metadata is None or MCP_IDEMPOTENCY_META_KEY not in metadata:
+        return None
+    key = metadata[MCP_IDEMPOTENCY_META_KEY]
+    if not isinstance(key, str) or not key:
+        raise ValueError("INVALID_IDEMPOTENCY_KEY: MCP metadata requires a nonempty string")
+    return key
 
 
 def mcp_retry_scope() -> str | None:

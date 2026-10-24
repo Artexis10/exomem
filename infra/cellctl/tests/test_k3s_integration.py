@@ -2023,8 +2023,9 @@ def test_artifact_broker_selected_cell_edge_and_admission(k3s: K3sCluster) -> No
 
     forged = copy.deepcopy(selected)
     forged["spec"]["egress"][0]["ports"][0]["port"] = 8768
-    _wait_for(lambda: "exomem-cellctl-scope" in _dry_run(forged).stderr, timeout=30,
-              description="artifact broker admission binding to enforce")
+    # An older policy also denies the forged request. Wait for the new allowlist.
+    _wait_for(lambda: _dry_run(selected).returncode == 0, timeout=30,
+              description="selected-cell artifact broker policy admission")
     allowed = _dry_run(selected)
     assert allowed.returncode == 0, allowed.stderr
     mutations = [forged]

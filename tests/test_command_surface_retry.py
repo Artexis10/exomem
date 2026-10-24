@@ -891,6 +891,127 @@ def test_mcp_retry_scope_uses_stable_verified_principal_across_bearer_rotation(
     assert "user-42" not in first
 
 
+def test_mcp_explicit_metadata_key_survives_lost_response_and_preserves_mismatch(vault, source_schema, monkeypatch):
+    from exomem.commands import product_commands_for
+
+    interrupt = True
+
+    def lose_response():
+        nonlocal interrupt
+        if interrupt:
+            interrupt = False
+            raise asyncio.CancelledError
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "writer-state"),
+        after_terminal_persisted=lose_response,
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    metadata = {command_surface.MCP_IDEMPOTENCY_META_KEY: "capture-attempt-1"}
+    monkeypatch.setattr("fastmcp.server.dependencies.get_context", lambda: SimpleNamespace(
+        request_context=SimpleNamespace(meta=metadata), session_id="connection-1"))
+    command = next(item for item in product_commands_for("mcp") if item.name == "capture_source")
+    bound = command_surface.bind_vault(command.leaf, vault, source_schema, command=command)
+    inputs = dict(title="A replayed source", content="Captured text", source_kind="session")
+
+    with pytest.raises(asyncio.CancelledError):
+        bound(**inputs)
+    replay = bound(**inputs)
+    mismatch = bound(**{**inputs, "content": "Different text"})
+
+    assert mismatch["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+    assert replay["idempotency_key"] == "capture-attempt-1"
+    assert len(list((vault / "Knowledge Base/Sources/Sessions").glob("*replayed-source.md"))) == 1
+
+
+@pytest.mark.parametrize("key", [None, "", 1, True, {}])
+def test_malformed_explicit_metadata_key_never_falls_back_to_implicit(monkeypatch, key):
+    monkeypatch.setattr("fastmcp.server.dependencies.get_context", lambda: SimpleNamespace(
+        request_context=SimpleNamespace(meta={command_surface.MCP_IDEMPOTENCY_META_KEY: key})))
+    with pytest.raises(ValueError, match="INVALID_IDEMPOTENCY_KEY"):
+        command_surface.mcp_idempotency_key()
+
+
+def test_programmatic_mcp_context_has_no_explicit_metadata(monkeypatch):
+    monkeypatch.setattr("fastmcp.server.dependencies.get_context", lambda: SimpleNamespace(request_context=None))
+    assert command_surface.mcp_idempotency_key() is None
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("standing_grant", [False, True])
+def test_identity_authority_precedes_saved_terminal_and_key_mismatch(vault, source_schema, monkeypatch, explicit, standing_grant):
+    from exomem.commands import product_commands_for
+    from exomem.governance import policy
+
+    governance = policy.governance_root(vault)
+    scope = governance / "scopes" / "capture.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(json.dumps({
+        "governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "name": "Capture policy", "paths": ["Sources/**"],
+    }))
+    rule = governance / "rules" / "capture.yaml"
+    rule.parent.mkdir(parents=True, exist_ok=True)
+    document = {"governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+                "scope_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+                "audience": principal_module.OWNER_AUDIENCE, "ceiling": 0 if standing_grant else 6}
+    rule.write_text(json.dumps(document))
+    if standing_grant:
+        grant = governance / "grants" / "capture.yaml"
+        grant.parent.mkdir(parents=True, exist_ok=True)
+        grant.write_text(json.dumps({
+            "governance_version": 1, "id": "01ARZ3NDEKTSV4RRFFQ69G5FB1", "kind": "standing",
+            "scope_ids": ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+            "audience": principal_module.OWNER_AUDIENCE, "ceiling": 6,
+        }))
+    assert not policy.load(vault).blocked
+
+    metadata = {command_surface.MCP_IDEMPOTENCY_META_KEY: "identity-attempt"} if explicit else {}
+    monkeypatch.setattr("fastmcp.server.dependencies.get_context", lambda: SimpleNamespace(
+        request_context=SimpleNamespace(meta=metadata), session_id="connection-1"))
+    command = next(item for item in product_commands_for("mcp") if item.name == "capture_source")
+    bound = command_surface.bind_vault(command.leaf, vault, source_schema, command=command)
+    inputs = dict(title="A saved capture", content="Captured text", source_kind="session",
+                  source_identity={"system": "archive", "record_id": "new-record", "revision": "r1"})
+    assert bound(**inputs)["capture_outcome"] == "created"
+    before = {p: p.read_bytes() for p in (vault / "Knowledge Base/Sources").rglob("*.md")}
+    if standing_grant:
+        grant.unlink()
+    else:
+        document["ceiling"] = 0
+        rule.write_text(json.dumps(document))
+    assert not policy.load(vault).blocked
+    repeated = bound(**inputs)
+    changed = bound(**{**inputs, "content": "Changed text"})
+    if explicit:
+        metadata[command_surface.MCP_IDEMPOTENCY_META_KEY] = "absent-attempt"
+    absent = bound(**{**inputs, "source_identity": {"system": "archive", "record_id": "absent", "revision": "r1"}})
+    assert repeated["error"]["code"] == "SOURCE_IDENTITY_FORBIDDEN"
+    assert changed["error"] == absent["error"] == repeated["error"]
+    assert all("source" not in response for response in (repeated, changed, absent))
+    assert {p: p.read_bytes() for p in (vault / "Knowledge Base/Sources").rglob("*.md")} == before
+
+
+def test_explicit_mcp_keys_are_isolated_by_verified_principal_and_vault(tmp_path, monkeypatch):
+    calls = []
+
+    def leaf(root, *, content):
+        calls.append((root, principal_module.effective_principal().audience_id))
+        return {"content": content}
+
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr("fastmcp.server.dependencies.get_context", lambda: SimpleNamespace(
+        request_context=SimpleNamespace(meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "same-key"}), session_id="connection-1"))
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    for root, audience in ((tmp_path / "one", "first"), (tmp_path / "one", "second"), (tmp_path / "two", "first")):
+        bound = command_surface.bind_vault(leaf, root, command=command)
+        with principal_module.request_scope(principal_module.RequestPrincipal(audience_id=audience, surface="mcp")):
+            assert bound(content="Text") == {"content": "Text"}
+            assert bound(content="Text") == {"content": "Text"}
+    assert len(calls) == 3
+
+
 def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     from exomem.commands import invocation_is_read_only, product_commands_for
 

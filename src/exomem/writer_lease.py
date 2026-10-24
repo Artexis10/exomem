@@ -4962,6 +4962,8 @@ class LeaseManager:
         fence_context: Token[tuple[Any, int] | None] | None = None
         file_context = None
         counted = False
+        renewal_stop = None
+        renewer = None
         admission_now = int(time.time()) if attachment_now is None else attachment_now
         if session_open_admission and activation_admission:
             raise ValueError("writer admission must name one restricted transition")
@@ -5013,8 +5015,26 @@ class LeaseManager:
                 self._last_activity_monotonic = time.monotonic()
             counted = True
         try:
+            if (fence_context is not None and self._collection_store is None
+                    and (self._renewer is None or not self._renewer.is_alive())):
+                # Standalone file mutations lack the server's renewal lifecycle.
+                # Each guard owns only its captured token, never a replacement grant.
+                renewal_stop = threading.Event()
+                renewer = threading.Thread(
+                    target=self._renew_loop,
+                    kwargs={"stop": renewal_stop, "fencing_token": lease.fencing_token},
+                    name="exomem-mutation-lease",
+                    daemon=True,
+                )
+                renewer.start()
             yield
         finally:
+            if renewal_stop is not None:
+                renewal_stop.set()
+                # The renewal needs the manager lock; keep this join outside it.
+                # Finish in-flight coordinator I/O before ending this guard's ownership.
+                if renewer is not None and renewer.ident is not None:
+                    renewer.join()
             if file_context is not None:
                 _ACTIVE_COLLECTION_FILE_WRITE.reset(file_context)
             if fence_context is not None:
@@ -6810,20 +6830,27 @@ class LeaseManager:
             self._log_lease_event("lease_idle_released")
             return True
 
-    def _renew_loop(self) -> None:
+    def _renew_loop(
+        self, *, stop: threading.Event | None = None, fencing_token: int | None = None
+    ) -> None:
         interval = self._renew_interval_seconds()
-        while not self._stop.wait(interval):
+        stop = self._stop if stop is None else stop
+        while not stop.wait(interval):
             with self._lock:
                 token = self._fencing_token
+                if fencing_token is not None and (
+                    token != fencing_token or self._collection_store is not None or self._stop.is_set()
+                ):
+                    return
             if self.client is None:
                 continue
             if token is None:
                 self._attempt_preferred_reclaim()
                 continue
-            if self._maybe_idle_release(token):
+            if fencing_token is None and self._maybe_idle_release(token):
                 continue
             try:
-                if self._collection_store is not None:
+                if fencing_token is None and self._collection_store is not None:
                     self._renew_collection_store(token)
                     continue
                 marker = (self._collection_file_marker(self._file_store_acquisition)
@@ -6836,7 +6863,8 @@ class LeaseManager:
                 with self._lock:
                     if self._fencing_token != token:
                         continue
-                    if record.granted and record.holder == self.config.replica_id:
+                    if (record.granted and record.holder == self.config.replica_id
+                            and record.fencing_token == token):
                         self._note_grant(record.expires_at)
                         self._last_renew_monotonic = time.monotonic()
                         self._record_lease_op("renew", "granted")
@@ -7466,6 +7494,11 @@ def invoke_command(
 
     def _invoke() -> Any:
         with _owner_authority_scope(command.name):
+            # This fixed capture field gates cached terminals and key mismatch, too.
+            if command.name == "capture_source" and kwargs.get("source_identity") is not None:
+                from .source_capture import require_authority
+
+                require_authority(injected[0])
             return get_manager().invoke(
                 dispatch_command,
                 injected,
