@@ -61,7 +61,7 @@ from .state import (
     mcp_server_entry,
     prepare_session_slot,
     product_env,
-    recover_session_vault,
+    recover_session_custody,
 )
 from .tap import READY_TIMEOUT_SECONDS, process_start_ticks, ready_wait, warming_refusal
 
@@ -870,9 +870,10 @@ class ClaudeSessionExecutor:
                 result = self._execute(inputs, attempt_dir, slot)
             finally:
                 _end_orphan_server(_read_jsonl(slot.runtime / "tap.jsonl"))
-                digest = recover_session_vault(self.layout)
+                recovery = recover_session_custody(self.layout)
                 slot.wipe()
-            result.facts["vault_digest_after"] = digest
+            result.facts["vault_digest_after"] = recovery.digest
+            result.facts["receipts_filed"] = recovery.receipts_filed
             return result
         except StateError as error:
             return AttemptResult(ABORT, "state", str(error))

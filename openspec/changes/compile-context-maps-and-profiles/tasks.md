@@ -39,3 +39,4 @@
 - [ ] 6.2 Add explicit successor preparation from an unproven checkpoint. Preserve the failed archive and opaque inputs, and refuse ordinary retry before destructive fallback.
 - [ ] 6.3 Converge media before publication and verify exact final vector coverage through existing product checks. Prove same-mtime edits and new media parents cannot inherit stale coverage.
 - [ ] 6.4 Qualify the integrated source through independent review and current CI, then verify bounded recovery and fresh quiescence before any development generation.
+- [ ] 6.5 File the evaluation reads' receipts out of the vault into run evidence, and prove that a governed vault returns with identical bytes and signatures after the startup proof and after a session (design, amendment 9).

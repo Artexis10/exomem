@@ -286,6 +286,13 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - Earn a fresh surface capture, content digest, signature manifest and startup quiescence proof before creating a usable state record. Keep stage validation and the proven-donor contract in amendment 7 unchanged.
    - No arm generation or scoring follows a failed quiescence check. Recovery changes preparation only, never cases, keys, removals, arm budgets or the blind held-out decision.
 
+9. **Amendment 9 (2026-10-24, before any held-out generation).** Audited reads append disclosure receipts inside a governed vault:
+   - The proof's readiness probe and the session actors' reads are audited. Each appends a `disclosure` receipt under the vault's governance events, and each fresh server creates its own receipt instance directory there. Vault walks skip that tree, so receipts do not reach ranking, but they change vault bytes.
+   - The harness records the receipt instances that a vault holds at checkout. Before it compares a returned vault, it files each instance directory created since checkout into run evidence at the mirrored path, verifies the chains with the product's receipt reader, and records the instance, record and event-type counts. The quiescence record and the session facts carry the counts.
+   - It then requires identical vault bytes and signatures, as amendment 4 says. An append to an instance that existed at checkout stays in the vault and refuses. Custody that lacks the recorded instances is compared without filing.
+   - Audit stays on for every arm and the readiness probe stays. The harness refuses to run while `EXOMEM_KB_DIRNAME` is set, because the servers run without it and the receipt paths would differ.
+   - Every session starts from identical bytes and signatures. This changes preparation only, never cases, keys, removals, arm budgets or the decision rule.
+
 ### Ready before held-out generation
 
 1. `maps` mode built, and pinned to one release or commit for every arm.

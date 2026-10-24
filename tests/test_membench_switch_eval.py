@@ -1439,6 +1439,100 @@ def test_the_real_startup_wrapper_refuses_unconverged_media(tmp_path: Path) -> N
     assert json.loads((out / "quiescence.json").read_text())["content_unchanged"] is False
 
 
+def _governed_vault_source(root: Path) -> Path:
+    """A scaffold vault with one page and a governance rule, so every recall is audited."""
+    import shutil
+
+    REPO_ROOT = Path(__file__).resolve().parents[1]
+    source = root / "source"
+    shutil.copytree(REPO_ROOT / "src" / "exomem" / "_scaffold" / "_Schema", source / "Knowledge Base" / "_Schema")
+    (source / "Knowledge Base" / "readiness.md").write_text(
+        "# Readiness\n\nA readiness probe note that any recall for readiness finds.\n"
+    )
+    governance = source / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir()
+    (governance / "scopes" / "planning.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5F01\nname: Planning\npaths: [\"Planning/**\"]\n"
+    )
+    (governance / "rules" / "external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5F02\n"
+        "scope_ids: [\"01ARZ3NDEKTSV4RRFFQ69G5F01\"]\naudience: external\nceiling: 6\n"
+    )
+    return source
+
+
+def test_the_real_startup_proof_files_its_readiness_receipts_out_of_a_governed_vault(tmp_path: Path) -> None:
+    """Under a governance policy every recall appends a disclosure receipt to the vault.
+
+    The tap's readiness probe is such a recall. The proof files the receipt
+    instance into run evidence, then demands the vault it started with.
+    """
+    import os
+
+    from membench.utility.switch_eval import state
+
+    source = _governed_vault_source(tmp_path)
+    layout = Layout(tmp_path / "run")
+    slot = state.prepare_build_slot(layout, source)
+    spec = replace(arm_specs()["P"], profile="neutral-lexical")
+    before = {"vault_digest": state.tree_digest(slot.vault), "vault_signatures": state.signature_manifest(slot.vault)}
+    out = tmp_path / "proof"
+    out.mkdir()
+
+    report = state.prove_quiescence(slot, spec, env=state._child_env(os.environ, slot, spec), out=out, before=before)
+
+    events = [json.loads(line) for line in (out / "surface-server-discover-tap.jsonl").read_text().splitlines()]
+    assert [event["outcome"] for event in events if event["event"] == "ready_finished"] == ["ready"]
+    assert report["receipts_filed"]["by_event_type"].get("disclosure", 0) >= 1, report
+    assert report["content_unchanged"] and report["signatures_unchanged"], report
+    events_path = Path("Knowledge Base") / "_Governance" / "events"
+    assert any((out / "receipts" / events_path).iterdir())
+    assert not any((slot.vault / events_path).iterdir())
+
+
+def test_a_governed_session_read_is_filed_and_the_next_session_starts(tmp_path: Path) -> None:
+    """The first real session reads through the tap, which appends a receipt to the vault.
+
+    Without filing, recovery refuses the changed vault and stops the run.
+    """
+    import os
+    import shutil
+
+    from membench.utility.switch_eval import state
+
+    from exomem.governance import receipts
+
+    layout = Layout(tmp_path / "run")
+    shared = layout.shared_tree("snapshot") / "vault"
+    shutil.copytree(_governed_vault_source(tmp_path), shared)
+    machine_state = layout.arm_tree("P", "snapshot") / "state"
+    machine_state.mkdir(parents=True)
+    baseline = {"digest": state.tree_digest(shared), "signatures": state.signature_manifest(shared)}
+    (layout.arm_tree("P", "snapshot") / "state.json").write_text(json.dumps({
+        "vault_digest": baseline["digest"], "state_digest": state.tree_digest(machine_state),
+        "build": {"vectors": {"state": "current"}},
+        "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
+        "vault_signature_digest": state.signature_digest(shared),
+    }))
+    spec = replace(arm_specs()["P"], profile="neutral-lexical")
+    out = tmp_path / "session"
+    out.mkdir()
+
+    slot = state.prepare_session_slot(layout, "P", "snapshot", "governed-session")
+    state._ask_surface(slot, spec, env=state._child_env(os.environ, slot, spec), out=out, method="server/discover", startup_proof=True)
+    events_path = Path("Knowledge Base") / "_Governance" / "events"
+    assert any((slot.vault / events_path).iterdir())  # the served read left a receipt in the vault
+    recovery = state.recover_session_custody(layout)
+
+    assert recovery.digest == baseline["digest"]
+    assert state.signature_manifest(shared) == baseline["signatures"]
+    assert recovery.receipts_filed["by_event_type"].get("disclosure", 0) >= 1, recovery
+    filed = receipts.event_records(layout.receipts_dir("governed-session"))
+    assert {record["event_type"] for record in filed} >= {"disclosure"}
+    state.prepare_session_slot(layout, "P", "snapshot", "next-session")
+
+
 def test_state_cpu_threads_reach_only_the_builder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -23,12 +23,14 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import REPO_ROOT, refuse_unsafe_out_dir
 
+from exomem.governance import receipts
 from exomem.runtime_resources import CPU_THREADS_ENV, effective_online_cpus
 
 from . import protocol
@@ -91,6 +93,52 @@ def _write_json_atomically(receipt: Path, custody: Mapping) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _receipt_instances(vault: Path) -> list[str]:
+    """Names of the receipt instance directories that a vault holds now."""
+
+    # The children run without EXOMEM_KB_DIRNAME (see _child_env), so a parent that sets it
+    # would read another directory than the servers wrote and file nothing.
+    if os.environ.get("EXOMEM_KB_DIRNAME", "").strip():
+        raise StateError(
+            "EXOMEM_KB_DIRNAME is set in the harness environment; unset it so that receipt "
+            "paths match the paths that the servers write"
+        )
+    root = receipts._events_root(vault)
+    if not root.is_dir():
+        return []
+    return sorted(entry.name for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink())
+
+
+def _file_new_receipts(vault: Path, known: Collection[str], evidence: Path) -> dict:
+    """Move receipt instances created since checkout out of the vault into run evidence.
+
+    An audited read appends a disclosure receipt inside the vault, and each fresh
+    server creates its own instance directory. Only whole new directories move;
+    a file inside an instance that existed at checkout stays, so the vault check
+    still refuses an append to it. The product's chain reader then verifies every
+    record under ``evidence``, which keeps the product's mirrored path layout.
+    """
+
+    root = receipts._events_root(vault)
+    mirror = receipts._events_root(evidence)
+    moved = [name for name in _receipt_instances(vault) if name not in known]
+    for name in moved:
+        if (mirror / name).exists():
+            raise StateError(f"receipt instance {name} is already filed under {evidence}")
+        mirror.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(root / name), str(mirror / name))
+    try:
+        records = receipts.event_records(evidence)
+    except receipts.ReceiptError as error:
+        raise StateError(f"filed receipts under {evidence} failed chain verification: {error}") from error
+    filed = [record for record in records if record["instance_id"] in moved]
+    return {
+        "instances": len(moved),
+        "records": len(filed),
+        "by_event_type": dict(sorted(Counter(record["event_type"] for record in filed).items())),
+    }
+
+
 @dataclass(frozen=True)
 class Layout:
     """Every path the run writes, all under one run directory."""
@@ -134,6 +182,12 @@ class Layout:
 
         name = hashlib.sha256(json.dumps([case_id, arm, repeat]).encode()).hexdigest()[:16]
         return self.inside(self.sessions / f"session-{name}")
+
+    def receipts_dir(self, session: str) -> Path:
+        """Where a session's receipts are filed, named by a digest of the session id."""
+
+        name = hashlib.sha256(session.encode()).hexdigest()[:16]
+        return self.inside(self.run / "receipts" / f"session-{name}")
 
     @property
     def judge(self) -> Path:
@@ -621,7 +675,10 @@ def prove_quiescence(
     """Admit a fresh server, finish startup and media work, then check the stopped vault."""
 
     started = time.monotonic()
+    known = _receipt_instances(slot.vault)
     _ask_surface(slot, spec, env=env, out=out, method="server/discover", startup_proof=True)
+    # The tap's readiness probe is an audited read, so a governed vault gains a receipt instance.
+    filed = _file_new_receipts(slot.vault, known, out / "receipts")
     after = signature_manifest(slot.vault)
     prior = before["vault_signatures"]
     counts: dict[str, int] = {}
@@ -633,6 +690,7 @@ def prove_quiescence(
         "content_unchanged": tree_digest(slot.vault) == before["vault_digest"],
         "signatures_unchanged": after == prior,
         "changed_files_by_extension": dict(sorted(counts.items())),
+        "receipts_filed": filed,
         "seconds": round(time.monotonic() - started, 3),
     }
     (out / "quiescence.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -1011,6 +1069,7 @@ def build_tree(
                 "digest": record["vault_digest"],
                 "signatures": record["vault_signature_digest"],
                 "shared": True,
+                "receipt_instances": _receipt_instances(slot.vault),
             },
         )
         record["quiescence"] = prove_quiescence(slot, spec, env=env, out=target, before=record)
@@ -1113,6 +1172,18 @@ def _rename_vault(source: Path, destination: Path) -> None:
         raise StateError(f"vault rename failed: {source} -> {destination}: {error}") from error
 
 
+@dataclass(frozen=True)
+class Recovery:
+    """A recovered checkout: the vault digest and what was filed out of the vault.
+
+    ``digest`` is None when no vault was checked out. ``receipts_filed`` is None
+    when the custody predates receipt filing.
+    """
+
+    digest: str | None
+    receipts_filed: dict | None
+
+
 def recover_session_vault(layout: Layout) -> str | None:
     """Return a checked-out vault, including one left by a killed runner.
 
@@ -1120,9 +1191,20 @@ def recover_session_vault(layout: Layout) -> str | None:
     preparation prevents a new session or build from deleting that evidence.
     """
 
+    return recover_session_custody(layout).digest
+
+
+def recover_session_custody(layout: Layout) -> Recovery:
+    """:func:`recover_session_vault`, with the receipts that it filed.
+
+    Custody that lists the receipt instances present at checkout has each newer
+    instance filed into run evidence before the vault is compared. Custody
+    without the list is compared as it stands.
+    """
+
     receipt = layout.run / "slot-vault.json"
     if not receipt.exists():
-        return None
+        return Recovery(None, None)
     custody = json.loads(receipt.read_text(encoding="utf-8"))
     # Old custody predates shared trees; return it before refusing the old build format.
     source = (
@@ -1132,15 +1214,20 @@ def recover_session_vault(layout: Layout) -> str | None:
     ) / "vault"
     held = Slot(layout.slot).vault
     location = held if held.exists() else source
+    evidence = filed = None
+    if "receipt_instances" in custody and location.is_dir():
+        evidence = layout.receipts_dir(custody["session"])
+        filed = _file_new_receipts(location, custody["receipt_instances"], evidence)
     digest = tree_digest(location) if location.is_dir() else None
     signatures = signature_digest(location) if location.is_dir() else None
     if digest != custody["digest"] or (
         "signatures" in custody and signatures != custody["signatures"]
     ):
+        filing = "" if evidence is None else f" Filed receipts are at {evidence}."
         raise StateError(
             f"session {custody['session']}: vault digest changed (content or signatures); "
-            f"preserved at {location}. Inspect it, then remove the failed run at {layout.run} "
-            "and rebuild state from the frozen snapshot in a new run."
+            f"preserved at {location}.{filing} Inspect it, then remove the failed run at "
+            f"{layout.run} and rebuild state from the frozen snapshot in a new run."
         )
     if held.exists():
         if source.exists():
@@ -1149,7 +1236,7 @@ def recover_session_vault(layout: Layout) -> str | None:
             )
         _rename_vault(held, source)
     receipt.unlink()
-    return digest
+    return Recovery(digest, filed)
 
 
 def prepare_session_slot(layout: Layout, arm: str, tree: str, session: str = "unstarted") -> Slot:
@@ -1193,6 +1280,7 @@ def _prepare_session_slot(
             "digest": record["vault_digest"],
             "signatures": signatures,
             "shared": True,
+            "receipt_instances": _receipt_instances(source),
         },
     )
     try:
