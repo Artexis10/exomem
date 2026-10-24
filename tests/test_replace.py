@@ -210,6 +210,56 @@ def test_replace_renders_supersession_links_for_kb_rooted_obsidian(vault: Path) 
     assert "[[Knowledge Base/" not in old_text + new_text
 
 
+def _give_predecessor_a_superseded_by(vault: Path, old_rel: str, lines: str) -> None:
+    """Add a hand-written `superseded_by` entry to the predecessor's frontmatter."""
+    page = vault / old_rel
+    page.write_text(_read(page).replace("\n---\n", f"\n{lines}\n---\n", 1), encoding="utf-8")
+
+
+def test_replace_appends_to_a_default_style_superseded_by_list(vault: Path) -> None:
+    """PyYAML writes block lists unindented; appending at a two-space indent beside
+    them left the predecessor unparseable, so it could no longer be read or edited."""
+    old_rel = _make_insight(vault, "Default Style Predecessor")
+    earlier = "[[Knowledge Base/Notes/Insights/earlier-conclusion]]"
+    _give_predecessor_a_superseded_by(vault, old_rel, f"superseded_by:\n- '{earlier}'")
+
+    result = replace_module.replace(
+        vault,
+        old_path=old_rel,
+        content=_compact_content("Default Style Successor", body="revised."),
+        note_type="insight",
+        title="Default Style Successor",
+        today=TODAY,
+    )
+
+    old_fm, _body, _raw = vault_module.parse_frontmatter(_read(vault / old_rel), strict=True)
+    assert old_fm["status"] == "superseded"
+    assert old_fm["superseded_by"][0] == earlier
+    assert len(old_fm["superseded_by"]) == 2
+    assert result.new_path.removesuffix(".md") in old_fm["superseded_by"][1]
+
+
+def test_replace_refuses_instead_of_half_marking_an_unextendable_superseded_by(
+    vault: Path,
+) -> None:
+    old_rel = _make_insight(vault, "Unextendable Predecessor")
+    _give_predecessor_a_superseded_by(vault, old_rel, "superseded_by: legacy-pointer")
+    before = _markdown_snapshot(vault)
+
+    with pytest.raises(replace_module.ReplaceError) as exc:
+        replace_module.replace(
+            vault,
+            old_path=old_rel,
+            content=_compact_content("Unextendable Successor", body="revised."),
+            note_type="insight",
+            title="Unextendable Successor",
+            today=TODAY,
+        )
+
+    assert exc.value.code == "INVALID_FRONTMATTER"
+    assert _markdown_snapshot(vault) == before
+
+
 def test_replace_bumps_old_updated_date(vault: Path) -> None:
     old_rel = _make_insight(vault, "Bumped Insight")
     later = dt.date(2026, 6, 1)

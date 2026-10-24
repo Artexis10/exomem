@@ -45,6 +45,7 @@ from .vault import (
     PathGuard,
     PathGuardError,
     PlannedWrite,
+    append_frontmatter_list_item,
     batch_atomic_write,
     document_newline,
     kb_root,
@@ -397,7 +398,7 @@ def _mark_superseded(text: str, rel_new_no_ext: str, date_iso: str) -> str:
         return text
     fm_text = m.group(1)
     body = m.group(2)
-    new_link = f'"[[{rel_new_no_ext}]]"'
+    new_link = f"[[{rel_new_no_ext}]]"
 
     # status
     if re.search(r"^status:", fm_text, re.MULTILINE):
@@ -423,70 +424,18 @@ def _mark_superseded(text: str, rel_new_no_ext: str, date_iso: str) -> str:
     else:
         fm_text = fm_text.rstrip() + f"\nupdated: {date_iso}"
 
-    # superseded_by — handle three shapes: missing, flow (`[]` or `[a,b]`),
-    # block (multi-line `- ...`). Mirror note._append_to_ingested_into.
+    # superseded_by — missing: add the key. Present: append through the shared
+    # list helper, which leaves the page as it was when it cannot append safely.
+    newline = document_newline(text)
     if re.search(r"^superseded_by:", fm_text, re.MULTILINE):
-        fm_text = _append_to_yaml_list(fm_text, "superseded_by", new_link)
-    else:
-        fm_text = fm_text.rstrip() + f"\nsuperseded_by:\n  - {new_link}"
-
-    return render_frontmatter_document(fm_text, body, newline=document_newline(text))
-
-
-def _append_to_yaml_list(fm_text: str, key: str, new_quoted_value: str) -> str:
-    """Append `new_quoted_value` (already wrapped in quotes if needed) to the
-    `<key>:` list in a frontmatter block. Handles flow and block forms.
-
-    `new_quoted_value` should be the YAML-ready string e.g. `"[[foo]]"` —
-    the quotes are part of the value.
-    """
-    if new_quoted_value in fm_text:
-        return fm_text
-    flow_pattern = re.compile(
-        rf"^({re.escape(key)}:\s*)(\[\s*\]|\[[^\]\n]*\])\s*$", re.MULTILINE
-    )
-    block_header_pattern = re.compile(
-        rf"^({re.escape(key)}:)\s*$", re.MULTILINE
-    )
-    flow_match = flow_pattern.search(fm_text)
-    if flow_match:
-        prefix, current = flow_match.group(1), flow_match.group(2).strip()
-        inner = current.strip("[]").strip()
-        items: list[str]
-        if not inner:
-            items = []
-        else:
-            items = [s.strip() for s in inner.split(",")]
-        items.append(new_quoted_value)
-        block_lines = [prefix.rstrip().rstrip(":") + ":"] + [
-            f"  - {item}" for item in items
-        ]
-        replacement = "\n".join(block_lines)
-        return (
-            fm_text[: flow_match.start()] + replacement + fm_text[flow_match.end():]
-        )
-
-    block_match = block_header_pattern.search(fm_text)
-    if block_match:
-        body_start = block_match.end()
-        cursor = body_start
-        while cursor < len(fm_text):
-            line_end = fm_text.find("\n", cursor + 1)
-            if line_end == -1:
-                line_end = len(fm_text)
-            line = (
-                fm_text[cursor + 1 : line_end]
-                if fm_text[cursor] == "\n"
-                else fm_text[cursor:line_end]
-            )
-            if line.lstrip().startswith("- "):
-                cursor = line_end
-            else:
-                break
-        return fm_text[:cursor] + f"\n  - {new_quoted_value}" + fm_text[cursor:]
-
-    # Should not reach here — caller checks for the key first.
-    return fm_text
+        marked = render_frontmatter_document(fm_text, body, newline=newline)
+        linked = append_frontmatter_list_item(marked, "superseded_by", new_link)
+        listed = parse_frontmatter(linked)[0].get("superseded_by")
+        # All or nothing: status and `updated` without the pointer to the
+        # successor would strand a reader on a page that names no replacement.
+        return linked if isinstance(listed, list) and new_link in listed else text
+    fm_text = fm_text.rstrip() + f'\nsuperseded_by:\n  - "{new_link}"'
+    return render_frontmatter_document(fm_text, body, newline=newline)
 
 
 def _prepend_replace_log_entry(
@@ -704,6 +653,15 @@ def replace(
     old_updated = _mark_superseded(old_text, new_link_target, stamp_iso)
     if predecessor_class == "superseded" and recovery_receipt is not None:
         old_updated = old_text
+    elif old_updated == old_text:
+        # Committing the successor beside an unmarked predecessor would leave two
+        # active conclusions and report success, so refuse before any write.
+        raise ReplaceError(
+            "INVALID_FRONTMATTER",
+            ["old_path"],
+            "old page frontmatter could not be marked superseded safely "
+            "(its superseded_by list is not extendable); nothing was written",
+        )
     auxiliary = list(prepared.auxiliary_writes)
     log_file = root / "Knowledge Base" / "log.md"
     replacement_body = f"Supersedes `{rel_old_no_ext}` via exomem."
