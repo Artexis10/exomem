@@ -1250,6 +1250,37 @@ def test_worker_sample_includes_bound_command_logging(tmp_path: Path, monkeypatc
     assert sample["elapsed_ms"] == 25.0
 
 
+def test_reference_admitted_principal_receives_the_owners_released_hits(
+    tmp_path: Path, warm_managed_cell,
+) -> None:
+    """A withheld-only admitted series times notices and empty unit results."""
+    from synth_vault import gen_reference_vault, reference_source
+
+    from exomem import command_surface, commands
+    from exomem.governance import principal
+
+    profile = {**json.loads((gate.BENCHMARK / "profile.json").read_text()), "pages": 40}
+    words, _digest = reference_source(profile, gate.BENCHMARK)
+    with principal.library_scope():
+        gen_reference_vault(tmp_path, profile, words)
+    warm_managed_cell(tmp_path)
+    command = command_surface.resolve_command("ask_memory", commands.PRODUCT_COMMANDS)
+    ask_memory = command_surface.bind_vault(command.leaf, tmp_path, command=command)
+    unit_page = next(tmp_path.glob("Knowledge Base/**/sample-00000.md")).read_text()
+    unit_text = next(line for line in unit_page.splitlines() if line.startswith("- ["))
+    query = max(unit_text.split("] ", 1)[1].split()[:6], key=len).strip(".,;:!?()")
+    callers = {"owner": principal.owner_principal(surface="library"),
+               "admitted": principal.RequestPrincipal(audience_id="benchmark-admitted", surface="mcp")}
+    for level in ("unit", "mixed"):
+        hits = {}
+        for name, caller in callers.items():
+            with principal.request_scope(caller), principal.invocation_scope():
+                hits[name] = ask_memory(query=query, include_timings=False, limit=gate.DEFAULT_LIMIT,
+                                        rerank=False, mode="keyword", result_level=level)
+        assert any(hit.get("result_type") == "semantic_unit" for hit in hits["owner"])
+        assert hits["admitted"] == hits["owner"]
+
+
 @pytest.mark.skipif(not hasattr(gate.os, "sched_getaffinity"), reason="The worker uses the Linux reference profile")
 @pytest.mark.parametrize("persisted", [False, True])
 def test_worker_prepares_persisted_advisory_before_managed_admission(

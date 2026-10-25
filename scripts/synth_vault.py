@@ -176,6 +176,7 @@ def gen_reference_vault(root: Path, profile: dict, words: list[str]) -> list[str
     import json
 
     from exomem import note_types, semantic_language_registry
+    from exomem.governance import egress
     from exomem.vocabulary import load
 
     types = [
@@ -231,6 +232,9 @@ def gen_reference_vault(root: Path, profile: dict, words: list[str]) -> list[str
         destination.write_text(content, encoding="utf-8")
 
     # This policy fixture is generated only in disposable benchmark vaults.
+    # The rule releases in full: below egress.RELEASE_FLOOR every admitted hit
+    # becomes a withheld notice and units are omitted, so the admitted series
+    # would time notices instead of the owner's results.
     governance = root / "Knowledge Base/_Governance"
     scope_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
     for kind, name, document in (
@@ -238,7 +242,7 @@ def gen_reference_vault(root: Path, profile: dict, words: list[str]) -> list[str
          "name": "Reference", "paths": [f"{entry.attributes['folder']}/**" for entry in types]}),
         ("rules", "reference", {"governance_version": 1,
          "id": "01ARZ3NDEKTSV4RRFFQ69G5FB0", "scope_ids": [scope_id],
-         "audience": "benchmark-admitted", "ceiling": 3}),
+         "audience": "benchmark-admitted", "ceiling": egress.LEVEL_FULL}),
     ):
         path = governance / kind / f"{name}.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
