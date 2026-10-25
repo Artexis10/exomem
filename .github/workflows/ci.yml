@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: c3e069d9e6628d43cb7aebe74f2edae36ba627e3
+          ref: 6838bf7967976fcfd3f95adc48d1d66920cfe81b
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
@@ -40,7 +40,7 @@ jobs:
           git worktree add --detach "$baseline" 9432ea367192e8833d6dc5aef1ffb2b463ed4d8a
           cp tests/test_semantic_unit_recall.py "$baseline/tests/test_semantic_unit_recall.py"
           set +e
-          PYTHONPATH="$baseline/src" "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest -q "$baseline/tests/test_semantic_unit_recall.py::test_finite_mixed_recall_keeps_hits_and_reports_only_proved_completeness[complete]" -o timeout=180 --junitxml="$RUNNER_TEMP/finite-mixed-baseline.xml"
+          PYTHONPATH="$baseline/src" "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest -q "$baseline/tests/test_semantic_unit_recall.py::test_hybrid_mixed_recall_fills_finite_demand_without_a_candidate_window_warning" -o timeout=180 --junitxml="$RUNNER_TEMP/finite-mixed-baseline.xml"
           result=$?
           set -e
           test "$result" -eq 1
