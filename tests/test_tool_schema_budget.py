@@ -73,7 +73,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_media": 625,
     "coordination_status": 500,
     "viewer_map": 3325,
-    # The four single-purpose tools of the default `nested` shape; `flat` lists the same four.
+    # The four single-purpose tools of the default `nested` shape.
     "read_records": 3090,
     "change_records": 6755,
     "read_plans": 2305,

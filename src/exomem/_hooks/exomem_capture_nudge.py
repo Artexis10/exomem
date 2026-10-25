@@ -532,9 +532,8 @@ def _operation_of(arguments: dict) -> str:
     """The operation a tool call selects, whichever argument form the tool takes.
 
     The mixed tools take `operation` as a string; the grouped Records and Planning
-    commands and the flat `read_*`/`change_*` renderings take `action`; the nested
-    renderings take `operation` as an object whose `kind` names it. Without all three a
-    mutation and a read look alike.
+    commands take `action`; the `read_*`/`change_*` renderings take `operation` as an
+    object whose `kind` names it. Without all three a mutation and a read look alike.
     """
     operation = arguments.get("operation")
     if isinstance(operation, dict):

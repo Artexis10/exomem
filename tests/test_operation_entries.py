@@ -12,7 +12,7 @@ import dataclasses
 
 import pytest
 
-from exomem import commands
+from exomem import commands, operation_entries
 from exomem.cli_ops import OpError
 from exomem.command_surface import UnresolvedInvocation, resolve_invocation
 
@@ -49,23 +49,40 @@ def _nested(kind: str, fields: dict[str, object]) -> dict[str, object]:
     return {"operation": {"kind": kind, **fields}}
 
 
-def _flat(kind: str, fields: dict[str, object]) -> dict[str, object]:
-    return {"action": kind, **fields}
-
-
-@pytest.mark.parametrize("shape,build", [("nested", _nested), ("flat", _flat)])
 @pytest.mark.parametrize("command,rendering,variant", VARIANTS)
 def test_every_variant_resolves_to_its_grouped_command_and_flat_arguments(
-    command, rendering, variant, shape, build
+    command, rendering, variant
 ) -> None:
     fields = _fields(command, variant)
 
     resolved, arguments = resolve_invocation(
-        rendering.name, build(variant.action, fields), commands.PRODUCT_COMMANDS, shape=shape
+        rendering.name, _nested(variant.action, fields), commands.PRODUCT_COMMANDS
     )
 
     assert resolved.name == command.name
     assert arguments == {"action": variant.action, **fields}
+
+
+@pytest.mark.parametrize("command,rendering,variant", VARIANTS)
+def test_a_spelled_call_resolves_back_to_the_grouped_call_it_spells(
+    command, rendering, variant
+) -> None:
+    """Guidance spells calls with `spell_call` and the server reads them with `resolve_invocation`.
+
+    A write tool's `response_detail` sits beside `operation`, as the server reads it; inside
+    `operation` the server would refuse it as a field of no operation.
+    """
+    grouped = {"action": variant.action, **_fields(command, variant)}
+    if "response_detail" in rendering.tool_arguments:
+        grouped["response_detail"] = "full"
+
+    tool, spelled = operation_entries.spell_call(command.name, grouped, "nested")
+    resolved, flat = resolve_invocation(tool, spelled, commands.PRODUCT_COMMANDS)
+
+    assert tool == rendering.name
+    assert (resolved.name, flat) == (command.name, grouped)
+    assert operation_entries.unspell_call(tool, spelled, "nested") == (command.name, grouped)
+    assert "response_detail" not in spelled["operation"]
 
 
 def test_a_grouped_spelling_resolves_to_itself_with_its_arguments_untouched() -> None:

@@ -118,9 +118,7 @@ class PublicCommandNameMiddleware(Middleware):
         except OpError as error:
             command, refusal = found[0], error
             flat = dict(arguments)
-            writes = rendered_call_writes(
-                command, found[1], arguments, shape=self.shape, passthrough=passthrough
-            )
+            writes = rendered_call_writes(command, found[1], arguments, passthrough=passthrough)
         message = context.message.model_copy(update={"name": command.name, "arguments": flat})
         with rendering_scope(name, refusal, writes=writes):
             return await call_next(context.copy(message=message))
@@ -883,7 +881,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
         if tool_shape != "grouped":
             for rendering in cmd.renderings:
                 mcp.tool(
-                    rendering_handler(rendering, grouped, tool_shape),
+                    rendering_handler(rendering, grouped),
                     **{**tool_kwargs, "annotations": rendering_annotations(rendering)},
                 )
 
@@ -909,9 +907,10 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
 def _tool_shape_from_environment() -> str:
     """The MCP tool shape for this server, read once at build. EXPERIMENTAL.
 
-    `nested`, `flat` and `grouped` are the single-purpose-tools pilot's arms; the pilot
-    removes the losers. A misspelt value stops the build: an eval arm that silently ran
-    another shape would invalidate the comparison, and nothing else sets this variable.
+    `nested` is the default surface. `grouped` is today's surface, selectable only as the
+    baseline of the tool-selection eval, and the round that ends that comparison removes it.
+    A misspelt or retired value stops the build: an eval arm that silently ran another
+    shape would invalidate the comparison, and nothing else sets this variable.
     """
     shape = os.environ.get("EXOMEM_MCP_TOOL_SHAPE", DEFAULT_TOOL_SHAPE).strip() or DEFAULT_TOOL_SHAPE
     if shape not in TOOL_SHAPES:

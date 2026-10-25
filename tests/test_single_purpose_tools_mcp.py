@@ -450,44 +450,21 @@ def test_the_contact_spy_sees_a_write_that_is_allowed(build, seams) -> None:
 # --- (d) shapes ---------------------------------------------------------------------------
 
 
-def test_each_shape_lists_its_tools_and_schemas(build) -> None:
-    async def tools_of(shape):
-        async with Client(build(shape)) as client:
-            return {tool.name: tool for tool in await client.list_tools()}
+def test_the_grouped_baseline_lists_the_grouped_commands_and_no_rendering(build) -> None:
+    async def scenario(client):
+        return {tool.name: tool for tool in await client.list_tools()}
 
-    nested = asyncio.run(tools_of("nested"))
-    writer_lease.reset_managers_for_tests()
-    flat = asyncio.run(tools_of("flat"))
-    writer_lease.reset_managers_for_tests()
-    grouped = asyncio.run(tools_of("grouped"))
+    grouped = _session(build("grouped"), scenario)
 
-    assert RENDERED <= set(nested) and not GROUPED & set(nested)
-    assert RENDERED <= set(flat) and not GROUPED & set(flat)
     assert GROUPED <= set(grouped) and not RENDERED & set(grouped)
-    for name, kinds in (
-        ("read_records", READ_RECORDS_KINDS),
-        ("change_records", CHANGE_RECORDS_KINDS),
-        ("read_plans", READ_PLANS_KINDS),
-        ("change_plans", CHANGE_PLANS_KINDS),
-    ):
-        schema = flat[name].input_schema
-        assert set(schema["properties"]["action"]["enum"]) == kinds
-        assert "operation" not in schema["properties"]
-        assert "action" in schema["required"]
-    assert "item" not in flat["read_records"].input_schema["properties"]
-    assert "manifest_text" in flat["change_records"].input_schema["properties"]
     assert grouped["record_memory"].annotations.read_only_hint is False
 
 
-def test_every_shape_resolves_one_logical_call_to_the_same_dispatch(build, seams) -> None:
+def test_both_shapes_resolve_one_logical_call_to_the_same_dispatch(build, seams) -> None:
     calls = {
         "nested": [
             ("read_records", {"operation": {"kind": "describe"}}),
             ("change_records", {"operation": {"kind": "append", **_APPEND}}),
-        ],
-        "flat": [
-            ("read_records", {"action": "describe"}),
-            ("change_records", {"action": "append", **_APPEND}),
         ],
         "grouped": [
             ("record_memory", {"action": "describe"}),
@@ -507,13 +484,14 @@ def test_every_shape_resolves_one_logical_call_to_the_same_dispatch(build, seams
 
     reached = {shape: dispatches for shape, (dispatches, _) in dispatched.items()}
     outcomes = {shape: [_envelope(result) for result in results] for shape, (_, results) in dispatched.items()}
-    assert reached["nested"] == reached["flat"] == reached["grouped"]
-    assert outcomes["nested"] == outcomes["flat"] == outcomes["grouped"]
+    assert reached["nested"] == reached["grouped"]
+    assert outcomes["nested"] == outcomes["grouped"]
 
 
-def test_an_unknown_shape_stops_the_server_build(build) -> None:
-    with pytest.raises(RuntimeError, match="EXOMEM_MCP_TOOL_SHAPE"):
-        build("sideways")
+@pytest.mark.parametrize("shape", ["sideways", "flat"])
+def test_an_unknown_or_retired_shape_stops_the_server_build(build, shape) -> None:
+    with pytest.raises(RuntimeError, match="EXOMEM_MCP_TOOL_SHAPE must be one of nested, grouped"):
+        build(shape)
 
 
 # --- exclusions ---------------------------------------------------------------------------

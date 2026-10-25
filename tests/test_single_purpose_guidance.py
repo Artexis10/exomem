@@ -34,7 +34,7 @@ from exomem import (
 from exomem import server as server_module
 from exomem._hooks import exomem_capture_nudge as capture_hook
 
-SHAPES = ("nested", "flat", "grouped")
+SHAPES = ("nested", "grouped")
 GROUPED_NAMES = frozenset(operation_entries.OPERATIONS)
 RENDERED_NAMES = frozenset(
     spec.name for operations in operation_entries.OPERATIONS.values() for spec in operations.renderings
@@ -42,7 +42,7 @@ RENDERED_NAMES = frozenset(
 ALL_SPELLINGS = GROUPED_NAMES | RENDERED_NAMES
 
 # What a client of each shape is told to call for a filing, written from the design.
-FILING_TOOL = {"nested": "change_records", "flat": "change_records", "grouped": "record_memory"}
+FILING_TOOL = {"nested": "change_records", "grouped": "record_memory"}
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SCAFFOLD = REPOSITORY / "src" / "exomem" / "_scaffold"
@@ -223,8 +223,7 @@ def test_bootstrap_routes_name_the_tools_of_the_shape(vault, build, shape) -> No
         assert planning["route"]["tool"] == "plan_memory"
         assert records["contract_route"] == {"tool": "record_memory", "arguments": {"action": "describe"}}
     else:
-        selector = "operation.kind" if shape == "nested" else "action"
-        assert records["route"]["selector"] == planning["route"]["selector"] == selector
+        assert records["route"]["selector"] == planning["route"]["selector"] == "operation.kind"
         assert records["route"]["tools"] == {
             "read_records": ["describe", "validate", "inspect", "query"],
             "change_records": ["create", "append", "update", "revise", "rebaseline"],
@@ -235,8 +234,7 @@ def test_bootstrap_routes_name_the_tools_of_the_shape(vault, build, shape) -> No
         }
         described = records["contract_route"]
         assert described["tool"] == "read_records"
-        expected = {"operation": {"kind": "describe"}} if shape == "nested" else {"action": "describe"}
-        assert described["arguments"] == expected
+        assert described["arguments"] == {"operation": {"kind": "describe"}}
 
 
 # --- REST and the CLI keep the grouped names ----------------------------------------------
@@ -336,9 +334,7 @@ def test_the_size_bound_admits_the_same_item_in_every_shape(shape) -> None:
         assert _terminal_routing(_routing(*over_the_bound)) is None
 
 
-@pytest.mark.parametrize(
-    "shape,other", [("nested", "grouped"), ("flat", "grouped"), ("grouped", "nested"), ("nested", "flat")]
-)
+@pytest.mark.parametrize("shape,other", [("nested", "grouped"), ("grouped", "nested")])
 def test_the_terminal_drops_a_call_spelled_for_another_shape(shape, other) -> None:
     tool, call = _spelled(other)
 
@@ -360,13 +356,11 @@ def _scaffold_texts() -> dict[str, str]:
 def test_the_shipped_skill_packs_and_hook_name_no_grouped_spelling() -> None:
     """The skill ships static, so it names the default `nested` renderings; a pack is spelt when served."""
     named = {path: _mentions(text, GROUPED_NAMES) for path, text in _scaffold_texts().items()}
-    for shape in ("nested", "flat"):
-        with capabilities.active_surface(_surface(shape)):
-            served = knowledge_packs.list_builtin_packs()
-        named |= {
-            f"pack {pack['id']} ({shape})": _mentions("\n".join(_texts(pack)), GROUPED_NAMES)
-            for pack in served
-        }
+    with capabilities.active_surface(_surface("nested")):
+        served = knowledge_packs.list_builtin_packs()
+    named |= {
+        f"pack {pack['id']}": _mentions("\n".join(_texts(pack)), GROUPED_NAMES) for pack in served
+    }
     hook_texts = {
         name: value
         for name, value in vars(capture_hook).items()

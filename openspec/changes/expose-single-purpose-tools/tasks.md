@@ -23,7 +23,7 @@
 
 ## 4. Delivery
 
-- [ ] 4.1 Remove the `flat` shape; keep `nested` as the only listed shape and `grouped` only as the eval baseline (D8).
+- [x] 4.1 Remove the `flat` shape; keep `nested` as the only listed shape and `grouped` only as the eval baseline (D8).
 - [ ] 4.2 Run `openspec validate --all --strict`, the scoped suites and the full corpus; get an independent review; merge; cut the ordinary release.
 - [ ] 4.3 Make the Substrate gateway accept both spellings before Cloud cells list the renderings.
 - [ ] 4.4 After the operator deploys Cloud and rescans, record the scan result for the four tools.

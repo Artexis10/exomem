@@ -14,7 +14,7 @@ import typing
 from collections.abc import Callable, Mapping
 from typing import Annotated, Any
 
-from pydantic import Field, TypeAdapter, WithJsonSchema
+from pydantic import TypeAdapter, WithJsonSchema
 
 from .edit_operations import inline_schema
 from .operation_entries import OperationEntry, Rendering
@@ -77,49 +77,30 @@ def operation_schema(
     }
 
 
-def rendering_handler(rendering: Rendering, grouped: Callable, shape: str) -> Callable:
+def rendering_handler(rendering: Rendering, grouped: Callable) -> Callable:
     """A callable whose signature FastMCP publishes as this rendering's input schema.
 
     `grouped` is the bound grouped command, whose published parameters supply each
-    field's type and description. `shape` is `nested` or `flat`.
+    field's type and description.
     """
     parameters = {
         name: parameter.replace(kind=inspect.Parameter.KEYWORD_ONLY)
         for name, parameter in inspect.signature(grouped).parameters.items()
     }
     carried = [parameters[name] for name in rendering.tool_arguments]
-    if shape == "nested":
-        schema = operation_schema(rendering, parameters)
-        leading = [
-            inspect.Parameter(
-                "operation",
-                kind=inspect.Parameter.KEYWORD_ONLY,
-                annotation=Annotated[dict[str, Any], WithJsonSchema(schema)],
-            )
-        ]
-    else:
-        kinds = typing.Literal[rendering.kinds]
-        leading = [
-            inspect.Parameter(
-                rendering.selector,
-                kind=inspect.Parameter.KEYWORD_ONLY,
-                annotation=Annotated[
-                    kinds, Field(description=f"The operation: {', '.join(rendering.kinds)}.")
-                ],
-            ),
-            *(
-                parameter
-                for name, parameter in parameters.items()
-                if name in rendering.fields
-            ),
-        ]
+    schema = operation_schema(rendering, parameters)
+    operation = inspect.Parameter(
+        "operation",
+        kind=inspect.Parameter.KEYWORD_ONLY,
+        annotation=Annotated[dict[str, Any], WithJsonSchema(schema)],
+    )
 
     def handler(**_: object) -> typing.NoReturn:
         # Middleware rewrites every rendering call to its grouped command, so a call that
         # reaches this body skipped authorization's view of the real command: fail closed.
         raise RuntimeError(f"{rendering.name} reached its handler without translation")
 
-    handler.__signature__ = inspect.Signature([*leading, *carried])  # type: ignore[attr-defined]
+    handler.__signature__ = inspect.Signature([operation, *carried])  # type: ignore[attr-defined]
     handler.__annotations__ = {
         parameter.name: parameter.annotation
         for parameter in handler.__signature__.parameters.values()  # type: ignore[attr-defined]

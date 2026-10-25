@@ -33,12 +33,16 @@ from typing import Any, Literal, get_args
 Effect = Literal["read", "write"]
 
 #: How the MCP surface publishes a command that has renderings. `nested` carries the
-#: operation in one `operation` object, `flat` carries it as an `action` plus its fields,
-#: and `grouped` lists only the grouped command. EXPERIMENTAL: the single-purpose-tools
-#: pilot compares the three and then removes the losers.
-ToolShape = Literal["nested", "flat", "grouped"]
+#: operation in one `operation` object, and `grouped` lists only the grouped command.
+#: `grouped` stays selectable only as the baseline of the tool-selection eval, which
+#: compares each converted family with today's surface on one build; the round that ends
+#: that comparison removes it.
+ToolShape = Literal["nested", "grouped"]
 TOOL_SHAPES: tuple[str, ...] = get_args(ToolShape)
 DEFAULT_TOOL_SHAPE: ToolShape = "nested"
+
+#: The argument path that names the operation in a nested call, as guidance and refusals say it.
+OPERATION_KIND = "operation.kind"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,11 +120,6 @@ class Rendering:
     def destructive(self) -> bool:
         """True when any variant can overwrite or remove content; always False for a read tool."""
         return any(variant.destructive for variant in self.variants)
-
-    @property
-    def fields(self) -> frozenset[str]:
-        """Every field some variant of this tool accepts."""
-        return frozenset().union(*(variant.fields for variant in self.variants))
 
     @property
     def kinds(self) -> tuple[str, ...]:
@@ -498,15 +497,6 @@ def listed_tools(command: str, shape: str, effect: Effect | None = None) -> tupl
     return tuple(r.name for r in renderings if effect in (None, r.effect))
 
 
-def selector_label(command: str, shape: str) -> str:
-    """The argument that names the operation, as a client of this shape writes it."""
-    _require_shape(shape)
-    operations = OPERATIONS.get(command)
-    if operations is None:
-        raise ValueError(f"no operation entries for {command}")
-    return "operation.kind" if shape == "nested" else operations.selector
-
-
 def spell_call(
     command: str, arguments: Mapping[str, Any], shape: str
 ) -> tuple[str, dict[str, Any]]:
@@ -527,9 +517,9 @@ def spell_call(
     for rendering in renderings:
         if rendering.variant_for(kind, fields) is None:
             continue
-        if shape == "nested":
-            return rendering.name, {"operation": {"kind": kind, **fields}}
-        return rendering.name, {selector: kind, **fields}
+        # The tool's own arguments sit beside `operation`, where the server reads them.
+        tool_arguments = {key: fields.pop(key) for key in rendering.tool_arguments if key in fields}
+        return rendering.name, {"operation": {"kind": kind, **fields}, **tool_arguments}
     raise ValueError(f"no rendering of {command} carries {selector}={kind!r}")
 
 
@@ -566,23 +556,19 @@ def route(command: str, shape: str, actions: Sequence[str]) -> dict[str, Any]:
     missing = [a for a in actions if not any(a in carried for carried in by_tool.values())]
     if missing:
         raise ValueError(f"no rendering of {command} carries {', '.join(missing)}")
-    return {"tools": by_tool, "selector": selector_label(command, shape)}
+    return {"tools": by_tool, "selector": OPERATION_KIND}
 
 
-def split_operation(
-    rendering: Rendering, shape: str, body: Mapping[str, Any]
-) -> tuple[Any, dict[str, Any]] | None:
+def split_operation(body: Mapping[str, Any]) -> tuple[Any, dict[str, Any]] | None:
     """The operation kind and its fields from a rendering call's arguments, or None.
 
     `body` holds the arguments without the transport keys and the tool's own extra
-    arguments. A nested call must carry one `operation` object and nothing else.
+    arguments. The call must carry one `operation` object and nothing else.
     """
-    if shape == "nested":
-        operation = body.get("operation")
-        if set(body) != {"operation"} or not isinstance(operation, Mapping):
-            return None
-        return operation.get("kind"), {k: v for k, v in operation.items() if k != "kind"}
-    return body.get(rendering.selector), {k: v for k, v in body.items() if k != rendering.selector}
+    operation = body.get("operation")
+    if set(body) != {"operation"} or not isinstance(operation, Mapping):
+        return None
+    return operation.get("kind"), {k: v for k, v in operation.items() if k != "kind"}
 
 
 def unspell_call(
@@ -613,7 +599,7 @@ def unspell_call(
                 continue
             body = dict(arguments)
             tool_arguments = {key: body.pop(key) for key in rendering.tool_arguments if key in body}
-            parsed = split_operation(rendering, shape, body)
+            parsed = split_operation(body)
             if parsed is None:
                 return None
             kind, fields = parsed

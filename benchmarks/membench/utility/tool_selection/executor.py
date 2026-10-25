@@ -55,8 +55,8 @@ from .cases import Case
 from .score import compact_calls
 from .vault import read_end_state
 
-#: The tool shapes the change defines (design, "Decision"); ``grouped`` is the baseline.
-SHAPES: tuple[str, ...] = ("grouped", "flat", "nested")
+#: The tool shapes the server still serves (design, D8); ``grouped`` is the baseline.
+SHAPES: tuple[str, ...] = ("grouped", "nested")
 
 #: The server-side switch for the tool shape (design, "Decision": one build, the
 #: shape chosen by the process environment). A build that does not know it
@@ -274,9 +274,9 @@ def require_distinct_shapes(probes: Mapping[str, Mapping]) -> None:
     """Refuse a run whose arms serve one surface.
 
     A build that ignores the shape switch serves the grouped surface under every
-    arm, and the comparison would then be the same arm against itself. Two shapes
-    may list the same tool names in different argument forms (flat and nested), so
-    the surface is each tool's schema hash, not its name.
+    arm, and the comparison would then be the same arm against itself. The surface
+    is each tool's schema hash, so a build that lists the same names under another
+    schema still reads as a different arm.
     """
 
     seen: dict[tuple[tuple[str, str], ...], str] = {}

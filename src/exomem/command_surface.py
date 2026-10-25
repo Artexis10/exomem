@@ -512,11 +512,11 @@ def resolve_invocation(
     rules = command.argument_rules
     if rules is None:
         raise UnresolvedInvocation(public_name)
-    carried, tool_arguments, parsed = _split_rendered_call(rendering, arguments, shape, passthrough)
+    carried, tool_arguments, parsed = _split_rendered_call(rendering, arguments, passthrough)
     if parsed is None:
         rules.refuse(f"{rendering.name} takes an operation object and nothing else")
     kind, fields = parsed
-    label = operation_entries.selector_label(command.name, shape)
+    label = operation_entries.OPERATION_KIND
     variant = rendering.variant_for(kind, fields)
     if variant is None:
         sibling = next(
@@ -546,14 +546,13 @@ def resolve_invocation(
 def _split_rendered_call(
     rendering: operation_entries.Rendering,
     arguments: Mapping[str, typing.Any],
-    shape: str,
     passthrough: frozenset[str],
 ) -> tuple[dict[str, typing.Any], dict[str, typing.Any], tuple[object, dict[str, typing.Any]] | None]:
     """A rendered call's transport keys, its tool-level arguments and its parsed operation."""
     carried = {key: value for key, value in arguments.items() if key in passthrough}
     body = {key: value for key, value in arguments.items() if key not in passthrough}
     tool_arguments = {key: body.pop(key) for key in rendering.tool_arguments if key in body}
-    return carried, tool_arguments, operation_entries.split_operation(rendering, shape, body)
+    return carried, tool_arguments, operation_entries.split_operation(body)
 
 
 def rendered_call_writes(
@@ -561,7 +560,6 @@ def rendered_call_writes(
     rendering: operation_entries.Rendering,
     arguments: Mapping[str, typing.Any],
     *,
-    shape: str,
     passthrough: frozenset[str] = frozenset(),
 ) -> bool:
     """Whether the grouped call that a rendered call spells would take the writer lease.
@@ -573,7 +571,7 @@ def rendered_call_writes(
     from .commands import invocation_is_read_only
     from .governance.egress import SelectorCoverageError
 
-    _, _, parsed = _split_rendered_call(rendering, arguments, shape, passthrough)
+    _, _, parsed = _split_rendered_call(rendering, arguments, passthrough)
     flat = {} if parsed is None else {**parsed[1], rendering.selector: parsed[0]}
     try:
         return not invocation_is_read_only(command, flat)

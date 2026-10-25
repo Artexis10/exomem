@@ -421,14 +421,7 @@ def _nested_spelling(tool: str, operation: dict, **top) -> tuple[str, dict]:
     return tool, {"operation": operation, **top}
 
 
-def _flat_spelling(tool: str, operation: dict, **top) -> tuple[str, dict]:
-    return tool, {"action": operation["kind"], **{k: v for k, v in operation.items() if k != "kind"}, **top}
-
-
-@pytest.mark.parametrize(
-    "arm,spell",
-    [("grouped", _grouped_spelling), ("nested", _nested_spelling), ("flat", _flat_spelling)],
-)
+@pytest.mark.parametrize("arm,spell", [("grouped", _grouped_spelling), ("nested", _nested_spelling)])
 def test_every_arm_reads_a_call_by_its_operation_and_counts_refusals_from_result_codes(arm, spell) -> None:
     """A call that names the right operation with a wrong field counts the same in every arm."""
     case = build_case("records-log-entry", 101)
@@ -465,27 +458,29 @@ def test_every_arm_reads_a_call_by_its_operation_and_counts_refusals_from_result
     assert (result.schema_bytes, result.input_tokens, result.output_tokens) == (90_000, 1000, 50)
 
 
-def test_the_product_resolver_reads_each_shape_as_its_server_does() -> None:
+def test_the_product_resolver_reads_a_nested_call_as_its_server_does() -> None:
     resolver = product_resolver()
 
     nested_query = resolve_call(
         resolver, "read_records", {"operation": {"kind": "query", "collection": "c"}}, "nested"
     )
-    flat_append = resolve_call(
+    nested_append = resolve_call(
         resolver,
         "change_records",
-        {"action": "append", "collection": "c", "item": {"a": 1}, "why": "log it"},
-        "flat",
+        {"operation": {"kind": "append", "collection": "c", "item": {"a": 1}, "why": "log it"}},
+        "nested",
     )
     write_sent_to_read_tool = resolve_call(
         resolver, "read_records", {"operation": {"kind": "append", "collection": "c"}}, "nested"
     )
-    flat_form_under_nested = resolve_call(resolver, "read_records", {"action": "query", "collection": "c"}, "nested")
+    grouped_form_under_nested = resolve_call(
+        resolver, "read_records", {"action": "query", "collection": "c"}, "nested"
+    )
 
     assert (nested_query.command, nested_query.action, nested_query.read_only) == ("record_memory", "query", True)
-    assert (flat_append.command, flat_append.action, flat_append.read_only) == ("record_memory", "append", False)
+    assert (nested_append.command, nested_append.action, nested_append.read_only) == ("record_memory", "append", False)
     assert not write_sent_to_read_tool.resolved
-    assert not flat_form_under_nested.resolved
+    assert not grouped_form_under_nested.resolved
 
 
 def test_resolution_reports_the_command_the_action_and_whether_it_reads() -> None:
@@ -527,7 +522,7 @@ def _dev_by_id() -> dict[str, Case]:
     return {case.case_id: case for case in dev_cases()}
 
 
-def _results(arm_success, *, arm: str = "flat", wrong_write=frozenset()) -> list[CaseResult]:
+def _results(arm_success, *, arm: str = "nested", wrong_write=frozenset()) -> list[CaseResult]:
     """Grouped passes every dev case; ``arm`` follows ``arm_success(case)``."""
 
     out = []
@@ -540,20 +535,20 @@ def _results(arm_success, *, arm: str = "flat", wrong_write=frozenset()) -> list
 def test_an_arm_that_does_as_well_as_grouped_everywhere_reads_as_no_change() -> None:
     report = ro.readout(_results(lambda case: True), _dev_by_id())
 
-    flat = report["arms"]["flat"]
-    assert flat["paired_cases"] == 20
-    assert flat["verdict"] == ro.PASS
-    assert "no change" in flat["reading"]
-    assert flat["passes"]
+    nested = report["arms"]["nested"]
+    assert nested["paired_cases"] == 20
+    assert nested["verdict"] == ro.PASS
+    assert "no change" in nested["reading"]
+    assert nested["passes"]
 
 
 def test_an_arm_that_loses_the_cases_of_every_template_fails() -> None:
     report = ro.readout(_results(lambda case: False), _dev_by_id())
 
-    flat = report["arms"]["flat"]
-    assert flat["comparison"]["mean_difference"] == -1.0
-    assert flat["verdict"] == ro.FAIL
-    assert not flat["passes"]
+    nested = report["arms"]["nested"]
+    assert nested["comparison"]["mean_difference"] == -1.0
+    assert nested["verdict"] == ro.FAIL
+    assert not nested["passes"]
 
 
 def test_a_comparison_over_fewer_than_six_template_groups_is_inconclusive() -> None:
@@ -563,26 +558,26 @@ def test_a_comparison_over_fewer_than_six_template_groups_is_inconclusive() -> N
 
     report = ro.readout(results, cases)
 
-    flat = report["arms"]["flat"]
-    assert flat["verdict"] == ro.INCONCLUSIVE
-    assert not flat["passes"]
+    nested = report["arms"]["nested"]
+    assert nested["verdict"] == ro.INCONCLUSIVE
+    assert not nested["passes"]
     # The reader is told it is the group count, not a failure of the arm.
-    assert f"{protocol.MIN_GROUPS - 1} template groups" in flat["reading"]
+    assert f"{protocol.MIN_GROUPS - 1} template groups" in nested["reading"]
 
 
 def test_a_session_that_could_not_be_scored_leaves_its_case_out_instead_of_counting_a_loss() -> None:
     cases = _dev_by_id()
     lost = next(iter(cases))
     results = [
-        replace(r, scored=False, success=False, outcome="harness_fault") if (r.arm == "flat" and r.case_id == lost) else r
+        replace(r, scored=False, success=False, outcome="harness_fault") if (r.arm == "nested" and r.case_id == lost) else r
         for r in _results(lambda case: True)
     ]
 
-    flat = ro.readout(results, cases)["arms"]["flat"]
+    nested = ro.readout(results, cases)["arms"]["nested"]
 
-    assert flat["excluded_cases"] == [lost]
-    assert flat["paired_cases"] == 19
-    assert flat["comparison"]["mean_difference"] == 0.0
+    assert nested["excluded_cases"] == [lost]
+    assert nested["paired_cases"] == 19
+    assert nested["comparison"]["mean_difference"] == 0.0
 
 
 def test_a_repeat_is_averaged_within_its_case_before_the_cases_are_compared() -> None:
@@ -591,20 +586,20 @@ def test_a_repeat_is_averaged_within_its_case_before_the_cases_are_compared() ->
     results = [
         *_results(lambda c: True),
         _result(case, "grouped", True, repeat=2),
-        _result(case, "flat", False, repeat=2),
+        _result(case, "nested", False, repeat=2),
     ]
 
-    flat = ro.readout(results, cases)["arms"]["flat"]
+    nested = ro.readout(results, cases)["arms"]["nested"]
 
-    assert flat["paired_cases"] == 20
-    assert flat["comparison"]["mean_difference"] == pytest.approx(-0.5 / 20)
+    assert nested["paired_cases"] == 20
+    assert nested["comparison"]["mean_difference"] == pytest.approx(-0.5 / 20)
 
 
 def test_the_wrong_write_rule_allows_one_more_case_than_grouped_and_not_two() -> None:
     reads = [case.case_id for case in dev_cases() if case.kind == "read"]
 
-    one_more = ro.readout(_results(lambda case: True, wrong_write=set(reads[:1])), _dev_by_id())["arms"]["flat"]
-    two_more = ro.readout(_results(lambda case: True, wrong_write=set(reads[:2])), _dev_by_id())["arms"]["flat"]
+    one_more = ro.readout(_results(lambda case: True, wrong_write=set(reads[:1])), _dev_by_id())["arms"]["nested"]
+    two_more = ro.readout(_results(lambda case: True, wrong_write=set(reads[:2])), _dev_by_id())["arms"]["nested"]
 
     assert (one_more["wrong_write_excess"], one_more["passes"]) == (1, True)
     assert (two_more["wrong_write_excess"], two_more["passes"]) == (2, False)
@@ -673,10 +668,10 @@ def _probe(**schemas: str) -> dict:
 
 
 def test_a_build_that_serves_one_surface_for_every_shape_is_refused() -> None:
-    same = {"grouped": _probe(a="1", b="2"), "flat": _probe(a="1", b="2")}
-    renamed = {"grouped": _probe(a="1", b="2"), "flat": _probe(a="1", c="3", d="4")}
-    # Flat and nested list the same names; only their argument schemas differ.
-    reshaped = {"flat": _probe(a="1", c="3"), "nested": _probe(a="1", c="5")}
+    same = {"grouped": _probe(a="1", b="2"), "nested": _probe(a="1", b="2")}
+    renamed = {"grouped": _probe(a="1", b="2"), "nested": _probe(a="1", c="3", d="4")}
+    # Two builds can list the same names; only their argument schemas differ.
+    reshaped = {"grouped": _probe(a="1", c="3"), "nested": _probe(a="1", c="5")}
 
     with pytest.raises(StateError, match=f"does not apply {ex.SHAPE_ENV}"):
         ex.require_distinct_shapes(same)
@@ -759,11 +754,11 @@ def test_the_plan_stage_prints_session_counts_and_token_estimates_for_each_round
     assert main(["plan", "--calibration", str(_calibration_file(tmp_path))]) == 0
 
     out = capsys.readouterr().out
-    assert "round dev: 20 cases x 3 arms x 2 repeats = 120 sessions" in out
-    assert "round heldout-90: 90 cases x 3 arms x 2 repeats = 540 sessions" in out
-    assert "round heldout-120: 120 cases x 3 arms x 2 repeats = 720 sessions" in out
-    assert f"{120 * 200_000:,} input tokens" in out
-    assert f"{120 * 400:,} output tokens" in out
+    assert "round dev: 20 cases x 2 arms x 2 repeats = 80 sessions" in out
+    assert "round heldout-90: 90 cases x 2 arms x 2 repeats = 360 sessions" in out
+    assert "round heldout-120: 120 cases x 2 arms x 2 repeats = 480 sessions" in out
+    assert f"{80 * 200_000:,} input tokens" in out
+    assert f"{80 * 400:,} output tokens" in out
 
 
 def test_the_plan_stage_without_a_calibration_still_counts_sessions_and_says_it_cannot_estimate_tokens(
@@ -771,7 +766,7 @@ def test_the_plan_stage_without_a_calibration_still_counts_sessions_and_says_it_
 ) -> None:
     monkeypatch.setattr("membench.utility.tool_selection.__main__.DEFAULT_CALIBRATION", tmp_path / "absent.json")
 
-    assert main(["plan", "--arms", "grouped,flat"]) == 0
+    assert main(["plan", "--arms", "grouped,nested"]) == 0
 
     out = capsys.readouterr().out
     assert "= 80 sessions" in out
@@ -784,7 +779,7 @@ def test_the_plan_stage_estimates_from_the_committed_calibration_when_none_is_gi
     assert main(["plan"]) == 0
 
     out = capsys.readouterr().out
-    assert "= 120 sessions" in out
+    assert "= 80 sessions" in out
     assert "input tokens" in out
     assert "estimates are unavailable" not in out
 
@@ -793,8 +788,8 @@ def test_an_arm_with_smaller_schemas_is_estimated_lower_by_its_bytes_times_its_r
     calibration = planning.load_calibration(_calibration_file(tmp_path))
 
     estimate = planning.estimate_round(
-        cases=10, arms=["grouped", "flat"], repeats=1, calibration=calibration,
-        schema_bytes={"flat": 90_000 - 3_500},
+        cases=10, arms=["grouped", "nested"], repeats=1, calibration=calibration,
+        schema_bytes={"nested": 90_000 - 3_500},
     )
 
     saved_per_session = 3_500 / planning.BYTES_PER_TOKEN * (calibration.calls + 1)
@@ -819,7 +814,7 @@ def test_calibration_takes_its_means_from_the_scored_baseline_sessions_only() ->
     kept = replace(_result(case, "grouped", True), input_tokens=100, calls=2, wall_seconds=4.0)
     other_kept = replace(_result(case, "grouped", True, repeat=2), input_tokens=300, calls=4, wall_seconds=6.0)
     unscored = replace(_result(case, "grouped", False, repeat=3, scored=False), input_tokens=9_999)
-    other_arm = replace(_result(case, "flat", True), input_tokens=9_999)
+    other_arm = replace(_result(case, "nested", True), input_tokens=9_999)
 
     calibration = planning.calibrate([kept, other_kept, unscored, other_arm], source="unit")
 
@@ -953,19 +948,19 @@ def test_an_arm_comparison_runs_from_recorded_sessions_and_reads_a_lost_case_as_
     triage_before = _recording("plan-triage-item-s101")[2]["end_state_before"]
     for name in RECORDED:
         _play(layout, name, "grouped")
-    _play(layout, "records-range-total-s101", "flat")
+    _play(layout, "records-range-total-s101", "nested")
     # The same recorded transcript, but the vault the key reads never changed.
-    _play(layout, "plan-triage-item-s101", "flat", after=triage_before)
+    _play(layout, "plan-triage-item-s101", "nested", after=triage_before)
     cases = {name: _recorded_case(name) for name in RECORDED}
     by_id = {case.case_id: case for case in cases.values()}
 
     results = ro.load_results(sorted(layout.sessions.glob("session-*")), by_id, grouped_resolver())
     report = ro.readout(results, by_id)
 
-    flat = report["arms"]["flat"]
-    assert flat["paired_cases"] == 2
-    assert flat["comparison"]["mean_difference"] == pytest.approx(-0.5)
-    assert flat["verdict"] == ro.INCONCLUSIVE
+    nested = report["arms"]["nested"]
+    assert nested["paired_cases"] == 2
+    assert nested["comparison"]["mean_difference"] == pytest.approx(-0.5)
+    assert nested["verdict"] == ro.INCONCLUSIVE
     assert report["arms"]["grouped"]["secondary"]["success_rate"] == 1.0
 
 
