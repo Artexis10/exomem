@@ -8996,33 +8996,27 @@ class LexicalStore:
         if not wanted or self._failed or not self.path.exists():
             return None
         try:
-            conn = self._connect()
-        except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical unit probe declined (%s)")
-            return None
-        try:
-            if not self._schema_is_current(conn):
-                return None
-            view = _SelectedUnits(self.vault_root, conn)
-            served = [
-                (str(row[1]), str(unit.unit_ref), str(unit.category or ""), str(row[9]))
-                for row, unit in view.served(conn.execute(
-                    f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u "
-                    "WHERE u.parent_path IN (SELECT value FROM json_each(?)) "
-                    "ORDER BY u.parent_path, u.source_order",
-                    (json.dumps(wanted, ensure_ascii=False),),
-                ))
-                if filed is None or unit.category in filed
-            ]
-            view.require_complete()
+            with self._query_connection() as conn:
+                if not self._schema_is_current(conn):
+                    return None
+                view = _SelectedUnits(self.vault_root, conn)
+                served = [
+                    (str(row[1]), str(unit.unit_ref), str(unit.category or ""), str(row[9]))
+                    for row, unit in view.served(conn.execute(
+                        f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u "
+                        "WHERE u.parent_path IN (SELECT value FROM json_each(?)) "
+                        "ORDER BY u.parent_path, u.source_order",
+                        (json.dumps(wanted, ensure_ascii=False),),
+                    ))
+                    if filed is None or unit.category in filed
+                ]
+                view.require_complete()
+                return served
         except RegistryError:
             return None
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical unit probe declined (%s)")
             return None
-        finally:
-            conn.close()
-        return served
 
     def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
         """Each Knowledge Base page's stored `page.tags` members, by path.
