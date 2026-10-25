@@ -17,7 +17,7 @@ commands.
 | `record` | Capture, correct, inspect, or query a durable observed event or current state | `read_records` or `change_records` for a configured Record collection |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `read_review/triage_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `read_connections/change_connections`; use `operation="context"` for the unified read-only view |
-| `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
+| `adopt` | Assess or import an existing vault safely | `read_adoption(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | Check or repair vault health | Remote tools may audit or dry-run. Actual repair is host-operator work via `exomem maintain --fix` / `--reconcile` |
 | `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `read_schema/change_schema`; inference is proposal-only and saving is explicit |
 
@@ -62,6 +62,11 @@ read-only preview, resolve every collision or immutable/withheld inbound-link
 blocker, then apply the exact `plan_id` and `source_snapshot` with a reason.
 
 ## Governed curation
+
+MCP and REST expose only curation `work-item`, `preview`, and `status` reads.
+Use the CLI `maintain_memory` command with `mode="curation"` for every curation
+write, including proposals and compensation proposals. Retain the grouped
+`curation_action` selector and the returned identifiers on that CLI route.
 
 Use `check_memory(operation={'kind': 'curation-work-item'})` when one reviewed structural improvement
 spans multiple compiled notes or combines typed creation, relation acceptance,
@@ -937,22 +942,26 @@ Use only when explicitly requested or the live `proactive_capture` disposition f
 - resume adds `{status, executed, replayed, stale, diverged, reconciled, blocked, deferred, publication}`; coverage adds `{input: {input_revision, ref, recovery}, receipts: [{candidate_key, leaf_id, operation_id, receipt_digest, path, readback}]}`.
 - Newlines, credential-shaped text and anything over a cap are refused with nothing written. `about` refs you cannot see are dropped and counted in `about_skipped`; recording marks the rest as the conversation's latest work.
 
-## adoption_studio
+## Collection adoption
 
-A durable, resumable session that turns an existing vault into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `status` is the read-only default; `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
+A durable, resumable session that turns an existing collection of notes, documents, images, audio and video into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `read_adoption` carries `status` and `work-item`. `change_adoption` carries the other operations, including `plan` and `finish`. `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
+
+Every selected file is imported or refused with a per-path code; none is dropped silently. A UTF-8 text file becomes a Source that holds the exact text in a verbatim fence, with its links, embeds, tags and aliases kept outside the fence as graph structure. Any other file, and a text file that is not valid UTF-8, becomes a Source that keeps the original bytes as its artifact; media extraction then runs through the media job path.
 
 ### Lifecycle
-1. `start` scans a subtree read-only and snapshots a candidate inventory (`path`, `include_hidden`).
-2. `select` materializes a folder-rule selection server-side (`include`, `exclude`, `overrides`, `include_junk`).
-3. `plan` previews exact targets, titles, hashes and frontmatter.
-4. `apply` copies the validated subset into governed Sources with provenance in one atomic batch (`plan_id`; `retry_failed` and `only_paths` narrow a retry).
-5. `cancel` closes a pre-apply run (`why` records the reason); `finish` proves recall, hands back a first question and optionally writes a run manifest under `Knowledge Base/_Adoption/` (`write_manifest`, default true).
+1. `start` reads a subtree and saves a candidate inventory (`path`, `include_hidden`). Pass `collection` to name the collection; a re-staged copy of the same collection under a new path then imports nothing twice.
+2. `select` materializes a folder-rule selection server-side (`include`, `exclude`, `overrides`, `include_junk`). An `include` entry is a folder path, or `{path, source_kind, domain}` to file that folder's items under a registered Source kind and domain. An unregistered kind is refused with the selection unchanged.
+3. `plan` previews exact targets, titles, hashes, frontmatter and resolved or unresolved links. It reports `existing_ref` for an item that an earlier import already holds with the same bytes.
+4. `apply` copies the validated subset into governed Sources with provenance (`plan_id`; `retry_failed` and `only_paths` narrow a retry).
+5. `cancel` closes a pre-apply run (`why` records the reason); `finish` proves recall, reports `coverage` (imported, refused, pending extraction, unresolved links, hidden folders counted) and optionally writes a run manifest under `Knowledge Base/_Adoption/` (`write_manifest`, default true).
+
+`plan` and `apply` stop inside the request budget. While a result carries `continuation`, call the same action again with that `continuation` and the unchanged other arguments. The run is done when no `continuation` returns and `phase` is `applied`; a stopped call leaves the remaining work in `status`.
 
 ### Agent actions after apply
 - `work-item` returns bounded read-only context (`sources`, `max_sources` default 5, `max_chars_per_source` default 2000).
 - `propose` submits structured `proposals`.
 - `apply-proposal` approves one through an existing governed leaf: `ref` (`exomem://review/adoption/<id>`), `why` required, `expected_fingerprint` must still match, and `expected_hash` guards relation and reconciliation-relate targets.
 
-## adopt_vault
+## One-shot adoption
 
-One-shot adoption of an existing vault without replacing originals. `mode` is `scan-only` (default), `save-manifest`, `copy-as-sources` or `compile-selected`; only the last three write, under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.
+One-shot adoption preserves originals. Use `read_adoption` with `operation.kind="scan-only"` to inspect first. Use `change_adoption` with `operation.kind` set to `save-manifest`, `copy-as-sources` or `compile-selected` to write under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.

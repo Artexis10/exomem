@@ -40,11 +40,10 @@ REST and CLI calls keep the grouped commands in the following registry.
 
 | MCP tool | Operations | Execution commands |
 | --- | --- | --- |
-| adopt_vault | Direct inputs | adopt_vault |
-| adoption_studio | Direct inputs | adoption_studio |
 | bootstrap | settings, writer-status, instructions | configure_memory, coordination_status, bootstrap |
 | browse_memory | overview, folder-list, files, trash-list, propose-reclassification, validate-create, validate-append | browse_memory, manage_memory_file |
 | capture_source | Direct inputs | capture_source |
+| change_adoption | save-manifest, copy-as-sources, compile-selected, start, select, plan, apply, cancel, finish, propose, apply-proposal | adopt_vault, adoption_studio |
 | change_connections | create-entity, accept-relation | connect_memory |
 | change_files | create, append, move, delete, recover, reclassify, revert-reclassification | manage_memory_file |
 | change_governance | propose, commit, grant-standing, revoke-standing, suspend, resume, undo, backfill-preview, backfill-commit | govern_memory |
@@ -63,6 +62,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | prepare_note | observation, compile | observe_memory, compile_source |
 | preserve_artifacts | Direct inputs | preserve_artifacts |
 | preserve_evidence | Direct inputs | preserve_evidence |
+| read_adoption | scan-only, status, work-item | adopt_vault, adoption_studio |
 | read_connections | suggest-links, suggest-relations, context, graph-context, inbound-links, resolve-entity, resolve-relation | connect_memory |
 | read_episode | inspect, candidates, coverage | episode_memory |
 | read_governance | list, explain, simulate, vocabulary-request, vocabulary-status | govern_memory |
@@ -108,7 +108,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | triage_memory | 1 | MCP, REST, CLI | write | no | ref | attention | ref*, action*, until, why, expected_fingerprint, source_path, decision, response_detail | Save review decisions or attention settings; use returned refs and fingerprints. |
 | connect_memory | 1 | MCP, REST, CLI | write | no | - | suggest_links, graph_context, suggest_relations, link, list_inbound_links | operation, path, target, query, requested_relation, continuation, unit_ref, categories, kinds, draft_title, draft_body, limit, scope, include_model_suggestions, depth, relation_types, node_types, max_nodes, max_edges, traversal_profile, max_body_chars, entity_type, name, slug, summary, why_in_kb, tags, connections, affiliation, relationship, domain, language, repo, license, used_in, decided, project, decision_status, aliases, ref, expected_hash, why, expected_fingerprint, vocabulary_ref, vocabulary_fingerprint, identity_decision, facets, entity_family, registry_scope, relations, response_detail | Find relations, graph context or entities. |
 | adopt_vault | 1 | MCP, REST, CLI | write | no | path | adopt | path, mode, max_depth, include_hidden, samples, pack_limit, manifest_path, selected_paths, semantic_max_files, semantic_max_bytes, semantic_example_limit, response_detail | Scan or import; preserve originals. |
-| adoption_studio | 1 | MCP, REST, CLI | write | yes | - | adopt | action*, run_id, path, include_hidden, initialize_kb, include, exclude, overrides, include_junk, plan_id, retry_failed, only_paths, why, write_manifest, sources, max_sources, max_chars_per_source, proposals, ref, expected_fingerprint, expected_hash, response_detail | Review and import existing material in a resumable run. |
+| adoption_studio | 1 | MCP, REST, CLI | write | yes | - | adopt | action*, run_id, path, include_hidden, initialize_kb, collection, include, exclude, overrides, include_junk, plan_id, continuation, retry_failed, only_paths, why, write_manifest, sources, max_sources, max_chars_per_source, proposals, ref, expected_fingerprint, expected_hash, response_detail | Review and import an existing collection of notes, documents, images, audio and video in a resumable run. |
 | maintain_memory | 1 | MCP, REST, CLI | write | yes | - | audit, audit_fix, reconcile | mode, categories, dry_run, rebuild_embeddings, rebuild_graph, detail, legacy_sample_limit, collection, apply, plan_id, source_snapshot, why, curation_action, run_id, plan, refs, paths, review_ref, hydration_recheck, expected_plan_fingerprint, vocabulary_ref, vocabulary_fingerprint, exclude_groups, acknowledge_skipped, response_detail | Maintain vault health; several modes write. |
 | schema_memory | 1 | MCP, REST, CLI | write | yes | - | schema_memory | operation*, name, subject, project, page_type, save, expected_hash, strict, compare_to, proposal, why, include_model_suggestions, context, date_from, date_to, continuation, limit, query, requested_type, vocabulary_ref, vocabulary_fingerprint, detail, version, registry_scope, response_detail | Infer, validate, diff, or save governed memory schemas and workflow contracts. |
 | govern_memory | 2 | MCP, REST, CLI | write | yes | operation | - | operation*, session_action, documents, selector_paths, intent, ttl_seconds, target_ceiling, duration, proposal_id, scope, grant_id, scope_ids, audience, ceiling, token, authorization_session, purpose, duration_seconds, rule_ids, path, paths, backfill_action, companion_input, vocabulary_request_id, raw_release, response_detail | Manage opt-in confidential access policy. |

@@ -8,29 +8,82 @@ reconstructable after a process restart with no dependence on any rebuildable
 sidecar. Originals outside ``Knowledge Base/`` are never rewritten, moved, or
 deleted under any action or failure: imports are copies with provenance, and
 scan/select/plan write nothing outside the run object.
+
+``plan`` and ``apply`` are bounded by the caller's request budget. A call that
+runs short returns a ``continuation`` cursor and the next call carries on; a
+repeated cursor returns the earlier call's answer and writes nothing.
 """
 
 from __future__ import annotations
 
-import dataclasses
+import contextlib
+import copy
 import datetime as dt
 import hashlib
 import json
 import os
+import secrets
+import stat
 import threading
+import time
+from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
 
 from . import adopt as adopt_module
-from . import context_refs, knowledge_packs, source_taxonomy
+from . import (
+    adoption_plan,
+    capabilities,
+    context_refs,
+    held_fs,
+    knowledge_packs,
+    request_budget,
+    reserved_paths,
+    source_taxonomy,
+)
 from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .kbdir import kb_dirname
-from .vault import PlannedWrite, batch_atomic_write, kb_root
+from .vault import PlannedWrite, batch_atomic_write, kb_root, parse_frontmatter
 
 RUNS_DIR = "_Adoption/runs"
 SCHEMA_VERSION = 1
+# The plan layout `apply` understands. A plan made by an earlier layout is refused as stale.
+PLAN_FORMAT = 2
 MAX_CANDIDATES_DEFAULT = 5000
+# Where Exomem Cloud stages an uploaded collection (see `cloud_import_job`).
+IMPORT_STAGE_DIR = "_Imports"
+# One `apply` batch holds at most this many items or bytes of originals (the
+# batch writer re-validates the whole batch per write, so cost grows with size).
+# 25 items is about 2-4 s on the measured vaults: a small share of the 50 s call.
+APPLY_CHUNK_ITEMS = 25
+APPLY_CHUNK_BYTES = 64 * 1024 * 1024
+# A chunk is also cut so its predicted cost stays at most this share of the call's budget.
+APPLY_CHUNK_BUDGET_SHARE = 0.1
+# What a call assumes before it has timed a chunk: seconds per item, and per media
+# artifact for its extraction request (both pessimistic starts).
+INITIAL_ITEM_SECONDS = 0.5
+INITIAL_EXTRACTION_SECONDS = 1.0
+# ... and per MiB of original bytes (read, hashed, copied, hashed again): pessimistic,
+# about 20 MiB/s, so one huge file is never started on the strength of small notes.
+INITIAL_SECONDS_PER_MIB = 0.05
+# A chunk teaches the per-MiB rate only when its items average at least this many
+# MiB; lighter chunks teach the per-item rate, which a huge file would otherwise inflate.
+BYTE_RATE_MIN_ITEM_MIB = 1.0
+# Work a call owes after its loop, inside the same MCP call, which the loop cannot
+# time. Media sidecars are indexed by a fan-out deferred until the mutation's
+# terminal is persisted (a fast-acknowledgement session moves it behind the reply
+# instead); its first graph step waits on the graph the background media worker
+# also holds, and the reply names every written path for the egress checks to
+# scan. PROVISIONAL, from a 1,100-file collection on the personal profile: seven
+# terminal drains took 3.4-15.2 s, with one outlier of 30.4 s on a short final
+# call; once the first had run, each further sidecar cost about 0.1 s; reply
+# handling took about 2.4 s for 456 written paths (0.005 s each).
+TERMINAL_FANOUT_RESERVE_SECONDS = 20.0
+TERMINAL_FANOUT_SECONDS_PER_ARTIFACT = 0.15
+REPLY_SECONDS_PER_ITEM = 0.006
 PHASES = (
     "selecting",
     "planned",
@@ -43,11 +96,18 @@ PHASES = (
 )
 
 _APPLIED_STATUSES = ("applied", "already-applied")
+# Per-item failures that mean "the original is not what the plan read".
+_DRIFT_CODES = frozenset({"SOURCE_CHANGED", "NOT_FOUND"})
+_RECALL_SAMPLE = 10
 
 _REASONS = {
     "NOT_IN_INVENTORY": "path is not among the scanned adoption candidates",
-    "UNSUPPORTED_IMPORT_TYPE": "adoption imports text/markdown-like files only",
+    "UNSUPPORTED_IMPORT_TYPE": "the scan did not mark this file importable",
     "ALREADY_GOVERNED": f"path is already inside {kb_dirname()}/",
+    "TOO_LARGE": "file is larger than the artifact ceiling",
+    "NOT_REGULAR_FILE": "only regular files import; links and special files do not",
+    "HIDDEN_FOLDER": "hidden folders are not scanned unless include_hidden=true",
+    "JUNK": "sync-conflict or zero-byte file; pass include_junk=true or list it in overrides",
 }
 
 _LOCK = threading.Lock()
@@ -81,6 +141,21 @@ def _rel(root: Path, p: Path) -> str:
     return p.relative_to(root).as_posix()
 
 
+def _call_budget() -> request_budget.RequestBudget:
+    """This call's deadline, which `plan` and `apply` pace themselves against.
+
+    Over MCP, stdio and HTTP alike, the dispatcher binds one `RequestBudget` per
+    request (`request_budget.MCP_REQUEST_BUDGET_SECONDS`, 50 s unless the operator
+    sets `EXOMEM_MCP_REQUEST_BUDGET_SECONDS`) and `current()` returns it, with the
+    time the request has already spent. The REST and CLI doors bind none, so they
+    get a fresh budget of the same length that starts here. Either way the call
+    stops starting work `request_budget.DELIVERY_RESERVE_SECONDS` before the end.
+    """
+    return request_budget.current() or request_budget.RequestBudget(
+        seconds=request_budget.budget_seconds()
+    )
+
+
 # --------------------------------------------------------------------------- #
 # id / fingerprint helpers
 # --------------------------------------------------------------------------- #
@@ -91,9 +166,14 @@ def inventory_fingerprint(rows: list[dict]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
-def selection_hash(paths: list[str]) -> str:
-    """sha256[:16] over the sorted selected paths."""
+def selection_hash(paths: list[str], classification: Mapping[str, Mapping] | None = None) -> str:
+    """sha256[:16] over the sorted selected paths and the classification each one carries."""
     payload = "\n".join(sorted(paths))
+    if classification:
+        payload += "\n--\n" + json.dumps(
+            {path: classification[path] for path in sorted(classification)},
+            sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+        )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -137,13 +217,14 @@ class AdoptionRunStore:
         except (OSError, json.JSONDecodeError) as exc:
             raise AdoptionRunError("RUN_NOT_FOUND", f"cannot read run {run_id!r}: {exc}") from exc
 
-    def save(self, run: dict) -> None:
+    def planned_write(self, run: dict) -> PlannedWrite:
+        """The run object as a write, so a caller can commit it inside a larger batch."""
         run["updated"] = _now_iso()
         content = json.dumps(run, indent=2, ensure_ascii=False, default=str) + "\n"
-        batch_atomic_write(
-            [PlannedWrite(path=self._run_file(run["run_id"]), content=content)],
-            vault_root=self.vault_root,
-        )
+        return PlannedWrite(path=self._run_file(run["run_id"]), content=content)
+
+    def save(self, run: dict) -> None:
+        batch_atomic_write([self.planned_write(run)], vault_root=self.vault_root)
 
     def load_proposals(self, run_id: str) -> dict:
         f = self.run_dir(run_id) / "proposals.json"
@@ -199,50 +280,83 @@ def _compact_row(run: dict) -> dict:
 # --------------------------------------------------------------------------- #
 # inventory
 # --------------------------------------------------------------------------- #
+def _count_files(folder: Path) -> int:
+    return sum(len(files) for _dirpath, _dirs, files in os.walk(folder))
+
+
 def build_inventory(
     root: Path,
     *,
     path: str = "",
     include_hidden: bool = False,
     max_candidates: int = MAX_CANDIDATES_DEFAULT,
-) -> tuple[list[dict], int]:
-    """Return ``(rows, truncated)`` — every adoption candidate outside the KB.
+    ceiling: int | None = None,
+) -> tuple[list[dict], int, int]:
+    """Return ``(rows, truncated, hidden_files)`` — every adoption candidate outside the KB.
 
-    Each row carries the vault-relative path, byte size, mtime, an ``eligible``
-    flag, and a machine-readable ``reason`` when ineligible (never silently
-    dropped). Rows are stat-only (no file reads); per-source sha256 is deferred
-    to ``plan``. The list is capped at ``max_candidates`` with the overflow
-    reported in the returned ``truncated`` count.
+    Each file row carries the vault-relative path, byte size, mtime, import
+    ``form`` (``text`` for a text-like suffix, ``artifact`` for any other file),
+    an ``eligible`` flag, and a machine-readable ``reason`` when ineligible
+    (never silently dropped). A skipped hidden folder is one ``kind: folder`` row
+    with its file count, kept outside the cap; ``hidden_files`` counts skipped
+    hidden files. Rows are stat-only (no file reads); per-source sha256 is
+    deferred to ``plan``. File rows are capped at ``max_candidates`` with the
+    overflow reported in ``truncated``.
     """
+    from . import client_artifacts
+
     root = Path(root)
     kb_name = kb_dirname()
+    limit = client_artifacts.fetch_budget().max_file_bytes if ceiling is None else ceiling
     scan_root = root if not _clean(path) else (root / _clean(path))
     rows: list[dict] = []
+    folders: list[dict] = []
+    hidden_files = 0
     if scan_root.is_dir():
         for dirpath, dirnames, filenames in os.walk(scan_root):
             dirnames.sort()
             filenames.sort()
             kept: list[str] = []
             for d in dirnames:
-                if not include_hidden and d.startswith("."):
-                    continue
-                rel_dir = _rel(root, Path(dirpath) / d)
+                dpath = Path(dirpath) / d
+                rel_dir = _rel(root, dpath)
                 if rel_dir == kb_name or rel_dir.startswith(kb_name + "/"):
+                    continue
+                if dpath.is_symlink():
+                    rows.append(_row(rel_dir, 0, 0.0, eligible=False, reason="NOT_REGULAR_FILE"))
+                    continue
+                if not include_hidden and d.startswith("."):
+                    try:
+                        mtime = dpath.stat().st_mtime
+                    except OSError:
+                        mtime = 0.0
+                    folders.append(
+                        {
+                            "path": rel_dir, "kind": "folder", "bytes": 0, "mtime": mtime,
+                            "eligible": False, "junk": False, "form": None,
+                            "reason": "HIDDEN_FOLDER", "files": _count_files(dpath),
+                        }
+                    )
                     continue
                 kept.append(d)
             dirnames[:] = kept
             for fn in filenames:
                 if not include_hidden and fn.startswith("."):
+                    hidden_files += 1
                     continue
                 fpath = Path(dirpath) / fn
                 rel = _rel(root, fpath)
                 if rel == kb_name or rel.startswith(kb_name + "/"):
                     continue
                 try:
-                    st = fpath.stat()
+                    st = fpath.lstat()
                 except OSError:
                     continue
-                eligible = fpath.suffix.lower() in _TEXT_IMPORT_SUFFIXES
+                reason = None
+                if not stat.S_ISREG(st.st_mode):
+                    reason = "NOT_REGULAR_FILE"
+                elif st.st_size > limit:
+                    reason = "TOO_LARGE"
                 # Stat-level junk classification (no reads), mirroring overview's
                 # categories. Rows are the UNCAPPED source of truth for the
                 # selection junk filter; overview's junk path lists are
@@ -252,21 +366,29 @@ def build_inventory(
                     token in name_l for token in overview_module._CONFLICT_TOKENS
                 )
                 rows.append(
-                    {
-                        "path": rel,
-                        "bytes": st.st_size,
-                        "mtime": st.st_mtime,
-                        "eligible": eligible,
-                        "junk": junk,
-                        "reason": None if eligible else "UNSUPPORTED_IMPORT_TYPE",
-                    }
+                    _row(rel, st.st_size, st.st_mtime, eligible=reason is None, reason=reason,
+                         junk=junk, suffix=fpath.suffix.lower())
                 )
     rows.sort(key=lambda r: r["path"])
     truncated = 0
     if len(rows) > max_candidates:
         truncated = len(rows) - max_candidates
         rows = rows[:max_candidates]
-    return rows, truncated
+    folders.sort(key=lambda r: r["path"])
+    return rows + folders, truncated, hidden_files
+
+
+def _row(
+    path: str, size: int, mtime: float, *, eligible: bool, reason: str | None,
+    junk: bool = False, suffix: str | None = None,
+) -> dict:
+    form = None
+    if eligible:
+        form = "text" if suffix in _TEXT_IMPORT_SUFFIXES else "artifact"
+    return {
+        "path": path, "bytes": size, "mtime": mtime, "eligible": eligible,
+        "junk": junk, "form": form, "reason": reason,
+    }
 
 
 def probe_staleness(root: Path, run: dict) -> list[str]:
@@ -307,68 +429,184 @@ def _reject(path: str, code: str) -> dict:
     return {"path": path, "code": code, "reason": _REASONS.get(code, code)}
 
 
+def _rule_key(entry: object) -> tuple[str, str | None, str | None]:
+    """``(path, source_kind, domain)`` of one `include` entry: a path or a rule object."""
+    if isinstance(entry, str):
+        return _clean(entry), None, None
+    if isinstance(entry, Mapping):
+        unknown = sorted(set(entry) - {"path", "source_kind", "domain"})
+        if unknown or not isinstance(entry.get("path"), str) or not _clean(entry["path"]):
+            raise AdoptionRunError(
+                "INVALID_RULE",
+                "an include rule is a path or an object {path, source_kind?, domain?}"
+                + (f"; unknown keys: {', '.join(unknown)}" if unknown else ""),
+            )
+        parts = []
+        for field in ("source_kind", "domain"):
+            value = entry.get(field)
+            if value is not None and not isinstance(value, str):
+                raise AdoptionRunError("INVALID_RULE", f"{field} must be a registry key string")
+            parts.append(value.strip() if isinstance(value, str) and value.strip() else None)
+        return _clean(entry["path"]), parts[0], parts[1]
+    raise AdoptionRunError("INVALID_RULE", "an include rule is a path or an object")
+
+
+def _resolve_classification(
+    taxonomy: source_taxonomy.SourceTaxonomy, kind_raw: str | None, domain_raw: str | None
+) -> dict | None:
+    """The registered kind and domain a rule names, or a refusal.
+
+    Only a result the registry already holds is accepted: an unknown key, a near
+    miss of a known key, a deprecated key, or a kind that cannot file a copied
+    file is refused with the resolver's close match when it has one.
+    """
+    if kind_raw is None and domain_raw is None:
+        return None
+    if kind_raw is None:
+        raise AdoptionRunError("SOURCE_KIND_REQUIRED", "a domain files under a kind: name the source_kind as well")
+    try:
+        kind = taxonomy.resolve_kind(kind_raw)
+    except source_taxonomy.TaxonomyTypoError as exc:
+        raise AdoptionRunError("SOURCE_KIND_NEAR_MISS", str(exc)) from exc
+    except source_taxonomy.TaxonomyError as exc:
+        raise AdoptionRunError("SOURCE_KIND_INVALID", str(exc)) from exc
+    if kind.status not in adoption_plan.ACCEPTED_STATUSES:
+        if kind.status == "deprecated":
+            replacement = f"; use {kind.replaced_by!r}" if kind.replaced_by else ""
+            raise AdoptionRunError(
+                "SOURCE_KIND_DEPRECATED", f"source_kind {kind.key!r} is deprecated{replacement}"
+            )
+        raise AdoptionRunError(
+            "SOURCE_KIND_UNREGISTERED",
+            f"source_kind {kind.key!r} is not in the Source taxonomy; "
+            "register it in _Schema/source-taxonomy.yaml first",
+        )
+    if kind.key in source_taxonomy.UNCHOSEN_KINDS or kind.key == source_taxonomy.EPISODE_KIND:
+        raise AdoptionRunError(
+            "SOURCE_KIND_NOT_ALLOWED",
+            f"source_kind {kind.key!r} records no choice or is reserved; name what the files are",
+        )
+    if kind.requires_url:
+        raise AdoptionRunError(
+            "SOURCE_KIND_NOT_ALLOWED",
+            f"source_kind {kind.key!r} needs a URL, which copied files lack; "
+            "name a kind that needs no URL",
+        )
+    domain_key = None
+    if domain_raw is not None:
+        try:
+            domain = taxonomy.resolve_domain(domain_raw)
+        except source_taxonomy.TaxonomyError as exc:
+            raise AdoptionRunError("DOMAIN_INVALID", str(exc)) from exc
+        if domain.status not in adoption_plan.ACCEPTED_STATUSES:
+            hint = (
+                f"; it looks like the registered domain {domain.close_match!r}" if domain.close_match
+                else f"; replaced by {domain.replaced_by!r}" if domain.replaced_by else ""
+            )
+            raise AdoptionRunError(
+                "DOMAIN_DEPRECATED" if domain.status == "deprecated" else "DOMAIN_UNREGISTERED",
+                f"domain {domain.key!r} is {domain.status}{hint}",
+            )
+        domain_key = domain.key
+    return {"source_kind": kind.key, "domain": domain_key}
+
+
 def _materialize_selection(
     run: dict,
-    include: list[str],
+    include: list,
     exclude: list[str],
     overrides: list[str],
     include_junk: bool,
-) -> tuple[list[str], list[dict]]:
+    taxonomy: source_taxonomy.SourceTaxonomy | None,
+) -> tuple[list[str], dict[str, dict], list[dict]]:
     """Materialize the concrete file set from folder rules, validating per-path.
 
     Include/exclude entries are subtree (or exact-file) rules applied in
     ascending path depth, so a deeper rule always overrides its ancestor —
     the UI's tri-state contract (uncheck a folder, re-check a subfolder).
-    At equal depth an exclude wins over an include of the same path.
+    At equal depth an exclude wins over an include of the same path. Each
+    selected path records the classification of the deepest include rule that
+    selects it. Every selected file that cannot import comes back in the
+    rejection list with its code.
     """
-    eligible = {r["path"] for r in run.get("inventory") or [] if r.get("eligible")}
-    junk = {r["path"] for r in run.get("inventory") or [] if r.get("junk")}
-    accepted: set[str] = set()
+    inventory = run.get("inventory") or []
+    files = {r["path"]: r for r in inventory if r.get("kind") != "folder"}
+    folder_rows = {r["path"]: r for r in inventory if r.get("kind") == "folder"}
+    paths = sorted(files)
     rejected: list[dict] = []
 
-    rules: list[tuple[int, int, str, bool]] = []
-    for inc in include:
-        incn = _clean(inc)
-        if any(p == incn or p.startswith(incn + "/") for p in eligible):
-            rules.append((len(incn.split("/")), 0, incn, True))
-        else:
-            rejected.append(_reject(incn, _classify_path(run, incn)))
-    for exc in exclude:
-        excn = _clean(exc)
-        rules.append((len(excn.split("/")), 1, excn, False))
+    def subtree(prefix: str) -> list[str]:
+        return [p for p in paths if p == prefix or p.startswith(prefix + "/")]
 
-    for _depth, _tie, pathn, on in sorted(rules):
-        subtree = {p for p in eligible if p == pathn or p.startswith(pathn + "/")}
-        if on:
-            accepted |= subtree
+    rules: list[tuple[int, int, str, bool, dict | None]] = []
+    seen_includes: dict[str, dict | None] = {}
+    for entry in include:
+        path, kind_raw, domain_raw = _rule_key(entry)
+        classification = _resolve_classification(taxonomy, kind_raw, domain_raw) if (
+            kind_raw is not None or domain_raw is not None
+        ) else None
+        if path in seen_includes and seen_includes[path] != classification:
+            raise AdoptionRunError(
+                "CONFLICTING_RULES", f"{path!r} appears in two include rules with different classification"
+            )
+        seen_includes[path] = classification
+        if subtree(path):
+            rules.append((len(path.split("/")), 0, path, True, classification))
+        elif path in folder_rows:
+            rejected.append(_reject(path, folder_rows[path]["reason"]))
         else:
-            accepted -= subtree
+            rejected.append(_reject(path, _classify_path(run, path)))
+    for exc_path in exclude:
+        excn = _clean(exc_path)
+        rules.append((len(excn.split("/")), 1, excn, False, None))
+
+    chosen: dict[str, dict | None] = {}
+    for _depth, _tie, pathn, on, classification in sorted(rules, key=lambda r: r[:3]):
+        for p in subtree(pathn):
+            if on:
+                chosen[p] = classification
+            else:
+                chosen.pop(p, None)
 
     override_set = {_clean(o) for o in overrides}
     for ov in sorted(override_set):
-        if ov in eligible:
-            accepted.add(ov)
+        if ov in files:
+            chosen.setdefault(ov, None)
         else:
             rejected.append(_reject(ov, _classify_path(run, ov)))
 
-    if not include_junk:
-        accepted = {p for p in accepted if p not in junk or p in override_set}
-
-    return sorted(accepted), rejected
+    accepted: list[str] = []
+    classification_of: dict[str, dict] = {}
+    for p in sorted(chosen):
+        row = files[p]
+        if not row.get("eligible"):
+            rejected.append(_reject(p, row.get("reason") or "UNSUPPORTED_IMPORT_TYPE"))
+        elif row.get("junk") and not include_junk and p not in override_set:
+            rejected.append(_reject(p, "JUNK"))
+        else:
+            accepted.append(p)
+            if chosen[p]:
+                classification_of[p] = chosen[p]
+    unique = {(r["path"], r["code"]): r for r in rejected}
+    return accepted, classification_of, [unique[key] for key in sorted(unique)]
 
 
 # --------------------------------------------------------------------------- #
 # presentation helpers
 # --------------------------------------------------------------------------- #
+# Run-object keys that drive the lifecycle but are not part of what a caller reads.
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope"})
+
+
 def _present(root: Path, run: dict, **extra) -> dict:
-    out = dict(run)
+    out = {key: value for key, value in run.items() if key not in _INTERNAL_KEYS}
     if "pack_suggestions" in run:
         # The run stores the spelling of the surface that started it; serve this surface's.
         out["pack_suggestions"] = knowledge_packs.rendered_suggestions(run["pack_suggestions"] or [])
     out["next_actions"] = _next_actions(run)
-    # Whenever the run carries a persisted `verify` block (set once by `apply`
-    # right after its post-commit re-hash), surface the SAME recorded counts at
-    # the top level of every presented document — never a live re-hash. This is
+    # Whenever the run carries a persisted `verify` block (kept current by `apply`
+    # from the per-item re-hash of the originals), surface the SAME recorded counts
+    # at the top level of every presented document — never a live re-hash. This is
     # what lets a later `status()` call stay honest even if an applied original
     # is mutated afterward: it reports what was actually verified at apply time,
     # not a fabricated fresh number.
@@ -376,6 +614,8 @@ def _present(root: Path, run: dict, **extra) -> dict:
     if verify:
         out["verified_unchanged"] = verify.get("verified_unchanged")
         out["verified_total"] = verify.get("verified_total")
+    if isinstance(out.get("finish"), dict):
+        out["finish"] = {**out["finish"], "handoff": _handoff(run)}
     out.update(extra)
     return out
 
@@ -384,7 +624,12 @@ def _next_actions(run: dict) -> list[dict]:
     phase = run.get("phase")
     actions: list[dict] = []
     if phase == "selecting":
-        if (run.get("selection") or {}).get("paths"):
+        if run.get("plan_draft"):
+            actions.append(
+                {"action": "plan", "status": "available",
+                 "description": "Planning is unfinished; call plan again with the continuation."}
+            )
+        elif (run.get("selection") or {}).get("paths"):
             actions.append(
                 {"action": "plan", "status": "available",
                  "description": "Preview the exact import actions before anything is written."}
@@ -398,6 +643,11 @@ def _next_actions(run: dict) -> list[dict]:
         actions.append(
             {"action": "apply", "status": "available",
              "description": "Commit exactly the previewed imports (echo the plan_id)."}
+        )
+    elif phase == "applying":
+        actions.append(
+            {"action": "apply", "status": "available",
+             "description": "Apply stopped with work left; call apply again with the continuation."}
         )
     elif phase in ("applied", "partial"):
         actions.append(
@@ -420,11 +670,13 @@ def _next_actions(run: dict) -> list[dict]:
 def _handoff(run: dict) -> dict:
     run_id = run["run_id"]
     run_ref = run["run_ref"]
+    work_item = capabilities.active_call_text("adoption_studio", {"action": "work-item", "run_id": run_id})
+    propose = capabilities.active_call_text("adoption_studio", {"action": "propose", "run_id": run_id})
     prompt_text = (
         f"Continue my Exomem adoption run {run_id}. "
-        f'Call adoption_studio(action="work-item", run_id="{run_id}") to load the bounded, '
+        f"Call {work_item} to load the bounded, "
         "read-only context, then submit structured proposals via "
-        f'adoption_studio(action="propose", run_id="{run_id}"). Run ref: {run_ref}.'
+        f"{propose}. Run ref: {run_ref}."
     )
     return {
         "prompt_text": prompt_text,
@@ -448,14 +700,81 @@ def _proposals_summary(store: AdoptionRunStore, run_id: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# continuation cursors
+# --------------------------------------------------------------------------- #
+# A cursor is a server-issued token. Passing it to the call that issued it makes
+# the call carry on; passing it again returns that call's answer and does no work.
+# The cursor, not the call's arguments, is what moves, because an MCP call with
+# identical arguments is replayed from the writer's stored result.
+def _issue_cursor(run: dict, kind: str) -> str:
+    cursors = run.get("cursors")
+    if cursors is None:
+        cursors = run["cursors"] = {}
+    seq = len(cursors) + 1
+    token = f"{kind}-{seq:04d}-{secrets.token_hex(4)}"
+    cursors[token] = {"kind": kind, "seq": seq, "state": "open"}
+    return token
+
+
+def _cursor_entry(run: dict, kind: str, token: str) -> dict:
+    entry = (run.get("cursors") or {}).get(token)
+    if not isinstance(entry, dict) or entry.get("kind") != kind:
+        raise AdoptionRunError(
+            "INVALID_CONTINUATION",
+            f"this run did not issue that {kind} continuation; call {kind} without one to start again",
+        )
+    return entry
+
+
+def _supersede_cursors(run: dict, kind: str) -> None:
+    """A fresh call replaces any open cursor: the work it would continue restarts."""
+    for entry in (run.get("cursors") or {}).values():
+        if entry.get("kind") == kind and entry.get("state") == "open":
+            entry["state"] = "used"
+            entry["reply"] = {}
+
+
+def _open_cursor(run: dict, kind: str) -> str | None:
+    open_tokens = [
+        (entry.get("seq", 0), token)
+        for token, entry in (run.get("cursors") or {}).items()
+        if entry.get("kind") == kind and entry.get("state") == "open"
+    ]
+    return max(open_tokens)[1] if open_tokens else None
+
+
+# --------------------------------------------------------------------------- #
 # lifecycle actions
 # --------------------------------------------------------------------------- #
+def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
+    """The collection's label, and the folder its files' collection paths hang from.
+
+    A staged Cloud upload holds its collection in the one folder inside
+    ``_Imports/<import_id>/``; a re-upload gets a new import id, so the inner folder
+    is what keeps ``collection_path`` stable across uploads.
+    """
+    parts = source_root.split("/") if source_root else []
+    collection_root = source_root
+    default = parts[-1] if parts else Path(root).name
+    if len(parts) == 2 and parts[0] == IMPORT_STAGE_DIR:
+        try:
+            entries = [e for e in (root / source_root).iterdir() if not e.name.startswith(".")]
+        except OSError:
+            entries = []
+        if len(entries) == 1 and entries[0].is_dir() and not entries[0].is_symlink():
+            collection_root = f"{source_root}/{entries[0].name}"
+            default = entries[0].name
+    chosen = (label or "").strip() or default
+    return {"label": adoption_plan.nfc(chosen), "root": collection_root}
+
+
 def start(
     root: Path,
     *,
     path: str = "",
     include_hidden: bool = False,
     initialize_kb: bool = False,
+    collection: str | None = None,
     today: dt.date | None = None,
 ) -> dict:
     root = Path(root)
@@ -479,7 +798,9 @@ def start(
     except overview_module.OverviewError as exc:
         raise AdoptionRunError(exc.code, exc.reason) from exc
 
-    rows, truncated = build_inventory(root, path=path, include_hidden=include_hidden)
+    rows, truncated, hidden_files = build_inventory(
+        root, path=path, include_hidden=include_hidden
+    )
     inv_fp = inventory_fingerprint(rows)
     created_iso = _now_iso()
     source_root = _clean(path)
@@ -495,6 +816,7 @@ def start(
         "updated": created_iso,
         "phase": "selecting",
         "source_root": source_root,
+        "collection": _collection_of(root, source_root, collection),
         "scan_summary": {
             "totals": scan.get("totals", {}),
             "kb": scan.get("kb", {}),
@@ -505,11 +827,14 @@ def start(
         "pack_suggestions": knowledge_packs.suggest_packs(scan, limit=6),
         "inventory": rows,
         "inventory_truncated": truncated,
+        "hidden_files_skipped": hidden_files,
         "inventory_fingerprint": inv_fp,
         "selection": {
             "paths": [],
             "selection_hash": selection_hash([]),
             "rules": {"include": [], "exclude": [], "overrides": [], "include_junk": False},
+            "classification": {},
+            "rejected_counts": {},
             "updated": created_iso,
         },
         "plan": None,
@@ -524,23 +849,54 @@ def start(
     return _present(root, run)
 
 
+def _pending(run: dict) -> list[dict]:
+    """Planned items in this call's scope that have no outcome yet, in plan order."""
+    plan = run.get("plan") or {}
+    outcomes = run.get("outcomes") or {}
+    scope = run.get("scope")
+    wanted = None if scope is None else set(scope)
+    return [
+        item for item in plan.get("items") or []
+        if (wanted is None or item["original_path"] in wanted)
+        and item["original_path"] not in outcomes
+    ]
+
+
 def status(root: Path, *, run_id: str | None = None) -> dict:
     root = Path(root)
     store = AdoptionRunStore(root)
     if not run_id:
         return {"mode": "adoption", "mutated": False, "runs": store.list_runs()}
     run = store.load(run_id)
-    outcomes = run.get("outcomes") or {}
-    selected = (run.get("selection") or {}).get("paths") or []
-    interrupted = run.get("phase") == "applying" and len(outcomes) < len(selected)
+    extra: dict = {}
+    if run.get("phase") == "applying":
+        pending = _pending(run)
+        open_cursor = _open_cursor(run, "apply")
+        # A budget stop is remaining work with a cursor; only a run that died
+        # mid-call, or has no cursor to carry on with, is interrupted.
+        extra["interrupted"] = bool(pending) and bool(run.get("inflight") or open_cursor is None)
+        extra["remaining"] = len(pending)
+        if open_cursor and not extra["interrupted"]:
+            extra["continuation"] = open_cursor
+    elif run.get("plan_draft") and _open_cursor(run, "plan"):
+        extra["continuation"] = _open_cursor(run, "plan")
+        draft = run["plan_draft"]
+        total = len((run.get("selection") or {}).get("paths") or [])
+        extra["interrupted"] = False
+        extra["progress"] = {
+            "planned": draft["next"], "remaining": total - draft["next"], "total": total
+        }
+    else:
+        extra["interrupted"] = False
+    stale = probe_staleness(root, run)
     return _present(
         root,
         run,
-        staleness={"stale_paths": probe_staleness(root, run)},
-        stale_paths=probe_staleness(root, run),
-        interrupted=interrupted,
+        staleness={"stale_paths": stale},
+        stale_paths=stale,
         proposals_summary=_proposals_summary(store, run_id),
         handoff=_handoff(run),
+        **extra,
     )
 
 
@@ -548,7 +904,7 @@ def select(
     root: Path,
     *,
     run_id: str,
-    include: list[str] | None = None,
+    include: list[str | dict] | None = None,
     exclude: list[str] | None = None,
     overrides: list[str] | None = None,
     include_junk: bool = False,
@@ -561,30 +917,53 @@ def select(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"select is not allowed from phase {run['phase']!r}"
             )
-        accepted, rejected = _materialize_selection(
-            run, include or [], exclude or [], overrides or [], include_junk
+        # A rule object names a registered kind (and domain); resolve before any change
+        # so a refused rule leaves the stored selection as it was.
+        taxonomy = (
+            source_taxonomy.load_taxonomy(root)
+            if any(not isinstance(entry, str) for entry in include or [])
+            else None
+        )
+        accepted, classification, rejected = _materialize_selection(
+            run, include or [], exclude or [], overrides or [], include_junk, taxonomy
         )
         run["selection"] = {
             "paths": accepted,
-            "selection_hash": selection_hash(accepted),
+            "selection_hash": selection_hash(accepted, classification),
             "rules": {
                 "include": list(include or []),
                 "exclude": list(exclude or []),
                 "overrides": list(overrides or []),
                 "include_junk": include_junk,
             },
+            "classification": classification,
+            "rejected_counts": dict(Counter(row["code"] for row in rejected)),
             "updated": _now_iso(),
         }
-        # A selection call always invalidates any existing plan.
+        # A selection call always invalidates any existing plan, and any plan in progress.
         run["plan"] = None
+        run["plan_draft"] = None
         run["phase"] = "selecting"
         store.save(run)
     return _present(root, run, rejected=rejected)
 
 
-def plan(root: Path, *, run_id: str, today: dt.date | None = None) -> dict:
+def plan(
+    root: Path,
+    *,
+    run_id: str,
+    continuation: str | None = None,
+    today: dt.date | None = None,
+) -> dict:
+    """Preview every import: read, hash, freeze destinations, resolve links.
+
+    Bounded by the request budget: a call that runs short saves its draft in the
+    run object and returns a ``continuation``; the plan exists, and the phase is
+    ``planned``, only after the last item.
+    """
+    from . import client_artifacts
+
     root = Path(root)
-    run_date = _today(today)
     store = AdoptionRunStore(root)
     with _LOCK:
         run = store.load(run_id)
@@ -594,48 +973,483 @@ def plan(root: Path, *, run_id: str, today: dt.date | None = None) -> dict:
             raise AdoptionRunError(
                 "INVALID_PHASE", f"plan requires phase 'selecting' or 'planned', got {run['phase']!r}"
             )
-        selected = (run.get("selection") or {}).get("paths") or []
+        selection = run.get("selection") or {}
+        selected = selection.get("paths") or []
         if not selected:
             raise AdoptionRunError("MISSING_SELECTION", "plan requires a non-empty selection")
+        sel_hash = selection["selection_hash"]
 
-        items, skipped = adopt_module.plan_import_items(root, selected, today=run_date)
-        plan_items: list[dict] = []
-        for it in items:
-            plan_items.append(
-                {
-                    "original_path": it.original_path,
-                    "original_sha256": it.sha256,
-                    "original_bytes": it.bytes,
-                    "action": "copy-as-source",
-                    "target_path": it.target_rel,
-                    "target_ref": context_refs.source_ref(it.target_rel),
-                    "title": it.title,
-                    "frontmatter": {
-                        "type": "source",
-                        "source_type": source_taxonomy.UNCLASSIFIED_KIND,
-                        "imported_from": it.original_path,
-                        "original_sha256": it.sha256,
-                        "original_bytes": it.bytes,
-                        "tags": ["imported"],
-                    },
-                }
-            )
-            if it.slug_warning:
-                skipped.append(
-                    {"path": it.original_path, "code": "SLUG_TRUNCATED", "reason": it.slug_warning}
+        if continuation:
+            entry = _cursor_entry(run, "plan", continuation)
+            if entry["state"] == "used":
+                return _present(root, run, **(entry.get("reply") or {}))
+            draft = run.get("plan_draft")
+            if not draft or draft.get("selection_hash") != sel_hash:
+                raise AdoptionRunError(
+                    "INVALID_CONTINUATION",
+                    "the selection changed or the plan is finished; call plan without a continuation",
                 )
-        sel_hash = run["selection"]["selection_hash"]
-        run["plan"] = {
-            "plan_id": plan_id_for(sel_hash, [pi["original_sha256"] for pi in plan_items]),
-            "created": _now_iso(),
-            "selection_hash": sel_hash,
-            "items": plan_items,
-            "skipped": skipped,
-            "warnings": [],
+        else:
+            entry = None
+            _supersede_cursors(run, "plan")
+            draft = {
+                "selection_hash": sel_hash,
+                "date": _today(today).isoformat(),
+                "items": [],
+                "skipped": [],
+                "next": 0,
+            }
+            run["plan"] = None
+            run["phase"] = "selecting"
+
+        collection = run.get("collection") or {"label": None, "root": ""}
+        classification = selection.get("classification") or {}
+        taxonomy = source_taxonomy.load_taxonomy(root) if classification else None
+        inventory = {row["path"]: row for row in run.get("inventory") or []}
+        ceiling = client_artifacts.fetch_budget().max_file_bytes
+        index = adoption_plan.read_import_index(root)
+        destinations = adoption_plan.Destinations(root)
+        for planned in draft["items"]:
+            if planned["action"] == "copy-as-source":
+                for frozen in (planned["target_path"], planned.get("artifact_path")):
+                    if frozen:
+                        destinations.reserve(frozen)
+
+        budget = _call_budget()
+        handled = 0
+        while draft["next"] < len(selected):
+            if handled and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+                break
+            rel = selected[draft["next"]]
+            result = adoption_plan.plan_item(
+                root, rel,
+                collection=collection["label"], collection_root=collection["root"],
+                classification=classification.get(rel), taxonomy=taxonomy,
+                text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
+                date_iso=draft["date"], destinations=destinations, index=index,
+                ceiling=ceiling,
+            )
+            draft["next"] += 1
+            handled += 1
+            if isinstance(result, dict):
+                draft["skipped"].append(result)
+            else:
+                draft["items"].append(result[0])
+
+        progress = {
+            "planned": draft["next"],
+            "remaining": len(selected) - draft["next"],
+            "total": len(selected),
         }
+        if draft["next"] < len(selected):
+            token = _issue_cursor(run, "plan")
+            reply = {"progress": progress, "continuation": token}
+            if entry is not None:
+                entry["state"], entry["reply"] = "used", reply
+            run["plan_draft"] = draft
+            store.save(run)
+            return _present(root, run, **reply)
+
+        items = draft["items"]
+        adoption_plan.resolve_links(items, index, collection=collection["label"])
+        skipped = list(draft["skipped"])
+        for planned in items:
+            if planned["action"] == "copy-as-source":
+                planned["frontmatter"] = adoption_plan.item_frontmatter(planned, collection["label"])
+            if planned.get("slug_warning"):
+                skipped.append(
+                    {"path": planned["original_path"], "code": "SLUG_TRUNCATED",
+                     "reason": planned["slug_warning"]}
+                )
+        run["plan"] = {
+            "plan_format": PLAN_FORMAT,
+            "plan_id": plan_id_for(sel_hash, [adoption_plan.item_digest(i) for i in items]),
+            "created": _now_iso(),
+            "date": draft["date"],
+            "selection_hash": sel_hash,
+            "collection": collection["label"],
+            "items": items,
+            "skipped": skipped,
+            "warnings": adoption_plan.root_warnings(
+                index, collection=collection["label"], collection_root=collection["root"]
+            ),
+            "total_bytes": adoption_plan.plan_total_bytes(items),
+        }
+        run["plan_draft"] = None
         run["phase"] = "planned"
+        reply = {"progress": progress}
+        if entry is not None:
+            entry["state"], entry["reply"] = "used", reply
         store.save(run)
-    return _present(root, run)
+    return _present(root, run, **reply)
+
+
+# --------------------------------------------------------------------------- #
+# apply
+# --------------------------------------------------------------------------- #
+def _failed(code: str, reason: str) -> dict:
+    return {"status": "failed", "code": code, "reason": reason, "at": _now_iso()}
+
+
+def _already_applied(page: str, artifact: str | None, sha256: str) -> dict:
+    ref = context_refs.source_ref(page)
+    outcome = {
+        "status": "already-applied", "target_path": page, "source_ref": ref,
+        "existing_ref": ref, "sha256": sha256, "at": _now_iso(),
+    }
+    if artifact:
+        outcome["artifact_path"] = artifact
+    return outcome
+
+
+def _applied(planned: dict) -> dict:
+    outcome = {
+        "status": "applied", "target_path": planned["target_path"],
+        "source_ref": planned["target_ref"], "sha256": planned["original_sha256"],
+        "at": _now_iso(),
+    }
+    if planned.get("artifact_path"):
+        outcome["artifact_path"] = planned["artifact_path"]
+    return outcome
+
+
+def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None, dict | None]:
+    """The original's text (None for an artifact), or a failed outcome when it drifted."""
+    read = adoption_plan.read_facts(
+        root, planned["original_path"], ceiling=ceiling, text_hint=planned["form"] == "text"
+    )
+    if isinstance(read, dict):
+        code = "SOURCE_CHANGED" if read["code"] == "TOO_LARGE" else read["code"]
+        return None, _failed(code, read["reason"])
+    facts, text = read
+    if (
+        facts["original_sha256"] != planned["original_sha256"]
+        or facts["original_bytes"] != planned["original_bytes"]
+        or (planned["form"] == "text" and text is None)
+    ):
+        return None, _failed("SOURCE_CHANGED", "sha256 mismatch at apply time")
+    return text, None
+
+
+def _original_unchanged(root: Path, planned: dict) -> bool:
+    """Re-hash one original: the honest after-the-fact check that it was never touched."""
+    read = adoption_plan.read_facts(
+        root, planned["original_path"], ceiling=planned["original_bytes"], text_hint=False
+    )
+    return not isinstance(read, dict) and read[0]["original_sha256"] == planned["original_sha256"]
+
+
+def _earlier_with_same_bytes(
+    root: Path, index: list[adoption_plan.EarlierImport], label: str | None, planned: dict
+) -> adoption_plan.EarlierImport | None:
+    earlier = adoption_plan.earlier_with_same_bytes(
+        index, collection=label, collection_path=planned["collection_path"],
+        original_path=planned["original_path"], sha256=planned["original_sha256"],
+    )
+    if earlier is not None and planned["form"] == "artifact":
+        if adoption_plan.artifact_of(root, earlier.path) is None:
+            return None
+    return earlier
+
+
+class _ApplyPacer:
+    """Decides how much of the plan one `apply` call may start, from what its chunks cost.
+
+    A call never starts a chunk whose predicted cost does not fit in the time left
+    before the delivery reserve, after the fan-out the call already owes past the
+    loop. A chunk costs its items, its bytes and its media requests. Costs are those
+    this call has measured, not a past call's, and each rate is the dearest seen so
+    far: chunk cost swings several-fold with media artifacts and a contended index,
+    so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
+    of this call's chunks and nothing after it.
+    """
+
+    def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
+        from .writer_lease import active_derived_batch_custody
+
+        self._budget = budget
+        self._item_seconds: float | None = None
+        self._mib_seconds: float | None = None
+        self._extraction_seconds: float | None = None
+        self._deferred_artifacts = 0
+        self._started_items = 0
+        # A fast-acknowledgement session runs the sidecar fan-out behind the reply.
+        self._owes_fanout = not active_derived_batch_custody(root)
+
+    @staticmethod
+    def _tracked(rate: float | None, seen: float) -> float:
+        return seen if rate is None else max(rate, seen)
+
+    def _owed_after_loop(self, artifacts: int) -> float:
+        if not self._owes_fanout or not artifacts:
+            return 0.0
+        return TERMINAL_FANOUT_RESERVE_SECONDS + artifacts * TERMINAL_FANOUT_SECONDS_PER_ARTIFACT
+
+    @staticmethod
+    def _media(chunk: list[dict]) -> int:
+        """How many of `chunk` get an extraction request: media artifacts, by extension."""
+        from . import media_processing
+
+        return sum(
+            1 for planned in chunk
+            if planned["form"] == "artifact" and planned.get("artifact_path")
+            and media_processing.classify_media(planned["artifact_path"]) is not None
+        )
+
+    @staticmethod
+    def _mib(chunk: list[dict]) -> float:
+        return sum(planned["original_bytes"] for planned in chunk) / (1024 * 1024)
+
+    def _cost(self, chunk: list[dict]) -> float:
+        item = INITIAL_ITEM_SECONDS if self._item_seconds is None else self._item_seconds
+        per_mib = INITIAL_SECONDS_PER_MIB if self._mib_seconds is None else self._mib_seconds
+        extraction = (
+            INITIAL_EXTRACTION_SECONDS if self._extraction_seconds is None
+            else self._extraction_seconds
+        )
+        return len(chunk) * item + self._mib(chunk) * per_mib + self._media(chunk) * extraction
+
+    def _room(self, chunk: list[dict]) -> float:
+        """Seconds the chunk may take: what is left, less the reserve and the call's debts."""
+        return (
+            self._budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS
+            - REPLY_SECONDS_PER_ITEM * (self._started_items + len(chunk))
+            - self._owed_after_loop(self._deferred_artifacts + self._media(chunk))
+        )
+
+    def next_chunk(self, pending: list[dict], *, first: bool) -> list[dict]:
+        """The next chunk, trimmed to fit; empty when none fits. The first is never empty."""
+        share = APPLY_CHUNK_BUDGET_SHARE * self._budget.seconds
+        chunk = _take_chunk(pending, APPLY_CHUNK_ITEMS)
+        cost, allowed = self._cost(chunk), min(share, self._room(chunk))
+        while len(chunk) > 1 and cost > allowed:
+            chunk = chunk[: max(1, int(len(chunk) * allowed / cost))]
+            cost, allowed = self._cost(chunk), min(share, self._room(chunk))
+        return chunk if first or cost <= self._room(chunk) else []
+
+    def record(self, chunk: list[dict], elapsed: float, extractions: list[float]) -> None:
+        """Learn from a finished chunk: `extractions` are its media requests' seconds."""
+        self._started_items += len(chunk)
+        committing = max(elapsed - sum(extractions), 0.0)
+        mib = self._mib(chunk)
+        if mib >= BYTE_RATE_MIN_ITEM_MIB * len(chunk):
+            self._mib_seconds = self._tracked(self._mib_seconds, committing / mib)
+        else:
+            self._item_seconds = self._tracked(self._item_seconds, committing / len(chunk))
+        if extractions:
+            self._extraction_seconds = self._tracked(
+                self._extraction_seconds, sum(extractions) / len(extractions)
+            )
+            self._deferred_artifacts += len(extractions)
+
+
+def _take_chunk(pending: list[dict], limit: int) -> list[dict]:
+    """Up to `limit` items, bounded by bytes, always at least one."""
+    chunk: list[dict] = []
+    total = 0
+    for item in pending[:limit]:
+        if chunk and total + item["original_bytes"] > APPLY_CHUNK_BYTES:
+            break
+        chunk.append(item)
+        total += item["original_bytes"]
+    return chunk
+
+
+def _request_extraction(root: Path, planned: dict, budget: request_budget.RequestBudget,
+                        stats: Counter) -> float | None:
+    """Ask for text extraction of a committed media artifact; finish repairs what is missed.
+
+    Returns the seconds the request took, or None when none was made.
+    """
+    from . import media_processing
+
+    artifact = root / planned["artifact_path"]
+    if media_processing.classify_media(artifact) is None:
+        return None
+    if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+        stats["extraction_deferred"] += 1
+        return None
+    started = time.monotonic()
+    try:
+        # The caller already holds the mutation guard, so the sidecar write needs no second one.
+        media_processing.reconcile_media(
+            root, artifact, explicit=False, commit_guard=contextlib.nullcontext,
+            defer_fanout_to_terminal=True,
+        )
+    except Exception:  # noqa: BLE001 - committed custody is authoritative; finish retries
+        stats["extraction_failed"] += 1
+    else:
+        stats["extraction_requested"] += 1
+    return time.monotonic() - started
+
+
+@dataclass
+class _CallReads:
+    """What one `apply` call reads from the vault once and keeps current across its chunks.
+
+    Walking every Source for each chunk made a re-run cost grow with the whole vault.
+    Both start empty and fill on first use; a batch that raised drops them, because
+    what it left on disk is then unknown.
+    """
+
+    index: list[adoption_plan.EarlierImport] | None = None
+    source_counts: dict[str, int] | None = None
+
+
+def _commit_chunk(
+    root: Path, store: AdoptionRunStore, run: dict,
+    survivors: list[tuple[dict, adopt_module.ImportItem]], *,
+    run_date: dt.date, label: str | None, reads: _CallReads,
+) -> list[dict]:
+    """Commit one chunk's pages, artifacts, indexes, log and the run object in one batch.
+
+    Returns the items now on disk. A batch that raises may still have committed, so
+    each item is resolved by the same identity check the next call would use; the
+    rest fail as retryable, and the call's closing save records them.
+    """
+    outcomes = run["outcomes"]
+    for planned, _item in survivors:
+        outcomes[planned["original_path"]] = _applied(planned)
+    try:
+        committed = adopt_module.commit_import_items(
+            root, [item for _planned, item in survivors], today=run_date,
+            extra_writes=[store.planned_write(run)], source_counts=reads.source_counts,
+        )
+    except Exception as error:  # noqa: BLE001 - a rolled-back batch is a retryable outcome
+        reads.source_counts = None
+        reads.index = adoption_plan.read_import_index(root)
+        landed: list[dict] = []
+        for planned, _item in survivors:
+            earlier = _earlier_with_same_bytes(root, reads.index, label, planned)
+            if earlier is not None:
+                outcomes[planned["original_path"]] = _already_applied(
+                    earlier.path, adoption_plan.artifact_of(root, earlier.path),
+                    planned["original_sha256"],
+                )
+                landed.append(planned)
+            else:
+                if isinstance(error, adopt_module.AdoptError):
+                    failure = {"code": error.code, "reason": error.reason}
+                elif isinstance(
+                    error, (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
+                ) or getattr(error, "code", None) == "PATH_GUARD_CONTENT":
+                    failure = adoption_plan.source_failure(error)
+                else:
+                    failure = {"code": "BATCH_ROLLED_BACK", "reason": str(error)}
+                outcomes[planned["original_path"]] = _failed(**failure)
+        return landed
+    reads.source_counts = committed["source_counts"]
+    return [planned for planned, _item in survivors]
+
+
+def _apply_chunk(
+    root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], *,
+    run_date: dt.date, ceiling: int, budget: request_budget.RequestBudget, stats: Counter,
+    written: list[str], reads: _CallReads,
+) -> list[float]:
+    """Apply one chunk; returns the seconds each media extraction request took."""
+    plan = run["plan"]
+    outcomes = run["outcomes"]
+    label = (run.get("collection") or {}).get("label")
+    if reads.index is None:
+        reads.index = adoption_plan.read_import_index(root)
+    index = reads.index
+    settled: list[dict] = []
+    survivors: list[tuple[dict, adopt_module.ImportItem]] = []
+    for planned in chunk:
+        path = planned["original_path"]
+        text, failure = _read_original(root, planned, ceiling)
+        if failure is not None:
+            outcomes[path] = failure
+            continue
+        if planned["action"] == "already-imported":
+            frozen = [entry for entry in index if entry.path == planned["target_path"]]
+            if _earlier_with_same_bytes(root, frozen, label, planned) is None:
+                outcomes[path] = _failed(
+                    "PLAN_STALE", "the earlier Source or artifact is missing or changed; re-plan this import"
+                )
+                continue
+            outcomes[path] = _already_applied(
+                planned["target_path"], planned.get("artifact_path"), planned["original_sha256"]
+            )
+            settled.append(planned)
+            continue
+        earlier = _earlier_with_same_bytes(root, index, label, planned)
+        if earlier is not None:
+            outcomes[path] = _already_applied(
+                earlier.path, adoption_plan.artifact_of(root, earlier.path),
+                planned["original_sha256"],
+            )
+            settled.append(planned)
+            continue
+        occupied = [
+            target for target in (planned["target_path"], planned.get("artifact_path"))
+            if target and os.path.lexists(root / target)
+        ]
+        if occupied:
+            outcomes[path] = _failed(
+                "TARGET_OCCUPIED",
+                f"{occupied[0]} already exists and is not an import of this file",
+            )
+            continue
+        survivors.append(
+            (planned, adopt_module.import_item(
+                root, planned, text=text, date_iso=plan["date"], collection=label
+            ))
+        )
+    landed: list[dict] = []
+    if survivors:
+        landed = _commit_chunk(
+            root, store, run, survivors, run_date=run_date, label=label, reads=reads
+        )
+        for planned in landed:
+            if outcomes[planned["original_path"]]["status"] == "applied":
+                reads.index.append(
+                    adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
+                )
+    for planned in [*settled, *landed]:
+        _record_unchanged(root, planned, outcomes[planned["original_path"]], stats)
+    extractions: list[float] = []
+    for planned in landed:
+        if outcomes[planned["original_path"]]["status"] == "applied":
+            written.append(planned["target_path"])
+        if planned["form"] == "artifact":
+            seconds = _request_extraction(root, planned, budget, stats)
+            if seconds is not None:
+                extractions.append(seconds)
+    return extractions
+
+
+def _record_unchanged(root: Path, planned: dict, outcome: dict, stats: Counter) -> None:
+    """Re-hash one applied original; keep the answer on its outcome and in this call's counts."""
+    unchanged = _original_unchanged(root, planned)
+    outcome["original_unchanged"] = unchanged
+    stats["verified_total"] += 1
+    stats["verified_unchanged"] += int(unchanged)
+
+
+def _progress(run: dict) -> dict:
+    plan_items = (run.get("plan") or {}).get("items") or []
+    scope = run.get("scope")
+    wanted = None if scope is None else set(scope)
+    outcomes = run.get("outcomes") or {}
+    in_scope = [it for it in plan_items if wanted is None or it["original_path"] in wanted]
+    statuses = [outcomes.get(it["original_path"], {}).get("status") for it in in_scope]
+    return {
+        "applied": sum(1 for s in statuses if s in _APPLIED_STATUSES),
+        "failed": sum(1 for s in statuses if s == "failed"),
+        "remaining": sum(1 for s in statuses if s is None),
+        "total": len(in_scope),
+    }
+
+
+def _verify_counts(outcomes: dict) -> tuple[int, int]:
+    """Originals re-hashed after their import, and how many were byte-identical."""
+    checked = [
+        o for o in outcomes.values()
+        if o.get("status") in _APPLIED_STATUSES and "original_unchanged" in o
+    ]
+    return sum(1 for o in checked if o["original_unchanged"]), len(checked)
 
 
 def apply(
@@ -643,190 +1457,149 @@ def apply(
     *,
     run_id: str,
     plan_id: str | None,
+    continuation: str | None = None,
     retry_failed: bool = False,
     only_paths: list[str] | None = None,
     today: dt.date | None = None,
 ) -> dict:
+    """Commit the previewed imports in chunks, bounded by the request budget.
+
+    A call that runs out of budget returns a ``continuation``; the next call,
+    carrying it, resumes at the first item without an outcome. Nothing is written
+    twice: every item is checked against the earlier imports before it is copied.
+    """
+    from . import client_artifacts
+
     root = Path(root)
     run_date = _today(today)
     store = AdoptionRunStore(root)
     with _LOCK:
         run = store.load(run_id)
         phase = run["phase"]
-        # apply is re-runnable (idempotent) from any post-plan, pre-terminal phase:
-        # `applying` recovers an interrupted run; `applied`/`partial`/`failed`
-        # replay safely because already-applied detection + write-time
-        # re-validation make re-entry safe. `retry_failed` gates re-attempting
-        # previously failed items.
+        # apply is re-runnable from any post-plan phase: `applying` resumes an interrupted
+        # or budget-stopped run, and a finished one answers `already-applied`.
         if phase not in ("planned", "applying", "applied", "partial", "failed"):
             raise AdoptionRunError("INVALID_PHASE", f"apply is not allowed from phase {phase!r}")
         plan = run.get("plan")
         if not plan:
             raise AdoptionRunError("PLAN_NOT_FOUND", "no plan on this run; call plan first")
-        if plan_id != plan.get("plan_id"):
+        if plan_id != plan.get("plan_id") or plan.get("plan_format") != PLAN_FORMAT:
             raise AdoptionRunError("PLAN_STALE", "plan_id does not match the current plan")
         if plan.get("selection_hash") != (run.get("selection") or {}).get("selection_hash"):
             raise AdoptionRunError("PLAN_STALE", "selection changed since the plan was created")
 
-        outcomes = dict(run.get("outcomes") or {})
+        entry = None
+        if continuation:
+            entry = _cursor_entry(run, "apply", continuation)
+            if entry["state"] == "used":
+                return _present(root, run, **(entry.get("reply") or {}))
+
         plan_items = plan["items"]
+        by_path = {it["original_path"]: it for it in plan_items}
+        outcomes = dict(run.get("outcomes") or {})
+        before = {
+            "phase": phase, "outcomes": dict(outcomes), "scope": run.get("scope"),
+            "cursors": copy.deepcopy(run.get("cursors")), "inflight": run.get("inflight"),
+        }
+        stats: Counter = Counter()
+        fresh = entry is None
+        if fresh:
+            _supersede_cursors(run, "apply")
+            if retry_failed:
+                wanted = {p for p, o in outcomes.items() if o.get("status") == "failed"}
+                if only_paths:
+                    wanted &= {_clean(p) for p in only_paths}
+                for path in wanted:
+                    del outcomes[path]
+                run["scope"] = sorted(wanted)
+            elif only_paths:
+                run["scope"] = sorted({_clean(p) for p in only_paths} & set(by_path))
+            else:
+                run["scope"] = None
+            scope = None if run["scope"] is None else set(run["scope"])
+            # A repeat call re-checks what an earlier call applied: the originals stay unchanged.
+            for path in list(outcomes):
+                in_scope = scope is None or path in scope
+                if in_scope and path in by_path and outcomes[path].get("status") in _APPLIED_STATUSES:
+                    outcomes[path] = {**outcomes[path], "status": "already-applied"}
+                    _record_unchanged(root, by_path[path], outcomes[path], stats)
+        run["outcomes"] = outcomes
 
-        if retry_failed:
-            failed = {p for p, o in outcomes.items() if o.get("status") == "failed"}
-            if only_paths:
-                failed &= {_clean(p) for p in only_paths}
-            target_items = [it for it in plan_items if it["original_path"] in failed]
-        elif only_paths:
-            wanted = {_clean(p) for p in only_paths}
-            target_items = [it for it in plan_items if it["original_path"] in wanted]
-        else:
-            target_items = list(plan_items)
+        budget = _call_budget()
+        ceiling = client_artifacts.fetch_budget().max_file_bytes
+        written: list[str] = []
+        pending = _pending(run)
+        if pending:
+            # Held in memory until a chunk commits it: a call whose every source drifted
+            # refuses below with nothing written, as before.
+            run["phase"] = "applying"
+            run["inflight"] = True
 
-        # Write-time re-validation; already-applied items are idempotent skips.
-        validated: list[str] = []
-        for it in target_items:
-            op = it["original_path"]
-            existing = outcomes.get(op)
-            if existing and existing.get("status") in _APPLIED_STATUSES and not retry_failed:
-                outcomes[op] = {**existing, "status": "already-applied"}
-                continue
-            if existing and existing.get("status") == "failed" and not retry_failed:
-                # Leave a prior failure untouched on a plain re-apply; only
-                # retry_failed re-attempts it.
-                continue
-            fpath = root / op
-            if not fpath.exists():
-                outcomes[op] = {
-                    "status": "failed", "code": "NOT_FOUND",
-                    "reason": "original missing at apply time", "at": _now_iso(),
-                }
-                continue
-            if hashlib.sha256(fpath.read_bytes()).hexdigest() != it["original_sha256"]:
-                outcomes[op] = {
-                    "status": "failed", "code": "SOURCE_CHANGED",
-                    "reason": "sha256 mismatch at apply time", "at": _now_iso(),
-                }
-                continue
-            validated.append(op)
+        pacer = _ApplyPacer(root, budget)
+        reads = _CallReads()
+        stopped = False
+        chunks = 0
+        while pending:
+            chunk = pacer.next_chunk(pending, first=not chunks)
+            if not chunk:
+                stopped = True
+                break
+            started = time.monotonic()
+            extractions = _apply_chunk(
+                root, store, run, chunk, run_date=run_date, ceiling=ceiling,
+                budget=budget, stats=stats, written=written, reads=reads,
+            )
+            pacer.record(chunk, time.monotonic() - started, extractions)
+            pending = pending[len(chunk):]
+            chunks += 1
 
-        # Run-level stale-conflict refusal, distinct from PLAN_STALE (a plan
-        # identity mismatch): a plain, whole-plan apply attempt whose write-time
-        # re-validation finds NOTHING left to commit, on a run that has never
-        # successfully applied anything, means every requested source drifted or
-        # vanished since the plan was captured. Refuse before any write so the
-        # still-valid selection survives a re-scan/re-plan (design.md's pinned
-        # ADOPTION_SOURCE_CHANGED vocabulary) — a scoped retry_failed/only_paths
-        # call that still fails one stubborn item (while others already applied)
-        # is NOT this case; that stays a normal partial response.
-        has_any_applied = any(o.get("status") in _APPLIED_STATUSES for o in outcomes.values())
-        if not retry_failed and not only_paths and target_items and not validated and not has_any_applied:
+        outcomes = run["outcomes"]
+        # Every requested source drifted or vanished, and nothing was ever imported: refuse
+        # before the run reports a result, so the still-valid selection survives a re-plan.
+        if (
+            fresh and not retry_failed and not only_paths and not stopped and outcomes
+            and all(
+                o.get("status") == "failed" and o.get("code") in _DRIFT_CODES
+                for o in outcomes.values()
+            )
+        ):
+            run.update(before)
             raise AdoptionRunError(
                 "ADOPTION_SOURCE_CHANGED",
                 "every requested source changed or is missing since the plan was captured; "
                 "re-scan and re-plan to continue",
             )
 
-        # Persist the transient `applying` phase BEFORE the first item write so a
-        # crash mid-apply is visible to `status`.
-        run["phase"] = "applying"
-        run["outcomes"] = outcomes
-        store.save(run)
-
-        if validated:
-            # Re-read and re-render with the PLAN's date so content and slugs
-            # match the approved preview even across midnight, then pin every
-            # item to its persisted target: apply commits EXACTLY the plan.
-            plan_created = str(plan.get("created") or "")[:10]
-            try:
-                render_date = dt.date.fromisoformat(plan_created)
-            except ValueError:
-                render_date = run_date
-            fresh_items, _sk = adopt_module.plan_import_items(
-                root, validated, today=render_date
-            )
-            planned_by_original = {pi["original_path"]: pi for pi in plan_items}
-            commit_items: list[adopt_module.ImportItem] = []
-            for item in fresh_items:
-                pi = planned_by_original.get(item.original_path) or {}
-                target_rel = pi.get("target_path") or item.target_rel
-                target_abs = root / target_rel
-                if target_abs.exists():
-                    if _is_prior_import(target_abs, item.original_path, item.sha256):
-                        # Our own earlier commit (crash before the outcomes
-                        # save): record it instead of writing a duplicate.
-                        outcomes[item.original_path] = {
-                            "status": "already-applied",
-                            "target_path": target_rel,
-                            "source_ref": context_refs.source_ref(target_rel),
-                            "sha256": item.sha256,
-                            "at": _now_iso(),
-                        }
-                        continue
-                    # Foreign occupant at the planned target: design-pinned
-                    # fallback — keep the re-plan's fresh unique target.
-                    commit_items.append(item)
-                    continue
-                commit_items.append(
-                    dataclasses.replace(item, target_rel=target_rel, target=target_abs)
-                )
-            try:
-                # The apply date (not the plan date) stamps the Sources-index
-                # "recent captures" line: the log records when it happened.
-                result = adopt_module.commit_import_items(
-                    root, commit_items, today=run_date
-                )
-            except Exception as exc:  # noqa: BLE001 — batch rollback is a retryable outcome
-                for item in commit_items:
-                    outcomes[item.original_path] = {
-                        "status": "failed", "code": "BATCH_ROLLED_BACK",
-                        "reason": str(exc), "at": _now_iso(),
-                    }
-            else:
-                by_path = {c["original_path"]: c for c in result["copied_sources"]}
-                for item in commit_items:
-                    op = item.original_path
-                    c = by_path.get(op)
-                    if c is None:
-                        outcomes[op] = {
-                            "status": "failed", "code": "NOT_FOUND",
-                            "reason": "import produced no Source", "at": _now_iso(),
-                        }
-                        continue
-                    outcomes[op] = {
-                        "status": "applied",
-                        "target_path": c["source_path"],
-                        "source_ref": c["source_ref"],
-                        "sha256": c["original_sha256"],
-                        "at": _now_iso(),
-                    }
-
-        run["outcomes"] = outcomes
-        run["phase"] = _recompute_phase(outcomes, plan_items)
-        # Post-apply re-hash of applied originals, persisted as the run's single
-        # source of truth for verification counts — never recomputed live by a
-        # later `status`/`finish` call (see `_present`).
-        verified_unchanged, verified_total = _verify_originals(root, plan_items, outcomes)
+        run["phase"] = _recompute_phase(outcomes, plan_items, stopped)
+        run["inflight"] = False
+        # The run keeps the cumulative counts; this call reports those of the originals it handled.
+        unchanged, checked = _verify_counts(outcomes)
         run["verify"] = {
-            "verified_unchanged": verified_unchanged,
-            "verified_total": verified_total,
-            "at": _now_iso(),
+            "verified_unchanged": unchanged, "verified_total": checked, "at": _now_iso()
         }
+        call_counts = {
+            "verified_unchanged": stats["verified_unchanged"],
+            "verified_total": stats["verified_total"],
+        }
+        reply: dict = {
+            **call_counts,
+            "apply_result": {
+                "written": written,
+                **call_counts,
+                "extraction": {
+                    "requested": stats["extraction_requested"],
+                    "deferred": stats["extraction_deferred"],
+                    "failed": stats["extraction_failed"],
+                },
+            },
+            "progress": _progress(run),
+        }
+        if stopped:
+            reply["continuation"] = _issue_cursor(run, "apply")
+        if entry is not None:
+            entry["state"], entry["reply"] = "used", reply
         store.save(run)
-    return _present(
-        root,
-        run,
-        apply_result={"verified_unchanged": verified_unchanged, "verified_total": verified_total},
-    )
-
-
-def _is_prior_import(target_abs: Path, original_path: str, sha256: str) -> bool:
-    """Provenance check: is the file at the planned target OUR import of this
-    exact original? Matches the rendered frontmatter's provenance fields."""
-    try:
-        head = target_abs.read_text(encoding="utf-8", errors="replace")[:2000]
-    except OSError:
-        return False
-    return f"original_sha256: {sha256}" in head and original_path in head
+    return _present(root, run, **reply)
 
 
 def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
@@ -835,18 +1608,210 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
     with _LOCK:
         run = store.load(run_id)
         phase = run["phase"]
-        if phase == "applying":
+        # A run stopped by its budget holds an open cursor and may be cancelled; one with no
+        # cursor died mid-call and must be resumed with `apply` first.
+        if phase == "applying" and _open_cursor(run, "apply") is None:
             raise AdoptionRunError("CANCEL_DURING_APPLY", "cannot cancel while an apply is in flight")
         if phase in ("applied", "done"):
             raise AdoptionRunError(
                 "ALREADY_APPLIED", "run already applied; applied Sources survive (append-only)"
             )
-        if phase not in ("selecting", "planned", "partial", "failed"):
+        # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
+        if phase not in ("selecting", "planned", "applying", "partial", "failed"):
             raise AdoptionRunError("INVALID_PHASE", f"cancel is not allowed from phase {phase!r}")
         run["cancel"] = {"at": _now_iso(), "why": (why or "").strip() or None}
         run["phase"] = "cancelled"
         store.save(run)
     return _present(root, run)
+
+
+def _recompute_phase(outcomes: dict, plan_items: list[dict], budget_stopped: bool) -> str:
+    """`applied` only when every planned item has an outcome and none failed."""
+    statuses = [outcomes.get(it["original_path"], {}).get("status") for it in plan_items]
+    applied = any(s in _APPLIED_STATUSES for s in statuses)
+    failed = any(s == "failed" for s in statuses)
+    if any(s is None for s in statuses):
+        if budget_stopped:
+            return "applying"
+        return "partial" if applied or failed else "planned"
+    if applied and not failed:
+        return "applied"
+    return "partial" if applied else "failed"
+
+
+# --------------------------------------------------------------------------- #
+# finish and coverage
+# --------------------------------------------------------------------------- #
+def _same_page(left: str, right: str) -> bool:
+    return left.removesuffix(".md") == right.removesuffix(".md")
+
+
+def _find_paths(root: Path, query: str) -> list[str] | None:
+    """Paths of the first keyword hits for `query`, or None when search failed."""
+    from . import find as find_module
+
+    try:
+        hits = find_module.find(root, query=query, mode="keyword", limit=5, graph=False)
+    except Exception:  # noqa: BLE001 - recall failure never blocks finish
+        return None
+    return [str(getattr(hit, "path", "")) for hit in hits]
+
+
+def _applied_items(run: dict) -> list[tuple[dict, dict]]:
+    plan_items = {it["original_path"]: it for it in (run.get("plan") or {}).get("items") or []}
+    return [
+        (plan_items[path], outcome)
+        for path, outcome in (run.get("outcomes") or {}).items()
+        if outcome.get("status") in _APPLIED_STATUSES and path in plan_items
+        and outcome.get("target_path")
+    ]
+
+
+def _recall_check(root: Path, run: dict) -> dict:
+    # A text note names itself in a question; a media file's title is its file name.
+    applied = sorted(
+        _applied_items(run),
+        key=lambda pair: (pair[0].get("form") == "text", pair[0].get("original_bytes", 0)),
+        reverse=True,
+    )
+    if applied:
+        item, outcome = applied[0]
+        title, target = item.get("title") or item["original_path"], outcome["target_path"]
+    else:
+        packs = run.get("pack_suggestions") or []
+        title, target = (packs[0].get("name") if packs else "") or "", ""
+    paths = _find_paths(root, title) if title else None
+    ok = bool(target) and any(_same_page(path, target) for path in paths or [])
+    result: dict = {"query": title, "ok": ok, "hits": paths or []}
+    if not ok:
+        result["next_action"] = {"tool": "maintain_memory", "args": {"mode": "reconcile"}}
+    return result
+
+
+def _recall_sample(root: Path, run: dict) -> dict:
+    """Search for a spread of imported notes: one per top-level folder, then the next of each."""
+    groups: dict[str, list[tuple[dict, dict]]] = {}
+    for item, outcome in sorted(_applied_items(run), key=lambda pair: pair[0]["collection_path"]):
+        folder = item["collection_path"].split("/", 1)[0] if "/" in item["collection_path"] else ""
+        groups.setdefault(folder, []).append((item, outcome))
+    ordered = [groups[key] for key in sorted(groups)]
+    picks: list[tuple[dict, dict]] = []
+    depth = 0
+    while len(picks) < _RECALL_SAMPLE and any(depth < len(group) for group in ordered):
+        for group in ordered:
+            if depth < len(group) and len(picks) < _RECALL_SAMPLE:
+                picks.append(group[depth])
+        depth += 1
+    found = 0
+    missed: list[str] = []
+    for item, outcome in picks:
+        paths = _find_paths(root, item.get("title") or item["original_path"])
+        if paths is not None and any(_same_page(path, outcome["target_path"]) for path in paths):
+            found += 1
+        else:
+            missed.append(outcome["target_path"])
+    return {"sampled": len(picks), "found": found, "missed": missed}
+
+
+def _extraction_states(root: Path, run: dict, budget: request_budget.RequestBudget) -> dict:
+    """Extraction state of every imported media artifact, after one request for any missing job."""
+    from . import media_engines, media_jobs, media_processing
+
+    media: list[tuple[str, str]] = []
+    for _item, outcome in _applied_items(run):
+        artifact = outcome.get("artifact_path")
+        media_type = media_processing.classify_media(root / artifact) if artifact else None
+        if media_type is not None:
+            media.append((artifact, media_type))
+    if not media:
+        return {}
+    counts: Counter = Counter()
+    try:
+        jobs = media_jobs.MediaJobStore(root)
+    except Exception:  # noqa: BLE001 - an unreadable ledger is "unknown", not a failed finish
+        return {"unknown": len(media)}
+    for artifact, media_type in media:
+        try:
+            page = f"{artifact}.md"
+            with reserved_paths.open_generic_binary(root, page, physical=True) as source:
+                content = source.stream.read().decode("utf-8")
+            job = jobs.get_by_binary(root / artifact)
+            if (
+                job is None and media_engines.stage_enabled(media_type)
+                and not media_processing.has_completed_transcript(content, media_type=media_type)
+                and budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS)
+            ):
+                with contextlib.suppress(Exception):
+                    media_processing.reconcile_media(
+                        root, root / artifact, explicit=False,
+                        commit_guard=contextlib.nullcontext, defer_fanout_to_terminal=True,
+                    )
+                    job = jobs.get_by_binary(root / artifact)
+                    with reserved_paths.open_generic_binary(root, page, physical=True) as source:
+                        content = source.stream.read().decode("utf-8")
+            counts[_extraction_state(content, media_type, job)] += 1
+        except Exception:  # noqa: BLE001 - one unreadable page is one unknown
+            counts["unknown"] += 1
+    return dict(counts)
+
+
+def _extraction_state(content: str, media_type: str, job: object) -> str:
+    from . import media_engines, media_jobs, media_processing
+
+    if media_processing.has_completed_transcript(content, media_type=media_type):
+        return "done"
+    frontmatter, _body, _raw = parse_frontmatter(content)
+    extracted_by = str(frontmatter.get("extracted_by", "")).strip().lower()
+    if (
+        extracted_by.startswith("failed")
+        or frontmatter.get("processing_state") == media_jobs.FAILED
+        or (job is not None and job.state == media_jobs.FAILED)
+    ):
+        return "failed"
+    if job is not None and job.state == media_jobs.BLOCKED:
+        return "blocked"
+    if not media_engines.stage_enabled(media_type):
+        return "engine_disabled"
+    return "unknown" if job is None else "pending"
+
+
+def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> dict:
+    """What the run did with every file it was pointed at, and what it did not read."""
+    plan = run.get("plan") or {}
+    selection = run.get("selection") or {}
+    outcomes = run.get("outcomes") or {}
+    plan_items = plan.get("items") or []
+    by_status = Counter(
+        outcomes.get(it["original_path"], {}).get("status") or "pending" for it in plan_items
+    )
+    by_code = Counter(
+        o.get("code") for o in outcomes.values() if o.get("status") == "failed" and o.get("code")
+    )
+    folders = [row for row in run.get("inventory") or [] if row.get("kind") == "folder"]
+    applied_text = [item for item, _outcome in _applied_items(run) if item["form"] == "text"]
+    return {
+        "selected": len(selection.get("paths") or []),
+        "outcomes": {"by_status": dict(by_status), "by_code": dict(by_code)},
+        "not_imported": {
+            "hidden_folders": {
+                "folders": len(folders),
+                "files": sum(int(row.get("files") or 0) for row in folders),
+            },
+            "hidden_files": run.get("hidden_files_skipped", 0),
+            "refused_at_selection": selection.get("rejected_counts") or {},
+            "refused_at_plan": dict(Counter(row["code"] for row in plan.get("skipped") or [])),
+            "inventory_truncated": run.get("inventory_truncated", 0),
+        },
+        "extraction": _extraction_states(root, run, budget),
+        "links": {
+            "resolved": sum(len((item.get("links") or {}).get("resolved") or []) for item in applied_text),
+            "unresolved": sum(len((item.get("links") or {}).get("unresolved") or []) for item in applied_text),
+        },
+        "recall": _recall_sample(root, run),
+        "limits": [
+            "Inline #tags in a note body are not read; only front-matter tags and aliases are kept."
+        ],
+    }
 
 
 def finish(
@@ -866,26 +1831,23 @@ def finish(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
         recall = _recall_check(root, run)
-        # Reuse the SAME real counts the last `apply` call recorded — never a
-        # fresh re-hash at finish time, which could disagree with what was
-        # actually verified immediately after the commit.
+        coverage = _coverage(root, run, _call_budget())
+        # The counts the last `apply` recorded from its own re-hash — never a fresh
+        # re-hash at finish time, which could disagree with what was verified then.
         verify = run.get("verify") or {}
         verified_unchanged = verify.get("verified_unchanged", 0)
         verified_total = verify.get("verified_total", 0)
         manifest_path = None
         if write_manifest:
             manifest_path = _write_run_manifest(
-                root,
-                run,
-                recall=recall,
-                verified_unchanged=verified_unchanged,
-                verified_total=verified_total,
-                today=run_date,
+                root, run, recall=recall, verified_unchanged=verified_unchanged,
+                verified_total=verified_total, today=run_date,
             )
         title = recall["query"]
         run["finish"] = {
             "at": _now_iso(),
             "recall_check": recall,
+            "coverage": coverage,
             "first_question": f'What do my notes say about "{title}"?',
             "route": {"tool": "search_memory", "args": {"query": title}},
             "handoff": _handoff(run),
@@ -895,81 +1857,7 @@ def finish(
         }
         run["phase"] = "done"
         store.save(run)
-    return _present(root, run)
-
-
-# --------------------------------------------------------------------------- #
-# internals
-# --------------------------------------------------------------------------- #
-def _recompute_phase(outcomes: dict, plan_items: list[dict]) -> str:
-    statuses = [outcomes.get(it["original_path"], {}).get("status") for it in plan_items]
-    applied = [s for s in statuses if s in _APPLIED_STATUSES]
-    failed = [s for s in statuses if s == "failed"]
-    if applied and not failed:
-        return "applied"
-    if applied and failed:
-        return "partial"
-    if failed and not applied:
-        return "failed"
-    return "applied" if applied else "failed"
-
-
-def _verify_originals(root: Path, plan_items: list[dict], outcomes: dict) -> tuple[int, int]:
-    """Post-apply re-hash of applied originals — the UI's honest verification line."""
-    total = 0
-    unchanged = 0
-    for it in plan_items:
-        outcome = outcomes.get(it["original_path"])
-        if not outcome or outcome.get("status") not in _APPLIED_STATUSES:
-            continue
-        total += 1
-        fpath = root / it["original_path"]
-        try:
-            current = hashlib.sha256(fpath.read_bytes()).hexdigest()
-        except OSError:
-            continue
-        if current == it["original_sha256"]:
-            unchanged += 1
-    return unchanged, total
-
-
-def _recall_check(root: Path, run: dict) -> dict:
-    from . import find as find_module
-
-    outcomes = run.get("outcomes") or {}
-    plan_items = {it["original_path"]: it for it in (run.get("plan") or {}).get("items") or []}
-    applied = [
-        (op, o) for op, o in outcomes.items() if o.get("status") in _APPLIED_STATUSES
-    ]
-    applied.sort(key=lambda t: plan_items.get(t[0], {}).get("original_bytes", 0), reverse=True)
-
-    if applied:
-        op, outcome = applied[0]
-        title = plan_items.get(op, {}).get("title") or op
-        target = outcome.get("target_path") or ""
-    else:
-        packs = run.get("pack_suggestions") or []
-        title = (packs[0].get("name") if packs else "") or ""
-        target = ""
-
-    hits_paths: list[str] = []
-    ok = False
-    if title:
-        try:
-            hits = find_module.find(root, query=title, mode="keyword", limit=5, graph=False)
-            hits_paths = [str(getattr(h, "path", "")) for h in hits]
-            ok = any(
-                target and (target in hp or hp in target or Path(hp).name == Path(target).name)
-                for hp in hits_paths
-            )
-        except Exception:  # noqa: BLE001 — recall failure never blocks finish
-            hits_paths = []
-            ok = False
-
-    result: dict = {"query": title, "ok": ok, "hits": hits_paths}
-    if not ok:
-        result["next_action"] = {"tool": "maintain_memory", "args": {"mode": "reconcile"}}
-    return result
+    return _present(root, run, coverage=coverage)
 
 
 def _write_run_manifest(

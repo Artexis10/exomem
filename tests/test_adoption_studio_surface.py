@@ -10,9 +10,6 @@ from starlette.testclient import TestClient
 
 from exomem import commands, find, server
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
-
 
 def _adoption_command() -> commands.Command:
     for cmd in commands.PRODUCT_COMMANDS:
@@ -240,15 +237,6 @@ def test_unknown_action_is_rejected(vault: Path) -> None:
     with pytest.raises(ValueError) as ei:
         commands.op_adoption_studio(vault, action="frobnicate")
     assert "INVALID_MODE" in str(ei.value)
-
-
-# --- 29 ---
-def test_golden_fixture_names_adoption_studio() -> None:
-    """The intentional golden regen must have landed adoption_studio."""
-    baseline = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
-    assert "adoption_studio" in baseline
-    schema = baseline["adoption_studio"]["inputSchema"]
-    assert "action" in schema["properties"]
 
 
 # --- fix round: HTTP 409 mapping for stale-drift codes ---

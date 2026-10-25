@@ -528,8 +528,9 @@ def test_an_fts_only_correction_changes_warm_admitted_ranking(vault: Path) -> No
     assert ranked() == after, "warm repair scores must equal a fresh process cache"
 
 
+@pytest.mark.parametrize("partition", ["candidate", "outside"])
 def test_a_withheld_row_under_catalogue_ranking_ranks_on_admission(
-    vault: Path, caplog: pytest.LogCaptureFixture
+    vault: Path, caplog: pytest.LogCaptureFixture, partition: str,
 ) -> None:
     """A context that claims catalogue ranking while its predicate withholds
     a row breaks the contract. The snapshot's check catches it: the request
@@ -538,14 +539,25 @@ def test_a_withheld_row_under_catalogue_ranking_ranks_on_admission(
 
     held = _seed_ranked(vault)
     withheld = next(path for path in held if path.endswith("ranked-pair-repeated.md"))
+    if partition == "outside":
+        withheld = "Knowledge Base/Sources/ranking-denominator.md"
+        _write(vault / withheld, "# Ranking denominator\n\nplimsett quaddle " * 20)
+        _settle(vault)
     basis = lifecycle_statuses.Basis(vault)
+    denied: set[str] = set()
+
+    def visible(path: str) -> bool:
+        return path not in denied
 
     def ranked(catalogue_ranking: bool) -> list[tuple[str, float]]:
         context = lexstore.RequestQueryContext(
-            vault, lambda path: path != withheld, basis, catalogue_ranking=catalogue_ranking
+            vault, visible, basis, catalogue_ranking=catalogue_ranking
         )
         return _ranked(vault, 1000, query_context=context)
 
+    # Warm the structural rows, then change admission without changing those rows.
+    ranked(True)
+    denied.add(withheld)
     with caplog.at_level(logging.WARNING, logger="exomem.lexstore"):
         claimed = ranked(True)
     assert lexstore.CATALOGUE_RANKING_CONTRACT_VIOLATION in caplog.text

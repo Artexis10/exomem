@@ -356,3 +356,72 @@ def test_run_refuses_changed_case_payload_before_overwriting_saved_cases(tmp_pat
         driver.main(argv)
 
     assert (run / "cases.json").read_bytes() == original
+
+
+def test_adoption_plan_scores_independent_items_and_detects_original_changes_and_extra_runs(tmp_path, monkeypatch):
+    import datetime as dt
+
+    from membench.utility.tool_selection.development import admit_fixture
+    from membench.utility.tool_selection.vault import adoption_runs, markdown_facts
+
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+    from exomem.kbdir import kb_dirname, kb_prefix
+
+    case = source_case("r2-d10")
+    # Capture this attempt's local date before any product output, as the source reference requires.
+    case = replace(case, params={**case.params, "fixture": {
+        **case.params["fixture"], "case_date": dt.date.today().isoformat(),
+    }})
+    root = tmp_path / "vault"
+    seed_vault(root, case.seed_steps())
+    before = read_end_state(root)
+    admit_fixture(case.params, before)
+    run_id = next(iter(adoption_runs(before).values()))["run_id"]
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+    log_path = tmp_path / "adoption-tap.jsonl"
+    recorder = CanonicalLog(log_path)
+    recorder.write("ready_finished", outcome="ready")
+    with request_scope(owner_principal(surface="mcp")):
+        status = commands.op_adoption_studio(root, action="status", run_id=run_id)
+        recorder.write("call", name="adoption_studio", ordinal=1, arguments={"action": "status", "run_id": run_id},
+                       outcome="served", result={"structuredContent": status})
+        planned = commands.op_adoption_studio(root, action="plan", run_id=run_id)
+        recorder.write("call", name="adoption_studio", ordinal=2, arguments={"action": "plan", "run_id": run_id},
+                       outcome="served", result={"structuredContent": planned})
+    after = read_end_state(root)
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    result = score_session(case, session(events[0]["canonical_state"], after), compact_calls(events), product_resolver())
+
+    assert planned["phase"] == "planned" and not planned.get("continuation")
+    assert result.success, result.reasons
+    assert result.committed_effects == 1 and result.unexpected_mutations == 0
+    run_path = next(iter(adoption_runs(after)))
+    extra_log = json.loads(json.dumps(after))
+    log = extra_log["files"][f"{kb_dirname()}/log.md"]
+    prefix_end = next((index for index, token in enumerate(log["body"])
+                       if token["type"] == "heading_open" and token["tag"] == "h2"), len(log["body"]))
+    entry = markdown_facts(f"## 2026-10-25 | {run_path.removeprefix(kb_prefix())}\n\nUnexpected audit text.\n")
+    log["body"] = log["body"][:prefix_end] + entry + log["body"][prefix_end:]
+    log["remainder"] = log["body"]
+    assert not score_session(case, session(before, extra_log), [], product_resolver()).success
+    wrong = json.loads(json.dumps(after))
+    wrong["files"][run_path]["value"]["plan"]["items"][0]["frontmatter"]["source_type"] = "wrong-kind"
+    assert not score_session(case, session(before, wrong), [], product_resolver()).success
+    imported = json.loads(json.dumps(after))
+    imported["files"][case.key.adoption["plan"]["items"][0]["target_path"]] = {"body": "an unauthorized import"}
+    assert not score_session(case, session(before, imported), [], product_resolver()).success
+    original = root / next(iter(case.params["fixture"]["originals"]))
+    original.write_bytes(original.read_bytes() + b"\n")
+    assert not score_session(case, session(before, read_end_state(root)), [], product_resolver()).success
+    with request_scope(owner_principal(surface="mcp")):
+        status = commands.op_adoption_studio(root, action="status", run_id=run_id)
+    recorder.write("call", name="adoption_studio", ordinal=3, arguments={"action": "status", "run_id": run_id},
+                   outcome="served", result={"structuredContent": status})
+    original.write_bytes(case.params["fixture"]["originals"][original.relative_to(root).as_posix()].encode())
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    rolled_back = score_session(case, session(before, read_end_state(root)), compact_calls(events), product_resolver())
+    assert rolled_back.unexpected_mutations == 1 and not rolled_back.success
+    with request_scope(owner_principal(surface="mcp")):
+        commands.op_adoption_studio(root, action="start", path=case.params["fixture"]["source_root"])
+    assert not score_session(case, session(before, read_end_state(root)), [], product_resolver()).success

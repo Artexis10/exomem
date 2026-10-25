@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import context_refs, guards, knowledge_packs, lifecycle_statuses
+from . import capabilities, context_refs, guards, knowledge_packs, lifecycle_statuses
 from . import get_page as get_page_module
 from . import note as note_module
 from . import relation_registry as relation_registry_module
@@ -45,7 +45,7 @@ _CONTENT_MAX = 100_000
 
 _WORK_ITEM_CONSTRAINTS = (
     "Your interpretation is explicit and provisional. You cannot write to the "
-    "vault. Submit structured proposals via adoption_studio(action='propose'); "
+    "vault. Submit structured proposals via {proposal_route}; "
     "each is validated, fingerprint-bound, reviewed by the user, and applied only "
     "through governed operations. Original files are never rewritten, moved, or "
     "deleted."
@@ -592,7 +592,9 @@ def work_item(
         "run_id": run.get("run_id"),
         "phase": run.get("phase"),
         "run_fingerprint": run.get("inventory_fingerprint"),
-        "constraints": _WORK_ITEM_CONSTRAINTS,
+        "constraints": _WORK_ITEM_CONSTRAINTS.format(proposal_route=capabilities.active_call_text(
+            "adoption_studio", {"action": "propose", "run_id": run_id}
+        )),
         "sources": source_rows,
         "measurements": {
             "pack_suggestions": knowledge_packs.rendered_suggestions(run.get("pack_suggestions") or []),

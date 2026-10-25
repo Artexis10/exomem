@@ -24,21 +24,22 @@ from test_mcp_schema_fidelity import _build_server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Measured on the same candidate with scripts/measure-tool-schema-bytes.py:
-# grouped compatibility: 93,502 bytes; nested jobs: 173,949 bytes.
-# Exact operation inputs, conditional effects and shared jobs add 80,447 bytes.
+# Measured on the same 0.143.2 candidate with scripts/measure-tool-schema-bytes.py:
+# grouped compatibility: 93,949 bytes; nested jobs: 177,426 bytes.
+# Exact operation inputs, conditional effects and shared jobs add 83,477 bytes.
 # This rebase buys those contracts; it claims no routing or efficiency gain before evaluation.
 # Each ceiling rounds that tool's measured wire size up to the next 50 bytes.
 # The separate bootstrap core budget stays unchanged.
-TOTAL_BUDGET = 174_800
+TOTAL_BUDGET = 178_300
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
     "adopt_vault": 1350,
-    "adoption_studio": 3350,
+    "adoption_studio": 3800,
     "bootstrap": 1450,
     "browse_memory": 6850,
     "capture_source": 3350,
+    "change_adoption": 6300,
     "change_connections": 3200,
     "change_files": 7550,
     "change_governance": 5100,
@@ -68,6 +69,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
+    "read_adoption": 1900,
     "read_connections": 4050,
     "read_episode": 1850,
     "read_governance": 2500,

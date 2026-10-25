@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
 metadata:
-  skill_contract: 19ca698c1d33e2ba977d1381a65f7e1cc38ecf5df7b922a16264e681f8844cb0
+  skill_contract: 3d7b38a0a2f3799f7858ea613fcff0027650daa0c03fb9ea6c8f8c134ac56091
   version: "0.2.0"
 ---
 
@@ -40,14 +40,18 @@ identity after an uncertain commit.
 
 ## Workflow
 1. Search related notes with `search_memory`; use `read_connections(operation={'kind': 'suggest-links'})` for link candidates, `"suggest-relations"` when direction matters, and `"graph-context"` for graph shape or inbound links.
-2. Identify safe improvements — missing links, stale wording, weak titles, duplicate tags, or unlinked entities — starting from `read_review(operation={'kind': 'relation-debt'})` for pages with no outbound edges and `mode="relation-queue"` for already-reviewed candidates.
+2. Identify safe improvements — missing links, stale wording, weak titles, duplicate tags, or unlinked entities — starting from `read_review(operation={'kind': 'relation-debt'})` for pages with no outbound edges and `operation.kind="relation-queue"` for already-reviewed candidates.
 3. For a bounded set of explicitly selected pages, call `check_memory(operation={'kind': 'curation-work-item', 'curation_action': 'work-item', 'refs': [...], 'paths': [...]})`. This is `structural_suggestions`: it assembles recorded context and never chooses semantics or writes content.
-4. Author the typed plan yourself, then call `repair_memory(operation={'kind': 'curation-propose', 'curation_action': 'propose', 'plan': {...}})`. Inspect it with `check_memory(operation={'kind': 'curation-preview', 'curation_action': 'preview', 'run_id': ...})`; preview the immutable plan once and surface its exact actions, blockers, fingerprint, and compensation classes.
+4. Author the typed plan yourself. Submit it through the CLI `maintain_memory` command with `mode="curation"`, `curation_action="propose"`, and `plan`. Inspect it with `check_memory(operation={'kind': 'curation-preview', 'run_id': ...})`; preview the immutable plan once and surface its exact actions, blockers, fingerprint, and compensation classes.
 5. Before any execution, treat the plan as `restructure_execution`: obtain one explicit confirmation for that exact plan fingerprint. Do not infer confirmation from the request to inspect or improve notes, and do not accept standing approval.
-6. On confirmation, call `repair_memory(operation={'kind': 'curation-apply', 'curation_action': 'apply', 'run_id': ..., 'plan_id': ..., 'expected_plan_fingerprint': ..., 'why': ...})`. If the phase remains `executing`, resume automatically one step per request with `repair_memory(operation={'kind': 'curation-resume', 'curation_action': 'resume', 'run_id': ..., 'plan_id': ...})` until terminal; stop on `partial` or `blocked` and report the durable evidence instead of improvising.
-7. Compensation is a new reviewed plan, never rollback. `curation_action="propose-compensation"` is `structural_suggestions`: use it to derive the plan, then preview it and obtain a fresh exact-plan confirmation before `repair_memory(operation={'kind': 'curation-apply-compensation', 'curation_action': 'apply-compensation', 'run_id': ..., 'plan_id': ..., 'expected_plan_fingerprint': ..., 'why': ...})`. Continue the already-approved compensation plan only through the same one-step `resume` route; resume does not need a fresh confirmation for each step.
+6. On confirmation, use the same CLI command with `curation_action="apply"`, the returned `run_id`, `plan_id`, `expected_plan_fingerprint`, and `why`. If the phase remains `executing`, resume automatically one step per request through CLI `curation_action="resume"` until terminal; stop on `partial` or `blocked` and report the durable evidence instead of improvising.
+7. Compensation is a new reviewed plan, never rollback. CLI `curation_action="propose-compensation"` is `structural_suggestions`: use it to derive the plan, then preview it and obtain a fresh exact-plan confirmation before CLI `curation_action="apply-compensation"`. Continue the already-approved compensation plan only through the same one-step `resume` route; resume does not need a fresh confirmation for each step.
 8. Leave raw `Sources/` and `Evidence/` untouched except for metadata the core contract explicitly allows.
 9. Check `read_review(operation={'kind': 'audit', 'categories': ['unregistered_relation']})` for relation labels that recur but are not registered; promote the ones that have earned it with `read_schema(operation={"kind": "propose-relation", "subject": "relations", "proposal": ...})`, which turns them into real typed edges instead of standing review debt.
+
+Curation writes are CLI-only. MCP and REST expose `work-item`, `preview`, and
+`status`; they cannot propose, apply, resume, or compensate. If local CLI access
+is unavailable, report the required CLI action and its returned identifiers.
 
 ## Vocabulary
 

@@ -215,8 +215,47 @@ def _canonical_checks(key: Key, before: Mapping, after: Mapping, *, final: bool)
 
     reasons = []
     allowed = {item.path for item in key.files}
-    named = {item.manifest for item in (*key.collections, *key.manifests)}
     log_targets = set(allowed)
+    if key.adoption is not None:
+        from .vault import adoption_runs
+
+        prior_runs, actual_runs = adoption_runs(before), adoption_runs(after)
+        if len(prior_runs) != key.adoption["run_count"] or set(prior_runs) != set(actual_runs):
+            reasons.append("adoption planning replaced, removed or added a run")
+        for path, prior in prior_runs.items():
+            actual = actual_runs.get(path, {})
+            allowed.add(path)
+            # Only these source-owned plan fields change; inventory, selection and outcomes stay frozen.
+            changed_fields = {"updated", "phase", "plan", "plan_draft"}
+            if ({name: value for name, value in prior.items() if name not in changed_fields}
+                    != {name: value for name, value in actual.items() if name not in changed_fields}):
+                reasons.append("adoption planning changed the prepared run outside its plan")
+            selection = actual.get("selection")
+            if (not isinstance(selection, Mapping) or selection.get("paths") != key.adoption["selection_paths"]
+                    or actual.get("outcomes") != key.adoption["outcomes"]):
+                reasons.append("adoption planning changed the selected files or imported them")
+            if final or actual != prior:
+                from exomem.adoption_plan import item_digest
+                from exomem.adoption_run import plan_id_for
+
+                plan = actual.get("plan") or {}
+                if not isinstance(plan, Mapping):
+                    reasons.append("adoption plan is not a structured plan")
+                    continue
+                expected = key.adoption["plan"]
+                selection_hash = prior.get("selection", {}).get("selection_hash")
+                if (actual.get("phase") != key.adoption["phase"] or actual.get("plan_draft") is not None
+                        or {name: value for name, value in plan.items()
+                            if name not in ("created", "plan_id", "selection_hash")} != expected
+                        or plan.get("selection_hash") != selection_hash
+                        or plan.get("plan_id") != plan_id_for(selection_hash, [item_digest(item) for item in expected["items"]])):
+                    reasons.append("adoption plan differs from the independent selection and item facts")
+        for path, body in key.adoption["originals"].items():
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            if any(state.get("evidence", {}).get("files", {}).get(path, {}).get("sha256") != digest
+                   for state in (before, after)):
+                reasons.append(f"adoption original {path} changed bytes")
+    named = {item.manifest for item in (*key.collections, *key.manifests)}
     allowed_empty = set()
     for state in (before, after):
         for path in named:

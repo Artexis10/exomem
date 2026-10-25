@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 19ca698c1d33e2ba977d1381a65f7e1cc38ecf5df7b922a16264e681f8844cb0
+  skill_contract: 3d7b38a0a2f3799f7858ea613fcff0027650daa0c03fb9ea6c8f8c134ac56091
   version: "0.1.0"
 ---
 
@@ -44,6 +44,11 @@ identity after an uncertain commit.
    Pass `source_kind` and `domain` on a `capture_source` call — both are open
    vocabularies, so name the label that fits even if it is unfamiliar. A kind is
    required, and there is no catch-all.
+   For a whole folder or collection of existing files, use `change_adoption` instead of
+   capturing one by one: set `operation.kind` to `start` with a `collection` name, then `select` folders (with a
+   `source_kind` and `domain` per folder rule where known), `plan`, `apply`, then `finish`.
+   Repeat `plan` or `apply` with the returned `continuation` until none returns, and report
+   the `coverage` from `finish`, including what was refused or is still pending.
 3. Media processing is automatic; use `read_media/change_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `search_memory`.
 4. If distilling, reuse the returned proposal, or call `prepare_note` when none exists, to obtain a draft.
 

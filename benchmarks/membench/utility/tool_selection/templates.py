@@ -103,6 +103,7 @@ class Key:
     question: Mapping[str, Any] | None = None
     registry: Mapping[str, Any] | None = None
     preview: Mapping[str, Any] | None = None
+    adoption: Mapping[str, Any] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -123,6 +124,8 @@ class SeedStep:
     action: str
     kwargs: Mapping[str, Any]
     match: Mapping[str, Any] | None = None
+    #: Invented original bytes materialized before an adoption scan, outside the managed knowledge base.
+    originals: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

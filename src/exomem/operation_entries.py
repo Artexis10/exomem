@@ -534,6 +534,8 @@ _TOOL_HELP = {
     "record_episode": ("write", "Record episode", "Record an episode, prepare a capture, save a disposition or resume its workflow."),
     "check_memory": ("read", "Check memory", "Inspect maintenance findings and preview admitted repairs without writing."),
     "repair_memory": ("write", "Repair memory", "Apply admitted maintenance repairs with their current guards. Curation proposals persist workflow state."),
+    "read_adoption": ("read", "Read adoption", "Scan existing material without importing it, inspect adoption runs or read a bounded work item. Status retains recorded coverage and verification counts."),
+    "change_adoption": ("write", "Change adoption", "Save an adoption report, import selected originals or manage a collection adoption run. Planning saves resumable progress. Carry returned continuations through plan and apply; finish records coverage. Originals remain unchanged."),
 }
 
 
@@ -547,6 +549,7 @@ def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), d
 
 # Fields remain grouped by the leaf job that owns them. Conditional values are closed API
 # literals and must agree with the lease classifier in validate_operation_entries.
+_ADOPTION_SCAN_FIELDS = ("path", "max_depth", "include_hidden", "samples", "pack_limit")
 _REMAINING = {
     "bootstrap": (None, (_row("instructions", "bootstrap"),)),
     "coordination_status": (None, (_row("writer-status", "bootstrap"),)),
@@ -563,6 +566,24 @@ _REMAINING = {
     )),
     "compile_source": (None, (_row("compile", "prepare_note"),)),
     "query_dataset": (None, (_row("dataset", "read_memory"),)),
+    "adopt_vault": ("mode", (
+        _row("scan-only", "read_adoption", (*_ADOPTION_SCAN_FIELDS, "semantic_max_files", "semantic_max_bytes", "semantic_example_limit")),
+        _row("save-manifest", "change_adoption", (*_ADOPTION_SCAN_FIELDS, "manifest_path")),
+        _row("copy-as-sources", "change_adoption", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
+        _row("compile-selected", "change_adoption", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",)),
+    )),
+    "adoption_studio": ("action", (
+        _row("start", "change_adoption", ("path", "include_hidden", "initialize_kb", "collection")),
+        _row("status", "read_adoption", ("run_id",)),
+        _row("select", "change_adoption", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",)),
+        _row("plan", "change_adoption", ("run_id", "continuation"), ("run_id",)),
+        _row("apply", "change_adoption", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id")),
+        _row("cancel", "change_adoption", ("run_id", "why"), ("run_id",)),
+        _row("finish", "change_adoption", ("run_id", "write_manifest"), ("run_id",)),
+        _row("work-item", "read_adoption", ("run_id", "sources", "max_sources", "max_chars_per_source"), ("run_id",)),
+        _row("propose", "change_adoption", ("run_id", "proposals"), ("run_id",)),
+        _row("apply-proposal", "change_adoption", ("ref", "expected_fingerprint", "why", "expected_hash"), ("ref", "expected_fingerprint", "why"), destructive=True),
+    )),
     "read_media": (None, (_row("video", "read_media"),)),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),
@@ -1053,9 +1074,9 @@ def unspell_call(
             try:
                 fields = rendering.leaf_fields(fields)
             except ValueError:
-                return None
+                continue
             if rendering.variant_for(kind, fields) is None:
-                return None
+                continue
             variant = rendering.variant_for(kind, fields)
             return command, {**rendering.selected_arguments(variant, fields), **tool_arguments}
     return None

@@ -70,6 +70,13 @@ def source_steps(params: dict) -> list[SeedStep]:
         })]
     if family == "empty-media-ledger":
         return []
+    if family == "adoption":
+        return [
+            SeedStep("adoption_studio", "start", {"path": fixture["source_root"]},
+                     originals=fixture["originals"]),
+            SeedStep("adoption_studio", "select", {"include": fixture["selected_paths"]},
+                     match={"source_root": fixture["source_root"]}),
+        ]
     raise ValueError(f"fixture admission has no source recipe: {family}")
 
 
@@ -93,6 +100,17 @@ def source_key(params: dict) -> Key:
     if preview is not None and "exact_unit_anchor" in preview:
         unit = next(unit for unit in params["fixture"]["units"] if unit["id"] == preview["exact_unit_anchor"])
         preview = {**preview, "unit": {**unit, "content": preview["proposed_content"]}}
+    adoption = state.get("adoption")
+    if isinstance(adoption, dict):
+        from exomem.context_refs import source_ref
+
+        items = []
+        for item in adoption["plan"]["items"]:
+            target = item["target_path"].format(case_date=params["fixture"]["case_date"])
+            items.append({**item, "target_path": target, "target_ref": source_ref(target)})
+        adoption = {**adoption, "originals": params["fixture"]["originals"], "plan": {
+            **adoption["plan"], "date": params["fixture"]["case_date"], "items": items,
+        }}
     return Key(
         kind=params["kind"], target_ops=operations, answer=answer.get("value"),
         answer_mode=answer.get("mode"), files=files, preference=state.get("preferences")
@@ -101,6 +119,7 @@ def source_key(params: dict) -> Key:
         registry={**state["registry"], "reason": state["registry_history"]["reason"]}
         if "registry" in state else None,
         preview=preview,
+        adoption=adoption if isinstance(adoption, dict) else None,
     )
 
 
@@ -137,5 +156,34 @@ def admit_fixture(params: dict, state: dict) -> None:
         for name, entry in fixture["overlay"][fixture["subject"]].items():
             if any(overlay.get(fixture["subject"], {}).get(name, {}).get(field) != value for field, value in entry.items()):
                 raise ValueError("the seeded registry differs from the declared entry")
+    elif kind == "adoption":
+        import datetime as dt
+        import hashlib
+
+        from .vault import adoption_runs
+
+        runs = adoption_runs(state)
+        if len(runs) != 1:
+            raise ValueError("the adoption fixture must contain exactly one run")
+        run = next(iter(runs.values()))
+        if (run.get("source_root") != fixture["source_root"]
+                or run.get("collection") != {"label": fixture["source_root"], "root": fixture["source_root"]}
+                or run.get("phase") != "selecting" or run.get("plan") is not None
+                or run.get("outcomes") != {}
+                or run.get("selection", {}).get("paths") != fixture["selected_paths"]
+                or run.get("selection", {}).get("rules") != {
+                    "include": fixture["selected_paths"], "exclude": [], "overrides": [], "include_junk": False,
+                }
+                or run.get("selection", {}).get("classification") != {}
+                or run.get("selection", {}).get("rejected_counts") != {}):
+            raise ValueError("the seeded adoption run differs from the declared selection")
+        if fixture["case_date"] != dt.date.today().isoformat():
+            raise ValueError("capture the source-default local date before freezing the adoption pair")
+        for path, body in fixture["originals"].items():
+            if state["evidence"]["files"].get(path, {}).get("sha256") != hashlib.sha256(body.encode()).hexdigest():
+                raise ValueError("the seeded adoption original differs from the declared bytes")
+        if any(fact.get("frontmatter", {}).get("imported_from") in fixture["originals"]
+               for fact in state["files"].values()):
+            raise ValueError("the adoption fixture already contains an import")
     if state["review"].get("vocabulary", {}).get("items"):
         raise ValueError("the seed unexpectedly contains vocabulary questions")

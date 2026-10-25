@@ -228,7 +228,7 @@ remain agent guidance; these hooks do not create a Stop continuation gate.
 
 An optional `relevant_due_refs` candidate names due work on released current material.
 Judge relevance and raise at most one due item per maintained client conversation, remembering prior mentions through compaction and credential renewal.
-Use `read_review(ref, expected_fingerprint, operation={'kind': 'item-context'})` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
+Use `read_review(operation={'kind': 'item-context', 'ref': ...})` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
 
 Only if needed to resolve the turn, pass relevant `conversation`: up to six
 recent excerpts and 2,400 characters total, `focus` up to 240 characters and

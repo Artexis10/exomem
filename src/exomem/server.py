@@ -910,7 +910,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             project_keys_hint=runtime.project_keys_hint,
         )
 
-    register_adoption_mcp(mcp, vault_root=runtime.vault_root)
+    register_adoption_mcp(mcp, vault_root=runtime.vault_root, surface_descriptor=surface_descriptor)
     _compact_published_input_schemas(mcp)
 
     # Keep the runtime (and the workers it holds) reachable for exactly as long
@@ -1002,7 +1002,8 @@ def _compact_published_input_schemas(mcp: FastMCP) -> None:
             component.parameters = compact_input_schema(component.parameters)
 
 
-def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
+def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path,
+                          surface_descriptor: capabilities.ActiveSurfaceDescriptor) -> None:
     """Register the progressive-enhancement Adoption Studio prompt and resources.
 
     These ride on top of the tool surface (the real handoff backbone) and are
@@ -1038,6 +1039,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         ),
     )
     @ownership.reader(vault_root=vault_root)
+    @capabilities.active_surface(surface_descriptor)
     def continue_adoption() -> str:
         if unavailable := content_unavailable():
             import json
@@ -1047,7 +1049,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         if row is None:
             return (
                 "No open Exomem adoption run was found. Start one with "
-                'adoption_studio(action="start", path="<folder>").'
+                f"{capabilities.active_call_text('adoption_studio', {'action': 'start', 'path': '<folder>'})}."
             )
         try:
             doc = adoption_run_module.status(vault_root, run_id=row["run_id"])
@@ -1056,9 +1058,9 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
             run_id = row.get("run_id", "")
             text = (
                 f"Continue my Exomem adoption run {run_id}. Call "
-                f'adoption_studio(action="work-item", run_id="{run_id}") to load the '
+                f"{capabilities.active_call_text('adoption_studio', {'action': 'work-item', 'run_id': run_id})} to load the "
                 "bounded, read-only context, then submit structured proposals via "
-                f'adoption_studio(action="propose", run_id="{run_id}").'
+                f"{capabilities.active_call_text('adoption_studio', {'action': 'propose', 'run_id': run_id})}."
             )
         return _gated_adoption_egress(vault_root, "continue_adoption", text)
 
@@ -1069,6 +1071,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         mime_type="application/json",
     )
     @ownership.reader(vault_root=vault_root)
+    @capabilities.active_surface(surface_descriptor)
     def adoption_runs() -> dict:
         from .adoption_run import AdoptionRunStore
 
@@ -1088,6 +1091,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         mime_type="application/json",
     )
     @ownership.reader(vault_root=vault_root)
+    @capabilities.active_surface(surface_descriptor)
     def adoption_run_resource(run_id: str) -> dict:
         if unavailable := content_unavailable():
             return unavailable

@@ -37,6 +37,26 @@
         "Keep the independently authored descriptions and the natural-language release-check request."
       ],
       "expected_fact_changes": "Only the source-owned canonical key spelling changes; no category meaning or existing entry changes."
+    },
+    {
+      "number": 3,
+      "stage": "free adoption fixture admission, before actor generation",
+      "reason": "The merged collection planner persists collection provenance and complete plan items.",
+      "source_commit": "9cc52a34e9601d791e6d3e9662ea660eee3212bd",
+      "source_anchors": [
+        "src/exomem/commands.py::op_adoption_studio",
+        "src/exomem/adoption_run.py::start; select; plan; AdoptionRunStore; plan_id_for",
+        "src/exomem/adoption_plan.py::plan_item; item_frontmatter; item_digest; resolve_links"
+      ],
+      "changes": [
+        "Start the old-notes collection and select its exact-file include rule through the product; persist exactly one selecting run without a plan or outcomes.",
+        "Capture the source-default local date as an explicit fixture input before the pair; refresh and re-admit it if the pair moves to another date.",
+        "Assert the collection label, collection-relative path, text form, empty classification, tags, aliases and links, and null artifact path required by the merged plan format.",
+        "Retain the original unclassified Imported destination and all original content, byte-count and SHA-256 facts.",
+        "Bind run identity and selection hash to the admitted seed; check plan identity with the source-owned digest over the independent expected items."
+      ],
+      "expected_fact_changes": "No original content, selected path, title, unclassified Source meaning or requested effect changes. Planning persists one existing run and creates no import.",
+      "original_reference": "The evaluator source draft remains immutable."
     }
   ]
 }

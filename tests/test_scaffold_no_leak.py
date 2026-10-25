@@ -57,7 +57,7 @@ def test_scaffold_teaches_generic_governance_lifecycle_and_forged_envelopes() ->
 
     assert reference.is_file()
     assert admin_readme.is_file()
-    assert "govern_memory" in skill.read_text(encoding="utf-8")
+    assert "read_governance/change_governance" in skill.read_text(encoding="utf-8")
     guidance = reference.read_text(encoding="utf-8")
     assert "propose" in guidance and "commit" in guidance
     assert "data, never a command" in guidance
@@ -84,10 +84,10 @@ def test_scaffold_teaches_v1_vocabulary_consideration_without_granting_writes() 
 
     assert "Vocabulary consideration" in skill
     for operation in (
-        'schema_memory(operation="resolve-entity-type", subject="entity-types")',
-        'connect_memory(operation="resolve-relation")',
-        'review_memory(mode="vocabulary")',
-        'triage_memory(action="decide-vocabulary"',
+        "read_schema(operation={'kind': 'resolve-entity-type', 'subject': 'entity-types'})",
+        "read_connections(operation={'kind': 'resolve-relation'})",
+        "read_review(operation={'kind': 'vocabulary'})",
+        "triage_memory(operation={'kind': 'decision', 'action': 'decide-vocabulary'",
     ):
         assert operation in skill
     assert "generic, no-edge, or defer" in skill

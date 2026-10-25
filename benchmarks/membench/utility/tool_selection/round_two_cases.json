@@ -107,8 +107,9 @@
    "selected_paths": [
     "old-notes/checklist.md"
    ],
-   "case_date": "Capture the source-default local calendar date before the pair. Both arms must use that date; target paths derive from this captured input, not the measured plan result.",
-   "seed_kind": "adoption"
+   "case_date": "2026-10-25",
+   "seed_kind": "adoption",
+   "source_root": "old-notes"
   }
  },
  "cases": [
@@ -627,14 +628,29 @@
            "original_bytes": 42,
            "tags": [
             "imported"
-           ]
+           ],
+           "import_collection": "old-notes",
+           "collection_path": "checklist.md"
+          },
+          "collection_path": "checklist.md",
+          "form": "text",
+          "classification": null,
+          "tags": [],
+          "rejected_tags": [],
+          "aliases": [],
+          "rejected_aliases": [],
+          "artifact_path": null,
+          "links": {
+           "resolved": [],
+           "unresolved": []
           }
          }
         ],
-        "selection_hash": "64a5a347782f7891",
-        "plan_id": "f6a69c4b05084624",
         "skipped": [],
-        "warnings": []
+        "warnings": [],
+        "plan_format": 2,
+        "collection": "old-notes",
+        "total_bytes": 42
        },
        "outcomes": {}
       },
@@ -653,15 +669,15 @@
       "symbol": "AdoptionRunStore; status; select; plan; selection_hash; plan_id_for"
      },
      {
-      "path": "src/exomem/adopt.py",
-      "symbol": "plan_import_items; _title_from_text"
+      "path": "src/exomem/adoption_plan.py",
+      "symbol": "plan_item; item_frontmatter; item_digest; plan_total_bytes"
      },
      {
       "path": "src/exomem/source_taxonomy.py",
       "symbol": "UNCLASSIFIED_KIND; IMPORTED_PATH_LABEL"
      }
     ],
-    "blocked": "adoption leaf integration and fixture admission pending after the containing contract merge"
+    "reference_amendment": 3
    }
   }
  ]

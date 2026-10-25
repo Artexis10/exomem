@@ -204,7 +204,7 @@ Remember any prior due mention through continuation, compaction, hooks, MCP, RES
 A transport session, credential, workspace or process does not define a new client conversation.
 Receiving a candidate does not use this allowance; the active agent remembers the mention without a new server ledger.
 
-Read `read_review(ref, expected_fingerprint, operation={'kind': 'item-context'})` for the needed context; its bounded lookup may fall back to an existing wider audit.
+Read `read_review(operation={'kind': 'item-context', 'ref': ...})` for the needed context; its bounded lookup may fall back to an existing wider audit.
 `read_review/triage_memory` has no `expected_fingerprint` argument.
 After `REVIEW_ITEM_CHANGED`, refresh context and decide again before a mutation.
 

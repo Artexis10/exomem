@@ -96,7 +96,7 @@ when Exomem cannot capture; move durable results to Exomem when it can.
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `read_review/triage_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `read_review(operation={'kind': 'relation-queue'})` for the batched read; accept one reviewed candidate via `change_connections(operation={'kind': 'accept-relation'})` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `read_connections/change_connections`; use `operation="context"` for bounded graph, provenance, evidence, and history |
-| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
+| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `read_adoption(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | "check vault health," "fix safe drift," "make Planning/Records files readable" | Remote tools may use `check_memory(operation={'kind': 'audit'})` or preview one collection with `mode="structured-files"`. Structured-file apply requires its exact preview plan; ordinary `fix`/`reconcile` writes remain host-operator work via `exomem maintain --fix` / `--reconcile` |
 | `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `read_schema/change_schema`; infer before saving, and keep governance optional |
 

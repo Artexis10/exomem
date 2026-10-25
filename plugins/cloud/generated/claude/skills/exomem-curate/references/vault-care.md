@@ -58,7 +58,7 @@ small set (e.g. `personal`, `project-alpha`, `work`) and add their own.
 
 ### Assessing or adopting a vault you didn't build
 
-**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **adopt_vault(mode="scan-only")** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, reports a bounded semantic census, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance. `compile-selected` returns a proposal, not a compiled note: review it, then call `note()` so the normal semantic precommit contract still applies.
+**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **read_adoption(operation={"kind": "scan-only"})** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, reports a bounded semantic census, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance. `compile-selected` returns a proposal, not a compiled note: review it, then call `note()` so the normal semantic precommit contract still applies.
 
 For structural questions —
 "what does this vault look like," "how is this vault organized," "is there junk in

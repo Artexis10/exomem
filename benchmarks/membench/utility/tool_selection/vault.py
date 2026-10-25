@@ -57,6 +57,12 @@ def apply_steps(vault: Path, steps: Sequence[SeedStep]) -> None:
     """Run each step through the product command on an initialised vault."""
 
     for step in steps:
+        for relative, text in step.originals.items():
+            destination = vault / relative
+            if not destination.resolve().is_relative_to(vault.resolve()) or destination.exists():
+                raise ValueError("fixture originals must be new files inside the isolated vault")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(text.encode("utf-8"))
         if step.command not in _SEED_COMMANDS:
             _seed_product(vault, step)
             continue
@@ -117,9 +123,28 @@ def _seed_product(vault: Path, step: SeedStep) -> None:
             if not semantic["contract_result"]["relation_disposition"]["satisfied"]:
                 arguments.update(relation_disposition="reviewed_none", relation_review_hash=semantic["transition_hash"],
                                  relation_review_reason="The invented fixture asserts no relation to another page.")
+        elif command.name == "adoption_studio" and step.match is not None:
+            from exomem.adoption_run import AdoptionRunStore
+
+            store = AdoptionRunStore(vault)
+            runs = [store.load(entry["run_id"]) for entry in store.list_runs()]
+            matches = [run for run in runs if all(run.get(name) == value for name, value in step.match.items())]
+            if len(matches) != 1:
+                raise ValueError("the adoption fixture must bind exactly one prepared run")
+            arguments["run_id"] = matches[0]["run_id"]
         result = command.leaf(vault, **arguments)
     if result.get("success") is False or result.get("mutated") is False:
         raise RuntimeError(f"fixture command did not commit: {step.command}: {result}")
+
+
+def adoption_runs(state: Mapping) -> dict[str, dict]:
+    """Read already-projected run JSON at the canonical owner's paths, retaining every other file."""
+    from exomem.adoption_run import AdoptionRunStore
+
+    owner = AdoptionRunStore(Path("."))
+    return {path: fact["value"] for path, fact in state.get("files", {}).items()
+            if Path(path).parent.parent == owner.base and Path(path).name == "run.json"
+            and isinstance(fact.get("value"), dict)}
 
 
 def _manifest_fields(vault: Path, manifest: str) -> dict[str, dict]:
@@ -274,6 +299,13 @@ def read_end_state(vault: Path) -> dict:
                 directories.append(relative)
         else:
             files[relative] = _file_fact(path, relative, evidence["files"], unknown)
+    for run in adoption_runs({"files": files}).values():
+        inventory = run.get("inventory")
+        for item in inventory if isinstance(inventory, list) else []:
+            relative = item.get("path") if isinstance(item, Mapping) else None
+            if relative in files and relative in evidence["files"]:
+                # Adoption preserves original bytes, including Markdown whitespace, through every response snapshot.
+                files[relative]["original_sha256"] = evidence["files"][relative]["sha256"]
     machine = {}
     state = state_paths.vault_state_dir(vault)
     owner_preference = preferences._preference_path(vault, OWNER_AUDIENCE)

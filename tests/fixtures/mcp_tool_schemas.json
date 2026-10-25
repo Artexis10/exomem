@@ -1,216 +1,4 @@
 {
-  "adopt_vault": {
-    "description": "Scan or import; preserve originals.\n\nDefault scan-only reads; other modes write. Copies retain path/hash provenance.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "default": "",
-          "description": "Subtree.",
-          "type": "string"
-        },
-        "mode": {
-          "default": "scan-only",
-          "enum": [
-            "scan-only",
-            "save-manifest",
-            "copy-as-sources",
-            "compile-selected"
-          ],
-          "type": "string"
-        },
-        "max_depth": {
-          "default": 3,
-          "type": "integer"
-        },
-        "include_hidden": {
-          "default": false,
-          "type": "boolean"
-        },
-        "samples": {
-          "default": 5,
-          "type": "integer"
-        },
-        "pack_limit": {
-          "default": 6,
-          "type": "integer"
-        },
-        "manifest_path": {
-          "type": "string"
-        },
-        "selected_paths": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Files for copy/compile."
-        },
-        "semantic_max_files": {
-          "default": 512,
-          "type": "integer"
-        },
-        "semantic_max_bytes": {
-          "default": 8388608,
-          "type": "integer"
-        },
-        "semantic_example_limit": {
-          "default": 12,
-          "type": "integer"
-        },
-        "response_detail": {
-          "default": "compact",
-          "description": "Success detail: compact (default), full, or legacy.",
-          "enum": [
-            "compact",
-            "full",
-            "legacy"
-          ],
-          "type": "string"
-        }
-      },
-      "type": "object"
-    }
-  },
-  "adoption_studio": {
-    "description": "Review and import existing material in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nsave run state or material. Plan previews exact imports; apply commits that plan or refuses.\n\nstart scans; select chooses files; plan previews; apply atomically copies\ninto Sources; cancel closes pre-apply; finish proves recall. Then work-item\nreads context, propose submits proposals, apply-proposal approves one.\nDetails: references/operations.md.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "description": "Lifecycle step.",
-          "enum": [
-            "start",
-            "status",
-            "select",
-            "plan",
-            "apply",
-            "cancel",
-            "finish",
-            "work-item",
-            "propose",
-            "apply-proposal"
-          ],
-          "type": "string"
-        },
-        "run_id": {
-          "type": "string",
-          "description": "From `start`; required except for `start` and run-listing `status`."
-        },
-        "path": {
-          "default": "",
-          "description": "For `start`, subtree to scan (default: vault root).",
-          "type": "string"
-        },
-        "include_hidden": {
-          "default": false,
-          "description": "For `start`, include hidden files.",
-          "type": "boolean"
-        },
-        "initialize_kb": {
-          "default": false,
-          "description": "For `start`, bootstrap a missing Knowledge Base (otherwise KB_NOT_INITIALIZED).",
-          "type": "boolean"
-        },
-        "include": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "For `select`, paths whose eligible files are selected."
-        },
-        "exclude": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "For `select`, paths to deselect."
-        },
-        "overrides": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "For `select`, files to force-select."
-        },
-        "include_junk": {
-          "default": false,
-          "description": "For `select`, include demoted junk files.",
-          "type": "boolean"
-        },
-        "plan_id": {
-          "type": "string",
-          "description": "For `apply`, from `plan`/`status`; a mismatch or changed selection refuses with PLAN_STALE."
-        },
-        "retry_failed": {
-          "default": false,
-          "description": "For `apply`, re-apply only failures.",
-          "type": "boolean"
-        },
-        "only_paths": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "For `apply`, restrict to these originals."
-        },
-        "why": {
-          "type": "string",
-          "description": "Required for `apply-proposal`; also the `cancel` reason."
-        },
-        "write_manifest": {
-          "default": true,
-          "type": "boolean"
-        },
-        "sources": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "For `work-item`, source paths instead of the first imports."
-        },
-        "max_sources": {
-          "default": 5,
-          "type": "integer"
-        },
-        "max_chars_per_source": {
-          "default": 2000,
-          "type": "integer"
-        },
-        "proposals": {
-          "items": {
-            "type": "object"
-          },
-          "type": "array"
-        },
-        "ref": {
-          "type": "string",
-          "description": "For `apply-proposal`, the `exomem://review/adoption/<id>` ref."
-        },
-        "expected_fingerprint": {
-          "type": "string",
-          "description": "For `apply-proposal`, the reviewed fingerprint; a mismatch refuses."
-        },
-        "expected_hash": {
-          "type": "string",
-          "description": "For `apply-proposal`, target page hash for relation and reconciliation-relate approvals."
-        },
-        "response_detail": {
-          "default": "compact",
-          "description": "Success detail: compact (default), full, or legacy.",
-          "enum": [
-            "compact",
-            "full",
-            "legacy"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "action"
-      ],
-      "type": "object"
-    }
-  },
   "bootstrap": {
     "description": "Read instructions, saved engagement settings or writer status. The writer-status operation works without building instructions. Select one operation.kind.",
     "inputSchema": {
@@ -765,6 +553,404 @@
         "title"
       ],
       "type": "object"
+    }
+  },
+  "change_adoption": {
+    "description": "Save an adoption report, import selected originals or manage a collection adoption run. Planning saves resumable progress. Carry returned continuations through plan and apply; finish records coverage. Originals remain unchanged. Select one operation.kind.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "description": "One operation, selected by `kind`.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "save-manifest",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Subtree.",
+                  "type": "string",
+                  "default": ""
+                },
+                "max_depth": {
+                  "type": "integer",
+                  "default": 3
+                },
+                "include_hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samples": {
+                  "type": "integer",
+                  "default": 5
+                },
+                "pack_limit": {
+                  "type": "integer",
+                  "default": 6
+                },
+                "manifest_path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "copy-as-sources",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Subtree.",
+                  "type": "string",
+                  "default": ""
+                },
+                "max_depth": {
+                  "type": "integer",
+                  "default": 3
+                },
+                "include_hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samples": {
+                  "type": "integer",
+                  "default": 5
+                },
+                "pack_limit": {
+                  "type": "integer",
+                  "default": 6
+                },
+                "selected_paths": {
+                  "description": "Files for copy/compile.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "selected_paths"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "compile-selected",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Subtree.",
+                  "type": "string",
+                  "default": ""
+                },
+                "max_depth": {
+                  "type": "integer",
+                  "default": 3
+                },
+                "include_hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samples": {
+                  "type": "integer",
+                  "default": 5
+                },
+                "pack_limit": {
+                  "type": "integer",
+                  "default": 6
+                },
+                "selected_paths": {
+                  "description": "Files for copy/compile.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "selected_paths"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "start",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "For `start`, subtree to scan (default: vault root).",
+                  "type": "string",
+                  "default": ""
+                },
+                "include_hidden": {
+                  "description": "For `start`, include hidden files.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "initialize_kb": {
+                  "description": "For `start`, bootstrap a missing Knowledge Base (otherwise KB_NOT_INITIALIZED).",
+                  "type": "boolean",
+                  "default": false
+                },
+                "collection": {
+                  "type": "string",
+                  "description": "For `start`, a name kept across re-imports."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "select",
+                  "type": "string"
+                },
+                "run_id": {
+                  "description": "From `start`; required except for `start` and run-listing `status`.",
+                  "type": "string"
+                },
+                "include": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "type": "array",
+                  "description": "For `select`, paths whose files are selected, or {path, source_kind, domain} to file a folder under registered keys."
+                },
+                "exclude": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `select`, paths to deselect."
+                },
+                "overrides": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `select`, files to force-select."
+                },
+                "include_junk": {
+                  "description": "For `select`, include demoted junk files.",
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "plan",
+                  "type": "string"
+                },
+                "run_id": {
+                  "description": "From `start`; required except for `start` and run-listing `status`.",
+                  "type": "string"
+                },
+                "continuation": {
+                  "type": "string",
+                  "description": "For `plan` and `apply`, from the previous result."
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "apply",
+                  "type": "string"
+                },
+                "run_id": {
+                  "description": "From `start`; required except for `start` and run-listing `status`.",
+                  "type": "string"
+                },
+                "plan_id": {
+                  "description": "For `apply`, from `plan`/`status`; a mismatch or changed selection refuses with PLAN_STALE.",
+                  "type": "string"
+                },
+                "continuation": {
+                  "type": "string",
+                  "description": "For `plan` and `apply`, from the previous result."
+                },
+                "retry_failed": {
+                  "description": "For `apply`, re-apply only failures.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "only_paths": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `apply`, restrict to these originals."
+                }
+              },
+              "required": [
+                "kind",
+                "run_id",
+                "plan_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "cancel",
+                  "type": "string"
+                },
+                "run_id": {
+                  "description": "From `start`; required except for `start` and run-listing `status`.",
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string",
+                  "description": "Required for `apply-proposal`; also the `cancel` reason."
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "finish",
+                  "type": "string"
+                },
+                "run_id": {
+                  "description": "From `start`; required except for `start` and run-listing `status`.",
+                  "type": "string"
+                },
+                "write_manifest": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "propose",
+                  "type": "string"
+                },
+                "run_id": {
+                  "description": "From `start`; required except for `start` and run-listing `status`.",
+                  "type": "string"
+                },
+                "proposals": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "apply-proposal",
+                  "type": "string"
+                },
+                "why": {
+                  "description": "Required for `apply-proposal`; also the `cancel` reason.",
+                  "type": "string"
+                },
+                "ref": {
+                  "description": "For `apply-proposal`, the `exomem://review/adoption/<id>` ref.",
+                  "type": "string"
+                },
+                "expected_fingerprint": {
+                  "description": "For `apply-proposal`, the reviewed fingerprint; a mismatch refuses.",
+                  "type": "string"
+                },
+                "expected_hash": {
+                  "type": "string",
+                  "description": "For `apply-proposal`, target page hash for relation and reconciliation-relate approvals."
+                }
+              },
+              "required": [
+                "kind",
+                "why",
+                "ref",
+                "expected_fingerprint"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "discriminator": {
+            "propertyName": "kind"
+          }
+        },
+        "response_detail": {
+          "description": "Success detail: compact (default), full, or legacy.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string",
+          "default": "compact"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "additionalProperties": false
     }
   },
   "change_connections": {
@@ -5276,6 +5462,122 @@
         "content"
       ],
       "type": "object"
+    }
+  },
+  "read_adoption": {
+    "description": "Scan existing material without importing it, inspect adoption runs or read a bounded work item. Status retains recorded coverage and verification counts. Select one operation.kind.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "description": "One operation, selected by `kind`.",
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "scan-only",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Subtree.",
+                  "type": "string",
+                  "default": ""
+                },
+                "max_depth": {
+                  "type": "integer",
+                  "default": 3
+                },
+                "include_hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samples": {
+                  "type": "integer",
+                  "default": 5
+                },
+                "pack_limit": {
+                  "type": "integer",
+                  "default": 6
+                },
+                "semantic_max_files": {
+                  "type": "integer",
+                  "default": 512
+                },
+                "semantic_max_bytes": {
+                  "type": "integer",
+                  "default": 8388608
+                },
+                "semantic_example_limit": {
+                  "type": "integer",
+                  "default": 12
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "status",
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string",
+                  "description": "From `start`; required except for `start` and run-listing `status`."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "work-item",
+                  "type": "string"
+                },
+                "run_id": {
+                  "description": "From `start`; required except for `start` and run-listing `status`.",
+                  "type": "string"
+                },
+                "sources": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "For `work-item`, source paths instead of the first imports."
+                },
+                "max_sources": {
+                  "type": "integer",
+                  "default": 5
+                },
+                "max_chars_per_source": {
+                  "type": "integer",
+                  "default": 2000
+                }
+              },
+              "required": [
+                "kind",
+                "run_id"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "discriminator": {
+            "propertyName": "kind"
+          }
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "additionalProperties": false
     }
   },
   "read_connections": {

@@ -87,7 +87,7 @@ in-place correction and verify the current page and retained interpretation.
 If the surface lacks that writer, report the unavailable operation and retain
 the intended correction for a capable surface. Do not create a dated child.
 Migrate the legacy page into a compiled type only on request
-(`adoption_studio`) — nothing here does that automatically.
+(`read_adoption` and `change_adoption`) — nothing here does that automatically.
 
 ## Read-only paths (rest of the vault)
 

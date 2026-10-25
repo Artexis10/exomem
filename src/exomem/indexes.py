@@ -731,6 +731,7 @@ def compute_subindex_writes(
     pending_paths: list[str] | None = None,
     include_unchanged: bool = False,
     include_sources_index: bool = True,
+    sources_counts: Mapping[str, int] | None = None,
 ) -> tuple[list[PlannedWrite], str | None]:
     """Build the planned writes for sub-folder + top-index count refreshes.
 
@@ -742,6 +743,10 @@ def compute_subindex_writes(
     an index into one guarded write instead of scheduling competing replacements.
     Disk reads still bind a guard for indexes with no base write. Otherwise the
     caller is responsible for re-reading the top index from disk later.
+
+    `sources_counts` is a Sources census the caller already holds for the state
+    before `pending_paths`; it replaces the walk, which a caller that commits many
+    batches in a row would otherwise repeat for each.
 
     Set `include_sources_index=False` when another planned write supplies that
     index. The census and guarded read still run; only its rendering is omitted.
@@ -766,8 +771,11 @@ def compute_subindex_writes(
     entities_dir = kb / "Entities"
     entity_registry = load_entity_types(vault_root)
 
-    with call_spans.span("indexes.source_census"):
-        sources_counts = _count_sources(sources_dir)
+    if sources_counts is None:
+        with call_spans.span("indexes.source_census"):
+            sources_counts = _count_sources(sources_dir)
+    else:
+        sources_counts = dict(sources_counts)
     notes_counts = _count_notes(notes_dir)
     entities_counts = _count_entities(entities_dir, registry=entity_registry)
     notes_by_subfolder = _count_notes_by_subfolder(notes_dir)

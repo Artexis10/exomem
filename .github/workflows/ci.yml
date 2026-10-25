@@ -234,6 +234,50 @@ jobs:
         if: matrix.shard == 1
         run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
 
+  recall-structural-reference:
+    name: structural recall (system SQLite)
+    if: *not-release-pr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_NO_MANAGED_PYTHON: "true"
+      UV_PYTHON_DOWNLOADS: never
+      OPENBLAS_NUM_THREADS: *native-math-threads
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select test scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_change_scope.py "structural recall on a docs-only change"
+      - name: Install uv
+        if: steps.scope.outputs.docs_only != 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Verify reference interpreter and SQLite
+        if: steps.scope.outputs.docs_only != 'true'
+        run: |
+          /usr/bin/python3.12 -c 'import platform, sqlite3; print(platform.python_version(), sqlite3.sqlite_version); assert sqlite3.sqlite_version == "3.45.1"'
+          uv run --frozen --python /usr/bin/python3.12 python -c 'import platform, sqlite3, sys; print(sys.executable, platform.python_version(), sqlite3.sqlite_version); assert sqlite3.sqlite_version == "3.45.1"'
+      - name: Run structural recall gate
+        if: steps.scope.outputs.docs_only != 'true'
+        run: >-
+          uv run --frozen --python /usr/bin/python3.12 python -m pytest -q -s
+          tests/test_ranking_catalogue_metadata.py::test_public_recall_work_does_not_scale_with_unrelated_pages
+          -o timeout=600 --session-timeout=720
+          --junitxml=test-results/recall-structural-reference.xml
+      - name: Upload structural recall evidence
+        if: always() && steps.scope.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: recall-structural-reference
+          path: test-results/recall-structural-reference.xml
+          if-no-files-found: warn
+
   harness-tests:
     name: harness tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
     if: *not-release-pr
@@ -971,7 +1015,7 @@ jobs:
   quality:
     if: ${{ github.event_name == 'pull_request' && !cancelled() }}
     # The test jobs named in .github/quality.yml, so their runtime is known.
-    needs: [timing-tests, core-tests, harness-tests, windows-held-filesystem, tui, product-e2e]
+    needs: [timing-tests, core-tests, recall-structural-reference, harness-tests, windows-held-filesystem, tui, product-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -996,6 +1040,7 @@ jobs:
       - release-evidence
       - timing-tests
       - core-tests
+      - recall-structural-reference
       - harness-tests
       - windows-held-filesystem
       - tui

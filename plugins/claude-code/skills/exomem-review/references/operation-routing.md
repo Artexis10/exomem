@@ -143,7 +143,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   `"14:32"`), the timestamp of the matching keyframe.
 - **View a video's frames on demand — `read_media`.** To *see* what a vault
   video shows (slides, screen recordings, meetings), call
-  `read_media(path, max_frames=8, start_sec=?, end_sec=?)` — it returns
+  `read_media(operation={"kind": "video", "path": ..., "max_frames": 8})` — it returns
   sampled keyframes INLINE as JPEG image blocks (no download round-trip needed),
   preceded by per-frame timestamps. The comprehension companion to visual search:
   `search_memory` locates the moment (`clip_match_at`), `read_media` shows it — an
