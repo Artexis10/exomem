@@ -1,6 +1,6 @@
 name: CI
 
-# Disposable hosted preparation proof; this branch never merges.
+# Disposable hosted regression proof; this branch never merges.
 on:
   workflow_dispatch:
 
@@ -8,136 +8,59 @@ permissions:
   contents: read
 
 jobs:
-  recall-worker-preflight:
+  finite-mixed-regression:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
-      UV_PYTHON: /usr/bin/python3
-      UV_PYTHON_DOWNLOADS: never
+      KB_MCP_DISABLE_EMBEDDINGS: "1"
+      KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      EXOMEM_TEST_TIER: core
+      EXOMEM_TUI_TEST_DIRECTORY: tests/tui
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/finite-mixed-env
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 7e0c1d41c536bb455c5d258000c43be70084115b
+          ref: c3e069d9e6628d43cb7aebe74f2edae36ba627e3
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.11.28"
           enable-cache: true
-      - name: Resolve the encoder digest
-        id: encoder
-        run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py --encoder-cache-key >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
-      - name: Discriminate existing decision memo capacity on the actual reference
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Exercise finite mixed recall and existing unit behavior
+        run: >-
+          uv run --frozen --python 3.13 python -m pytest -q
+          tests/test_semantic_unit_recall.py -o timeout=180
+          --junitxml=${{ runner.temp }}/finite-mixed-head.xml
+      - name: Verify the released baseline exposes the same finite completeness defect
         shell: bash
         run: |
-          uv run --frozen --group recall-benchmark python - <<'PY'
-          import json
+          baseline="$RUNNER_TEMP/finite-mixed-baseline"
+          git worktree add --detach "$baseline" 9432ea367192e8833d6dc5aef1ffb2b463ed4d8a
+          cp tests/test_semantic_unit_recall.py "$baseline/tests/test_semantic_unit_recall.py"
+          set +e
+          PYTHONPATH="$baseline/src" "$UV_PROJECT_ENVIRONMENT/bin/python" -m pytest -q "$baseline/tests/test_semantic_unit_recall.py::test_finite_mixed_recall_keeps_hits_and_reports_only_proved_completeness[complete]" -o timeout=180 --junitxml="$RUNNER_TEMP/finite-mixed-baseline.xml"
+          result=$?
+          set -e
+          test "$result" -eq 1
+          python3 - <<'PY'
           import os
-          import subprocess
-          import sys
-          import tempfile
-          import hashlib
+          import xml.etree.ElementTree as ET
           from pathlib import Path
-
-          script = Path.cwd() / "scripts" / "recall_latency_gate.py"
-          original = script.read_text()
-          helper = r'''
-          _diagnostic_original_sample = _worker_sample
-
-          def _diagnostic_sample(vault_root, request):
-              from exomem.governance import bridges, egress
-              requested = request.get("diagnostic_memo_reserve")
-              if requested is not None:
-                  egress.reserve_decision_memo(requested)
-              before = {"bound": egress._DECISION_MEMO_MAX, "size": egress.decision_memo_size()}
-              calls = 0
-              original_admit = bridges.admit
-              def counted_admit(*args, **kwargs):
-                  nonlocal calls
-                  calls += 1
-                  return original_admit(*args, **kwargs)
-              bridges.admit = counted_admit
-              try:
-                  result = _diagnostic_original_sample(vault_root, request)
-              finally:
-                  bridges.admit = original_admit
-              result["decision_memo"] = {"before": before,
-                  "after": {"bound": egress._DECISION_MEMO_MAX, "size": egress.decision_memo_size()},
-                  "bridge_admission_calls": calls, "requested_reservation": requested}
-              return result
-
-          _worker_sample = _diagnostic_sample
-          '''
-          overlay = "import ast\n_profile_helper = " + repr(helper) + "\n_profile_tree = ast.parse(_profile_source, filename=__file__)\nassert isinstance(_profile_tree.body[-1], ast.If)\n_profile_tree.body[-1:-1] = ast.parse(_profile_helper).body\nexec(compile(ast.fix_missing_locations(_profile_tree), __file__, 'exec'), globals())\n"
-          wrapper = "_profile_source = " + repr(original) + "\n" + overlay
-          script.write_text(wrapper)
-          sys.path.insert(0, str(Path.cwd() / "scripts"))
-          import recall_latency_gate as gate
-
-          report = {"state": "failed", "mode": "decision-memo-discriminator", "timings": "counter-wrapped diagnostic only; not qualified", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "diagnostic_overlay": "bridge-call-counter-with-explicit-existing-memo-reservation", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
-          workers = {}
-          try:
-              profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
-              cases, _ = gate.reference_cases(profile)
-              tag = subprocess.check_output(["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"], text=True).strip()
-              report["tag"] = tag
-              cpus = sorted(os.sched_getaffinity(0))[:gate.REFERENCE["reference_cpus"]]
-              if len(cpus) != gate.REFERENCE["reference_cpus"]:
-                  raise gate.MeasurementRefused("two-cpu-reference-unavailable")
-              with tempfile.TemporaryDirectory(prefix="recall-worker-preflight-") as directory:
-                  scratch = Path(directory)
-                  base = scratch / "base"
-                  base.mkdir()
-                  archive = scratch / "release.tar"
-                  with archive.open("wb") as stream:
-                      subprocess.run(["git", "archive", tag], stdout=stream, check=True)
-                  subprocess.run(["tar", "-xf", str(archive), "-C", str(base)], check=True)
-                  python = gate._prepare_tag_runtime(base, scratch)
-                  try:
-                      for arm, source in (("head", gate.ROOT), ("base", base)):
-                          runtime = ({"python": python, "runtime_prefix": python.parent.parent, "runtime_policy": "frozen-tag-runtime"} if arm == "base" else {})
-                          workers[arm] = gate._Worker(source, scratch / "vault", scratch / arm, cpus, profile, **runtime)
-                          report.setdefault("environment", {})[arm] = workers[arm].environment
-                      head, base_environment = (report["environment"][arm] for arm in ("head", "base"))
-                      for field in ("encoder_digest", "encoder_identity", "corpus", "sqlite_version"):
-                          if head[field] != base_environment[field]:
-                              raise gate.MeasurementRefused("paired-reference-inputs-differ")
-                      if head["sqlite_version"] not in profile["sqlite_versions"]:
-                          raise gate.MeasurementRefused("reference-sqlite-unsupported")
-                      first_cases = {case["series"]: case for case in reversed(cases)}
-                      report["warm_calls"] = []
-                      for arm, worker in (("head", workers["head"]),):
-                          try:
-                              for principal in ("owner",):
-                                  sequence = ("unit", "unit", "mixed", "unit", "unit", "mixed", "unit")
-                                  for ordinal, series in enumerate(sequence):
-                                      case = first_cases[series]
-                                      request = {**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"]}
-                                      if ordinal == 4:
-                                          request["diagnostic_memo_reserve"] = head["corpus"]["pages"]
-                                      result = worker.exchange(request)
-                                      report["warm_calls"].append({"ordinal": ordinal, "arm": arm, "principal": principal, "case": case["id"], "series": case["series"], **result})
-                          finally:
-                              worker.pause()
-                      report["state"] = "failed" if any(row["state"] != "ok" for row in report["warm_calls"]) else "observed"
-                  finally:
-                      for worker in workers.values():
-                          worker.close()
-          except Exception as error:
-              report["reason"] = error.code if isinstance(error, gate.MeasurementRefused) else type(error).__name__
-              report["phase"] = getattr(error, "phase", None)
-          finally:
-              Path("recall-bootstrap-result.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-          raise SystemExit(report["state"] == "failed")
+          root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "finite-mixed-baseline.xml").getroot()
+          cases = list(root.iter("testcase"))
+          assert len(cases) == 1
+          failure = cases[0].find("failure")
+          assert failure is not None and failure.attrib["message"].startswith("AssertionError")
+          assert "semantic_units_candidate_window" in (failure.text or "")
+          assert not list(root.iter("error"))
+          print("The released baseline fails on the finite completeness assertion.")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: recall-worker-preflight
-          path: recall-bootstrap-result.json
+          name: finite-mixed-regression
+          path: ${{ runner.temp }}/finite-mixed-*.xml
           if-no-files-found: warn
