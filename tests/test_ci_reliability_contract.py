@@ -31,7 +31,7 @@ FULL_CI_JOBS = {
 #: `retrieval-latency` job) they cover exactly the previous lean suite —
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
-    ("core-tests", 12, "core"),
+    ("core-tests", 24, "core"),
     ("harness-tests", 6, "harness"),
 )
 
@@ -148,14 +148,28 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     assert '["3.11", "3.13"]' in versions
     assert '["3.13"]' in versions
 
-    assert matrix["shard"] == list(range(1, shards + 1))
+    if tier == "core":
+        # FULL uses two runtimes within the hosted job limit; feedback uses one.
+        full_event = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
+        assert matrix["shard-count"] == (
+            "${{ " + full_event + " && fromJSON('[12]') || fromJSON('[24]') }}"
+        )
+        full_shards = json.dumps(list(range(1, 13)), separators=(",", ":"))
+        feedback_shards = json.dumps(list(range(1, shards + 1)), separators=(",", ":"))
+        assert matrix["shard"] == (
+            "${{ " + full_event + f" && fromJSON('{full_shards}') || fromJSON('{feedback_shards}') }}}}"
+        )
+        shard_count = "${{ matrix.shard-count }}"
+    else:
+        assert matrix["shard"] == list(range(1, shards + 1))
+        shard_count = str(shards)
     assert job["name"] == (
         f"{tier} tests (py${{{{ matrix.python-version }}}}, "
-        f"shard ${{{{ matrix.shard }}}}/{shards})"
+        f"shard ${{{{ matrix.shard }}}}/{shard_count})"
     )
 
     command = _run_step(job)["run"]
-    assert f"--splits={shards}" in command
+    assert f"--splits={shard_count}" in command
     assert "--group=${{ matrix.shard }}" in command
     algorithm = "least_duration" if tier == "core" else "duration_based_chunks"
     assert f"--splitting-algorithm={algorithm}" in command
@@ -353,6 +367,24 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     serial = _collect_items("serial core checks", "core", serial_selections)
     harness_items = _collect_items("harness tier", "harness", [])
     latency_items = _collect_items("nightly latency file", None, [NIGHTLY_OWNED_MODULE])
+    latency_job = workflow["jobs"]["retrieval-latency"]
+    latency_step = next(
+        step for step in latency_job["steps"] if step.get("name", "").startswith("Per-lane")
+    )
+    assert "-n " not in latency_step["run"], "clock checks need an idle runner"
+    assert "--splits=4 --group=${{ matrix.shard }}" in latency_step["run"]
+    assert "--splitting-algorithm=least_duration" in latency_step["run"]
+    assert latency_job["strategy"]["matrix"]["shard"] == [1, 2, 3, 4]
+    latency_shards: set[str] = set()
+    for shard in latency_job["strategy"]["matrix"]["shard"]:
+        selected = _collect_items(
+            f"latency shard {shard}", None,
+            [NIGHTLY_OWNED_MODULE, "--splits=4", f"--group={shard}",
+             "--splitting-algorithm=least_duration"],
+        )
+        assert not latency_shards & selected, "latency shards repeat cases"
+        latency_shards |= selected
+    assert latency_shards == latency_items, "latency shards omit or add cases"
     full, core, harness, latency = full_items, core_items, harness_items, latency_items
 
     assert not core & serial, "the serial checks also run in the worker pool"
@@ -518,7 +550,10 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
 
     assert "retrieval-eval" not in jobs
     assert "pytest -m embeddings -v" in jobs["retrieval-quality"]["steps"][-1]["run"]
-    assert "tests/test_latency_gate.py -q" in jobs["retrieval-latency"]["steps"][-1]["run"]
+    assert any(
+        "tests/test_latency_gate.py -q" in step.get("run", "")
+        for step in jobs["retrieval-latency"]["steps"]
+    )
     semantic_command = jobs["semantic-write-latency"]["steps"][-1]["run"]
     assert "scripts/semantic_write_latency.py --check" in semantic_command
 

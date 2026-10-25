@@ -19,6 +19,7 @@ exomem-cellctl = "cellctl.main:run"
 dev = [
     "pytest>=8,<10",
     "pytest-asyncio>=1,<2",
+    "pytest-split>=0.11,<1",
     "ruff>=0.12,<1",
 ]
 

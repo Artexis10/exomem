@@ -109,7 +109,7 @@ jobs:
   # The 180-second per-test limit leaves room for CPU sharing. Disable worker
   # replacement because scheduler recovery previously stalled after a crash.
   core-tests:
-    name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/12)
+    name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/${{ matrix.shard-count }})
     env: *serial-core-selections
     # The release PR runs no test job: `release-evidence` requires a green
     # full run at its base revision and refuses a release PR that changes
@@ -130,7 +130,9 @@ jobs:
         python-version: *test-python-versions
         # Separate runners keep process, port, filesystem, and mutation-lock
         # state isolated while cutting the serial critical path.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        # Feedback can use 24 runners; FULL keeps 12 per runtime within the shared hosted limit.
+        shard-count: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('[12]') || fromJSON('[24]') }}
+        shard: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('[1,2,3,4,5,6,7,8,9,10,11,12]') || fromJSON('[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -197,7 +199,7 @@ jobs:
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           --basetemp=/tmp/exomem-pytest
-          --splits=12
+          --splits=${{ matrix.shard-count }}
           -n 4
           --dist loadfile
           --max-worker-restart=0
@@ -589,27 +591,51 @@ jobs:
         run: uv run --frozen --extra embeddings python -m pytest -m embeddings -v
 
   retrieval-latency:
-    name: retrieval latency (2k synthetic vault)
+    name: retrieval latency (2k synthetic vault, shard ${{ matrix.shard }}/4)
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     # Keep this benchmark on its calibrated Ubuntu 24.04 runtime.
     runs-on: ubuntu-24.04
     # Green CI took 9m38s; one case allows 15m. Let the remaining suite report
     # its result after that case while keeping every latency assertion unchanged.
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - *prepare-duration-snapshot
       - name: Per-lane latency ceiling gate (2000-note synthetic vault, model-free)
+        env:
+          EXOMEM_DURATIONS_PATH: *duration-snapshot-path
         # The anti-"hidden 14s" gate (tests/test_latency_gate.py): generates a
         # realistic densely-wikilinked 2000-note vault and asserts NO retrieval
         # lane exceeds its ceiling (graph rebuild → ~1.9s trips it). This job
         # OWNS the file: it runs in NEITHER PR tier (the partition check in
         # tests/test_ci_reliability_contract.py enforces that), so its evidence
         # comes from nightly/dispatch full runs, next to the golden quality gate.
-        run: uv run --frozen python -m pytest tests/test_latency_gate.py -q
+        # Each case keeps its whole timing loop and function-scoped vault on an idle runner.
+        run: >-
+          uv run --frozen python -m pytest tests/test_latency_gate.py -q
+          --splits=4 --group=${{ matrix.shard }} --splitting-algorithm=least_duration
+          --durations-path="$EXOMEM_DURATIONS_PATH" --store-durations --clean-durations
+          --durations=20 --junitxml=test-results/retrieval-latency-${{ matrix.shard }}.xml
+      - name: Upload latency timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-latency-shard-${{ matrix.shard }}-junit
+          path: test-results/retrieval-latency-${{ matrix.shard }}.xml
+          if-no-files-found: warn
+      - name: Upload refreshed test durations
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-durations-latency-shard-${{ matrix.shard }}
+          path: *duration-snapshot-path
 
   governance-projection-wire:
     name: governance projected wire characterization (${{ matrix.route }})

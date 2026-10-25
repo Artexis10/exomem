@@ -182,15 +182,26 @@ jobs:
   # Separate runners keep each group's cluster policies and storage isolated.
   # The complementary selectors run every case once; only imports need the source image.
   live-k3s:
-    name: Live K3s integration suite (${{ matrix.suite }})
+    name: Live K3s integration suite (${{ matrix.suite }}, shard ${{ matrix.shard }}/${{ matrix.shards }})
     if: needs.live-k3s-scope.outputs.run == 'true'
-    needs: [checks, live-k3s-scope]
+    # The live runners build their own dependencies; the workflow still requires checks to pass.
+    needs: [live-k3s-scope]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        suite: [protected-import, platform]
+        # These are test execution groups, not product vocabulary. Keep the platform cluster whole.
+        include:
+          - suite: protected-import
+            shard: 1
+            shards: 2
+          - suite: protected-import
+            shard: 2
+            shards: 2
+          - suite: platform
+            shard: 1
+            shards: 1
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -270,6 +281,8 @@ jobs:
           CELLCTL_K3S_IMPORT_IMAGE: ${{ matrix.suite == 'protected-import' && format('cellctl-import-source:ci-{0}', github.sha) || '' }}
           PYTHONUNBUFFERED: "1"
           SUITE_GROUP: ${{ matrix.suite }}
+          SUITE_SHARD: ${{ matrix.shard }}
+          SUITE_SHARDS: ${{ matrix.shards }}
           # These fixed test identities partition the existing suite, including all their parameters.
           # Both run the product's own commands from the source-built image, so both belong to the
           # protected-import group; the platform group runs every other case.
@@ -283,6 +296,8 @@ jobs:
           HELM_BIN="$(command -v helm)" \
           uv run --frozen python -m pytest -q -s -rs -p no:cacheprovider \
             --junitxml="${RUNNER_TEMP}/live-k3s.xml" \
+            --splits="$SUITE_SHARDS" --group="$SUITE_SHARD" \
+            --splitting-algorithm=least_duration \
             -k "$selection" tests/test_k3s_integration.py \
             | tee "${RUNNER_TEMP}/live-k3s.txt"
           if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/live-k3s.txt"; then
@@ -311,6 +326,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: live-k3s-${{ matrix.suite }}-junit
+          name: live-k3s-${{ matrix.suite }}-${{ matrix.shard }}-junit
           path: ${{ runner.temp }}/live-k3s.xml
           if-no-files-found: warn
