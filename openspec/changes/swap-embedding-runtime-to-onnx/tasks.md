@@ -68,14 +68,19 @@ Retirement scope (2026-10-11): Retirement supersedes the Hosted image and provis
 
 ## 5. Re-derive the envelope
 
-- [ ] 5.1 Measure warm resident and peak for one cell on the new runtime, on the node
+- [x] 5.1 Measure warm resident and peak for one cell on the new runtime, on the node
   profile in service, and record the numbers.
   - Measured in the hosted image under exact cell constraints (`--network none
     --read-only --user 10001:10001 --cap-drop ALL --memory=1536m`), batch 8, 200
     chunks: import 33 MiB, warm 548 MiB, **peak 604 MiB**, 22.7 chunks/s. The torch
     envelope this replaces was 918 MiB peak at the same batch size.
-  - Still open because the cap also needs the platform's own memory delta, which
-    cannot be measured until the platform is installed on the node.
+  - Platform memory delta on the node in service (4 vCPU, 7.57 GiB allocatable), from
+    metrics-server working sets, 30 one-minute samples on 2026-10-25 across a gateway
+    rollout and two cell restarts: platform pods 471–490 MiB; K3s, containerd and the
+    OS outside pods 1743–2236 MiB; **delta per sample 2223–2706 MiB, median about 2281 MiB**.
+    These are sampled working sets, not lifetime peaks, and include reclaimable cache.
+  - Live cells differ from the synthetic run: one owner cell's working set was 1488–1645 MiB
+    before its restart, and a small cell's 463 MiB, in the same window. Task 5.2 sizes from live cells.
 
 - [ ] 5.2 Set the cell resource requests and limits and the namespace quota from that
   measurement, keeping the declared and rendered worker policy in step.
