@@ -123,7 +123,9 @@ unknown timings separately from typed warming and labels full acceptance as
 not measured. Later process load remains diagnostic after initial quiescence.
 Missed targets and stage budgets diagnose their rows without failing a ceiling.
 
-Task 6.1 remains open. The legacy runner still lacks the complete reference query
-mix, principal proof, served encoder proof, interval unions and live run-queue
-attribution that the owning contract requires. Model-free injected transport
-checks prove the runner's bar comparisons; they establish no live acceptance.
+Task 6.1 remains open. The source runner now defines the reference corpus and
+query mix, includes principal and encoder checks, and records interval unions
+and live run-queue attribution. Hosted execution must verify stored rows,
+worker execution, paired qualification and the complete job duration.
+Encoder thread profiling, SQL replay and absolute and live acceptance remain
+unmeasured. Model-free transport checks establish no live acceptance.

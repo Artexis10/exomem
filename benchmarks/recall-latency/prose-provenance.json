@@ -422,7 +422,7 @@
     },
     "recipe": "For each source file in order, retain paragraph nodes with at least eight whitespace-separated words. Exclude paragraphs with problematic descendants or system_message, table, literal_block or raw ancestors. Join astext whitespace within each paragraph. Omit the paragraphs identified by source path, line and text hash below. Join paragraphs with two linefeeds; append one final linefeed.",
     "script_sha256": "87bb6b1e8cae4859d8f7ec3f074fe33708cb0551013a43290fd2bae0786708f6",
-    "privacy_validator_sha256": "4e1a536499f88ec5b641fe3fb13b6fab68eca4fceaff8856940e319463386b1e",
+    "privacy_validator_sha256": "953d76669efedd11e2b0516f1f04386e431d345720041aff18cf93c1ffd3c56a",
     "omitted_paragraphs": [
       {
         "path": "Doc/faq/windows.rst",

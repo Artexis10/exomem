@@ -55,7 +55,6 @@ PUBLIC_ARTIFACT_INVENTORY: tuple[PublicArtifactClass, ...] = (
         roots=("tests", "examples"),
     ),
     PublicArtifactClass("example-scripts", "input", roots=("scripts",)),
-    PublicArtifactClass("benchmark-inputs", "input", roots=("benchmarks",)),
     PublicArtifactClass(
         "generated-schemas-docs",
         "input",
