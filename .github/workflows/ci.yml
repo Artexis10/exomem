@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 5be11e31c2a96c05fbc04b6fe7dbd2ab504d2cc7
+          ref: 0b2f691c2735e5cba0b5af8acae834f10250d610
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
@@ -30,7 +30,7 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
-      - name: Prepare both real workers without timed queries
+      - name: Verify real worker preparation and representative warm calls
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -41,73 +41,16 @@ jobs:
           import subprocess
           import sys
           import tempfile
-          import textwrap
-          import hashlib
           from pathlib import Path
 
-          script = Path.cwd() / "scripts" / "recall_latency_gate.py"
-          original = script.read_text()
-          # Compile original AST locations so diagnostic lines identify the reviewed source.
-          overlay = textwrap.dedent(r'''
-          import ast
-
-          class _DiagnosticOverlay(ast.NodeTransformer):
-              responses = 0
-              refusals = 0
-
-              def visit_FunctionDef(self, node):
-                  if node.name == "worker_main":
-                      for handler in ast.walk(node):
-                          if not isinstance(handler, ast.ExceptHandler):
-                              continue
-                          for index, statement in enumerate(handler.body):
-                              if (isinstance(statement, ast.Assign)
-                                  and any(isinstance(target, ast.Name) and target.id == "response" for target in statement.targets)
-                                  and isinstance(statement.value, ast.Dict)):
-                                  capture = ast.parse("_diagnostic_frames = list(__import__('traceback').walk_tb(error.__traceback__))").body[0]
-                                  ast.copy_location(capture, statement)
-                                  handler.body.insert(index, capture)
-                                  statement.value.keys.append(ast.Constant("diagnostic_trace"))
-                                  statement.value.values.append(ast.parse(
-                                      "{'frames': [{'module': frame.f_globals.get('__name__', 'unknown'), 'function': frame.f_code.co_name, 'line': line} for frame, line in _diagnostic_frames[-64:]], 'truncated': len(_diagnostic_frames) > 64}", mode="eval"
-                                  ).body)
-                                  self.responses += 1
-                                  break
-                  if node.name == "exchange":
-                      for branch in ast.walk(node):
-                          if not isinstance(branch, ast.If):
-                              continue
-                          for index, statement in enumerate(branch.body):
-                              if (isinstance(statement, ast.Raise) and isinstance(statement.exc, ast.Call)
-                                  and isinstance(statement.exc.func, ast.Name) and statement.exc.func.id == "MeasurementRefused"
-                                  and statement.exc.args and isinstance(statement.exc.args[0], ast.Name)
-                                  and statement.exc.args[0].id == "reason"):
-                                  replacement = ast.parse("_diagnostic_error = None\n_diagnostic_error.diagnostic_trace = response.get('diagnostic_trace')\nraise _diagnostic_error").body
-                                  replacement[0].value = statement.exc
-                                  for item in replacement:
-                                      ast.copy_location(item, statement)
-                                  branch.body[index:index + 1] = replacement
-                                  self.refusals += 1
-                                  break
-                  return node
-
-          _diagnostic_tree = ast.parse(_diagnostic_source, filename=__file__)
-          _diagnostic_transformer = _DiagnosticOverlay()
-          _diagnostic_tree = _diagnostic_transformer.visit(_diagnostic_tree)
-          assert (_diagnostic_transformer.responses, _diagnostic_transformer.refusals) == (1, 1)
-          exec(compile(ast.fix_missing_locations(_diagnostic_tree), __file__, "exec"), globals())
-          ''')
-          wrapper = "_diagnostic_source = " + repr(original) + "\n" + overlay
-          script.write_text(wrapper)
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           import recall_latency_gate as gate
 
-          report = {"state": "failed", "timings": "not measured", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-                    "diagnostic_overlay": "exception-frame-metadata-only", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
+          report = {"state": "failed", "timings": "not qualified; preparation and warm-up only", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
           workers = {}
           try:
               profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
-              gate.reference_cases(profile)
+              cases, _ = gate.reference_cases(profile)
               tag = subprocess.check_output(["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"], text=True).strip()
               report["tag"] = tag
               cpus = sorted(os.sched_getaffinity(0))[:gate.REFERENCE["reference_cpus"]]
@@ -133,6 +76,18 @@ jobs:
                               raise gate.MeasurementRefused("paired-reference-inputs-differ")
                       if head["sqlite_version"] not in profile["sqlite_versions"]:
                           raise gate.MeasurementRefused("reference-sqlite-unsupported")
+                      first_cases = {case["series"]: case for case in reversed(cases)}
+                      report["warm_calls"] = []
+                      for arm, worker in workers.items():
+                          try:
+                              for principal in ("owner", "admitted"):
+                                  for case in first_cases.values():
+                                      result = worker.exchange({**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"]})
+                                      report["warm_calls"].append({"arm": arm, "principal": principal, "case": case["id"], "state": result.get("state")})
+                                      if result.get("state") != "ok":
+                                          raise gate.MeasurementRefused("reference-warm-call-not-ok")
+                          finally:
+                              worker.pause()
                       report["state"] = "prepared"
                   finally:
                       for worker in workers.values():
@@ -140,7 +95,6 @@ jobs:
           except Exception as error:
               report["reason"] = error.code if isinstance(error, gate.MeasurementRefused) else type(error).__name__
               report["phase"] = getattr(error, "phase", None)
-              report["diagnostic_trace"] = getattr(error, "diagnostic_trace", None)
           finally:
               Path("recall-bootstrap-result.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
           raise SystemExit(report["state"] != "prepared")
