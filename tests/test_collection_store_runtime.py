@@ -612,6 +612,88 @@ def test_explicit_close_drains_authority_holders_without_owning_boundary(runtime
     assert manager.client.released.is_set()
 
 
+def test_close_waits_until_authority_grant_is_released(runtime, monkeypatch):
+    from contextlib import contextmanager
+    from queue import Queue
+
+    _create(runtime)
+    manager = runtime.manager
+    guard_thread = threading.current_thread()
+    grant_releasing, resume_grant = threading.Event(), threading.Event()
+    boundary_available = threading.Event()
+    observations = Queue()
+    first_event, close_errors, handoff_errors = [], [], []
+    original_claim = manager._replica_grant_claim
+    original_wait = manager._store_condition.wait
+
+    def close():
+        try:
+            manager.close()
+        except BaseException as error:  # noqa: BLE001 - report every worker failure on the test thread
+            close_errors.append(error)
+            observations.put(("close-error", error))
+        else:
+            observations.put(("closed", None))
+
+    close_worker = threading.Thread(target=close, name="close-authority-grant")
+
+    @contextmanager
+    def claim(*, exclusive=False):
+        with original_claim(exclusive=exclusive) as available:
+            if exclusive and threading.current_thread() is close_worker:
+                observations.put(("exclusive-claim", available))
+            try:
+                yield available
+            finally:
+                if not exclusive and threading.current_thread() is guard_thread:
+                    # Pause after the guard body exits, while the real shared grant remains held.
+                    grant_releasing.set()
+                    assert resume_grant.wait(5), "shared grant release was not resumed"
+
+    def wait(timeout=None):
+        if threading.current_thread() is close_worker:
+            observations.put(("drain-wait", None))
+        return original_wait(timeout)
+
+    def handoff():
+        try:
+            assert grant_releasing.wait(5), "guard never reached shared grant release"
+            close_worker.start()
+            event = observations.get(timeout=5)
+            first_event.append(event)
+            if event == ("drain-wait", None):
+                with manager._mutation_coordinator_for(runtime.root).hold(timeout_seconds=0):
+                    boundary_available.set()
+        except BaseException as error:  # noqa: BLE001 - report every worker failure on the test thread
+            handoff_errors.append(error)
+        finally:
+            resume_grant.set()
+
+    monkeypatch.setattr(manager, "_replica_grant_claim", claim)
+    monkeypatch.setattr(manager._store_condition, "wait", wait)
+    handoff_worker = threading.Thread(target=handoff, name="handoff-authority-grant")
+    handoff_worker.start()
+    try:
+        with manager.writer_authority_guard(vault_root=runtime.root):
+            pass
+    finally:
+        resume_grant.set()
+        handoff_worker.join(5)
+        if close_worker.ident is not None:
+            close_worker.join(5)
+
+    diagnostic = (f"first close event={first_event!r}; close errors={close_errors!r}; "
+                  f"handoff errors={handoff_errors!r}")
+    assert not handoff_worker.is_alive(), diagnostic
+    assert not close_worker.is_alive(), diagnostic
+    assert first_event == [("drain-wait", None)], diagnostic
+    assert not handoff_errors, diagnostic
+    assert not close_errors, diagnostic
+    assert boundary_available.is_set(), diagnostic
+    assert manager.client.released.is_set()
+    assert manager.client.release_head == runtime.sample_head()
+
+
 def test_saved_adapter_cannot_read_after_checkout(runtime):
     from exomem import record_formats
 
