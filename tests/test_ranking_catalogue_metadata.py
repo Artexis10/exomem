@@ -22,6 +22,7 @@ from exomem.vault import kb_dirname
 @pytest.mark.parametrize("principal", ["owner", "admitted"])
 def test_public_recall_work_does_not_scale_with_unrelated_pages(
     tmp_path: Path, monkeypatch, principal: str, record_property,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Catch whole-catalogue SQL and candidate hydration through both public read commands."""
     from conftest import initialize_vault_state_offline
@@ -41,6 +42,8 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
     from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
     from exomem.vault import walk_vault_md
 
+    # This test owns managed readiness; restore the offline default for later tests.
+    request.addfinalizer(readiness.reset)
     runtime = {"python": platform.python_version(), "sqlite": sqlite3.sqlite_version}
     runtime_evidence = json.dumps(runtime, sort_keys=True)
     record_property("execution_versions", runtime_evidence)
