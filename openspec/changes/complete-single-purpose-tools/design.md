@@ -79,6 +79,24 @@ Extend the tool-selection harness rather than introduce another runner or teleme
 
 Start with free contract checks and a small complete development round. Freeze the decision protocol and fresh held-out cases before the decision run. Reuse the approved non-inferiority floor of 0.10 and inspect every wrong write. Report per-case paired differences and intervals. An interval containing zero means no change. Remove the grouped baseline option only after the decision run.
 
+### Scoring amendment R2-S1
+
+Consume one complete JSON reply with an `answer` member. Accept one whole Markdown JSON fence through the maintained Markdown parser. Reject prose wrappers, inline examples and multiple JSON documents. The former embedded-object scan could give credit to a quoted answer that the reply denied. The stricter rule can reject benign prose around a correct value; the JSON-only requests justify that cost.
+
+Apply this policy to every captured read answer in both arms. Preserve the original prompts, keys, replies and score artifacts. Write a separate rescore with the policy and source hashes. Keep historical results under their recorded policy. The margin of 0.10 and wrong-write excess tolerance of one remain unchanged.
+
+Resolve operational files through their source owners. Keep the role-store SQLite family and the emission ledger in raw evidence rather than authored quality facts. The role store is rebuildable support; the emission ledger records persistent telemetry. Keep due-state decisions, review state, preferences, registry history, logical governance rows and all other machine files in the existing checks.
+
+### Decision amendment R2-S2
+
+Use 70 fresh independent case pairs, with one actor run per arm and case. Draw each case independently from a frozen mixture: 75% new workflow intents and 25% existing Records or Planning templates. Select uniformly within each component. The new component contains the ten source-derived development intents; the existing component contains the eight established templates. Author new substantive fixtures, questions and source-derived keys after freezing this recipe. Do not reuse development source bundles or rebalance the draw. Each case has its own fixture and sampling unit. Report missing families as coverage limits.
+
+The existing shifted sign-flip interval becomes almost zero-width when all observed pairs tie. It does not bound unseen discordant outcomes. Leave the shared implementation unchanged for its owner. Use SciPy's exact binomial intervals for this decision instead of a new statistics implementation. For each complete pair, record candidate-only failure and candidate-only success. Let their one-sided 97.5% upper probability bounds be U_loss and U_gain. Report the conservative paired 95% interval [-U_loss, U_gain], the observed paired mean, and every case difference. Accept non-inferiority only when the lower bound exceeds -0.10 and wrong-write excess is at most one. An interval containing zero means no change. Missing or unscored pairs make the decision inconclusive.
+
+At 70 pairs, this rule permits at most two candidate-only failures. Its pass probability is 83.5% if the true candidate-only failure probability is 2%. That assumption is unverified; nine development ties do not establish it. The rule ignores offsetting gains and has less power when discordance is common. Freeze this size once, with no expansion after outcomes. Generalize only to this workflow mixture, installed host and actor configuration.
+
+Reuse the existing isolated MCP runner, subscription launcher, client, model, call budget and retry policy. Freeze the protocol before case authoring, then pin the candidate, harness, dependencies, cases, keys and captured request configuration before dispatch. Admit fixtures and verify the data chain first. Keep unavailable clients visible. Do not answer approval prompts or add an API fallback.
+
 ## Risks / Trade-offs
 
 - Shared names can collide with legacy registrations. Publish schemas through discovery and retain one grouped executable.

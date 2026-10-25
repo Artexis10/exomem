@@ -353,6 +353,7 @@ def read_end_state(vault: Path) -> dict:
     owner_preference = preferences._preference_path(vault, OWNER_AUDIENCE)
     preference_root = owner_preference.parent
     review_path = review_state.state_path(vault)
+    from exomem import artifact_role_state, due_state
     from exomem.governance.store import sidecar_path as governance_path
     from exomem.media_jobs import job_store_path, worker_lock_path
     from exomem.working_set_heat import sidecar_path as heat_path
@@ -363,12 +364,18 @@ def read_end_state(vault: Path) -> dict:
     activation_files = {Path(str(activation_path(vault)) + suffix) for suffix in reserved_paths._SQLITE_SUFFIXES}
     governance_files = {Path(str(governance_path(vault)) + suffix) for suffix in reserved_paths._SQLITE_SUFFIXES}
     media_files = {Path(str(job_store_path(vault)) + suffix) for suffix in reserved_paths._SQLITE_SUFFIXES}
+    role_files = {Path(str(artifact_role_state.store_path(vault)) + suffix) for suffix in reserved_paths._SQLITE_SUFFIXES}
+    emission_file = due_state.emission_path(vault)
     other_preferences = {}
 
     for path in sorted(state.rglob("*")) if state.exists() else ():
         if path.is_dir():
             continue
         relative = path.relative_to(state).as_posix()
+        if path in role_files or path == emission_file:
+            # Role descriptors are rebuildable support; the emission ledger is persistent operational telemetry.
+            _file_fact(path, relative, evidence["machine"], evidence["unavailable"], opaque=True)
+            continue
         if (derived(f"Knowledge Base/{relative}") or path in heat_files or path in activation_files
                 or path in governance_files or path in media_files
                 or path == worker_lock_path(vault) or path == preference_root / ".lock"):

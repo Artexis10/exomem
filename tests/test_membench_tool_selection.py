@@ -269,15 +269,19 @@ def test_the_seeding_child_process_builds_a_vault_the_end_state_reader_can_read(
     ("reply", "answer"),
     [
         ('{"answer": 8}', 8),
-        ('The total is 8.\n\n{"answer": 8}', 8),
+        ('The total is 8.\n\n{"answer": 8}', None),
         ('```json\n{"answer": ["a", "b"]}\n```', ["a", "b"]),
-        ('{"answer": 3} then, correcting myself, {"answer": 4}', 4),
+        ('{"answer": 3} then, correcting myself, {"answer": 4}', None),
+        ('The delta is not valid, so I am not returning `{"answer":"valid"}`. I saved nothing.', None),
+        ('> ```json\n> {"answer": 8}\n> ```', None),
+        ('[{"answer": 8}]', None),
+        ('```text\n{"answer": 8}\n```', None),
         ('{"result": 8}', None),
         ("no object here", None),
         (None, None),
     ],
 )
-def test_the_answer_is_the_last_answer_member_of_a_json_object_in_the_reply(reply, answer) -> None:
+def test_answer_decoding_requires_whole_json_or_one_whole_json_fence(reply, answer) -> None:
     assert parse_answer(reply) == answer
 
 
@@ -366,7 +370,7 @@ def test_a_write_task_succeeds_only_when_the_vault_ends_as_the_key_says() -> Non
     assert not run(ended_with([*_rows_of(case), entry], other_rows=[])).success
 
 
-def test_a_read_task_is_scored_on_its_answer_and_a_wrapper_around_it_does_not_matter() -> None:
+def test_read_answer_credit_requires_the_declared_whole_reply_format() -> None:
     case = build_case("records-range-total", 101)
     state = _records_state(case, _rows_of(case))
     total = case.key.answer
@@ -374,7 +378,9 @@ def test_a_read_task_is_scored_on_its_answer_and_a_wrapper_around_it_does_not_ma
     def run(reply: str) -> CaseResult:
         return _score(case, _session(case, answer=reply, before=state, after=state))
 
-    assert run(f'It adds up.\n{{"answer": {total}}}').success
+    assert run(f'{{"answer": {total}}}').success
+    assert run(f'```json\n{{"answer": {total}}}\n```').success
+    assert not run(f'It adds up.\n{{"answer": {total}}}').success
     assert not run(f'{{"answer": {total + 1}}}').success
     assert not run("It adds up to a few.").success
 

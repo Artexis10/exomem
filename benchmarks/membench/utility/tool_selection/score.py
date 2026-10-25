@@ -23,6 +23,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from markdown_it import MarkdownIt
+
 from exomem.cli_ops import INVALID_OPERATION_ARGUMENTS
 from membench.utility.switch_eval.tap import tool_payloads
 
@@ -52,28 +54,21 @@ SCORABLE_OUTCOMES = frozenset({"ok", "actor_failure"})
 
 
 def parse_answer(text: str | None) -> Any:
-    """The ``answer`` member of the last JSON object in a reply, or ``None``.
-
-    The prompt asks for only that object, and models still add a sentence or a
-    code fence around it. The JSON parser finds the object, so the wrapper
-    never decides the score; only the parsed value does.
-    """
-
+    """R2-S1: one complete JSON root object, optionally inside one whole JSON fence."""
     if not text:
         return None
-    decoder = json.JSONDecoder()
-    found: Any = None
-    position = text.find("{")
-    while position != -1:
+    try:
+        value = json.loads(text.strip())
+    except json.JSONDecodeError:
+        tokens = MarkdownIt("commonmark").parse(text.strip())
+        # `fence` and `json` are the maintained parser token and the declared output syntax.
+        if len(tokens) != 1 or tokens[0].type != "fence" or tokens[0].info.strip() != "json":
+            return None
         try:
-            value, end = decoder.raw_decode(text, position)
+            value = json.loads(tokens[0].content)
         except json.JSONDecodeError:
-            position = text.find("{", position + 1)
-            continue
-        if isinstance(value, dict) and "answer" in value:
-            found = value["answer"]
-        position = text.find("{", end)
-    return found
+            return None
+    return value.get("answer") if isinstance(value, dict) else None
 
 
 def answer_matches(answer: Any, key: Key) -> bool:

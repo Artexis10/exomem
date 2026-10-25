@@ -196,12 +196,18 @@ def test_observation_key_accepts_only_the_declared_unit_change_and_preserves_the
 
 @pytest.mark.parametrize("ident,commit", [("r2-d06", False), ("r2-d07", True)])
 def test_file_key_checks_preview_and_once_only_append_on_real_markdown(tmp_path, ident, commit):
-    from exomem import commands
+    import base64
+
+    from exomem import artifact_role_state, commands, due_state, state_paths
     from exomem.governance.principal import owner_principal, request_scope
 
     case = source_case(ident)
     root = tmp_path / "vault"
     seed_vault(root, case.seed_steps())
+    if commit:
+        # Match common readiness: post-commit hygiene updates an already warmed projection, never a cold full scan.
+        with request_scope(owner_principal(surface="mcp")):
+            due_state.reconcile(root)
     before = read_end_state(root)
     request = {"path": case.params["fixture"]["path"], "content": "\n" + case.params["fixture"]["append"] + "\n"}
     with request_scope(owner_principal(surface="mcp")):
@@ -221,6 +227,17 @@ def test_file_key_checks_preview_and_once_only_append_on_real_markdown(tmp_path,
     result = score_session(case, session(before, after, answer=answer), calls, product_resolver())
 
     assert result.success, result.reasons
+    if commit:
+        state_root = state_paths.vault_state_dir(root)
+        for owned in (artifact_role_state.store_path(root), due_state.emission_path(root)):
+            relative = owned.relative_to(state_root).as_posix()
+            assert relative not in after["machine"]
+            assert base64.b64decode(after["evidence"]["machine"][relative]["base64"]) == owned.read_bytes()
+        due = due_state.state_path(root).relative_to(state_root).as_posix()
+        assert due in after["machine"]
+        collateral = json.loads(json.dumps(after))
+        collateral["machine"][due]["value"]["writes"] = "an unrelated canonical change"
+        assert not score_session(case, session(before, collateral), [], product_resolver()).success
 
 
 def test_meaning_question_key_binds_page_evidence_and_rejects_a_second_question(tmp_path):
