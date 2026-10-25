@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.143.2](https://github.com/Artexis10/exomem/compare/v0.143.1...v0.143.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **recall:** reuse catalogue paths and bound graph membership work ([#2091](https://github.com/Artexis10/exomem/issues/2091)) ([b0d5aec](https://github.com/Artexis10/exomem/commit/b0d5aecb61e9aa0ec0fca9fd129e91907b30f526))
+
 ## [0.143.1](https://github.com/Artexis10/exomem/compare/v0.143.0...v0.143.1) (2026-10-25)
 
 
