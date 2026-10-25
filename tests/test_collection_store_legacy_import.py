@@ -546,6 +546,9 @@ def test_offline_mixed_capture_uses_the_verified_base_without_admitting_staged_f
     first = store.append_record(CID, item={"title": "Canonical base"}, item_key=KEY, why="capture")
     store.reconcile_views()
     base = ownership.current(root, conn=store.connection, private=True)
+    assert base.owner(root, root / manifest_path())["collection_id"] == CID
+    (root / "Outside.md").write_text("# Ordinary target\n")
+    (root / "Unrelated.md").write_text("# Unrelated root note\n")
     incoming = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     text = manifest_text().replace(CID, incoming).replace(
         "item_schema:\n",
@@ -564,6 +567,7 @@ def test_offline_mixed_capture_uses_the_verified_base_without_admitting_staged_f
         (KEY, "Target.md", {"title": "File target"}),
         ("22222222-2222-4222-8222-222222222222", "Own.md", {"title": "Own", "related": own_ref}),
         ("33333333-3333-4333-8333-333333333333", "Base.md", {"title": "Base", "related": "[[Canonical base]]"}),
+        ("44444444-4444-4444-8444-444444444444", "Ordinary.md", {"title": "Ordinary", "related": "[[Outside]]"}),
     ):
         (source / filename).write_text(record_formats.render_markdown_item(
             manifest, values, key, resolve_relationship=lambda kind, raw: ("Knowledge Base/Notes/Target.md", "Fixture")
@@ -576,6 +580,7 @@ def test_offline_mixed_capture_uses_the_verified_base_without_admitting_staged_f
         resolutions = {(kind, raw): result for kind, raw, result in captured.presentation_resolutions}
         assert resolutions[("record", own_ref)][1] == "File target"
         assert resolutions[("record", "[[Canonical base]]")][1] == "Canonical base"
+        assert resolutions[("record", "[[Outside]]")] == ("Outside.md", "Ordinary target")
         conn.execute("BEGIN")
         legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
         assert json.loads(conn.execute("SELECT values_json FROM items WHERE item_key=?", (KEY,)).fetchone()[0]) == {

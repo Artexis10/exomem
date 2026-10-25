@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from test_collection_store_writer import store as store
 
 from exomem import commands, entity_types, graph_sync, registry_history
 
@@ -398,6 +399,37 @@ def test_warm_registry_load_does_not_read_the_overlay_again(
     assert reads == []
 
 
+def test_cached_planning_values_do_not_read_unrelated_notes(store, monkeypatch) -> None:
+    from exomem import held_fs, reserved_paths
+    from exomem.collection_store.preview import preview_store
+    from exomem.planning_values import PlanningValues, registry_path
+
+    overlay = registry_path(store.root)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nentries:\n  status.waiting: {attributes: {class: open}}\n",
+        encoding="utf-8",
+    )
+    unrelated = store.root / "Knowledge Base/Notes/Unrelated.md"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("# Unrelated note\n", encoding="utf-8")
+    identity = reserved_paths.inspect_generic_path(store.root, unrelated.relative_to(store.root).as_posix())
+    with held_fs.acquire(store.root).require() as fs:
+        backend = type(fs)
+    read = backend.read
+
+    def admit_selected_bytes(fs, file, **kwargs):
+        assert file.identity != identity, "Planning value admission read an unrelated note"
+        return read(fs, file, **kwargs)
+
+    with preview_store(store.root, store.handle):
+        values = PlanningValues(store.root)
+        assert values.planning_class("waiting") == "open"
+        dependency = values.dependency
+        monkeypatch.setattr(backend, "read", admit_selected_bytes)
+        assert values.matches(dependency)
+
+
 @pytest.mark.parametrize("alias", ["hardlink", "parent-symlink"])
 @pytest.mark.parametrize("overlay_present", [False, True])
 def test_warm_registry_cache_does_not_admit_a_new_alias(
@@ -494,21 +526,25 @@ def test_remote_principal_does_not_grant_owner_writes(vault: Path) -> None:
     assert entity_types.load_entity_types(vault).resolve("venue") is None
 
 
+@pytest.mark.parametrize("owner", [False, True])
 def test_withheld_registry_is_not_loaded_for_private_dependent_operations(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,
+    owner: bool,
 ) -> None:
     from exomem.governance import egress
-    from exomem.governance.principal import RequestPrincipal, request_scope
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
     from exomem.vocabulary import contract, registry
 
     monkeypatch.setattr(egress, "release_level_for_path_only", lambda *a, **kw: egress.LEVEL_NONE)
+    monkeypatch.setattr(egress, "unrestricted_content_access", lambda *a, **kw: False)
 
     def private_read(*args, **kwargs):
         pytest.fail("private registry producer ran before admission")
 
     monkeypatch.setattr(registry, "load", private_read)
-    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+    who = owner_principal(surface="mcp") if owner else RequestPrincipal(audience_id="external", surface="mcp")
+    with request_scope(who):
         for operation in ("inspect", "propose", "save", "history"):
             result = commands.op_schema_memory(
                 vault,

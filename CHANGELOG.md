@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.144.1](https://github.com/Artexis10/exomem/compare/v0.144.0...v0.144.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **collections:** bound ownership and registry admission to relevant paths ([#2099](https://github.com/Artexis10/exomem/issues/2099)) ([7d805ff](https://github.com/Artexis10/exomem/commit/7d805ff23c5a8064a571f0c94bc1ba3bcbb6f21a))
+* **lexical:** keep targeted repair when a source moves during a bounded upsert ([#2097](https://github.com/Artexis10/exomem/issues/2097)) ([34de769](https://github.com/Artexis10/exomem/commit/34de7698eabb6617ac619127a5ef185febc7f163))
+* retain shared grants during local writer commands ([#2100](https://github.com/Artexis10/exomem/issues/2100)) ([fbb7863](https://github.com/Artexis10/exomem/commit/fbb78638a257f25415591a28ebc1933ebb190c11))
+
+
+### Performance
+
+* **recall:** reuse catalogue selections across activation phases ([#2094](https://github.com/Artexis10/exomem/issues/2094)) ([205cc54](https://github.com/Artexis10/exomem/commit/205cc5460780872d0dfc70866507a8f367646854))
+
 ## [0.144.0](https://github.com/Artexis10/exomem/compare/v0.143.2...v0.144.0) (2026-10-25)
 
 
