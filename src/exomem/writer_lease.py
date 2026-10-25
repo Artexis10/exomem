@@ -35,6 +35,8 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from filelock import ReadWriteLock, Timeout
+
 from . import call_spans, durable_write, mutation_lock, request_budget
 from . import capabilities as capabilities_module
 from . import curation as curation_module
@@ -4475,6 +4477,7 @@ class LeaseManager:
         # `writer_authority_guard()`, which sets every command fence, so
         # `count == 0` means no command holds a fence from that guard. The
         # collection-store fence setters are not counted (see that guard).
+        # Shared grant claims also protect commands in other local processes.
         self._active_mutations = 0
         self._last_activity_monotonic = time.monotonic()
         self._collection_store = None
@@ -4519,6 +4522,44 @@ class LeaseManager:
             timeout_seconds=self._mutation_timeout_seconds,
             poll_interval_seconds=self._mutation_poll_interval_seconds,
         )
+
+    @contextmanager
+    def _replica_grant_claim(self, *, exclusive: bool = False) -> Iterator[bool]:
+        """Keep the replica's grant while any local process holds a command fence.
+
+        A busy exclusive claim defers voluntary release, keeping writer routing
+        until the in-flight command exits. Each context owns its connection.
+        """
+        if not self.config.enabled:
+            yield True
+            return
+        origin = urllib.parse.urlsplit(self.config.url)
+        identity = (
+            origin.scheme, origin.hostname,
+            origin.port if origin.port is not None else (443 if origin.scheme == "https" else 80),
+            self.config.vault_id, self.config.replica_id,
+        )
+        key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        lock = ReadWriteLock(
+            self.config.state_dir / f"writer-grant-{key}.db", is_singleton=False,
+        )
+        try:
+            try:
+                if exclusive:
+                    lock.acquire_write(blocking=False)
+                else:
+                    lock.acquire_read(timeout=self._mutation_timeout_seconds)
+            except Timeout:
+                if not exclusive:
+                    raise _mutation_busy() from None
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                lock.release()
+        finally:
+            lock.close()
 
     def holds_mutation_boundary(self, vault_root: os.PathLike[str] | str) -> bool:
         """Whether this thread already holds this vault's mutation boundary.
@@ -5018,66 +5059,67 @@ class LeaseManager:
                     "the registered vault attachment is not serving mutations",
                     "Complete or recover the authenticated attachment transition before retrying.",
                 ) from None
-        if self.config.enabled or self._collection_store is not None:
-            with self._lock:
-                self._require_store_admitted()
-                lease = self._reusable_operation_grant() if reuse_operation_grant else None
-                if lease is None:
-                    inherited = _ACTIVE_WRITE_FENCE.get()
-                    # A narrowed command whose own grant was lost during unguarded
-                    # preparation is fenced, whether this replica or only the
-                    # coordinator has noticed; it never commits under a new grant.
-                    held = inherited[1] if inherited is not None and inherited[0] is self else None
-                    if held is not None and self._fencing_token != held:
-                        self._raise_fenced(held)
-                    try:
-                        lease = self._acquire_writer()
-                    except OpError as error:
-                        if held is not None and error.code == "WRITER_LEASE_REQUIRED":
-                            self.validate_fencing_token(held)
-                        raise
-                    if held is not None and lease.fencing_token != held:
-                        self._raise_fenced(held)
-                if self.config.enabled:
-                    fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
-                if self._serves_collection_store and self._collection_store is None:
-                    # Keep this mutation's file classification if a producer attaches during staging.
-                    file_context = _ACTIVE_COLLECTION_FILE_WRITE.set((
-                        self, self._file_store_acquisition, self._file_store_marker,
-                    ))
-                self._active_mutations += 1
-                self._last_activity_monotonic = time.monotonic()
-            counted = True
-        try:
-            if (fence_context is not None and self._collection_store is None
-                    and (self._renewer is None or not self._renewer.is_alive())):
-                # Standalone file mutations lack the server's renewal lifecycle.
-                # Each guard owns only its captured token, never a replacement grant.
-                renewal_stop = threading.Event()
-                renewer = threading.Thread(
-                    target=self._renew_loop,
-                    kwargs={"stop": renewal_stop, "fencing_token": lease.fencing_token},
-                    name="exomem-mutation-lease",
-                    daemon=True,
-                )
-                renewer.start()
-            yield
-        finally:
-            if renewal_stop is not None:
-                renewal_stop.set()
-                # The renewal needs the manager lock; keep this join outside it.
-                # Finish in-flight coordinator I/O before ending this guard's ownership.
-                if renewer is not None and renewer.ident is not None:
-                    renewer.join()
-            if file_context is not None:
-                _ACTIVE_COLLECTION_FILE_WRITE.reset(file_context)
-            if fence_context is not None:
-                _ACTIVE_WRITE_FENCE.reset(fence_context)
-            if counted:
+        with self._replica_grant_claim():
+            if self.config.enabled or self._collection_store is not None:
                 with self._lock:
-                    self._active_mutations -= 1
+                    self._require_store_admitted()
+                    lease = self._reusable_operation_grant() if reuse_operation_grant else None
+                    if lease is None:
+                        inherited = _ACTIVE_WRITE_FENCE.get()
+                        # A narrowed command whose own grant was lost during unguarded
+                        # preparation is fenced, whether this replica or only the
+                        # coordinator has noticed; it never commits under a new grant.
+                        held = inherited[1] if inherited is not None and inherited[0] is self else None
+                        if held is not None and self._fencing_token != held:
+                            self._raise_fenced(held)
+                        try:
+                            lease = self._acquire_writer()
+                        except OpError as error:
+                            if held is not None and error.code == "WRITER_LEASE_REQUIRED":
+                                self.validate_fencing_token(held)
+                            raise
+                        if held is not None and lease.fencing_token != held:
+                            self._raise_fenced(held)
+                    if self.config.enabled:
+                        fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+                    if self._serves_collection_store and self._collection_store is None:
+                        # Keep this mutation's file classification if a producer attaches during staging.
+                        file_context = _ACTIVE_COLLECTION_FILE_WRITE.set((
+                            self, self._file_store_acquisition, self._file_store_marker,
+                        ))
+                    self._active_mutations += 1
                     self._last_activity_monotonic = time.monotonic()
-                    self._store_condition.notify_all()
+                counted = True
+            try:
+                if (fence_context is not None and self._collection_store is None
+                        and (self._renewer is None or not self._renewer.is_alive())):
+                    # Standalone file mutations lack the server's renewal lifecycle.
+                    # Each guard owns only its captured token, never a replacement grant.
+                    renewal_stop = threading.Event()
+                    renewer = threading.Thread(
+                        target=self._renew_loop,
+                        kwargs={"stop": renewal_stop, "fencing_token": lease.fencing_token},
+                        name="exomem-mutation-lease",
+                        daemon=True,
+                    )
+                    renewer.start()
+                yield
+            finally:
+                if renewal_stop is not None:
+                    renewal_stop.set()
+                    # The renewal needs the manager lock; keep this join outside it.
+                    # Finish in-flight coordinator I/O before ending this guard's ownership.
+                    if renewer is not None and renewer.ident is not None:
+                        renewer.join()
+                if file_context is not None:
+                    _ACTIVE_COLLECTION_FILE_WRITE.reset(file_context)
+                if fence_context is not None:
+                    _ACTIVE_WRITE_FENCE.reset(fence_context)
+                if counted:
+                    with self._lock:
+                        self._active_mutations -= 1
+                        self._last_activity_monotonic = time.monotonic()
+                        self._store_condition.notify_all()
 
     def invoke(
         self,
@@ -6631,7 +6673,18 @@ class LeaseManager:
         that owns those commits can take the lease back for every write.
         """
         runtime = self._collection_store
-        with self._report_lock:
+        with ExitStack() as boundary:
+            try:
+                boundary.enter_context(self._mutation_coordinator_for(runtime.root).hold(
+                    timeout_seconds=0, operation="collection_store_release",
+                ))
+            except OpError as error:
+                if error.code != "MUTATION_BUSY":
+                    raise
+                return False
+            if not boundary.enter_context(self._replica_grant_claim(exclusive=True)):
+                return False
+            boundary.enter_context(self._report_lock)
             with self._lock:
                 if (self._fencing_token != token or self._store_handoff or self._store_borrowers
                         or self._active_mutations or not runtime._retire_handle()):
@@ -6694,6 +6747,10 @@ class LeaseManager:
                         if error.code != "MUTATION_BUSY":
                             raise
                 if time.monotonic() >= deadline or (cancelled is not None and cancelled()):
+                    return False
+                # Mutation guards take the canonical boundary before their shared claim.
+                # Try only: a peer preparing outside that boundary must be able to seal.
+                if release and not boundary.enter_context(self._replica_grant_claim(exclusive=True)):
                     return False
                 if self.config.enabled:
                     self.validate_fencing_token(token)
@@ -6852,28 +6909,31 @@ class LeaseManager:
             except Exception:  # noqa: BLE001 - idle handoff defers; never claims a flush
                 logger.warning("collection store idle release remains pending", exc_info=True)
                 return False
-        with self._lock:
-            if (self._fencing_token != token or self._store_handoff or self._store_closed
-                    or self._active_mutations or self._store_borrowers
-                    or time.monotonic() - self._last_activity_monotonic < idle_seconds):
+        with self._replica_grant_claim(exclusive=True) as available:
+            if not available:
                 return False
-            # Clear local state BEFORE (and during) the release RPC, still
-            # holding the lock: an `ensure_writer` arriving concurrently
-            # blocks on this same lock and then acquires a fresh token — it
-            # can never observe us as still the writer mid-release.
-            self._fencing_token = None
-            self._expires_at = None
-            try:
-                self.client.release(token)
-                self._record_lease_op("idle_release", "ok")
-            except OpError as error:
-                # Swallowed: the local token is already cleared, and the
-                # coordinator's own TTL expiry closes the gap within one TTL
-                # — a degraded handover, never split-brain.
-                self._record_coordinator_error(error.code)
-                self._record_lease_op("idle_release", "error")
-            self._log_lease_event("lease_idle_released")
-            return True
+            with self._lock:
+                if (self._fencing_token != token or self._store_handoff or self._store_closed
+                        or self._active_mutations or self._store_borrowers
+                        or time.monotonic() - self._last_activity_monotonic < idle_seconds):
+                    return False
+                # Clear local state BEFORE (and during) the release RPC, still
+                # holding the lock: an `ensure_writer` arriving concurrently
+                # blocks on this same lock and then acquires a fresh token — it
+                # can never observe us as still the writer mid-release.
+                self._fencing_token = None
+                self._expires_at = None
+                try:
+                    self.client.release(token)
+                    self._record_lease_op("idle_release", "ok")
+                except OpError as error:
+                    # Swallowed: the local token is already cleared, and the
+                    # coordinator's own TTL expiry closes the gap within one TTL
+                    # — a degraded handover, never split-brain.
+                    self._record_coordinator_error(error.code)
+                    self._record_lease_op("idle_release", "error")
+                self._log_lease_event("lease_idle_released")
+                return True
 
     def _renew_loop(
         self, *, stop: threading.Event | None = None, fencing_token: int | None = None
@@ -6950,15 +7010,16 @@ class LeaseManager:
             if not handed_off:
                 raise OpError("COLLECTION_STORE_FLUSH_PENDING", "replica handoff remains pending")
             return
-        with self._store_condition:
-            if self._store_bound:
-                if self._store_closed:
-                    return
-                if self._store_handoff or threading.get_ident() in self._store_borrowers:
-                    self._stop.set()
-                    raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
-                self._store_handoff = True
-                try:
+        handoff = False
+        try:
+            with self._store_condition:
+                if self._store_bound:
+                    if self._store_closed:
+                        return
+                    if self._store_handoff or threading.get_ident() in self._store_borrowers:
+                        self._stop.set()
+                        raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
+                    self._store_handoff = handoff = True
                     deadline = (time.monotonic() + self._mutation_timeout_seconds
                                 if deadline is None else deadline)
                     while True:
@@ -6966,23 +7027,32 @@ class LeaseManager:
                             self._stop.set()
                             raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
                         if not self._store_borrowers:
-                            self._store_closed = True
                             break
                         self._store_condition.wait(min(0.05, max(0, deadline - time.monotonic())))
-                finally:
+                self._stop.set()
+            # Borrowers may need a command claim to finish; drain them before exclusion.
+            with self._replica_grant_claim(exclusive=True) as available:
+                if not available:
+                    if self._store_bound:
+                        raise OpError("COLLECTION_STORE_FLUSH_PENDING", "preview borrowers remain active")
+                    return
+                with self._lock:
+                    if handoff:
+                        self._store_closed = True
+                    token = self._fencing_token
+                    self._fencing_token = None
+                if token is not None and self.client is not None:
+                    try:
+                        self.client.release(token)
+                        self._record_lease_op("release", "ok")
+                    except OpError as error:
+                        self._record_coordinator_error(error.code)
+                        self._record_lease_op("release", "error")
+        finally:
+            if handoff:
+                with self._store_condition:
                     self._store_handoff = False
                     self._store_condition.notify_all()
-            self._stop.set()
-        with self._lock:
-            token = self._fencing_token
-            self._fencing_token = None
-        if token is not None and self.client is not None:
-            try:
-                self.client.release(token)
-                self._record_lease_op("release", "ok")
-            except OpError as error:
-                self._record_coordinator_error(error.code)
-                self._record_lease_op("release", "error")
 
 
 def validate_active_write_fence() -> None:
