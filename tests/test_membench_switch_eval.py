@@ -126,7 +126,7 @@ for line in sys.stdin:
                       "warming": {"components": ["embeddings", "recall_projection"], "since_s": None}}}}
         else:
             result = {"structuredContent": {"result": {"hits": [],
-                      "warming": {"components": ["embeddings", "graph", "pending_visibility"], "since_s": None}}}}
+                      "warming": {"components": ["graph", "pending_visibility"], "since_s": None}}}}
     else:
         if crash:
             sys.exit(3)
@@ -535,7 +535,7 @@ tap.wait(timeout=10)
     assert turn["ready_wait_seconds"] >= 8.0 and turn["wall_seconds"] < 5
     record = run_session(inputs, tmp_path / "session", lambda *args: result)
     assert record["facts"]["ready_gate"]["warming"] == {
-        "components": ["embeddings", "graph", "pending_visibility"], "since_s": None,
+        "components": ["graph", "pending_visibility"], "since_s": None,
     }
 
 
@@ -570,8 +570,10 @@ def test_a_server_exit_during_the_gate_is_a_retried_setup_fault(tmp_path: Path) 
 def test_the_warming_guard_tracks_the_product_refusal_constants() -> None:
     from exomem.activation_result import INDEX_WARMING
     from exomem.find import _RECALL_PROJECTION_STALE_COMPONENT, RetrievalIndexWarming
+    from exomem.readiness import COMPONENTS
 
-    assert REQUIRED_CLEAR_COMPONENTS == {_RECALL_PROJECTION_STALE_COMPONENT}
+    assert REQUIRED_CLEAR_COMPONENTS == {_RECALL_PROJECTION_STALE_COMPONENT, "embeddings", "clip"}
+    assert {"embeddings", "clip"} <= set(COMPONENTS)
     assert (ACTIVATION_WARMING_REASON, RECALL_WARMING_CODE) == (
         INDEX_WARMING, RetrievalIndexWarming(site="catalog_proof_incomplete").code,
     )
@@ -1247,6 +1249,19 @@ def test_the_builder_publishes_vectors_and_the_active_pointer(vault: Path, monke
         assert built["vectors"]["state"] == "current"
         assert built["vault_digest"] == state.tree_digest(vault)
         assert built["product_source"] == observed_source
+        # Sessions serve cold copies: the sidecars must already carry the key the server asks for,
+        # or every map and packet reads as stale.
+        from exomem import context_catalogue, find, working_set_index, working_set_runtime
+
+        serving_key = working_set_runtime._key_text(find.FreshnessSnapshot(vault).projection_key("kb"))
+        reopened_index = working_set_index.WorkingSetIndex(vault)
+        try:
+            assert reopened_index.freshness_stamp() == serving_key
+        finally:
+            reopened_index.close()
+        reopened_catalogue = context_catalogue.ContextCatalogue(vault)
+        assert reopened_catalogue.freshness_stamp() == serving_key
+        assert not reopened_catalogue.pending()
 
         page = next(path for path in index_paths.iter_index_markdown(vault)
                     if embeddings.reconstruct_publication(vault, path) is not None)

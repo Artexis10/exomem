@@ -47,7 +47,9 @@ HANDSHAKE_METHODS = frozenset({"initialize", "server/discover"})
 # Amendment 4 measured projection readiness near 450 s; allow contention margin.
 READY_TIMEOUT_SECONDS = 1200.0
 # Amendment 4's 2026-10-23 measurement (~447 s) and op_activate_context's read path justify clearing this closed product component for arm parity.
-REQUIRED_CLEAR_COMPONENTS = frozenset({"recall_projection"})
+# Amendment 10: development rounds 1 and 2 admitted every actor before the dense and image lanes
+# warmed, so most early searches ran without vectors and the arms' warm-up timing differed.
+REQUIRED_CLEAR_COMPONENTS = frozenset({"recall_projection", "embeddings", "clip"})
 # Product refusal tokens, pinned to their definitions by the harness tests.
 ACTIVATION_WARMING_REASON = "index_warming"
 RECALL_WARMING_CODE = "RETRIEVAL_INDEX_WARMING"

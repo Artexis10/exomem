@@ -431,6 +431,7 @@ def build_state(vault: Path) -> dict:
     }
     context_catalogue = ContextCatalogue(vault)
     catalogue = context_catalogue.rebuild()
+    freshness = stamp_serving_freshness(vault, context_catalogue)
     result = {
         "vault_digest": final_content,
         "product_source": product_source_identity(),
@@ -442,6 +443,7 @@ def build_state(vault: Path) -> dict:
             key: value for key, value in catalogue.items() if isinstance(value, (int, str))
         },
         "owner_coverage": context_catalogue.owner_coverage(),
+        "serving_freshness": freshness,
     }
     if (
         tree_digest(vault) != final_content
@@ -451,6 +453,40 @@ def build_state(vault: Path) -> dict:
         raise StateError("vault or vector publication changed during final coverage proof")
     result["seconds"] = round(time.monotonic() - started, 2)
     return result
+
+
+def stamp_serving_freshness(vault: Path, context_catalogue) -> dict:
+    """Stamp the activation index and the catalogue with the key a session's server will ask for.
+
+    Every session serves a cold copy of this state. An unstamped sidecar reads as stale on
+    every call and schedules a catch-up walk that the copy then discards, so the map arm
+    would always serve a stale, turn-independent map.
+    """
+    from exomem import find, working_set_index, working_set_runtime
+
+    # The same key and serialisation that op_activate_context passes to the sidecars.
+    key = working_set_runtime._key_text(find.FreshnessSnapshot(vault).projection_key("kb"))
+    if not key:
+        raise StateError("no serving freshness key for the built vault")
+    index = working_set_index.WorkingSetIndex(vault)
+    try:
+        # The index first: the catalogue mirrors the index token that it reads when it updates.
+        index.update(freshness_stamp=key)
+        index_stamp, index_token = index.freshness_stamp(), json.dumps(list(index.token()))
+    finally:
+        index.close()
+    context_catalogue.update(freshness_stamp=key)
+    report = {
+        "key_sha256": sha256_text(key),
+        "index_stamped": index_stamp == key,
+        "catalogue_stamped": context_catalogue.freshness_stamp() == key,
+        "token_mirrored": context_catalogue.mirrored_activation_token() == index_token,
+        "catalogue_pending": len(context_catalogue.pending()),
+    }
+    stamped = report["index_stamped"] and report["catalogue_stamped"] and report["token_mirrored"]
+    if not stamped or report["catalogue_pending"]:
+        raise StateError(f"serving freshness was not stamped: {report}")
+    return report
 
 
 def product_source_identity() -> dict:

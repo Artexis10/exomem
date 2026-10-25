@@ -294,6 +294,14 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - Audit stays on for every arm and the readiness probe stays. The state stage and the run stage refuse, before any build or server starts, when `EXOMEM_KB_DIRNAME` names a folder other than the default. The servers run without it, so their receipts would land where the harness does not look.
    - Every session starts from identical bytes and signatures. This changes preparation only, never cases, keys, removals, arm budgets or the decision rule.
 
+10. **Amendment 10 (2026-10-25, before any held-out generation).** Development rounds 1 and 2 did not compare the push arms:
+   - The builder rebuilt the activation index and the context catalogue without a freshness stamp. Every session serves a cold copy of the state, so each map and packet read as stale and scheduled catch-up work that the copy discarded. Every maps packet was the same stale map in both rounds.
+   - The gate admitted the actor while the dense and image lanes were still warming, in every session of both rounds. Most early searches ran without vectors. The maps arm's longer first call let more of its searches reach the warm lanes, so warm-up timing differed by arm.
+   - The builder now stamps both sidecars with the key that a session's server derives, after the index and before the catalogue. It records the key digest, both stamps, the mirrored index token and an empty pending set, and refuses the state otherwise. The gate also waits for `embeddings` and `clip` to clear. Other optional components may still remain and are reported.
+   - Rounds 1 and 2 stay as diagnostic evidence; they are not repeated. The next development round starts from a rebuilt state and first checks one session per arm: the map reports `stale: false`, packets report no stale index, and the first search has dense hits.
+   - The vault declares no project-key domains, so the map lists recent activity, not topics, for this user. That is the product's behaviour on this vault, and the comparison measures it as it is.
+   - This changes preparation and readiness only, never cases, keys, removals, arm budgets or the decision rule.
+
 ### Ready before held-out generation
 
 1. `maps` mode built, and pinned to one release or commit for every arm.
