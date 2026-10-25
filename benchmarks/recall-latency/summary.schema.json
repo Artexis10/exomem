@@ -25,6 +25,11 @@
       "pattern": "^[a-z][a-z0-9_.:-]*$",
       "maxLength": 100
     },
+    "boundary": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.:-]*$",
+      "maxLength": 100
+    },
     "tag": {
       "type": "string",
       "maxLength": 100

@@ -25,6 +25,8 @@ The `request-latency-v3` contract names this boundary `recall-bound-command-v1`.
 Historical leaf measurements use a different boundary and cannot certify it.
 Transport, authentication middleware, FastMCP serialization and the live server's
 active-surface descriptor remain outside this in-process measurement.
+Live response diagnostics retain their inner boundary and cannot certify these
+bound-command bars, even when their corpus and SQLite checks pass.
 Owner preparation reconciles the advisory projection and validates its persisted
 state before managed startup and sampling. A failed persistence refuses the
 benchmark fixture; normal advisory refreshes can still run during measurement.

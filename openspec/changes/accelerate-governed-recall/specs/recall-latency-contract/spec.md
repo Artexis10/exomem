@@ -495,6 +495,8 @@ The boundary SHALL identify itself as the in-process bound command. It SHALL
 exclude transport, authentication middleware, FastMCP serialization and the
 live server's active-surface descriptor. Historical leaf measurements SHALL
 retain their narrower boundary and SHALL NOT establish bound-command acceptance.
+Live response diagnostics that expose only an inner timer SHALL retain that
+boundary and SHALL report bound-command ceiling and target acceptance as unmeasured.
 Only the active benchmark worker SHALL run during a sample, so the inactive
 arm's native pools cannot consume its CPUs.
 

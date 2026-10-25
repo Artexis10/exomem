@@ -1142,11 +1142,13 @@ def _live_inputs(tmp_path: Path) -> tuple[Path, Path]:
     return cases_path, corpus_path
 
 
-@pytest.mark.parametrize("damage", ["degraded", "stage-error"])
-def test_live_keyword_fallback_cannot_certify_a_failed_encoder(tmp_path: Path, monkeypatch, damage) -> None:
+@pytest.mark.parametrize("damage", [None, "degraded", "stage-error"])
+def test_live_inner_timings_preserve_failures_without_certifying_the_bound_call(
+    tmp_path: Path, monkeypatch, damage,
+) -> None:
     cases, corpus = _live_inputs(tmp_path)
     monkeypatch.setattr(gate, "one_minute_load", lambda: 1.0)
-    timing = {"total_ms": 10.0, "runqueue_ms": 0.0, "sqlite_version": "3.45.1",
+    timing = {"total_ms": 90.0, "runqueue_ms": 0.0, "sqlite_version": "3.45.1",
               "stage_rows": {"governed-stage-keyword": {"ms": 5.0, "cpu_ms": None}},
               "stages": {"vector": {"error": "ImportError"}} if damage == "stage-error" else {}}
     envelope = {"hits": [{"title": "private result"}], "timings": timing}
@@ -1157,9 +1159,13 @@ def test_live_keyword_fallback_cannot_certify_a_failed_encoder(tmp_path: Path, m
     output = tmp_path / "summary.json"
     assert gate.live_cli(transport, cases_path=cases, corpus_path=corpus, output=output, quiescence_bound=0) == 0
     report = json.loads(output.read_text())
-    assert report["state"] == "failed"
-    assert all(row["unknown_samples"] == gate.REFERENCE["queries_min"] for row in report["series"])
-    assert all(sample["state"] == "unknown" for sample in report["samples"])
+    assert report["state"] == ("failed" if damage else "not measured")
+    assert report["boundary"] == "response-inner-timings-v1"
+    assert all(row["ceiling_met"] is None and row["p95_target_met"] is None
+               and row["p50_target_met"] is None for row in report["series"])
+    assert all(row["unknown_samples"] == (gate.REFERENCE["queries_min"] if damage else 0)
+               for row in report["series"])
+    assert all(sample["state"] == ("unknown" if damage else "ok") for sample in report["samples"])
     assert "private" not in output.read_text() and "ImportError" not in output.read_text()
 
 

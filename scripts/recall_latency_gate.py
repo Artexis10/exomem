@@ -62,6 +62,7 @@ HYBRID_P50_MS = CONTRACT.bar("governed-p50-target").threshold_ms
 KEYWORD_P50_MS = HYBRID_P50_MS
 FILTERED_HYBRID_P50_MS = HYBRID_P50_MS
 FILTERED_ELIGIBILITY_MS = CONTRACT.bar("governed-stage-filter_eligibility").threshold_ms
+RESPONSE_INNER_BOUNDARY = "response-inner-timings-v1"
 
 #: "with the load average at or below 2.0"
 MAX_LOAD_AVERAGE = 2.0
@@ -457,7 +458,7 @@ def run(
         "refused": False,
         "contract_revision": CONTRACT.revision,
         "acceptance": "not measured",
-        "boundary": "response-inner-timings-v1",
+        "boundary": RESPONSE_INNER_BOUNDARY,
         "profile": "legacy-read-path-observation",
         "unmeasured_dimensions": [
             "reference-query-mix",
@@ -1026,7 +1027,7 @@ def _positive(value: Any) -> bool:
 
 
 def summarize_absolute(samples: list[dict], *, environment: dict, profile: dict,
-                       live: bool = False) -> tuple[str, list[dict]]:
+                       live: bool = False, boundary: str | None = None) -> tuple[str, list[dict]]:
     """Keep live contention separate from reference process costs."""
     summaries = []
     for principal_name, series_name in sorted({(s["principal"], s["series"]) for s in samples}):
@@ -1041,12 +1042,14 @@ def summarize_absolute(samples: list[dict], *, environment: dict, profile: dict,
         refused = (bool(unknown_contention) or
                    len(contended) > len(selected) * REFERENCE["max_contended_fraction"])
         bar = KEYWORD_BAR if series_name == "keyword" else HYBRID_BAR
+        comparable = boundary is None or boundary == bar.boundary.id
         target = CONTRACT.bar("governed-keyword-p95-target" if series_name == "keyword"
                               else "governed-hybrid-p95-target")
         values = [s["elapsed_ms"] for s in retained]
         p50, p95 = _percentile(values, 0.5), _percentile(values, 0.95)
         state = ("refused" if refused else "failed" if unknown
                  or warming > MAX_WARMING_SAMPLES or len(values) < bar.min_samples
+                 else "not measured" if not comparable
                  else "passed" if p95 <= bar.threshold_ms else "failed")
         stages = {}
         observed_rows = {row for sample in retained for row in sample["stages"]}
@@ -1092,9 +1095,9 @@ def summarize_absolute(samples: list[dict], *, environment: dict, profile: dict,
                    "load_mean": statistics.fmean(loads), "load_max": max(loads),
                    "ceiling_bar": bar.id, "p95_target_bar": target.id,
                    "p50_target_bar": "governed-p50-target",
-                   "p50_target_met": p50 <= HYBRID_P50_MS if p50 is not None and not refused else None,
-                   "p95_target_met": p95 <= target.threshold_ms if p95 is not None and not refused else None,
-                   "ceiling_met": p95 <= bar.threshold_ms if p95 is not None and not refused else None,
+                   "p50_target_met": p50 <= HYBRID_P50_MS if comparable and p50 is not None and not refused else None,
+                   "p95_target_met": p95 <= target.threshold_ms if comparable and p95 is not None and not refused else None,
+                   "ceiling_met": p95 <= bar.threshold_ms if comparable and p95 is not None and not refused else None,
                    "encode_floor": floor, "stages": stages}
         if refused:
             summary.update(p50_ms=None, p95_ms=None)
@@ -1105,7 +1108,8 @@ def summarize_absolute(samples: list[dict], *, environment: dict, profile: dict,
             row.update(state="not measured", ceiling_met=None)
         return "not measured", summaries
     return ("refused" if "refused" in owner_states else
-            "failed" if "failed" in owner_states or not owner_states else "passed"), summaries
+            "failed" if "failed" in owner_states or not owner_states else
+            "not measured" if "not measured" in owner_states else "passed"), summaries
 
 
 def absolute_cli(output: Path, *, quiescence_bound: float) -> int:
@@ -1624,7 +1628,7 @@ def live_cli(transport: ServedTransport, *, cases_path: Path, corpus_path: Path 
         raise MeasurementRefused("live-cases-insufficient")
     report = {"schema_version": 1, "mode": "live", "state": "not measured",
               "contract_revision": CONTRACT.revision, "series": [], "samples": [],
-              "nonce_strategy": "trailing-whitespace"}
+              "nonce_strategy": "trailing-whitespace", "boundary": RESPONSE_INNER_BOUNDARY}
     first, final, waited = await_quiescence(
         one_minute_load, bound_seconds=quiescence_bound, sleep=time.sleep,
     )
@@ -1673,6 +1677,7 @@ def live_cli(transport: ServedTransport, *, cases_path: Path, corpus_path: Path 
             environment = {"sqlite_version": next(iter(versions)) if len(versions) == 1 else "unknown"}
             report["state"], report["series"] = summarize_absolute(
                 report["samples"], environment=environment, profile=profile, live=True,
+                boundary=RESPONSE_INNER_BOUNDARY,
             )
             if (corpus["pages"] < REFERENCE["pages_min"] or corpus["chunks"] < REFERENCE["chunks_min"]
                 or corpus["units"] < REFERENCE["units_min"]):
