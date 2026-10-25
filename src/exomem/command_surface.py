@@ -551,7 +551,7 @@ def _split_rendered_call(
     """A rendered call's transport keys, its tool-level arguments and its parsed operation."""
     carried = {key: value for key, value in arguments.items() if key in passthrough}
     body = {key: value for key, value in arguments.items() if key not in passthrough}
-    tool_arguments = {key: body.pop(key) for key in rendering.tool_arguments if key in body}
+    tool_arguments = rendering.take_tool_arguments(body)
     return carried, tool_arguments, operation_entries.split_operation(body)
 
 
