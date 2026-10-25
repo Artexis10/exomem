@@ -159,11 +159,8 @@ def _admission_refusal(
 ) -> dict[str, Any] | None:
     """Keep instance admission branches shared by readers and publication witnesses."""
     from ..governance.egress import LEVEL_FULL
-    from ..governance.principal import effective_principal
-    from ..governance.raw_protection import is_owner
 
     root = Path(vault_root)
-    who = effective_principal()
     if spec.binding_revision is not None:
         document = instances.configuration(root)
         if document is None or instances.revision(document) != spec.binding_revision:
@@ -172,8 +169,6 @@ def _admission_refusal(
         path = spec.overlay(root).relative_to(root).as_posix()
         if release_level(path) < LEVEL_FULL or history_storage_level()[0] < LEVEL_FULL:
             return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
-        return None
-    if is_owner(who) and restricted_reason(root) is None:
         return None
     if instances.unassigned_pack_only(root, spec):
         # No overlay or history exists and none can be written unassigned, so
