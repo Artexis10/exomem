@@ -2152,8 +2152,10 @@ def _schedule_repair(
         else:
             _request_full_rebuild(key, lag_only=lag_only)
         if key in _REPAIRS_IN_FLIGHT:
-            # The running worker re-reads both queues before it exits, so this
-            # request is picked up rather than dropped.
+            # The request stays queued, never dropped. The running worker
+            # re-reads both queues before it exits normally. A flight that
+            # yields to a moving source or a failure leaves it for the next
+            # trigger or the runtime's catalogue recovery.
             return True
         _REPAIRS_IN_FLIGHT.add(key)
         _set_repair_progress(key, "queued")
