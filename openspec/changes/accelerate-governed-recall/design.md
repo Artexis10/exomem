@@ -462,18 +462,17 @@ it with the current path on the reference corpus.
   the structural gate and every plan check also run on 3.45.1, the older
   (decision 9). No verdict then rests on a plan that neither CI nor a Cloud
   cell runs.
-- **One catalogue read session per request.** Each catalogue query
-  (`_serve_from_ready_catalog_result`, `lexstore.py:7770`) runs a readiness proof
-  on its own connection, then opens a second connection and proves the
-  checkpoint, schema and semantic identity again before it queries. Every
-  connection goes through the reserved-path ownership checks
-  (`lexstore.py:3346-3428`). A request opened nine connections and ran six
-  proofs: 36 to 85 ms of setup across runs. A per-request catalogue session
-  serves BM25, keyword, parent hints and ranking metadata. It opens one
-  connection and runs one proof per store and scope, against the request's
-  checkpoint. Opt-in widening adds the vault scope, so it adds one proof for
-  that scope. The session closes with the request; no connection is retained
-  across requests.
+- **One catalogue read session per selection.** Baseline catalogue queries
+  ran a readiness proof on one connection, then opened another and proved
+  the checkpoint, schema and semantic identity again before querying. Each
+  connection passed the reserved-path ownership checks. A request opened
+  nine connections and ran six proofs: 36 to 85 ms of setup across runs.
+
+  A selection retains the existing catalogue view for BM25, keyword, parent
+  hints and ranking metadata. It opens one connection and runs one full
+  proof for the stored scope checkpoints. The view includes the vault scope
+  used by opt-in widening. Each selection closes at its synchronous phase
+  boundary; no connection survives into another request.
 
   Activation uses two optional selection phases: initial lexical evidence,
   then resolution, carry and role queries after semantic evidence. Neither

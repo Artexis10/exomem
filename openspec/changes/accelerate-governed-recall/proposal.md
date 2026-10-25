@@ -189,7 +189,7 @@ its read entry points.
   operator who rolls the live cell adds one release-runbook step: run the
   series and attach its summary to the GitHub Release.
 - Subsecond search slices (tasks section 6): `src/exomem/lexstore.py` (parent-hint
-  query, one catalogue read session per request), `src/exomem/find_candidates.py`,
+  query, one catalogue read session per selection), `src/exomem/find_candidates.py`,
   `src/exomem/find_policy.py` and `src/exomem/find.py` (ranking metadata from
   catalogue columns, unit-lane hydration), `src/exomem/embedding_index.py` (chunk
   text after fusion, unit matrix per generation), `src/exomem/commands.py` and
