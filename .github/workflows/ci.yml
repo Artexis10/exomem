@@ -30,7 +30,7 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
-      - name: Attribute warm unit cost and the existing ownership boundary
+      - name: Separate request and background work with actual thread counters
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -47,54 +47,70 @@ jobs:
           script = Path.cwd() / "scripts" / "recall_latency_gate.py"
           original = script.read_text()
           helper = r'''
-          import cProfile
-          import pstats
-          from contextlib import nullcontext
+          import inspect
+          import threading
 
-          _profile_original_sample = _worker_sample
+          _counter_original_sample = _worker_sample
 
-          def _profiled_sample(vault_root, request):
-              from exomem import state_paths
-              from exomem.collection_store import ownership
-              from exomem.governance import egress
-              def invoke():
-                  boundary = ownership.read_scope(vault_root, finalize=True) if request.get("diagnostic_ownership_scope") else nullcontext()
-                  with boundary:
-                      return _profile_original_sample(vault_root, request)
-              if not request.get("diagnostic_profile"):
-                  return invoke()
-              scope_observations = {"calls": 0, "placement_present": 0, "ownership_present": 0}
-              original_decide = egress._decide_path
-              def observed_decide(*args, **kwargs):
-                  scope_observations["calls"] += 1
-                  scope_observations["placement_present"] += int(state_paths.request_memo_scope() is not None)
-                  scope_observations["ownership_present"] += int(ownership._READ.get() is not None)
-                  return original_decide(*args, **kwargs)
-              profiler = cProfile.Profile()
-              egress._decide_path = observed_decide
-              started = time.perf_counter_ns()
+          def _counter_sample(vault_root, request):
+              from exomem import artifact_role_state, find_corpus
+              from exomem.governance import egress, lifecycle
+              request_thread = threading.get_ident()
+              observed = {}
+              lock = threading.Lock()
+              active = True
+              def wrap(name, original):
+                  def measured(*args, **kwargs):
+                      nonlocal active
+                      thread = threading.get_ident()
+                      variant = (kwargs.get("content") is not None) if name == "parse_page" else None
+                      key = (name, thread, variant)
+                      started = time.perf_counter_ns()
+                      with lock:
+                          row = observed.get(key)
+                          if row is None:
+                              stack = []
+                              frame = inspect.currentframe().f_back
+                              while frame is not None and len(stack) < 12:
+                                  module = frame.f_globals.get("__name__", "")
+                                  if module.startswith("exomem."):
+                                      stack.append({"module": module, "function": frame.f_code.co_name, "line": frame.f_lineno})
+                                  frame = frame.f_back
+                              del frame
+                              row = {"boundary": name, "thread_id": thread, "request_thread": thread == request_thread,
+                                     "content_supplied": variant, "started": 0, "completed": 0,
+                                     "completed_ns": 0, "stack": stack}
+                              observed[key] = row
+                          row["started"] += 1
+                      try:
+                          return original(*args, **kwargs)
+                      finally:
+                          ended = time.perf_counter_ns()
+                          with lock:
+                              if active:
+                                  row["completed"] += 1
+                                  row["completed_ns"] += ended - started
+                  return measured
+              # Closed application symbols define this disposable diagnostic's boundaries.
+              targets = ((find_corpus, "parse_page"), (artifact_role_state, "_state"),
+                         (egress, "_decide_path"), (lifecycle, "_tombstone_generation"))
+              originals = [(module, name, getattr(module, name)) for module, name in targets]
+              for module, name, original in originals:
+                  setattr(module, name, wrap(name, original))
               try:
-                  result = profiler.runcall(invoke)
+                  result = _counter_original_sample(vault_root, request)
               finally:
-                  egress._decide_path = original_decide
-              result["diagnostic_boundary_elapsed_ms"] = (time.perf_counter_ns() - started) / 1e6
-              application = (_boot_args.worker_source / "src" / "exomem").resolve()
-              rows = []
-              for (filename, line, function), (primitive, calls, own, cumulative, callers) in pstats.Stats(profiler).stats.items():
-                  try:
-                      relative = Path(filename).resolve().relative_to(application)
-                  except ValueError:
-                      continue
-                  rows.append({"module": "exomem." + relative.with_suffix("").as_posix().replace("/", "."),
-                               "function": function, "line": line, "primitive_calls": primitive,
-                               "calls": calls, "self_seconds": own, "cumulative_seconds": cumulative})
-              result["profile"] = {"scope": "warm current-thread application calls; profiling overhead; diagnostic only",
-                                   "scope_observations": scope_observations,
-                                   "by_cumulative": sorted(rows, key=lambda row: row["cumulative_seconds"], reverse=True)[:60],
-                                   "by_self": sorted(rows, key=lambda row: row["self_seconds"], reverse=True)[:60]}
+                  with lock:
+                      active = False
+                      rows = [{**row, "pending": row["started"] - row["completed"]} for row in observed.values()]
+                  for module, name, original in originals:
+                      setattr(module, name, original)
+              result["boundary_observations"] = {"request_thread_id": request_thread,
+                  "scope": "actual thread IDs; completed intervals only; counters add overhead; diagnostic only",
+                  "rows": rows}
               return result
 
-          _worker_sample = _profiled_sample
+          _worker_sample = _counter_sample
           '''
           overlay = "import ast\n_profile_helper = " + repr(helper) + "\n_profile_tree = ast.parse(_profile_source, filename=__file__)\nassert isinstance(_profile_tree.body[-1], ast.If)\n_profile_tree.body[-1:-1] = ast.parse(_profile_helper).body\nexec(compile(ast.fix_missing_locations(_profile_tree), __file__, 'exec'), globals())\n"
           wrapper = "_profile_source = " + repr(original) + "\n" + overlay
@@ -102,7 +118,7 @@ jobs:
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           import recall_latency_gate as gate
 
-          report = {"state": "failed", "mode": "warm-unit-ownership-boundary", "timings": "profiled diagnostic only; not qualified", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "diagnostic_overlay": "stdlib-cprofile-and-declared-ownership-boundary-comparison", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
+          report = {"state": "failed", "mode": "thread-qualified-unit-boundaries", "timings": "counter-wrapped diagnostic only; not qualified", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "diagnostic_overlay": "thread-qualified-boundary-counters", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
           workers = {}
           try:
               profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
@@ -127,10 +143,10 @@ jobs:
                           try:
                               for principal in ("owner",):
                                   case = first_cases["unit"]
-                                  for ordinal, scoped, profiled in ((0, False, False), (1, False, True), (2, True, False), (3, True, True)):
-                                      request = {**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"], "diagnostic_ownership_scope": scoped, "diagnostic_profile": profiled}
+                                  for ordinal in range(2):
+                                      request = {**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"]}
                                       result = worker.exchange(request)
-                                      report["warm_calls"].append({"ordinal": ordinal, "ownership_scope": scoped, "profiled": profiled, "arm": arm, "principal": principal, "case": case["id"], "series": case["series"], **result})
+                                      report["warm_calls"].append({"ordinal": ordinal, "arm": arm, "principal": principal, "case": case["id"], "series": case["series"], **result})
                           finally:
                               worker.pause()
                       report["state"] = "failed" if any(row["state"] != "ok" for row in report["warm_calls"]) else "observed"
