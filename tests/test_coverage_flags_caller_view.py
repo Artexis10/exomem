@@ -17,7 +17,9 @@ from types import SimpleNamespace
 import pytest
 from test_activate_context_request_path import TURN, _seed_live_recall
 from test_governance_egress import _external, write_rule, write_scope
+from test_working_set_carry import CARRY_PAGE, CARRY_TURN, _seed_carry_pages
 from test_working_set_index import _seed_planning, _seed_structure
+from test_working_set_topic_turns import CLEANING, _seed_workshop_vault
 
 from exomem import (
     commands,
@@ -151,6 +153,20 @@ def test_a_lag_history_cannot_bridge_is_reported_to_the_restricted_reader(served
 
     assert _links(served, restricted=True)["inbound"] is None
     assert context_pack.INBOUND_INCOMPLETE_TRUNCATION in _pack_truncation(served, restricted=True)[1]
+
+
+def test_a_fault_reading_the_lag_reports_it_in_the_inbound_field(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry fault is a lag nobody can rule out, not a failed read of the page."""
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nRewritten. See [[coverage-anchor]].\n")
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("registry delta unreadable")
+
+    monkeypatch.setattr(freshness, "delta_since", unreadable)
+
+    assert _links(served, restricted=True)["inbound"] is None
 
 
 def test_a_lag_longer_than_the_bound_is_reported_without_a_decision(
@@ -613,6 +629,24 @@ def test_a_lag_with_no_remembered_stamp_is_reported_to_the_restricted_reader(
     assert _activate(activation.vault)["generation"]["index_stale"] is True
 
 
+def test_a_fault_reading_the_lag_is_reported_to_the_restricted_reader_not_raised(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decision only quiets a flag; a registry fault must not fail the tool call."""
+    _activate(activation.vault)
+    _write_hidden_hub(activation.vault, "Second.")
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("registry delta unreadable")
+
+    monkeypatch.setattr(freshness, "recall_delta_since", unreadable)
+
+    served = _activate(activation.vault)
+
+    assert served["abstained"] is False
+    assert served["generation"]["index_stale"] is True
+
+
 def test_a_withheld_publication_during_the_request_does_not_withdraw_the_packet(
     activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -669,6 +703,151 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
 
     assert published == [True]
     assert served.get("abstention") == {"reason": "unavailable"}
+
+
+# ---- the pages a turn names ----------------------------------------------
+
+TITLE_TURN = "The smooth chain cleaning works best with degreaser, I find."
+STATE_TURN = "what is the current state of Harbourline Trust"
+STATE_ENTITY = "Knowledge Base/Entities/Organizations/Harbourline Trust.md"
+STATE_PAGE = "Knowledge Base/Notes/Insights/harbourline-operating-state.md"
+
+
+@pytest.fixture
+def named(activation: SimpleNamespace) -> SimpleNamespace:
+    """The activation runtime over a vault where a turn can name a page without an anchor.
+
+    A research note answers the carry, a note titled in ordinary words answers the
+    title listing, and an entity declares the visible page that holds its current state.
+    """
+    vault = activation.vault
+    _seed_workshop_vault(vault)
+    _seed_carry_pages(vault)
+    for rel, body in (
+        (
+            STATE_ENTITY,
+            "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n"
+            'current_state_page: "[[harbourline-operating-state]]"\n---\n\n'
+            "# Harbourline Trust\n\nA shipping trust. See [[harbourline-operating-state]].\n",
+        ),
+        (
+            STATE_PAGE,
+            "---\ntype: note\nstatus: active\nupdated: 2026-09-20\n---\n\n"
+            "# Harbourline operating state\n\n## Summary\n\n"
+            "- [fact] The harbourline retainer is ninety thousand. ^retainer\n",
+        ),
+    ):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    _seed_live_recall(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
+    return activation
+
+
+def _around_a_withheld_write(vault: Path, turn: str) -> tuple[dict, dict]:
+    """The restricted reader's packet before and after a withheld write the lexical catalogue lags."""
+    before = _activate(vault, turn=turn)
+    _write_as_the_service_does(vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+    return before, _activate(vault, turn=turn)
+
+
+def test_a_withheld_write_leaves_the_restricted_carry_as_it_was(named: SimpleNamespace) -> None:
+    before, after = _around_a_withheld_write(named.vault, CARRY_TURN)
+
+    assert before["generation"]["carried_by"] == "retrieval"
+    assert {unit["provenance"]["path"] for unit in before["units"]} == {CARRY_PAGE}
+    assert after == before
+
+
+def test_a_withheld_write_leaves_the_restricted_title_listing_as_it_was(
+    named: SimpleNamespace,
+) -> None:
+    before, after = _around_a_withheld_write(named.vault, TITLE_TURN)
+
+    assert before["abstained"] is True
+    assert [anchor["path"] for anchor in before["anchors"]] == [CLEANING]
+    assert after == before
+
+
+def test_a_withheld_write_leaves_the_restricted_current_state_page_as_it_was(
+    named: SimpleNamespace,
+) -> None:
+    before, after = _around_a_withheld_write(named.vault, STATE_TURN)
+
+    assert [e["path"] for e in before["current_state"] if e["source"] == "canonical_page"] == [
+        STATE_PAGE
+    ]
+    assert after == before
+
+
+MARSHAL = "Knowledge Base/Entities/People/Marshal Brannoch.md"
+DISPATCHER = "Knowledge Base/Entities/People/Dispatcher Vellum.md"
+
+
+@pytest.mark.parametrize("withheld_path", [MARSHAL], indirect=True)
+def test_deleting_a_withheld_page_a_carried_unit_names_leaves_the_relisted_links_as_they_were(
+    named: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard relists a carried page's links from the units it keeps.
+
+    Here it removes one unit of the carried page, so it relists. The working-set index
+    still holds the deleted page's row, and a deleted file reads as visible.
+    """
+    vault = named.vault
+    carried = vault / CARRY_PAGE
+    carried.write_text(
+        carried.read_text(encoding="utf-8").replace(
+            "- [finding] A quillon parcel",
+            "- [finding] Marshal Brannoch signs each widening and Dispatcher Vellum files it. ^q-sign\n"
+            "- [finding] A quillon parcel",
+            1,
+        )
+        + "\n## Context\n\n[[Marshal Brannoch]] [[Dispatcher Vellum]]\n",
+        encoding="utf-8",
+    )
+    for rel, title in ((MARSHAL, "Marshal Brannoch"), (DISPATCHER, "Dispatcher Vellum")):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n# {title}\n\n## Summary\n\nWorks the quillon queue.\n",
+            encoding="utf-8",
+        )
+    _seed_live_recall(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
+    # The guard removes a unit the compiler served, as it does when a policy moves between them.
+    guarding: list[bool] = []
+    guard, guarded_unit = egress.guard_working_set, egress._guarded_unit
+
+    def guard_removing_a_unit(*args, **kwargs):
+        guarding.append(True)
+        try:
+            return guard(*args, **kwargs)
+        finally:
+            guarding.clear()
+
+    monkeypatch.setattr(egress, "guard_working_set", guard_removing_a_unit)
+    monkeypatch.setattr(
+        egress,
+        "_guarded_unit",
+        lambda unit, *args: None
+        if guarding and "nine minutes" in str(unit.get("text")) else guarded_unit(unit, *args),
+    )
+
+    before = _activate(vault, turn=CARRY_TURN)
+    listed = [a["path"] for a in before["anchors"] if "carried_link" in a["evidence"]]
+    assert listed == [DISPATCHER], before["anchors"]
+    assert before["units"] and not any("nine minutes" in unit["text"] for unit in before["units"])
+
+    _delete_as_the_service_does(vault, MARSHAL)
+
+    assert _activate(vault, turn=CARRY_TURN) == before
 
 
 # ---- activation map ------------------------------------------------------
