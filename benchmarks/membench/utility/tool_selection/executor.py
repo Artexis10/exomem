@@ -272,12 +272,14 @@ def require_distinct_shapes(probes: Mapping[str, Mapping]) -> None:
     """Refuse a run whose arms serve one surface.
 
     A build that ignores the shape switch serves the grouped surface under every
-    arm, and the comparison would then be the same arm against itself.
+    arm, and the comparison would then be the same arm against itself. Two shapes
+    may list the same tool names in different argument forms (flat and nested), so
+    the surface is each tool's schema hash, not its name.
     """
 
-    seen: dict[tuple[str, ...], str] = {}
+    seen: dict[tuple[tuple[str, str], ...], str] = {}
     for shape, probe in probes.items():
-        tools = tuple(probe["tools"])
+        tools = tuple(sorted(probe["hashes"]["per_tool"]["initialize"].items()))
         if tools in seen:
             raise StateError(
                 f"arms {seen[tools]} and {shape} serve the same tools; "

@@ -668,13 +668,20 @@ def test_the_tool_search_setting_is_part_of_the_session_inputs_so_a_resumed_run_
     assert digest("false") != digest("auto")
 
 
+def _probe(**schemas: str) -> dict:
+    return {"tools": sorted(schemas), "hashes": {"per_tool": {"initialize": schemas}}}
+
+
 def test_a_build_that_serves_one_surface_for_every_shape_is_refused() -> None:
-    same = {"grouped": {"tools": ["a", "b"]}, "flat": {"tools": ["a", "b"]}}
-    different = {"grouped": {"tools": ["a", "b"]}, "flat": {"tools": ["a", "c", "d"]}}
+    same = {"grouped": _probe(a="1", b="2"), "flat": _probe(a="1", b="2")}
+    renamed = {"grouped": _probe(a="1", b="2"), "flat": _probe(a="1", c="3", d="4")}
+    # Flat and nested list the same names; only their argument schemas differ.
+    reshaped = {"flat": _probe(a="1", c="3"), "nested": _probe(a="1", c="5")}
 
     with pytest.raises(StateError, match=f"does not apply {ex.SHAPE_ENV}"):
         ex.require_distinct_shapes(same)
-    ex.require_distinct_shapes(different)
+    ex.require_distinct_shapes(renamed)
+    ex.require_distinct_shapes(reshaped)
 
 
 STAND_IN_SERVER = """
