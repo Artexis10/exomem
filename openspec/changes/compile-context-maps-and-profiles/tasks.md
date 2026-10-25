@@ -40,3 +40,4 @@
 - [ ] 6.3 Converge media before publication and verify exact final vector coverage through existing product checks. Prove same-mtime edits and new media parents cannot inherit stale coverage.
 - [ ] 6.4 Qualify the integrated source through independent review and current CI, then verify bounded recovery and fresh quiescence before any development generation.
 - [ ] 6.5 File the evaluation reads' receipts out of the vault into run evidence, and prove that a governed vault returns with identical bytes and signatures after the startup proof and after a session (design, amendment 9).
+- [ ] 6.6 Preserve usable registry entries through provenance removal, verify effective entries and narrative ancestry, and rebuild state against the corrected snapshot digest. Keep authored workflow checks separate from switch statistics (design, amendment 11).
