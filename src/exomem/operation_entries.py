@@ -255,7 +255,8 @@ RECORDS = CommandOperations(
             "Read records",
             "Read human-owned Records without changing them: describe the manifest contract, "
             "validate or inspect a collection, query rows, read an item's history, or preview "
-            "or check an import. `operation.kind` selects the operation.",
+            "or check an import. `operation.kind` selects the operation. Originals belong in "
+            "Sources or Evidence. Help: bootstrap(section=\"records_planning\").",
         ),
         RenderingSpec(
             CHANGE_RECORDS,
@@ -263,8 +264,9 @@ RECORDS = CommandOperations(
             "Change records",
             "Change human-owned Records: create a collection, append, update or bulk-upsert "
             "items, discard a held candidate, revise or rebaseline a manifest, or start or "
-            "cancel an import. `operation.kind` selects the operation. Guarded writes need the "
-            "hashes that the matching read returns.",
+            "cancel an import. `operation.kind` selects the operation. Propose a new collection "
+            "before creating it. Guarded writes need the hashes that the matching read returns. "
+            "Help: bootstrap(section=\"records_planning\").",
             # Success detail shapes a write's terminal response; a read has no such level.
             tool_arguments=("response_detail",),
         ),
@@ -364,7 +366,8 @@ PLANS = CommandOperations(
             "Read plans",
             "Read human-owned Planning intent without changing it: list or inspect plan "
             "collections, validate a manifest, query plan items, or read an item's history. "
-            "`operation.kind` selects the operation.",
+            "`operation.kind` selects the operation. Reread if stale; time never proves "
+            "completion. Help: bootstrap(section=\"records_planning\").",
         ),
         RenderingSpec(
             CHANGE_PLANS,
@@ -373,7 +376,8 @@ PLANS = CommandOperations(
             "Change human-owned Planning intent: create a collection, add, update or triage a "
             "plan item, or revise or rebaseline a manifest. `operation.kind` selects the "
             "operation. Writes select one queried item and need the hashes that the read "
-            "returned.",
+            "returned. Reread if stale; time never proves completion. "
+            "Help: bootstrap(section=\"records_planning\").",
             # Success detail shapes a write's terminal response; a read has no such level.
             tool_arguments=("response_detail",),
         ),

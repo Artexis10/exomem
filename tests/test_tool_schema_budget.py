@@ -33,8 +33,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Re-based by about 9 KB (from 92,905 to the listed ceilings below) for `expose-single-purpose-tools`:
 # the default `nested` shape lists `read_records`, `change_records`, `read_plans` and `change_plans`
 # (about 15.8 KB) and hides `record_memory` and `plan_memory` (about 6.4 KB), whose ceilings stay
-# for the `grouped` shape. A grouped surface still fits well inside the budget.
-TOTAL_BUDGET = 102_255
+# for the `grouped` shape. A grouped surface still fits well inside the budget. Then by 375 for
+# the guidance the four tools carry over from the grouped descriptions (help pointer, originals,
+# propose-before-create, stale rereads).
+TOTAL_BUDGET = 102_630
 
 #: Per-tool ceilings in bytes. The ceilings of the tools a surface lists stay within TOTAL_BUDGET.
 # Registry selector enums (close-mcp-tool-selectors) raise six selector tools' ceilings.
@@ -74,10 +76,10 @@ TOOL_CEILINGS: dict[str, int] = {
     "coordination_status": 500,
     "viewer_map": 3325,
     # The four single-purpose tools of the default `nested` shape.
-    "read_records": 3090,
-    "change_records": 6755,
-    "read_plans": 2305,
-    "change_plans": 3640,
+    "read_records": 3180,
+    "change_records": 6850,
+    "read_plans": 2400,
+    "change_plans": 3735,
 }
 
 #: A Cloud cell serves the local surface minus `CLOUD_SURFACE_EXCLUSIONS` plus the Cloud-only

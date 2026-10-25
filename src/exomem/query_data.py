@@ -38,7 +38,7 @@ from typing import Any
 
 from . import access, reserved_paths
 from .query_compat import (
-    DATE_LIKE as _DATE_LIKE, OPS as _OPS, QueryDataError,
+    DATE_LIKE as _DATE_LIKE, DEFAULT_OP, OPS as _OPS, QueryDataError,
     coerce_num as _coerce_num, get_field as _get_field, match as _match, sort_key,
     distinct_key, group_key, latest_aggregate, numeric_aggregate, profile_kind,
 )
@@ -558,7 +558,7 @@ def evaluate_rows(
     for f0 in filters or []:
         if not isinstance(f0, dict) or not f0.get("column"):
             raise QueryDataError("BAD_FILTER", f"each filter needs a 'column': {f0!r}")
-        if f0.get("op", "eq") not in _OPS:
+        if f0.get("op", DEFAULT_OP) not in _OPS:
             raise QueryDataError("BAD_OP", f"unknown op {f0.get('op')!r}; allowed: {sorted(_OPS)}")
         flt.append(f0)
 
