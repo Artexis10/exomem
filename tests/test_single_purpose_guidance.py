@@ -25,6 +25,7 @@ from exomem import (
     call_ledger,
     capabilities,
     commands,
+    knowledge_packs,
     mutation_terminal,
     operation_entries,
     product_invoke,
@@ -45,7 +46,6 @@ FILING_TOOL = {"nested": "change_records", "flat": "change_records", "grouped": 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SCAFFOLD = REPOSITORY / "src" / "exomem" / "_scaffold"
-PACKS = REPOSITORY / "src" / "exomem" / "packs"
 
 
 def _mentions(text: str, names: frozenset[str] | set[str]) -> set[str]:
@@ -358,12 +358,15 @@ def _scaffold_texts() -> dict[str, str]:
 
 
 def test_the_shipped_skill_packs_and_hook_name_no_grouped_spelling() -> None:
-    """The skill ships static, so it names the default `nested` renderings."""
+    """The skill ships static, so it names the default `nested` renderings; a pack is spelt when served."""
     named = {path: _mentions(text, GROUPED_NAMES) for path, text in _scaffold_texts().items()}
-    named |= {
-        path.name: _mentions(path.read_text(encoding="utf-8"), GROUPED_NAMES)
-        for path in sorted(PACKS.glob("*.json"))
-    }
+    for shape in ("nested", "flat"):
+        with capabilities.active_surface(_surface(shape)):
+            served = knowledge_packs.list_builtin_packs()
+        named |= {
+            f"pack {pack['id']} ({shape})": _mentions("\n".join(_texts(pack)), GROUPED_NAMES)
+            for pack in served
+        }
     hook_texts = {
         name: value
         for name, value in vars(capture_hook).items()

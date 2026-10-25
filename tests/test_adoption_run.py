@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
-from exomem import adoption_run
+from exomem import adoption_run, capabilities, operation_entries
 
 TODAY = dt.date(2026, 7, 14)
 
@@ -88,6 +89,27 @@ def test_start_requires_kb_and_initialize_kb_flag_bootstraps(tmp_path: Path) -> 
     assert run["run_id"].startswith("adr-")
     # Originals untouched by bootstrap + scan.
     assert _snapshot(vault, subdir="Old Notes") == before
+
+
+def test_a_run_serves_its_pack_suggestions_in_the_spelling_of_the_surface_reading_it(
+    tmp_path: Path,
+) -> None:
+    """A run started from the CLI and read over MCP must not name the tools MCP hides."""
+    vault = _legacy_vault(tmp_path)
+    grouped = set(operation_entries.OPERATIONS)
+    run = adoption_run.start(vault, today=TODAY)
+    nested = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    )
+
+    with capabilities.active_surface(nested):
+        served = adoption_run.status(vault, run_id=run["run_id"])
+
+    assert {name for name in grouped if name in json.dumps(run["pack_suggestions"])}
+    assert not {name for name in grouped if name in json.dumps(served["pack_suggestions"])}
+    assert [pack["id"] for pack in served["pack_suggestions"]] == [
+        pack["id"] for pack in run["pack_suggestions"]
+    ]
 
 
 # --- 2 ---

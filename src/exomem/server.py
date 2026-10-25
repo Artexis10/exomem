@@ -88,6 +88,7 @@ class PublicCommandNameMiddleware(Middleware):
         from .cli_ops import OpError
         from .command_surface import (
             find_rendering,
+            rendered_call_writes,
             rendering_scope,
             resolve_command,
             resolve_invocation,
@@ -102,20 +103,26 @@ class PublicCommandNameMiddleware(Middleware):
                 context = context.copy(message=context.message.model_copy(update={"name": command.name}))
             return await call_next(context)
         arguments = context.message.arguments or {}
+        passthrough = frozenset({MCP_CREDENTIAL_PARAMETER})
+        writes = False
         try:
             command, flat = resolve_invocation(
                 name,
                 arguments,
                 self.commands,
                 shape=self.shape,
-                passthrough=frozenset({MCP_CREDENTIAL_PARAMETER}),
+                passthrough=passthrough,
+                strict=context.fastmcp_context.fastmcp.strict_input_validation,
             )
             refusal = None
         except OpError as error:
             command, refusal = found[0], error
             flat = dict(arguments)
+            writes = rendered_call_writes(
+                command, found[1], arguments, shape=self.shape, passthrough=passthrough
+            )
         message = context.message.model_copy(update={"name": command.name, "arguments": flat})
-        with rendering_scope(name, refusal):
+        with rendering_scope(name, refusal, writes=writes):
             return await call_next(context.copy(message=message))
 
 
@@ -131,19 +138,32 @@ class RenderedRefusalMiddleware(Middleware):
         from . import cli_ops
         from .command_surface import (
             _log_tool_failure,
+            mcp_idempotency_key,
             mcp_request_id,
             pending_rendering_refusal,
+            pending_rendering_refusal_writes,
         )
 
         error = pending_rendering_refusal()
         if error is None:
             return await call_next(context)
+        request_id = mcp_request_id()
+        if pending_rendering_refusal_writes() and isinstance(error, cli_ops.OpError):
+            # The grouped write refusal comes from inside the lease, which adds these ids;
+            # this refusal comes before any lease, so it holds no receipt.
+            error.details.update(request_id=request_id, receipt_id=None)
+            try:
+                explicit_key = mcp_idempotency_key()
+            except ValueError:
+                explicit_key = None
+            if explicit_key is not None:
+                error.details["idempotency_key"] = explicit_key
         refusal = cli_ops.public_refusal(error)
         if refusal is None:
             raise error
         _log_tool_failure(
             tool=context.message.name,
-            request_id=mcp_request_id(),
+            request_id=request_id,
             code=str(refusal.get("code") or "OP_ERROR"),
             duration_ms=0.0,
             message=str(refusal.get("message") or ""),

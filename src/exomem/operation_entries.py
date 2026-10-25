@@ -590,24 +590,33 @@ def unspell_call(
     None when `tool` is not a name this shape lists for a converted command, or when the
     arguments do not select an operation that the tool carries. It checks which operation
     the call names and nothing about the operation's own fields: the grouped command's
-    argument rules do that when the call runs.
+    argument rules do that when the call runs. A tool's own arguments beside the operation
+    cross into the flat arguments as they do on the server.
     """
     _require_shape(shape)
     for command, operations in OPERATIONS.items():
         if shape == "grouped":
-            if tool == command:
-                return command, dict(arguments)
-            continue
+            if tool != command:
+                continue
+            kind = arguments.get(operations.selector)
+            mode = (
+                selected_mode(operations.mode_axes, kind, arguments) if isinstance(kind, str) else None
+            )
+            if not any(entry.action == kind and entry.mode == mode for entry in operations.entries):
+                return None
+            return command, dict(arguments)
         for rendering in _renderings_of(command):
             if rendering.name != tool:
                 continue
-            parsed = split_operation(rendering, shape, arguments)
+            body = dict(arguments)
+            tool_arguments = {key: body.pop(key) for key in rendering.tool_arguments if key in body}
+            parsed = split_operation(rendering, shape, body)
             if parsed is None:
                 return None
             kind, fields = parsed
             if rendering.variant_for(kind, fields) is None:
                 return None
-            return command, {operations.selector: kind, **fields}
+            return command, {**fields, **tool_arguments, operations.selector: kind}
     return None
 
 

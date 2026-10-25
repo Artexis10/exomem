@@ -385,6 +385,57 @@ def test_an_operation_the_tool_does_not_carry_is_refused_before_the_writer_is_co
     assert (row["outcome"], row["error_code"], row["rendering"]) == ("refused", code, tool)
 
 
+_TYPE_WRONG = [
+    ("read_records", {"kind": "query", "collection": "c", "limit": "ten"}, "limit"),
+    ("change_records", {"kind": "append", "collection": "c", "why": "w", "item": "x"}, "item"),
+    ("read_plans", {"kind": "query", "collection": "c", "descending": "sometimes"}, "descending"),
+    (
+        "change_plans",
+        {
+            "kind": "triage", "collection": "c", "plan_id": "p", "expected_container_hash": "h",
+            "expected_item_version": "v", "why": "w", "transition": "done",
+        },
+        "transition",
+    ),
+]
+
+
+@pytest.mark.parametrize("tool,operation,field", _TYPE_WRONG)
+def test_a_wrong_type_in_a_rendered_call_is_refused_without_naming_a_hidden_tool(
+    build, seams, tool, operation, field
+) -> None:
+    """The grouped tool's own validation error names that tool, which the host cannot call."""
+
+    async def scenario(client):
+        return await _call(client, tool, {"operation": operation})
+
+    refusal = _session(build(), scenario)
+
+    code = "INVALID_PLAN_ARGUMENTS" if tool.endswith("plans") else "INVALID_RECORD_ARGUMENTS"
+    assert refusal.get("success") is False, refusal
+    assert refusal["error"]["code"] == code
+    assert field in refusal["error"]["message"] and tool in refusal["error"]["message"]
+    assert not {name for name in GROUPED if name in json.dumps(refusal)}
+    assert seams.dispatched == []
+
+
+def test_a_write_refused_before_the_lease_carries_the_grouped_write_refusal_keys(build) -> None:
+    """A client branches on `ok`, `error_code` and `request_id` whichever spelling it called."""
+    stray = {**_APPEND, "manifest_text": "not an append field"}
+
+    async def scenario(client):
+        rendered = await _call(client, "change_records", {"operation": {"kind": "append", **stray}})
+        direct = await _call(client, "record_memory", {"action": "append", **stray})
+        return rendered, direct
+
+    rendered, direct = _session(build(), scenario)
+
+    assert _envelope(rendered) == _envelope(direct)
+    assert set(rendered["error"]) == set(direct["error"])
+    (row,) = [row for row in _ledger_rows() if row.get("rendering") == "change_records"]
+    assert rendered["error"]["request_id"] == row["request_id"]
+
+
 def test_the_contact_spy_sees_a_write_that_is_allowed(build, seams) -> None:
     """The refusal tests above prove absence, so show the same spy detects presence."""
 

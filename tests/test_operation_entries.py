@@ -33,9 +33,12 @@ _LEAF_EITHER_OR = {
     ("plan_memory", "update"): {"changes": {}},
 }
 
+# Required fields whose published type is not a string, with a value of that type.
+_TYPED = {"item": {}, "transition": {}, "rows": [], "acknowledged_gap_codes": []}
+
 
 def _fields(command, variant) -> dict[str, object]:
-    fields: dict[str, object] = dict.fromkeys(variant.required, "x")
+    fields: dict[str, object] = {name: _TYPED.get(name, "x") for name in variant.required}
     fields.update(_LEAF_EITHER_OR.get((command.name, variant.action), {}))
     if variant.mode is not None:
         fields["import_request"] = {"mode": variant.mode}
@@ -157,6 +160,16 @@ def test_a_malformed_operation_fails_closed_with_the_grouped_refusal(arguments) 
         resolve_invocation("read_records", arguments, commands.PRODUCT_COMMANDS)
 
     assert refusal.value.code == "INVALID_RECORD_ARGUMENTS"
+
+
+def test_a_null_selector_field_does_not_replace_the_operation_kind() -> None:
+    """A null `action` would leave the grouped call without a selector, which the lease reads as a write."""
+    arguments = _nested("query", {"collection": "c", "action": None})
+
+    resolved, flat = resolve_invocation("read_records", arguments, commands.PRODUCT_COMMANDS)
+
+    assert flat["action"] == "query"
+    assert commands.invocation_is_read_only(resolved, flat)
 
 
 def test_an_unknown_name_fails_closed() -> None:

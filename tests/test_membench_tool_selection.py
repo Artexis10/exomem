@@ -411,7 +411,25 @@ def test_a_write_call_the_product_refused_is_not_a_wrong_write() -> None:
     assert served_without_a_visible_change.write_calls_served == 1
 
 
-def test_calls_resolve_through_the_injected_resolver_and_refusals_come_from_result_codes() -> None:
+def _grouped_spelling(tool: str, operation: dict) -> tuple[str, dict]:
+    kind = operation["kind"]
+    return "record_memory", {"action": kind, **{k: v for k, v in operation.items() if k != "kind"}}
+
+
+def _nested_spelling(tool: str, operation: dict) -> tuple[str, dict]:
+    return tool, {"operation": operation}
+
+
+def _flat_spelling(tool: str, operation: dict) -> tuple[str, dict]:
+    return tool, {"action": operation["kind"], **{k: v for k, v in operation.items() if k != "kind"}}
+
+
+@pytest.mark.parametrize(
+    "arm,spell",
+    [("grouped", _grouped_spelling), ("nested", _nested_spelling), ("flat", _flat_spelling)],
+)
+def test_every_arm_reads_a_call_by_its_operation_and_counts_refusals_from_result_codes(arm, spell) -> None:
+    """A call that names the right operation with a wrong field counts the same in every arm."""
     case = build_case("records-log-entry", 101)
     tracker, target = case.params["tracker"], case.params["target"]
     path = records_path(tracker)
@@ -419,13 +437,15 @@ def test_calls_resolve_through_the_injected_resolver_and_refusals_come_from_resu
     start = _records_state(case, _rows_of(case))
     done = _records_state(case, [*_rows_of(case), entry])
     calls = [
-        _call(1, "record_memory", {"action": "inspect", "collection": path}),
-        _call(2, "record_memory", {"action": "append", "collection": path, "item": {}}, codes=("INVALID_RECORD_ARGUMENTS",)),
-        _call(3, "record_memory", {"action": "append", "collection": path, "item": entry}),
+        _call(1, *spell("read_records", {"kind": "inspect", "collection": path})),
+        # The server refuses this append for its missing `why`; it still names the target operation.
+        _call(2, *spell("change_records", {"kind": "append", "collection": path, "item": {}}), codes=("INVALID_RECORD_ARGUMENTS",)),
+        _call(3, *spell("change_records", {"kind": "append", "collection": path, "item": entry, "why": "log it"})),
         _call(4, "a_tool_no_arm_serves", {}),
     ]
 
-    result = _score(case, _session(case, before=start, after=done, calls=calls))
+    session, calls = _session(case, before=start, after=done, calls=calls, arm=arm)
+    result = score_session(case, session, calls, product_resolver())
 
     assert result.success
     assert result.calls == 4

@@ -54,6 +54,16 @@ Each pack is a JSON object with these required fields:
 Allowed primitives are `source`, `evidence`, `case`, `decision`, `record`,
 `asset`, `production`, `entity`, `failure`, `pattern`, and `experiment`.
 
+A pack may also carry an optional `references` field. It maps a name to a
+grouped call, `{"command": "record_memory", "arguments": {"action": "query"}}`,
+or to a grouped command alone, `{"command": "plan_memory"}`. When a pack has
+references, `agent_instructions` and each workflow `route` cite them as
+`{name}`. Each surface reads the citation in its own spelling: REST and the CLI
+name the grouped command, and MCP names the tool that it lists. A reference
+without arguments reads as every tool that the surface lists for the command.
+Validation rejects a citation of an undefined name and a reference that some
+tool shape cannot spell.
+
 Unknown pack fields are rejected. Unknown workflow fields are also rejected. This
 is intentional: a deployment should not believe a pack field is active when this
 Exomem version ignores it.

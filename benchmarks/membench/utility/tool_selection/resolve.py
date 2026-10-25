@@ -3,10 +3,12 @@
 Every arm lists different tool names and argument shapes for the same logical
 operation, so scoring never reads a tool name. It asks a resolver, injected as a
 parameter, what a call means: ``resolver(public_name, arguments, shape)`` returns the
-grouped product command and the flat grouped arguments, as the server's own
-translation does for that tool shape. The production resolver is the product's
-``command_surface.resolve_invocation``; ``grouped_resolver`` is the same
-contract for today's grouped spelling alone and serves tests.
+grouped product command and the flat grouped arguments that the call stands for on
+a server of that tool shape. Every shape reads a call's identity the same way, from
+its operation alone (``operation_entries.unspell_call``: the tool, the selector and the
+mode, never the fields), so one arm cannot score a call that another arm would not.
+Whether the server then refused the fields is a separate readout, read from the
+result codes. ``grouped_resolver`` reads today's grouped spelling alone and serves tests.
 
 The product also owns the read-or-write decision (``invocation_is_read_only``)
 and the selector name that carries the action, so neither is restated here.
@@ -26,35 +28,38 @@ class UnresolvedTool(LookupError):
 
 
 def product_resolver() -> Resolver:
-    """The product's rendering-aware resolver; imported at run time, never at load."""
+    """Read a call's operation as a server of the arm's shape names it; imported at run time."""
 
-    from exomem.command_surface import resolve_invocation
+    from exomem import operation_entries
+    from exomem.command_surface import resolve_command
     from exomem.commands import product_commands_for
 
     commands = product_commands_for("mcp")
+    by_name = {command.name: command for command in commands}
 
     def resolve(name: str, arguments: Mapping[str, Any], shape: str):
-        # The arm names the shape its server rendered, so a call is read as that server read it.
-        return resolve_invocation(name, arguments, commands, shape=shape)
+        rendered = operation_entries.unspell_call(name, arguments, shape)
+        if rendered is not None:
+            return by_name[rendered[0]], rendered[1]
+        command = resolve_command(name, commands)
+        if command is None:
+            raise UnresolvedTool(name)
+        if not command.renderings:
+            return command, dict(arguments)
+        # A grouped name stays callable on every shape; its operation must exist all the same.
+        grouped = operation_entries.unspell_call(command.name, arguments, "grouped")
+        if grouped is None:
+            raise UnresolvedTool(name)
+        return command, grouped[1]
 
     return resolve
 
 
 def grouped_resolver() -> Resolver:
-    """Resolve today's grouped spelling: the command registry's own lookup, arguments as sent."""
+    """Read today's grouped spelling alone, whatever shape the session names."""
 
-    from exomem.command_surface import resolve_command
-    from exomem.commands import product_commands_for
-
-    commands = product_commands_for("mcp")
-
-    def resolve(name: str, arguments: Mapping[str, Any], shape: str = "grouped"):
-        command = resolve_command(name, commands)
-        if command is None:
-            raise UnresolvedTool(name)
-        return command, dict(arguments)
-
-    return resolve
+    resolve = product_resolver()
+    return lambda name, arguments, shape="grouped": resolve(name, arguments, "grouped")
 
 
 RESOLVERS: Mapping[str, Callable[[], Resolver]] = {

@@ -5,7 +5,33 @@
   "purpose": "Provide a safe default for everyday records, purchases, travel, home, vehicle, and life-admin knowledge.",
   "audience": "Fresh Exomem users and anyone tracking personal logistics, household records, travel, purchases, or administrative documents.",
   "beginner_description": "Use this as the starter pack for everyday documents, purchases, travel, home, vehicles, and personal admin.",
-  "agent_instructions": "Use this as the default when no stronger domain pack is selected. Route observed purchases, maintenance, mileage, and transactions through Records when a Record collection exists; use Planning only for an explicit household, travel, or life-admin goal, priority, or horizon. This is guidance only and selecting the pack creates nothing. Save external documents as Sources, preserve proof as Evidence, and compile only durable conclusions, solved problems, and reusable patterns.",
+  "agent_instructions": "Use this as the default when no stronger domain pack is selected. Route observed purchases, maintenance, mileage, and transactions through {records} when a Record collection exists; use {plans} only for an explicit household, travel, or life-admin goal, priority, or horizon. This is guidance only and selecting the pack creates nothing. Save external documents as Sources, preserve proof as Evidence, and compile only durable conclusions, solved problems, and reusable patterns.",
+  "references": {
+    "records": {
+      "command": "record_memory"
+    },
+    "plans": {
+      "command": "plan_memory"
+    },
+    "append": {
+      "command": "record_memory",
+      "arguments": {
+        "action": "append"
+      }
+    },
+    "update": {
+      "command": "record_memory",
+      "arguments": {
+        "action": "update"
+      }
+    },
+    "query": {
+      "command": "record_memory",
+      "arguments": {
+        "action": "query"
+      }
+    }
+  },
   "default_note_types": [
     "research-note",
     "insight",
@@ -35,13 +61,13 @@
     {
       "title": "Save a personal record",
       "intent": "Capture a document, purchase, travel detail, or administrative record.",
-      "route": "Records append or update for a configured Record collection; use Sources or Evidence for the original document or proof",
+      "route": "{append} or {update} for a configured Record collection; use Sources or Evidence for the original document or proof",
       "example": "Save this vehicle maintenance record."
     },
     {
       "title": "Find everyday documents",
       "intent": "Retrieve records by topic, person, trip, purchase, or household context.",
-      "route": "Records query for bounded Record history; use search_memory for compiled conclusions or original documents",
+      "route": "{query} for bounded Record history; use search_memory for compiled conclusions or original documents",
       "example": "Find the documents for the trip."
     }
   ],
