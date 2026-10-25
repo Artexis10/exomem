@@ -167,6 +167,40 @@ def test_resolver_caches_across_calls(vault: Path) -> None:
         assert warning is None
 
 
+def test_targeted_paths_keep_parser_and_precedence_without_building_a_resolver(tmp_path):
+    resolver = WikilinkResolver.from_entries(tmp_path, [
+        ("Notes/root.md", None),
+        ("Knowledge Base/Notes/root.md", None),
+        ("Knowledge Base/Notes/only.md", None),
+        ("Knowledge Base/Knowledge Base/doubled.md", None),
+    ])
+
+    def unnecessary_resolver():
+        pytest.fail("an explicit path built a stem/title index")
+
+    for raw in (
+        "[[Notes/root.md#section|label]]", "Notes/only", "Knowledge Base/Notes/only",
+        "Knowledge Base/doubled", "Notes/missing", "Notes/./root", "Notes//root",
+    ):
+        assert normalize_wikilink(
+            raw, tmp_path, targeted_namespace_contains=resolver.full_paths.__contains__,
+            resolver_factory=unnecessary_resolver,
+        ) == normalize_wikilink(raw, tmp_path, resolver=resolver)
+
+
+def test_targeted_normalization_keeps_bare_name_ambiguity_and_title_lookup(tmp_path):
+    resolver = WikilinkResolver.from_entries(tmp_path, [
+        ("Knowledge Base/Notes/one.md", "Canonical title"),
+        ("Knowledge Base/Notes/duplicate.md", None),
+        ("Reference/duplicate.md", None),
+    ])
+    for raw in ("one", "Canonical title", "duplicate", "missing"):
+        assert normalize_wikilink(
+            raw, tmp_path, targeted_namespace_contains=lambda _candidate: False,
+            resolver_factory=lambda: resolver,
+        ) == normalize_wikilink(raw, tmp_path, resolver=resolver)
+
+
 def test_pending_path_resolves_before_disk_write(vault: Path) -> None:
     """A writer registering its about-to-be-written file should make it
     immediately resolvable, even before the disk write."""
