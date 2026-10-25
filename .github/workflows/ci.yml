@@ -30,7 +30,7 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
-      - name: Profile unit and mixed work on the actual reference
+      - name: Discriminate existing decision memo capacity on the actual reference
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -47,30 +47,31 @@ jobs:
           script = Path.cwd() / "scripts" / "recall_latency_gate.py"
           original = script.read_text()
           helper = r'''
-          import cProfile
-          import pstats
+          _diagnostic_original_sample = _worker_sample
 
-          _profile_original_sample = _worker_sample
-
-          def _profiled_sample(vault_root, request):
-              profiler = cProfile.Profile()
-              result = profiler.runcall(_profile_original_sample, vault_root, request)
-              application = (_boot_args.worker_source / "src" / "exomem").resolve()
-              rows = []
-              for (filename, line, function), (primitive, calls, own, cumulative, callers) in pstats.Stats(profiler).stats.items():
-                  try:
-                      relative = Path(filename).resolve().relative_to(application)
-                  except ValueError:
-                      continue
-                  rows.append({"module": "exomem." + relative.with_suffix("").as_posix().replace("/", "."),
-                               "function": function, "line": line, "primitive_calls": primitive,
-                               "calls": calls, "self_seconds": own, "cumulative_seconds": cumulative})
-              result["profile"] = {"scope": "current-thread application calls; profiled diagnostic only",
-                                   "by_cumulative": sorted(rows, key=lambda row: row["cumulative_seconds"], reverse=True)[:40],
-                                   "by_self": sorted(rows, key=lambda row: row["self_seconds"], reverse=True)[:40]}
+          def _diagnostic_sample(vault_root, request):
+              from exomem.governance import bridges, egress
+              requested = request.get("diagnostic_memo_reserve")
+              if requested is not None:
+                  egress.reserve_decision_memo(requested)
+              before = {"bound": egress._DECISION_MEMO_MAX, "size": egress.decision_memo_size()}
+              calls = 0
+              original_admit = bridges.admit
+              def counted_admit(*args, **kwargs):
+                  nonlocal calls
+                  calls += 1
+                  return original_admit(*args, **kwargs)
+              bridges.admit = counted_admit
+              try:
+                  result = _diagnostic_original_sample(vault_root, request)
+              finally:
+                  bridges.admit = original_admit
+              result["decision_memo"] = {"before": before,
+                  "after": {"bound": egress._DECISION_MEMO_MAX, "size": egress.decision_memo_size()},
+                  "bridge_admission_calls": calls, "requested_reservation": requested}
               return result
 
-          _worker_sample = _profiled_sample
+          _worker_sample = _diagnostic_sample
           '''
           overlay = "import ast\n_profile_helper = " + repr(helper) + "\n_profile_tree = ast.parse(_profile_source, filename=__file__)\nassert isinstance(_profile_tree.body[-1], ast.If)\n_profile_tree.body[-1:-1] = ast.parse(_profile_helper).body\nexec(compile(ast.fix_missing_locations(_profile_tree), __file__, 'exec'), globals())\n"
           wrapper = "_profile_source = " + repr(original) + "\n" + overlay
@@ -78,7 +79,7 @@ jobs:
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           import recall_latency_gate as gate
 
-          report = {"state": "failed", "mode": "profiled-unit-mixed", "timings": "profiled diagnostic only; not qualified", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "diagnostic_overlay": "stdlib-cprofile-wrapper", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
+          report = {"state": "failed", "mode": "decision-memo-discriminator", "timings": "counter-wrapped diagnostic only; not qualified", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "diagnostic_overlay": "bridge-call-counter-with-explicit-existing-memo-reservation", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
           workers = {}
           try:
               profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
@@ -113,9 +114,14 @@ jobs:
                       for arm, worker in (("head", workers["head"]),):
                           try:
                               for principal in ("owner",):
-                                  for case in (first_cases["unit"], first_cases["mixed"]):
-                                      result = worker.exchange({**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"]})
-                                      report["warm_calls"].append({"arm": arm, "principal": principal, "case": case["id"], "series": case["series"], **result})
+                                  sequence = ("unit", "unit", "mixed", "unit", "unit", "mixed", "unit")
+                                  for ordinal, series in enumerate(sequence):
+                                      case = first_cases[series]
+                                      request = {**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"]}
+                                      if ordinal == 4:
+                                          request["diagnostic_memo_reserve"] = head["corpus"]["pages"]
+                                      result = worker.exchange(request)
+                                      report["warm_calls"].append({"ordinal": ordinal, "arm": arm, "principal": principal, "case": case["id"], "series": case["series"], **result})
                           finally:
                               worker.pause()
                       report["state"] = "failed" if any(row["state"] != "ok" for row in report["warm_calls"]) else "observed"
