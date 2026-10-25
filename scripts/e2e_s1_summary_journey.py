@@ -2209,10 +2209,11 @@ def print_log_tails(work: Path, chars: int = 1500, *, observer_log_root: Path | 
         with contextlib.suppress(OSError):
             record = log.read_text(encoding="utf-8")
             print(f"--- s1-journey {log.relative_to(observer_logs)} (complete aggregate) ---\n{record}", file=sys.stderr)
-    for log in sorted(work.glob("*.log")):
+    # Forked services keep their captured output below this work root.
+    for log in sorted(work.rglob("*.log")):
         with contextlib.suppress(OSError):
             tail = log.read_text(encoding="utf-8", errors="replace")[-chars:]
-            print(f"--- s1-journey {log.name} (last {chars} chars) ---\n{tail}", file=sys.stderr)
+            print(f"--- s1-journey {log.relative_to(work)} (last {chars} chars) ---\n{tail}", file=sys.stderr)
 
 
 def run(args: argparse.Namespace) -> int:

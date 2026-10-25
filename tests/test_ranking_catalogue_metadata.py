@@ -186,6 +186,20 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
         for size, sample in ((400, small), (1600, large)):
             if sample["outside_output_reads"]:
                 failures.append((operation, size, "Markdown exceeds selected sources"))
+            selections = {
+                selection for selection, store, _scope in sample["connections"]
+                if selection > 0 and store == "lexical"
+            }
+            assert selections, (operation, size, "no catalogue selection measured")
+            for selection in selections:
+                # Independent admission checks belong to selection zero and keep their own proofs.
+                for measurement in ("connections", "proofs"):
+                    count = sum(
+                        value for (selected, store, _scope), value in sample[measurement].items()
+                        if selected == selection and store == "lexical"
+                    )
+                    if count != 1:
+                        failures.append((operation, size, selection, measurement, count))
         read_growth = large["page_reads"] / small["page_reads"] if small["page_reads"] else None
         if (read_growth is None and large["page_reads"]) or (read_growth is not None and read_growth > 1.5):
             failures.append((operation, "Markdown read growth", read_growth))

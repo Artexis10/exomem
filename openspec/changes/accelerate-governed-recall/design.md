@@ -462,27 +462,44 @@ it with the current path on the reference corpus.
   the structural gate and every plan check also run on 3.45.1, the older
   (decision 9). No verdict then rests on a plan that neither CI nor a Cloud
   cell runs.
-- **One catalogue read session per request.** Each catalogue query
-  (`_serve_from_ready_catalog_result`, `lexstore.py:7770`) runs a readiness proof
-  on its own connection, then opens a second connection and proves the
-  checkpoint, schema and semantic identity again before it queries. Every
-  connection goes through the reserved-path ownership checks
-  (`lexstore.py:3346-3428`). A request opened nine connections and ran six
-  proofs: 36 to 85 ms of setup across runs. A per-request catalogue session
-  serves BM25, keyword, parent hints and ranking metadata. It opens one
-  connection and runs one proof per store and scope, against the request's
-  checkpoint. Opt-in widening adds the vault scope, so it adds one proof for
-  that scope. The session closes with the request; no connection is retained
-  across requests.
-- **Semantic identity.** `catalog_semantic_identity` (`lexstore.py:1040-1088`)
-  rereads and hashes the semantic-language registry
-  (`<KB>/_Schema/semantic-language-registry.yaml`) on every call. The identity
-  invalidates catalogue rows when the registry or the authoring contract changes
-  with no note change, and a registry edit does not move the recall checkpoint.
-  A memo per catalogue generation would therefore serve a stale identity. The
-  identity is memoized on its inputs instead: the registry file's stat signature
-  (`st_mtime_ns`, `st_size`, `st_ino`, `st_ctime_ns`) plus the authoring
-  contract's version. When any of them moves, the identity is hashed again.
+- **One catalogue read session per selection.** Baseline catalogue queries
+  ran a readiness proof on one connection, then opened another and proved
+  the checkpoint, schema and semantic identity again before querying. Each
+  connection passed the reserved-path ownership checks. A request opened
+  nine connections and ran six proofs: 36 to 85 ms of setup across runs.
+
+  A selection retains the existing catalogue view for BM25, keyword, parent
+  hints and ranking metadata. It opens one connection and runs one full
+  proof for the stored scope checkpoints. The view includes the vault scope
+  used by opt-in widening. Each selection closes at its synchronous phase
+  boundary; no connection survives into another request.
+
+  Activation uses two optional selection phases: initial lexical evidence,
+  then resolution, carry and role queries after semantic evidence. Neither
+  phase holds a transaction across query encoding. Failed capture preserves
+  the existing optional lexical outcome. The compiler closes its selection
+  on every return and exception, before final evidence checks.
+
+  Selection exit sends activation's lag repair through its existing deferred
+  repair queue. Repair dispatch waits until the activation request ends, so
+  the first phase cannot invalidate the checkpoint pinned for the second.
+  Other callers keep the existing dispatch behavior.
+
+  An admission reader on the exact retained store and connection reuses its
+  view through `_view_readiness` only with an explicit checkpoint. That check
+  still validates policy, schema and semantic identity. Independent readers
+  keep their full proof, and a missing checkpoint keeps its existing refusal.
+- **Semantic identity.** `catalog_semantic_identity` binds catalogue schema,
+  parser version, the semantic-authoring contract and the admitted note-type
+  dependency. Registry edits can retire rows without changing any note.
+  Recall checkpoints attest the separate policy and access boundary.
+
+  The registry loader already caches parsing and effective digests while
+  checking the current binding and path. An outer stat memo could skip those
+  checks, so it must not retain a loaded basis or its identity across calls.
+  Measure the remaining canonical serialization and hashing before adding a
+  memo. Only those pure operations may reuse results after every dependency
+  has been loaded and validated again.
 - **Ranking metadata from catalogue columns.** Multipliers
   (`find_policy.py:264`), recency (`find_policy.py:495`), graph seeds
   (`find_candidates.py:702-708`) and the lexical guard (`find_candidates.py:634`)

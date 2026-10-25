@@ -292,7 +292,14 @@ limit emitted groups from admitted catalogue metadata and the entire frozen
 pending overlay before it reads a page. For unchanged admitted evidence, it
 SHALL return the same hits, order, excerpts and frame annotations as exhaustive
 recall. Each derived store SHALL open at
-most one connection and run at most one readiness proof per scope per request.
+most one connection and run at most one full readiness proof per scope per
+selection. A request MAY use a cache-probe selection and a selection after
+encoding. Activation MAY use an initial lexical selection and a selection for
+synchronous compilation after semantic evidence. Each selection SHALL close
+before provider work or final evidence checks, respectively. Activation SHALL
+defer its lag repair until the request ends, preserving its pinned checkpoint
+between selections. Independent readers SHALL retain their current proof, and
+an absent checkpoint SHALL NOT gain authority from a retained view.
 Ranking, temporal, graph-seed and unit-lane stages SHALL read page and unit
 metadata from the maintained catalogue and sidecars for the current generation,
 not from Markdown. A gate SHALL check the work bounds as ratios between two
@@ -321,7 +328,20 @@ hash that supplies their disclosed excerpt or frame annotation.
 - **WHEN** the same warm request series, with the same candidate set, runs on a generated corpus and on the same corpus grown four times larger
 - **THEN** the work of each candidate-keyed catalogue query at the larger size stays within 1.5 times its work at the smaller size
 - **AND** the work per matched row of each full-text lane stays within 1.5 times
-- **AND** Markdown page reads stay within the candidate count plus the fixed overfetch, and connections and readiness proofs within one per store and scope
+- **AND** Markdown page reads stay within the candidate count plus the fixed overfetch, and connections and full readiness proofs within one per store and scope per selection
+
+#### Scenario: Activation retains a checkpoint across its selection phases
+
+- **WHEN** activation pins a catalogue checkpoint that trails only on withheld pages
+- **THEN** its initial lexical selection closes before encoding
+- **AND** its compilation selection closes before final evidence checks
+- **AND** lag repair runs after the activation ends, so it cannot replace that checkpoint between selections
+
+#### Scenario: A retained view preserves admission checks
+
+- **WHEN** an admission reader supplies an explicit checkpoint on its exact retained store and connection
+- **THEN** it reuses the view while checking the current policy, schema and semantic identity
+- **AND** an absent or mismatched checkpoint retains its refusal behavior
 
 #### Scenario: An unread candidate retains its admitted ranking
 
