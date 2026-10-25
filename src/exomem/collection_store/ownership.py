@@ -69,6 +69,9 @@ class Proof:
     def owner(self, root, path, *, ancestors=False):
         if self.marker is None:
             return None
+        path = collections._reference_key(Path(root), path) or path
+        if not relevant(path, ancestors=ancestors):
+            return None
         owner = authority.owned_entry(root, self.marker, path)
         if owner is None and ancestors:
             key = collections._portable_path_key(path).rstrip("/")
