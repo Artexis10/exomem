@@ -74,7 +74,8 @@
   - Verify: an owner write to a withheld page leaves a restricted caller's response unchanged; a write to a visible page is reported; owner responses are unchanged.
   - Closed since: the activation lexical lane, units, materials and dependence check read one reader checkpoint per request; `ensure_unlisted` and the map's project entries follow the caller's view; a deleted page counts as withheld when the caller's own published verdict for that generation proves it (#2079 and this change). The anchors surface serves project anchors to every reader, so a registry edit stays a reported lag there by design.
   - Still open in the same class:
-    - The carry retrieval, the title listing and the packet's correction context still read the request checkpoint.
+    - The carry retrieval, the title listing, the packet's correction context and the current-state canonical-page lookup still read the request checkpoint, and the carry's term statistics still schedule a repair part-way through a request.
+    - A catalogue publication between the request's pinned checkpoint and a later lane's query makes that lane report stale for the request.
     - The direct-read and graph callers of `only_withheld` have no deleted-page proof, so a deleted withheld page still counts as visible there.
     - A lag longer than the decision bound (16 paths), or an unbridgeable change history, reports the lag without deciding each path, so a burst of withheld writes can still flip a restricted caller's flag until the structure is published.
 - [x] 3.15 Publish admitted sets for structured eligibility and the activation carry. Key them by audience, purpose, grants, tombstone generation and catalogue generation. Patch them from catalogue deltas, and abstain on a key mismatch.
