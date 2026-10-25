@@ -46,7 +46,7 @@ Coverage is keyed on (action, import mode), so each pair belongs to exactly one 
 
 **D7. Annotations.** Read tools: `readOnlyHint=true`, `destructiveHint=false`, `idempotentHint=true`. Write tools: `readOnlyHint=false`, `destructiveHint=true` when any variant overwrites or removes. The hidden grouped spellings keep their current annotations.
 
-**D8. The rendering shape is selectable so the eval can separate its causes.** The server renders converted objects as `nested` (default: D1), `flat` (the same read/write split, each tool with an `action` enum limited to its side and only that side's fields) or `grouped` (today's surface), from the same entries. The eval compares the three on one build. After the pilot, the losing shapes are removed.
+**D8. The rendering shape is selectable so the eval can separate its causes.** The server renders converted objects as `nested` (default: D1), `flat` (the same read/write split, each tool with an `action` enum limited to its side and only that side's fields) or `grouped` (today's surface), from the same entries. The eval compares the three on one build. After the pilot, `flat` is removed. `grouped` stays selectable only as the eval baseline, because round 2 measures its families against today's surface on one build; round 2 removes the option when it ships.
 
 **D9. The pilot is judged by agent performance first.** A paired tool-selection eval runs Records and Planning tasks on the three shapes with the same cases, model and host:
 - Primary metric: task success, checked from the vault's end state against a key written from source truth, never from system output.
@@ -57,6 +57,17 @@ Coverage is keyed on (action, import mode), so each pair belongs to exactly one 
 - Secondary readouts: first correct operation on the resolved (command, action, mode), calls per task, argument refusals, schema bytes and input tokens per task.
 - Isolation: each arm loads only its own rendering's guidance; skill digests and the host's tool-search setting are recorded.
 The directory rescan after release is a secondary signal.
+
+**Pilot result (2026-10-25, Claude Code `claude -p`, Sonnet 5.5, tool search off, one repeat).**
+- Dev round: 20 cases × 3 shapes. Every shape solved 20 of 20, so success could not separate them. Mean calls were 4.1 (grouped), 4.1 (flat) and 3.55 (nested). Argument refusals were 4, 4 and 0. Success sat at the ceiling, so `power_step` had no spread to raise δ above the 0.10 floor.
+- Held-out round: 90 fresh cases in 8 template groups × `grouped` and `nested`. `flat` dropped after the dev round because it matched `grouped` on every readout and kept no advantage of `nested`.
+  - Success: grouped 87 of 90, nested 88 of 90. The per-case difference is +0.011, with a 95% interval of (0.0, +0.045). The lower bound is above −0.10, so nested passes; the interval includes zero, so this reads "no change".
+  - Wrong-write excess: 0.
+  - Argument refusals: grouped 26, nested 1. The per-case interval is (−0.62, 0.0) and touches zero at 8 groups, so it is not claimed as a gain. 4 of 8 templates improved and none got worse.
+  - Collection-path refusals: grouped 13, nested 25, interval (−0.15, +0.45), "no change". Both shapes pass a collection's title where its manifest path belongs; the `collection` field description names neither, which round 2 fixes for every shape.
+  - Calls per task: 3.93 and 3.94. Input tokens per task: 193,678 and 201,794. Schema bytes: 92,197 and 101,538.
+- Deviation: one repeat instead of two. The dev round showed no repeat spread at the ceiling, and the operator agreed to one repeat where repeats agree.
+- Decision: `nested` ships.
 
 ## Risks
 

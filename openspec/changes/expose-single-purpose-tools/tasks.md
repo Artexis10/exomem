@@ -18,12 +18,12 @@
 ## 3. Tool-selection eval
 
 - [x] 3.1 Build the paired eval: Records and Planning tasks grouped by template (at least six groups), each with a vault seed and an end-state key written from source truth; three arms (`grouped`, `flat`, `nested`) on one build; `claude -p` stream-json against an isolated stdio server with only that arm's guidance loaded; skill digests and the tool-search setting recorded. Scoring: task success from vault end state (primary); first correct resolved (command, action, mode), calls per task, argument refusals, schema bytes and input tokens (secondary); writes during read tasks. Verify: offline tests with an injected runner score recorded transcripts.
-- [ ] 3.2 Run the dev round (about 20 cases × 3 arms × 2 repeats); set δ from `power_step` (floor 0.10, cap 0.15) and the held-out size; generate and freeze about 90–120 held-out cases. Record the cost before running.
-- [ ] 3.3 Run the held-out round once. Record each arm's per-case paired difference against `grouped` with its sign-flip interval, and the wrong-write counts, in this change. Verify: the chosen shape's lower bound is above −δ and its wrong-write excess is at most 1.
+- [x] 3.2 Run the dev round (about 20 cases × 3 arms × 2 repeats); set δ from `power_step` (floor 0.10, cap 0.15) and the held-out size; generate and freeze about 90–120 held-out cases. Record the cost before running.
+- [x] 3.3 Run the held-out round once. Record each arm's per-case paired difference against `grouped` with its sign-flip interval, and the wrong-write counts, in this change. Verify: the chosen shape's lower bound is above −δ and its wrong-write excess is at most 1.
 
 ## 4. Delivery
 
-- [ ] 4.1 Remove the losing rendering shapes; keep the chosen one.
+- [ ] 4.1 Remove the `flat` shape; keep `nested` as the only listed shape and `grouped` only as the eval baseline (D8).
 - [ ] 4.2 Run `openspec validate --all --strict`, the scoped suites and the full corpus; get an independent review; merge; cut the ordinary release.
 - [ ] 4.3 Make the Substrate gateway accept both spellings before Cloud cells list the renderings.
 - [ ] 4.4 After the operator deploys Cloud and rescans, record the scan result for the four tools.
