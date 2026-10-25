@@ -7496,6 +7496,7 @@ def visible_page_filter(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    withheld: frozenset[str] = frozenset(),
 ) -> Callable[[str], bool] | None:
     """`restricted_release_filter` for references that may name no page.
 
@@ -7503,10 +7504,19 @@ def visible_page_filter(
     unresolved link, a placeholder). That is not a page, so nothing can be
     withheld and the reference is kept, exactly as in a vault without the
     withheld pages. A reference to an existing or erased page is decided.
+
+    `withheld` names pages that have left the vault but that a structure
+    published before they left still holds, and that this caller's own verdict
+    held back while they were pages (`view_lag.withheld_lag`).
     """
     keep = restricted_release_filter(vault_root, principal=principal, purpose=purpose)
-    if keep is None:
-        return None
+    return None if keep is None else page_filter_over(vault_root, keep, withheld=withheld)
+
+
+def page_filter_over(
+    vault_root: Path, keep: Callable[[str], bool], *, withheld: frozenset[str] = frozenset()
+) -> Callable[[str], bool]:
+    """`visible_page_filter` over a release decision `keep` that the caller already built."""
     root = Path(vault_root)
     offered = admission_of(keep)
 
@@ -7514,6 +7524,9 @@ def visible_page_filter(
         rel = str(rel_path or "").strip()
         if not rel:
             return True, False
+        # A page that left is no page to the check below, which would keep it.
+        if rel in withheld:
+            return False, False
         if not lifecycle.is_tombstoned(root, rel):
             try:
                 if not (root / rel).is_file():
@@ -7631,10 +7644,13 @@ def reader_view(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     unit_identity_only: bool = False,
+    withheld: frozenset[str] = frozenset(),
 ) -> ReaderView | None:
     """The caller's `ReaderView`, or `None` when nothing is withheld from it
     (`visible_page_filter`: the owner, or no bound caller)."""
-    pages = visible_page_filter(vault_root, principal=principal, purpose=purpose)
+    pages = visible_page_filter(
+        vault_root, principal=principal, purpose=purpose, withheld=withheld
+    )
     if pages is None:
         return None
     return ReaderView(vault_root, pages, principal=principal, purpose=purpose, unit_identity_only=unit_identity_only)
