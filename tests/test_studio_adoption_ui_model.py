@@ -145,7 +145,7 @@ def test_junk_inclusion_and_payload_toggle() -> None:
 def test_plan_bullets_sums_reconcile_and_count_line_matches_contract() -> None:
     source = f"""
       import {{planBullets, countLine}} from {MODEL.as_uri()!r};
-      const plan = planBullets({{copy: 1204, skip_unsupported: 1213, skip_junk: 14}});
+      const plan = planBullets({{copy: 1204, existing: 4, skip_unsupported: 1213, skip_junk: 14}});
       console.log(JSON.stringify({{
         plan,
         line: countLine(200, 1532, 0),
@@ -155,11 +155,12 @@ def test_plan_bullets_sums_reconcile_and_count_line_matches_contract() -> None:
 
     result = _node(source)
 
-    assert result["plan"]["total"] == 2431
+    assert result["plan"]["total"] == 2435
     assert result["plan"]["total"] == (
-        result["plan"]["copy"] + result["plan"]["unsupported"] + result["plan"]["junk"]
+        result["plan"]["copy"] + result["plan"]["existing"]
+        + result["plan"]["unsupported"] + result["plan"]["junk"]
     )
-    assert result["plan"]["bullets"][0] == "1204 text notes will be copied in"
+    assert result["plan"]["bullets"][0] == "1204 files will be copied in"
     assert result["plan"]["bullets"][-1] == (
         "0 files will be changed, moved, or deleted — always"
     )
@@ -528,3 +529,44 @@ def test_selection_rules_round_trip_after_resume() -> None:
     assert result["revived"]["files"] == {"Archive/c.md": True, "Docs/Notes/b.md": False}
     assert result["revived"]["folders"]["Archive"] is False
     assert result["missing"] is None
+
+
+def test_classified_selection_survives_resume_and_folder_toggles() -> None:
+    source = f"""
+      import {{selectionFromRules, selectionPayload, toggleFolder}} from {MODEL.as_uri()!r};
+      const rules = {{include: [
+        {{path: 'Coll/books', source_kind: 'book', domain: 'media'}},
+        {{path: 'Coll/guide.md', source_kind: 'note'}},
+      ], exclude: [], overrides: [], include_junk: false}};
+      const selection = selectionFromRules(rules, ['Coll/books/a.md', 'Coll/guide.md']);
+      const resumed = selectionPayload(selection, ['Coll']);
+      const off = toggleFolder(selection, 'Coll', false);
+      const on = toggleFolder(off, 'Coll', true);
+      console.log(JSON.stringify({{resumed, off: selectionPayload(off, ['Coll']),
+        on: selectionPayload(on, ['Coll'])}}));
+    """
+    result = _node(source)
+    expected = [
+        "Coll",
+        {"path": "Coll/books", "source_kind": "book", "domain": "media"},
+        {"path": "Coll/guide.md", "source_kind": "note"},
+    ]
+    assert result["resumed"]["include"] == expected
+    assert result["on"]["include"] == expected
+    assert result["off"]["include"] == []
+    assert result["off"]["exclude"] == ["Coll"]
+
+
+def test_include_rule_paths_do_not_inherit_object_properties() -> None:
+    source = f"""
+      import {{initialSelection, selectionFromRules, selectionPayload}} from {MODEL.as_uri()!r};
+      const rule = {{path: 'constructor', source_kind: 'book'}};
+      const restored = selectionFromRules({{include: [rule]}}, []);
+      console.log(JSON.stringify({{
+        plain: selectionPayload(initialSelection(), ['constructor']),
+        classified: selectionPayload(restored, ['constructor']),
+      }}));
+    """
+    result = _node(source)
+    assert result["plain"]["include"] == ["constructor"]
+    assert result["classified"]["include"] == [{"path": "constructor", "source_kind": "book"}]

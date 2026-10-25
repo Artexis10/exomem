@@ -1,0 +1,767 @@
+"""Collection adoption planner: file facts, frozen destinations, links, earlier imports.
+
+Both the durable Adoption Studio run and the stateless ``adopt`` copy mode plan
+through this module, so a note's links and a re-import are decided in one place.
+Planning reads originals and the Sources front matter; it writes nothing.
+
+A plan item is a JSON-able dict. Destinations are allocated first and never move,
+because the links rendered into other Sources point at them. Links resolve in a
+second pass over the whole item set.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import posixpath
+import unicodedata
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from . import (
+    access,
+    context_refs,
+    find_results,
+    held_fs,
+    markdown_regions,
+    reserved_paths,
+    source_taxonomy,
+)
+from .vault import (
+    kb_root,
+    parse_frontmatter,
+    slugify_with_truncation_check,
+)
+
+IMPORTED_FOLDER = source_taxonomy.IMPORTED_PATH_LABEL
+# A text file past this size plans as an artifact: its bytes are kept, but the
+# page never holds them in memory. A resource bound, not a vocabulary.
+INLINE_TEXT_MAX_BYTES = 4 * 1024 * 1024
+# A page's front matter is read in blocks of this size until its closing fence.
+_INDEX_BLOCK_BYTES = 32 * 1024
+_MARKDOWN_SUFFIXES = (".md", ".markdown")
+# A rule may name only a key the registry already holds: these are the closed
+# `Resolution.status` values (see source_taxonomy) that mean it does.
+ACCEPTED_STATUSES = frozenset({"builtin", "alias", "registered"})  # nosemgrep: ep-word-set -- `Resolution.status` values that source_taxonomy._resolve assigns.
+_UNRESOLVED_NOT_FOUND = "not-found"
+_UNRESOLVED_AMBIGUOUS = "ambiguous"
+
+
+def nfc(value: str) -> str:
+    return unicodedata.normalize("NFC", value)
+
+
+def _key(value: str) -> str:
+    """Comparison form of a name: composed and case-folded, as filesystems differ."""
+    return nfc(value).casefold()
+
+
+def _strip_markdown_suffix(name: str) -> str:
+    lowered = name.lower()
+    for suffix in _MARKDOWN_SUFFIXES:
+        if lowered.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+# --------------------------------------------------------------------------- #
+# earlier imports
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class EarlierImport:
+    """One imported Source read from its front matter."""
+
+    path: str  # vault-relative page path
+    imported_from: str | None
+    import_collection: str | None
+    collection_path: str | None
+    original_sha256: str | None
+    captured: str
+    aliases: tuple[str, ...]
+
+
+def _text_field(value: Any) -> str | None:
+    return nfc(value) if isinstance(value, str) and value.strip() else None
+
+
+def _leading_frontmatter(root: Path, page: Path) -> dict[str, Any] | None:
+    """The parsed front matter of a page, however long, or None when it has none.
+
+    The page is read block by block until the closing fence, so a long title or a
+    long alias list cannot hide the provenance that follows it.
+    """
+    with reserved_paths.open_generic_binary(
+        root, page.relative_to(root).as_posix(), physical=True
+    ) as source:
+        stream = source.stream
+        data = stream.read(_INDEX_BLOCK_BYTES)
+        if not data.startswith(b"---"):
+            return None
+        while True:
+            frontmatter, _body, raw = parse_frontmatter(data.decode("utf-8", errors="replace"))
+            if raw is not None:
+                return frontmatter
+            more = stream.read(_INDEX_BLOCK_BYTES)
+            if not more:
+                return None
+            data += more
+
+
+def earlier_import_of(
+    planned: Mapping[str, Any], *, collection: str | None, captured: str
+) -> EarlierImport:
+    """The entry the index holds for a Source just written for ``planned``.
+
+    It is what `read_import_index` would read back from that page, so a caller
+    that keeps the index in memory across several commits stays current without
+    walking the Sources tree again.
+    """
+    return EarlierImport(
+        path=planned["target_path"],
+        imported_from=nfc(planned["original_path"]),
+        import_collection=nfc(collection) if collection is not None else None,
+        collection_path=planned["collection_path"] if collection is not None else None,
+        original_sha256=planned["original_sha256"],
+        captured=captured,
+        aliases=tuple(planned.get("aliases") or ()),
+    )
+
+
+def read_import_index(root: Path) -> list[EarlierImport]:
+    """Every Source page whose parsed front matter names its original.
+
+    The decision is the parsed ``imported_from`` field, never a substring of the
+    page, so a page that merely quotes a path does not count as an import.
+    """
+    sources = kb_root(root) / "Sources"
+    found: list[EarlierImport] = []
+    if not sources.is_dir():
+        return found
+    for dirpath, dirnames, filenames in os.walk(sources):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if not name.lower().endswith(".md"):
+                continue
+            page = Path(dirpath) / name
+            try:
+                frontmatter = _leading_frontmatter(root, page)
+            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                continue
+            if frontmatter is None:
+                continue
+            imported_from = _text_field(frontmatter.get("imported_from"))
+            if imported_from is None:
+                continue
+            aliases = frontmatter.get("aliases")
+            found.append(
+                EarlierImport(
+                    path=page.relative_to(root).as_posix(),
+                    imported_from=imported_from,
+                    import_collection=_text_field(frontmatter.get("import_collection")),
+                    collection_path=_text_field(frontmatter.get("collection_path")),
+                    original_sha256=_text_field(frontmatter.get("original_sha256")),
+                    captured=str(frontmatter.get("captured") or ""),
+                    aliases=tuple(
+                        nfc(a) for a in aliases if isinstance(a, str) and a.strip()
+                    ) if isinstance(aliases, list) else (),
+                )
+            )
+    return found
+
+
+def latest_earlier_import(
+    index: Iterable[EarlierImport],
+    *,
+    collection: str | None,
+    collection_path: str | None,
+    original_path: str,
+) -> EarlierImport | None:
+    """The newest earlier Source for this original, or None.
+
+    A Source carrying ``import_collection`` and ``collection_path`` matches on that
+    pair. One that lacks both matches on ``imported_from``, so imports made before
+    the pair existed still count.
+    """
+    matches = []
+    for entry in index:
+        if entry.import_collection is not None or entry.collection_path is not None:
+            same = (
+                collection is not None
+                and entry.import_collection == nfc(collection)
+                and entry.collection_path == collection_path
+            )
+        else:
+            same = entry.imported_from == nfc(original_path)
+        if same:
+            matches.append(entry)
+    if not matches:
+        return None
+    return max(matches, key=lambda entry: (entry.captured, entry.path))
+
+
+def earlier_with_same_bytes(
+    index: Iterable[EarlierImport],
+    *,
+    collection: str | None,
+    collection_path: str,
+    original_path: str,
+    sha256: str,
+) -> EarlierImport | None:
+    """The earlier Source that already holds these exact bytes of this original, or None.
+
+    The newest import under this collection label decides. When the label has none,
+    an import of the same original path under another label counts: a subfolder
+    imported first, then its parent.
+    """
+    entries = list(index)
+    latest = latest_earlier_import(
+        entries, collection=collection, collection_path=collection_path,
+        original_path=original_path,
+    )
+    if latest is not None:
+        return latest if latest.original_sha256 == sha256 else None
+    twins = [
+        entry for entry in entries
+        if entry.imported_from == nfc(original_path) and entry.original_sha256 == sha256
+    ]
+    return max(twins, key=lambda entry: (entry.captured, entry.path)) if twins else None
+
+
+def root_warnings(
+    index: Iterable[EarlierImport], *, collection: str | None, collection_root: str
+) -> list[dict[str, Any]]:
+    """A warning naming each other root that earlier imports of this collection came from.
+
+    Re-import matches by collection path, so a collection staged somewhere new still
+    finds its earlier Sources. The warning only tells the reader that it did.
+    """
+    if collection is None:
+        return []
+    own = nfc(collection_root).rstrip("/")
+    roots: set[str] = set()
+    for entry in index:
+        if entry.import_collection != nfc(collection) or not (
+            entry.imported_from and entry.collection_path
+        ):
+            continue
+        head = entry.imported_from[: len(entry.imported_from) - len(entry.collection_path)]
+        if not entry.imported_from.endswith(entry.collection_path) or (
+            head and not head.endswith("/")
+        ):
+            continue
+        earlier = head.rstrip("/")
+        if earlier != own:
+            roots.add(earlier)
+    if not roots:
+        return []
+    named = sorted(roots)
+    return [
+        {
+            "code": "EARLIER_IMPORT_FROM_OTHER_ROOT",
+            "reason": (
+                f"earlier imports of collection {nfc(collection)!r} came from "
+                + ", ".join(repr(root) for root in named)
+                + f", not {own!r}; files match by collection path"
+            ),
+            "roots": named,
+        }
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# destinations
+# --------------------------------------------------------------------------- #
+class Destinations:
+    """Allocates page and artifact paths, unique on disk and within the plan."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self._taken: dict[Path, set[str]] = {}
+
+    def _names(self, folder: Path) -> set[str]:
+        if folder not in self._taken:
+            try:
+                self._taken[folder] = {entry.name.casefold() for entry in folder.iterdir()}
+            except OSError:
+                self._taken[folder] = set()
+        return self._taken[folder]
+
+    def reserve(self, rel_path: str) -> None:
+        path = self.root / rel_path
+        self._names(path.parent).add(path.name.casefold())
+
+    def allocate(
+        self, folder: Path, stem: str, *, artifact_suffix: str | None
+    ) -> tuple[str, str | None]:
+        """A free page path, and the artifact path beside it for an artifact item."""
+        taken = self._names(folder)
+        attempt = 1
+        while True:
+            seed = stem if attempt == 1 else f"{stem}-{attempt}"
+            page_name = f"{seed}{artifact_suffix or ''}.md"
+            names = {page_name.casefold()}
+            if artifact_suffix is not None:
+                names.add(f"{seed}{artifact_suffix}".casefold())
+            if not names & taken:
+                taken |= names
+                page = (folder / page_name).relative_to(self.root).as_posix()
+                artifact = (
+                    page[: -len(".md")] if artifact_suffix is not None else None
+                )
+                return page, artifact
+            attempt += 1
+
+
+def _folder_for(root: Path, classification: Mapping[str, Any] | None,
+                taxonomy: source_taxonomy.SourceTaxonomy | None) -> Path | str:
+    """Where this item's Source lives, or a refusal code when the registry no longer agrees."""
+    if not classification:
+        return kb_root(root) / "Sources" / IMPORTED_FOLDER
+    assert taxonomy is not None
+    try:
+        kind = taxonomy.resolve_kind(classification["source_kind"])
+        domain_key = classification.get("domain")
+        domain = taxonomy.resolve_domain(domain_key) if domain_key else None
+    except source_taxonomy.TaxonomyError:
+        return "TAXONOMY_CHANGED"
+    for resolution in (kind, domain):
+        if resolution is not None and resolution.status not in ACCEPTED_STATUSES:
+            return "TAXONOMY_CHANGED"
+    return source_taxonomy.source_directory(root, kind, domain)
+
+
+# --------------------------------------------------------------------------- #
+# tags
+# --------------------------------------------------------------------------- #
+def _tag_values(raw: Any) -> list[Any]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [part for part in raw.split(",")]
+    return list(raw) if isinstance(raw, list) else [raw]
+
+
+def normalize_tags(raw: Any) -> tuple[list[str], list[str]]:
+    """Front-matter tags as the vault writes them, and those it cannot carry.
+
+    The spelling rule is capture's own (`add._clean_tags`). A tag is carried only
+    when the vault's tag grammar (`semantic_units._is_valid_tag`) accepts it, so it
+    survives the inline YAML list unquoted and the vault reads it back.
+    """
+    from .add import _clean_tags
+    from .semantic_units import _is_valid_tag
+
+    kept: list[str] = []
+    rejected: list[str] = []
+    for value in _tag_values(raw):
+        if not isinstance(value, str):
+            rejected.append(str(value))
+            continue
+        text = value.strip().removeprefix("#")
+        cleaned = _clean_tags([text])
+        if cleaned and _is_valid_tag(cleaned[0]):
+            if cleaned[0] not in kept:
+                kept.append(cleaned[0])
+        elif text:
+            rejected.append(value.strip())
+    return kept, rejected
+
+
+def normalize_aliases(raw: Any) -> tuple[list[str], list[str]]:
+    """Front-matter aliases as the page carries them, and those it cannot carry.
+
+    A non-string or multi-line alias cannot sit in the inline YAML list, so it is
+    reported instead of dropped. An empty alias carries nothing and is not reported.
+    """
+    values = _tag_values(raw)
+    kept: list[str] = []
+    rejected: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            rejected.append(str(value))
+        elif "\n" in value:
+            rejected.append(value.strip())
+        elif value.strip():
+            alias = nfc(value.strip())
+            if alias not in kept:
+                kept.append(alias)
+    return kept, rejected
+
+
+# --------------------------------------------------------------------------- #
+# item facts
+# --------------------------------------------------------------------------- #
+def title_from_text(path: str, text: str) -> str:
+    for line in text.splitlines()[:40]:
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip() or Path(path).stem
+    stem = Path(path).stem
+    return stem.replace("-", " ").replace("_", " ").strip() or stem
+
+
+def decode_text(data: bytes) -> str | None:
+    """The text of `data`, or None when it is not valid UTF-8 text."""
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def link_references(body: str) -> list[dict[str, Any]]:
+    """Wikilinks, embeds and local Markdown links of a body, in source order."""
+    seen: set[tuple[str, str, bool, str | None]] = set()
+    refs: list[dict[str, Any]] = []
+    for wiki in find_results.wikilink_references(body):
+        key = ("wiki", wiki.target, wiki.embed, wiki.fragment)
+        if wiki.target and key not in seen:
+            seen.add(key)
+            refs.append(
+                {"raw": wiki.target, "embed": wiki.embed, "style": "wikilink",
+                 "fragment": wiki.fragment}
+            )
+    for link in markdown_regions.local_links(body):
+        key = ("md", link.target, link.image, link.fragment)
+        if key not in seen:
+            seen.add(key)
+            refs.append(
+                {"raw": link.target, "embed": link.image, "style": "markdown",
+                 "fragment": link.fragment}
+            )
+    return refs
+
+
+def source_failure(error: Exception) -> dict[str, str]:
+    """Map the held-filesystem error protocol without exposing host paths."""
+    code = getattr(error, "code", "IO_REFUSED")
+    if isinstance(error, FileNotFoundError):
+        code = "MISSING"
+    # These are the held substrate's closed refusal codes, not a content vocabulary.
+    mapped = {
+        "MISSING": ("NOT_FOUND", "the original is missing"),
+        "UNSAFE_PATH": ("INVALID_PATH", "the original has an unsafe path"),
+        "CROSS_DEVICE": ("INVALID_PATH", "the original crosses a filesystem boundary"),
+        "RESERVED_PATH": ("RESERVED_PATH", "the original is reserved or has multiple names"),
+        "IDENTITY_CHANGED": ("SOURCE_CHANGED", "the original changed during import"),
+        "PATH_GUARD_CONTENT": ("SOURCE_CHANGED", "the original bytes changed before publication"),
+    }.get(code, (code, "the original could not be read safely"))
+    return {"code": mapped[0], "reason": mapped[1]}
+
+
+def read_facts(
+    root: Path, original_path: str, *, ceiling: int, text_hint: bool
+) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
+    """Hash one original and decide how it imports.
+
+    Returns ``(facts, text)`` (``text`` is None for an artifact) or a refusal dict
+    ``{"code", "reason"}``. A text-like file that is not valid UTF-8, or is too big
+    to hold, imports as an artifact so its bytes survive.
+    """
+    from .add import AddError, artifact_identity
+
+    text: str | None = None
+    try:
+        with reserved_paths.open_generic_binary(root, original_path, physical=True) as source:
+            size = source.version.size
+            if size > ceiling:
+                return {"code": "TOO_LARGE", "reason": f"original exceeds the {ceiling:,} byte artifact ceiling"}
+            if text_hint and size <= INLINE_TEXT_MAX_BYTES:
+                data = source.stream.read(INLINE_TEXT_MAX_BYTES + 1)
+                if len(data) != size:
+                    return {"code": "SOURCE_CHANGED", "reason": "the original changed during import"}
+                text = decode_text(data)
+                digest, length = hashlib.sha256(data).hexdigest(), len(data)
+            else:
+                digest, length = artifact_identity(source.stream, ceiling=ceiling)
+    except AddError as error:
+        return {"code": error.code, "reason": error.reason}
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        return source_failure(error)
+    facts: dict[str, Any] = {
+        "original_path": original_path,
+        "original_sha256": digest,
+        "original_bytes": length,
+        "form": "text" if text is not None else "artifact",
+    }
+    return facts, text
+
+
+def text_facts(original_path: str, text: str) -> dict[str, Any]:
+    """Title, tags, aliases and raw link references of a text original."""
+    frontmatter, body, _raw = parse_frontmatter(text)
+    tags, rejected_tags = normalize_tags(frontmatter.get("tags"))
+    aliases, rejected_aliases = normalize_aliases(frontmatter.get("aliases"))
+    return {
+        "title": title_from_text(original_path, text),
+        "tags": tags,
+        "rejected_tags": rejected_tags,
+        "aliases": aliases,
+        "rejected_aliases": rejected_aliases,
+        "_refs": link_references(body),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# one item
+# --------------------------------------------------------------------------- #
+def plan_item(
+    root: Path,
+    original_path: str,
+    *,
+    collection: str | None,
+    collection_root: str,
+    classification: Mapping[str, Any] | None,
+    taxonomy: source_taxonomy.SourceTaxonomy | None,
+    text_hint: bool,
+    date_iso: str,
+    destinations: Destinations,
+    index: Iterable[EarlierImport],
+    ceiling: int,
+) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
+    """Facts, identity and a frozen destination for one original; or a refusal dict."""
+    read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint)
+    if isinstance(read, dict):
+        return {"path": original_path, **read}
+    facts, text = read
+    prefix = f"{collection_root}/" if collection_root else ""
+    relative = original_path[len(prefix) :] if prefix and original_path.startswith(prefix) else original_path
+    item: dict[str, Any] = {
+        **facts,
+        "collection_path": nfc(relative),
+        "action": "copy-as-source",
+        "classification": dict(classification) if classification else None,
+    }
+    if text is not None:
+        item.update(text_facts(original_path, text))
+    else:
+        item.update(
+            title=Path(original_path).stem or original_path,
+            tags=[], rejected_tags=[], aliases=[], rejected_aliases=[], _refs=[],
+        )
+
+    earlier = earlier_with_same_bytes(
+        index, collection=collection, collection_path=item["collection_path"],
+        original_path=original_path, sha256=item["original_sha256"],
+    )
+    if earlier is not None:
+        item["action"] = "already-imported"
+        item["target_path"] = earlier.path
+        item["target_ref"] = context_refs.source_ref(earlier.path)
+        item["existing_ref"] = item["target_ref"]
+        item["artifact_path"] = artifact_of(root, earlier.path)
+        return item, text
+    changed = latest_earlier_import(
+        index, collection=collection, collection_path=item["collection_path"],
+        original_path=original_path,
+    )
+    if changed is not None:
+        item["previous_import"] = context_refs.source_ref(changed.path)
+
+    folder = _folder_for(root, classification, taxonomy)
+    if isinstance(folder, str):
+        return {"path": original_path, "code": folder,
+                "reason": "the Source taxonomy no longer accepts this rule's kind or domain"}
+    slug, slug_warning = slugify_with_truncation_check(item["title"])
+    suffix = None
+    if item["form"] == "artifact":
+        from .preserve import _sanitize_filename
+
+        suffix = Path(_sanitize_filename(Path(original_path).name) or "").suffix
+        if suffix.lower() == ".md":
+            # An artifact is a `.md` file only when its bytes are not UTF-8 text, and the
+            # graph reads every `.md` under the knowledge base as strict UTF-8.
+            # Storing the bytes under `.bin` keeps them out of the graph input set.
+            suffix = ".bin"
+    page, artifact = destinations.allocate(folder, f"{date_iso}-{slug}", artifact_suffix=suffix)
+    reason = access.writable_reason(root, page)
+    if reason is not None:
+        return {"path": original_path, "code": "WRITE_REFUSED", "reason": reason}
+    item["target_path"] = page
+    item["target_ref"] = context_refs.source_ref(page)
+    item["artifact_path"] = artifact
+    if slug_warning:
+        item["slug_warning"] = slug_warning
+    return item, text
+
+
+def artifact_of(root: Path, page_path: str) -> str | None:
+    """The artifact beside an earlier Source page, when there is one."""
+    candidate = page_path[: -len(".md")]
+    if candidate != page_path:
+        try:
+            reserved_paths.inspect_generic_file(root, candidate, physical=True)
+        except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+            return None
+        return candidate
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# links
+# --------------------------------------------------------------------------- #
+class LinkResolver:
+    """Resolves a link target to a Source page of the collection.
+
+    Order: the exact collection path, the path relative to the note, a unique
+    basename for a bare name, then a unique front-matter alias. A step that finds
+    more than one candidate leaves the link unresolved; nothing is guessed.
+    """
+
+    def __init__(self, entries: Iterable[Mapping[str, Any]]) -> None:
+        self._by_path: dict[str, set[str]] = {}
+        self._by_name: dict[str, set[str]] = {}
+        self._by_alias: dict[str, set[str]] = {}
+        self.pages: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            cp = entry["collection_path"]
+            self.pages[cp] = dict(entry)
+            name = posixpath.basename(cp)
+            for variant in {cp, _strip_markdown_suffix(cp)}:
+                self._by_path.setdefault(_key(variant), set()).add(cp)
+            for variant in {name, _strip_markdown_suffix(name)}:
+                self._by_name.setdefault(_key(variant), set()).add(cp)
+            for alias in entry.get("aliases") or ():
+                self._by_alias.setdefault(_key(alias), set()).add(cp)
+
+    def resolve(self, raw: str, note_path: str) -> tuple[str | None, str, str | None]:
+        """``(collection_path, via, reason)``: a target, or None with why."""
+        target = nfc(raw.strip()).replace("\\", "/")
+        if not target:
+            return None, "", _UNRESOLVED_NOT_FOUND
+        target = target.lstrip("/")
+        steps: list[tuple[str, set[str]]] = [
+            ("path", self._by_path.get(_key(posixpath.normpath(target)), set())),
+        ]
+        relative = posixpath.normpath(posixpath.join(posixpath.dirname(note_path), target))
+        if not relative.startswith(".."):
+            steps.append(("note-relative", self._by_path.get(_key(relative), set())))
+        if "/" not in target:
+            steps.append(("basename", self._by_name.get(_key(target), set())))
+        steps.append(("alias", self._by_alias.get(_key(target), set())))
+        for via, candidates in steps:
+            if len(candidates) == 1:
+                return next(iter(candidates)), via, None
+            if len(candidates) > 1:
+                return None, via, _UNRESOLVED_AMBIGUOUS
+        return None, "", _UNRESOLVED_NOT_FOUND
+
+
+def resolve_links(
+    items: list[dict[str, Any]],
+    index: Iterable[EarlierImport],
+    *,
+    collection: str | None,
+) -> None:
+    """Fill every text item's ``links`` and drop its raw references.
+
+    The namespace is the planned items plus the collection's earlier imports that
+    this plan does not replace, each at its frozen or existing Source page.
+    """
+    entries: dict[str, dict[str, Any]] = {}
+    if collection is not None:
+        for entry in sorted(index, key=lambda e: (e.captured, e.path)):
+            if entry.import_collection == nfc(collection) and entry.collection_path:
+                entries[entry.collection_path] = {
+                    "collection_path": entry.collection_path,
+                    "target_path": entry.path,
+                    "aliases": entry.aliases,
+                }
+    for item in items:
+        entries[item["collection_path"]] = {
+            "collection_path": item["collection_path"],
+            "target_path": item["target_path"],
+            "aliases": item.get("aliases") or (),
+        }
+    resolver = LinkResolver(entries.values())
+    for item in items:
+        resolved: list[dict[str, Any]] = []
+        unresolved: list[dict[str, Any]] = []
+        for ref in item.pop("_refs", []):
+            cp, via, reason = resolver.resolve(ref["raw"], item["collection_path"])
+            if cp is None:
+                unresolved.append({"raw": ref["raw"], "embed": ref["embed"], "reason": reason})
+            elif cp != item["collection_path"]:
+                link = {
+                    "raw": ref["raw"], "embed": ref["embed"], "via": via,
+                    "target_path": resolver.pages[cp]["target_path"],
+                }
+                if ref.get("fragment"):
+                    link["fragment"] = ref["fragment"]
+                resolved.append(link)
+        item["links"] = {"resolved": resolved, "unresolved": unresolved}
+
+
+# --------------------------------------------------------------------------- #
+# provenance and identity of a whole plan
+# --------------------------------------------------------------------------- #
+def item_frontmatter(item: Mapping[str, Any], collection: str | None) -> dict[str, Any]:
+    """The front-matter fields the Source will carry, as previewed in the plan."""
+    classification = item.get("classification") or {}
+    frontmatter: dict[str, Any] = {
+        "type": "source",
+        "source_type": classification.get("source_kind") or source_taxonomy.UNCLASSIFIED_KIND,
+    }
+    if classification.get("domain"):
+        frontmatter["domain"] = classification["domain"]
+    frontmatter["imported_from"] = item["original_path"]
+    if collection is not None:
+        frontmatter["import_collection"] = nfc(collection)
+        frontmatter["collection_path"] = item["collection_path"]
+    frontmatter["original_sha256"] = item["original_sha256"]
+    frontmatter["original_bytes"] = item["original_bytes"]
+    if item.get("previous_import"):
+        frontmatter["previous_import"] = item["previous_import"]
+    if item.get("aliases"):
+        frontmatter["aliases"] = list(item["aliases"])
+    frontmatter["tags"] = ["imported", *item.get("tags", [])]
+    return frontmatter
+
+
+def item_digest(item: Mapping[str, Any]) -> str:
+    """Hash of one complete planned action (destination, classification, provenance, links)."""
+    payload = json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def plan_total_bytes(items: Iterable[Mapping[str, Any]]) -> int:
+    """Bytes `apply` will write for the originals: existing Sources write none."""
+    return sum(
+        int(item.get("original_bytes") or 0)
+        for item in items
+        if item.get("action") != "already-imported"
+    )
+
+
+def wikilink_for(page_path: str) -> str:
+    """The wikilink target of a Source page: its vault path without the `.md` suffix."""
+    return page_path[: -len(".md")] if page_path.lower().endswith(".md") else page_path
+
+
+__all__ = [
+    "ACCEPTED_STATUSES",
+    "IMPORTED_FOLDER",
+    "INLINE_TEXT_MAX_BYTES",
+    "Destinations",
+    "EarlierImport",
+    "LinkResolver",
+    "item_digest",
+    "artifact_of",
+    "decode_text",
+    "earlier_import_of",
+    "earlier_with_same_bytes",
+    "item_frontmatter",
+    "latest_earlier_import",
+    "normalize_aliases",
+    "normalize_tags",
+    "plan_item",
+    "plan_total_bytes",
+    "read_import_index",
+    "resolve_links",
+    "title_from_text",
+    "wikilink_for",
+]
