@@ -211,6 +211,8 @@ dev = [
     "pytest-split>=0.11,<1",
     "pytest-timeout>=2.3",
     "pytest-xdist>=3.6",
+    # Exact paired-binary decision bounds in the tool-selection evaluation.
+    "scipy>=1.17.1,<2",
     "tiktoken>=0.7",
     "tokenizers>=0.20",
 ]

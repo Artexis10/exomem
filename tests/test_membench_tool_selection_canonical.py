@@ -645,3 +645,122 @@ def test_governance_projection_rejects_false_v4_authority_and_retains_real_autho
         assert json.loads(base64.b64decode(archived["row_json"]["blob_base64"]))["grant_id"] == "grant-v3"
     else:
         assert facts["status"] == "unreadable"
+
+
+def test_retained_failed_media_fixture_survives_recorded_status_without_starting_a_worker(tmp_path):
+    import asyncio
+    import subprocess
+    import sys
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from membench.utility.switch_eval.state import mcp_server_entry
+    from membench.utility.tool_selection.development import admit_fixture
+
+    case = source_case("r2-d05")
+    fixture = {"seed_kind": "media-ledger", "jobs": [{
+        "binary_path": f"Knowledge Base/Evidence/Images/retained-{index}.png",
+        "sidecar_path": f"Knowledge Base/Evidence/Images/retained-{index}.md",
+        "media_type": "image", "do_ocr": True, "do_clip": False, "do_reembed": False,
+        "state": "failed", "error": "ExtractionError: the retained image header was invalid.",
+    } for index in (1, 2)]}
+    case = replace(case, params={**case.params, "fixture": fixture})
+    run = tmp_path / "run"
+    spec = arm_spec("grouped", ("*",))
+    seed_case(run, case, parent_env=dict(os.environ), spec=spec)
+    slot = Slot(run / "slot")
+    source = run / "seeded" / case.case_id
+    shutil.copytree(source / "vault", slot.vault)
+    shutil.copytree(source / "state", slot.state)
+    for path in (slot.runtime, slot.cwd, slot.hook_home):
+        path.mkdir(parents=True, exist_ok=True)
+    env = seeding_env(dict(os.environ), slot, spec)
+    env["EXOMEM_MCP_TOOL_SHAPE"] = "grouped"
+    slot.turn_file.write_text("0")
+    before = snapshot_slot(slot, env, tmp_path / "before.json")
+    admit_fixture(case.params, before)
+    log = slot.runtime / "tap.jsonl"
+    entry = mcp_server_entry(slot, spec, log=log, server_stderr=slot.runtime / "server.stderr",
+                             warm_search=True, budget=2)
+
+    async def workflow():
+        parameters = StdioServerParameters(command=sys.executable,
+            args=["-m", "membench.utility.tool_selection.recorder", *entry["args"][1:]], env=env)
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write, read_timeout_seconds=45) as client:
+                await client.initialize()
+                result = await client.call_tool("process_media", {"operation": "status"})
+                diagnostic = subprocess.run([sys.executable, "-c", """
+from pathlib import Path
+from exomem.media_jobs import MediaJobStore, status
+import os
+vault = Path(os.environ['EXOMEM_VAULT_PATH'])
+owner = MediaJobStore(vault, create=False)
+assert not owner.needs_worker() and owner.worker_pid() is None
+assert not status(vault, diagnostic_snapshot=True)['worker_active']
+"""], env=env, capture_output=True, text=True, timeout=15)
+                assert diagnostic.returncode == 0, diagnostic.stderr
+                return result
+
+    result = asyncio.run(workflow())
+    after = snapshot_slot(slot, env, tmp_path / "after.json")
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert not result.is_error
+    assert len(result.structured_content["jobs"]) == 2
+    assert result.structured_content["reconciliation_required_count"] == 0
+    assert before["media"] == after["media"]
+    assert len(after["media"]["tables"]["jobs"]) == 2
+    assert after["media"]["tables"]["media_job_results"] == []
+    assert any(event["event"] == "ready_finished" and event.get("canonical_state") for event in events)
+    calls = [event for event in events if event["event"] == "call"]
+    assert len(calls) == 1 and calls[0]["canonical_state"]["media"] == before["media"]
+    broken = json.loads(json.dumps(after))
+    broken["media"]["tables"]["jobs"][0]["last_error"] = "a different retained failure"
+    with pytest.raises(ValueError, match="declared jobs"):
+        admit_fixture(case.params, broken)
+
+
+def test_source_manifest_key_checks_typed_composite_collection_creation_and_collateral(tmp_path):
+    from membench.utility.tool_selection.development import admit_fixture
+    from membench.utility.tool_selection.score import check_end_state
+    from membench.utility.tool_selection.templates import _manifest_text
+
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    declared = {
+        "manifest": "Knowledge Base/Records/Calibration/_collection.md",
+        "profile": "records", "title": "Calibration ledger",
+        "natural_key": ["measured_on", "sample"],
+        "fields": {"measured_on": ["date"], "sample": ["string"], "replicates": ["integer"],
+                   "reading": ["number"], "accepted": ["boolean"]},
+        "required": ["measured_on", "sample", "replicates", "reading", "accepted"],
+    }
+    case = source_case("r2-d05")
+    case = replace(case, params={**case.params, "kind": "write", "fixture": {"seed_kind": "empty-records"},
+        "expected": {"target_operations": [{"command": "record_memory", "value": "create"}],
+                     "canonical_end_state": {"manifests": [declared]}}})
+    vault = tmp_path / "vault"
+    seed_vault(vault, case.seed_steps())
+    before = read_end_state(vault)
+    admit_fixture(case.params, before)
+    key = case.key
+    assert check_end_state(key, before, before)
+    text = _manifest_text(title=declared["title"], profile=declared["profile"], source="Entries",
+        natural_key=declared["natural_key"], fields={
+            name: {"type": types[0], "required": True} for name, types in declared["fields"].items()})
+    with request_scope(owner_principal(surface="mcp")):
+        commands.op_record_memory(vault, action="create", manifest_path=declared["manifest"], manifest_text=text,
+                                  why="Create the invented calibration ledger.")
+    after = read_end_state(vault)
+
+    assert check_end_state(key, before, after) == []
+    assert after["collections"][declared["manifest"]]["rows"] == []
+    malformed = json.loads(json.dumps(after))
+    malformed["collections"][declared["manifest"]]["fields"]["accepted"]["type"] = "string"
+    assert check_end_state(key, before, malformed)
+    collateral = json.loads(json.dumps(after))
+    collateral["preferences"]["stored"] = "suppressed"
+    assert check_end_state(key, before, collateral)
+    with pytest.raises(ValueError, match="without collections"):
+        admit_fixture(case.params, after)

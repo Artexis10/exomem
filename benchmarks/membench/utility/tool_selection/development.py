@@ -6,9 +6,9 @@ held-out generator. Keys read only their invented input facts, not seed response
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
-from .templates import FileKey, Key, Op, SeedStep, Template
+from .templates import FileKey, Key, ManifestKey, Op, SeedStep, Template
 
 
 def source_template(params: dict) -> Template:
@@ -68,7 +68,7 @@ def source_steps(params: dict) -> list[SeedStep]:
             "subject": fixture["subject"],
             "proposal": {"upsert": fixture["overlay"][fixture["subject"]]},
         })]
-    if family == "empty-media-ledger":
+    if family in ("empty-media-ledger", "media-ledger", "empty-records"):
         return []
     if family == "adoption":
         return [
@@ -78,6 +78,33 @@ def source_steps(params: dict) -> list[SeedStep]:
                      match={"source_root": fixture["source_root"]}),
         ]
     raise ValueError(f"fixture admission has no source recipe: {family}")
+
+
+def seed_owned_fixture_state(params: dict, vault: Path) -> None:
+    """Materialize retained failed media references through their canonical owner."""
+    fixture = params["fixture"]
+    if fixture["seed_kind"] != "media-ledger":
+        return
+    from exomem.media_jobs import FAILED, MediaJob, MediaJobStore, status
+
+    owner = MediaJobStore(vault)
+    for job in fixture["jobs"]:
+        paths = [PurePosixPath(job[name]) for name in ("binary_path", "sidecar_path")]
+        if (job["state"] != FAILED or any(path.is_absolute() or ".." in path.parts for path in paths)
+                or any(type(job[name]) is not bool for name in ("do_ocr", "do_clip", "do_reembed"))):
+            raise ValueError("media fixtures require relative retained references and failed jobs")
+        binary, sidecar = (vault / path for path in paths)
+        if binary.exists() or sidecar.exists():
+            raise ValueError("retained media references must not materialize binary or sidecar bytes")
+        ident = owner.enqueue(MediaJob(binary_path=binary, sidecar_path=sidecar,
+                                      media_type=job["media_type"], do_ocr=job["do_ocr"],
+                                      do_clip=job["do_clip"], do_reembed=job["do_reembed"]))
+        if not owner.mark(ident, FAILED, error=job["error"]):
+            raise ValueError("the media owner did not persist the declared failed job")
+    diagnostic = status(vault, diagnostic_snapshot=True)
+    if (diagnostic["counts"].get(FAILED) != len(fixture["jobs"])
+            or diagnostic["worker_active"] or owner.needs_worker()):
+        raise ValueError("the media fixture must contain valid retained jobs without runnable work")
 
 
 def source_key(params: dict) -> Key:
@@ -113,6 +140,12 @@ def source_key(params: dict) -> Key:
         }}
     return Key(
         kind=params["kind"], target_ops=operations, answer=answer.get("value"),
+        manifests=tuple(ManifestKey(
+            manifest=item["manifest"], profile=item["profile"], title=item["title"],
+            natural_key=tuple(item["natural_key"]),
+            fields={name: tuple(types) for name, types in item["fields"].items()},
+            required=tuple(item["required"]),
+        ) for item in state.get("manifests", [])),
         answer_mode=answer.get("mode"), files=files, preference=state.get("preferences")
         if isinstance(state.get("preferences"), dict) else None,
         question=state.get("review_questions") if isinstance(state.get("review_questions"), dict) else None,
@@ -147,6 +180,9 @@ def admit_fixture(params: dict, state: dict) -> None:
                 raise ValueError("the seeded page remainder differs from the declared prose")
         elif file.get("body") != markdown_facts(fixture["body"]):
             raise ValueError("the seeded Markdown differs from the independently authored body")
+    elif kind == "empty-records":
+        if state["collections"]:
+            raise ValueError("the Records creation fixture must start without collections")
     elif kind == "preferences":
         if any(state["preferences"].get(name) != fixture[name] for name in ("stored", "contexts")):
             raise ValueError("the seeded preferences differ from the declared owner choices")
@@ -156,6 +192,21 @@ def admit_fixture(params: dict, state: dict) -> None:
         for name, entry in fixture["overlay"][fixture["subject"]].items():
             if any(overlay.get(fixture["subject"], {}).get(name, {}).get(field) != value for field, value in entry.items()):
                 raise ValueError("the seeded registry differs from the declared entry")
+    elif kind == "media-ledger":
+        tables = state["media"].get("tables", {})
+        rows = tables.get("jobs", [])
+        fields = ("binary_rel", "sidecar_rel", "media_type", "do_ocr", "do_clip", "do_reembed",
+                  "state", "last_error", "attempts", "claim_revision", "ocr_generation",
+                  "blocked_reason", "blocked_context")
+        expected = [{"binary_rel": job["binary_path"], "sidecar_rel": job["sidecar_path"],
+                     **{name: job[name] for name in ("media_type", "do_ocr", "do_clip", "do_reembed", "state")},
+                     "last_error": job["error"], "attempts": 0, "claim_revision": 0, "ocr_generation": 0,
+                     "blocked_reason": None, "blocked_context": None} for job in fixture["jobs"]]
+        actual = [{name: row.get(name) for name in fields} for row in rows]
+        # These table names are the media owner's persisted job/result protocol, not inferred categories.
+        if (state["media"].get("status") != "present" or tables.get("media_job_results") != []
+                or sorted(actual, key=lambda row: row["binary_rel"]) != sorted(expected, key=lambda row: row["binary_rel"])):
+            raise ValueError("the retained media ledger differs from the independently declared jobs")
     elif kind == "adoption":
         import datetime as dt
         import hashlib

@@ -927,7 +927,7 @@ def test_a_recorded_write_session_scores_from_its_end_state_and_a_refusal_it_met
     assert (result.schema_bytes or 0) > 50_000
 
 
-def test_a_recorded_read_session_scores_from_its_answer_and_wrote_nothing(tmp_path: Path) -> None:
+def test_a_recorded_read_with_prose_wrapped_json_fails_r2s1_without_a_wrong_write(tmp_path: Path) -> None:
     name = "records-range-total-s101"
     layout = Layout(tmp_path / "run")
     session = _play(layout, name, "grouped")
@@ -935,7 +935,8 @@ def test_a_recorded_read_session_scores_from_its_answer_and_wrote_nothing(tmp_pa
 
     result = score_session(case, session, session["facts"]["calls"], grouped_resolver())
 
-    assert result.success, result.reasons
+    assert result.scored and not result.success
+    assert result.reasons == ["answer does not match the seeded facts"]
     assert not result.wrong_write
     assert result.write_calls_served == 0
     assert result.first_correct_ordinal is not None
@@ -971,7 +972,7 @@ def test_an_arm_comparison_runs_from_recorded_sessions_and_reads_a_lost_case_as_
     assert nested["paired_cases"] == 2
     assert nested["comparison"]["mean_difference"] == pytest.approx(-0.5)
     assert nested["verdict"] == ro.INCONCLUSIVE
-    assert report["arms"]["grouped"]["secondary"]["success_rate"] == 1.0
+    assert report["arms"]["grouped"]["secondary"]["success_rate"] == 0.5
 
 
 def test_the_readout_stage_reads_a_run_directory_it_did_not_write_itself(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -983,7 +984,7 @@ def test_the_readout_stage_reads_a_run_directory_it_did_not_write_itself(tmp_pat
 
     assert main(["readout", "--run", str(run), "--resolver", "grouped"]) == 0
 
-    assert "grouped: 2/2 sessions scored, success 1.0" in capsys.readouterr().out
+    assert "grouped: 2/2 sessions scored, success 0.5" in capsys.readouterr().out
     assert json.loads((run / "readout.json").read_text(encoding="utf-8"))["baseline"] == "grouped"
 
 

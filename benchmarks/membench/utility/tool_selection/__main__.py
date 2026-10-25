@@ -208,6 +208,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     },
                     "arms": list(arms),
                     "repeats": args.repeats,
+                    "decision_method": args.decision_method,
                     "seed": args.seed,
                     "tool_search": args.tool_search,
                     "call_budget": args.call_budget,
@@ -378,7 +379,8 @@ def cmd_readout(args: argparse.Namespace) -> int:
     inputs_path = Path(args.run) / "inputs.json"
     inputs = json.loads(inputs_path.read_text()) if inputs_path.exists() else {}
     report = ro.readout(results, cases, delta=args.delta, seed=args.seed,
-                        expected_repeats=inputs.get("repeats"), expected_arms=inputs.get("arms"))
+                        expected_repeats=inputs.get("repeats"), expected_arms=inputs.get("arms"),
+                        decision_method=inputs.get("decision_method", ro.DEFAULT_DECISION_METHOD))
     ro.write_readout(report, Path(args.run) / "readout.json")
     print(ro.format_readout(report))
     return 0
@@ -413,6 +415,10 @@ def cmd_seed_vault(args: argparse.Namespace) -> int:
     raw = json.loads(args.case_json)
     case = Case(raw["case_id"], raw["template"], raw["seed"], raw["params"])
     seed_vault(Path(args.out), case.seed_steps())
+    if case.template_id == "source-derived":
+        from .development import seed_owned_fixture_state
+
+        seed_owned_fixture_state(case.params, Path(args.out))
     if args.snapshot_out:
         snapshot = read_end_state(Path(args.out))
         Path(args.snapshot_out).write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
@@ -487,6 +493,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     p = sub.add_parser("run", help="seed, probe and play every session")
     common(p)
+    from .readout import DECISION_METHODS, DEFAULT_DECISION_METHOD
+
+    p.add_argument("--decision-method", choices=DECISION_METHODS, default=DEFAULT_DECISION_METHOD,
+                   help="the statistical decision policy frozen with this run")
     p.add_argument("--run", required=True)
     p.add_argument("--actor-model", required=True, help="the pinned actor model ID")
     p.add_argument("--seed", type=int, default=0)
