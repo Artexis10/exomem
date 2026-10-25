@@ -148,28 +148,14 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     assert '["3.11", "3.13"]' in versions
     assert '["3.13"]' in versions
 
-    if tier == "core":
-        # FULL uses two runtimes within the hosted job limit; feedback uses one.
-        full_event = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
-        assert matrix["shard-count"] == (
-            "${{ " + full_event + " && fromJSON('[12]') || fromJSON('[24]') }}"
-        )
-        full_shards = json.dumps(list(range(1, 13)), separators=(",", ":"))
-        feedback_shards = json.dumps(list(range(1, shards + 1)), separators=(",", ":"))
-        assert matrix["shard"] == (
-            "${{ " + full_event + f" && fromJSON('{full_shards}') || fromJSON('{feedback_shards}') }}}}"
-        )
-        shard_count = "${{ matrix.shard-count }}"
-    else:
-        assert matrix["shard"] == list(range(1, shards + 1))
-        shard_count = str(shards)
+    assert matrix["shard"] == list(range(1, shards + 1))
     assert job["name"] == (
         f"{tier} tests (py${{{{ matrix.python-version }}}}, "
-        f"shard ${{{{ matrix.shard }}}}/{shard_count})"
+        f"shard ${{{{ matrix.shard }}}}/{shards})"
     )
 
     command = _run_step(job)["run"]
-    assert f"--splits={shard_count}" in command
+    assert f"--splits={shards}" in command
     assert "--group=${{ matrix.shard }}" in command
     algorithm = "least_duration" if tier == "core" else "duration_based_chunks"
     assert f"--splitting-algorithm={algorithm}" in command

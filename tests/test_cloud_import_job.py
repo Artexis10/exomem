@@ -93,7 +93,9 @@ def test_refused_import_leaves_canonical_content(vault, tmp_path, monkeypatch, f
     )
     if failure == "wrong-cell":
         monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "ponmlkjihgfedcba")
-    reads = iter([ciphertext, ciphertext[:-1] + b"x"] if failure == "substitute" else [ciphertext] * 2)
+    # A bit flip always changes ciphertext; a fixed replacement byte can already match.
+    substituted = ciphertext[:-1] + bytes([ciphertext[-1] ^ 1])
+    reads = iter([ciphertext, substituted] if failure == "substitute" else [ciphertext] * 2)
     before = {p.relative_to(vault): p.read_bytes() for p in vault.rglob("*") if p.is_file()}
     with pytest.raises(cloud_import_job.ArchiveRefused):
         cloud_import_job.run_import(

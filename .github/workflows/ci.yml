@@ -109,7 +109,7 @@ jobs:
   # The 180-second per-test limit leaves room for CPU sharing. Disable worker
   # replacement because scheduler recovery previously stalled after a crash.
   core-tests:
-    name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/${{ matrix.shard-count }})
+    name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/24)
     env: *serial-core-selections
     # The release PR runs no test job: `release-evidence` requires a green
     # full run at its base revision and refuses a release PR that changes
@@ -130,9 +130,8 @@ jobs:
         python-version: *test-python-versions
         # Separate runners keep process, port, filesystem, and mutation-lock
         # state isolated while cutting the serial critical path.
-        # Feedback can use 24 runners; FULL keeps 12 per runtime within the shared hosted limit.
-        shard-count: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('[12]') || fromJSON('[24]') }}
-        shard: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('[1,2,3,4,5,6,7,8,9,10,11,12]') || fromJSON('[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]') }}
+        # Shorter batches limit the tail when a full run queues core work behind other jobs.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -199,7 +198,7 @@ jobs:
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           --basetemp=/tmp/exomem-pytest
-          --splits=${{ matrix.shard-count }}
+          --splits=24
           -n 4
           --dist loadfile
           --max-worker-restart=0
