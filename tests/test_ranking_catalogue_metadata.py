@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import platform
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 import pytest
+from recall_structural_counts import RequestCounts
 from test_recall_integration import _PageReadSentinel
 
 from exomem import find as find_module
@@ -13,6 +17,201 @@ from exomem import find_candidates, find_policy, find_results, lexstore
 from exomem.governance.principal import library_scope
 from exomem.ranking_config import DEFAULT_RANKING
 from exomem.vault import kb_dirname
+
+
+@pytest.mark.parametrize("principal", ["owner", "admitted"])
+def test_public_recall_work_does_not_scale_with_unrelated_pages(
+    tmp_path: Path, monkeypatch, principal: str, record_property,
+) -> None:
+    """Catch whole-catalogue SQL and candidate hydration through both public read commands."""
+    from conftest import initialize_vault_state_offline
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem import (
+        bm25,
+        commands,
+        epistemic_graph,
+        file_watcher,
+        memory_refs,
+        readiness,
+        warmup,
+        working_set_index,
+        working_set_runtime,
+    )
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+    from exomem.vault import walk_vault_md
+
+    runtime = {"python": platform.python_version(), "sqlite": sqlite3.sqlite_version}
+    runtime_evidence = json.dumps(runtime, sort_keys=True)
+    record_property("execution_versions", runtime_evidence)
+    print(runtime)
+    root = tmp_path / "generated"
+    root.mkdir()
+    initialize_vault_state_offline(root, source="structural recall fixture")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    monkeypatch.setenv("EXOMEM_EAGER_BOOT", "1")
+    monkeypatch.setenv("EXOMEM_MODEL_OFFLINE", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+    # Policy also restricts the owner; keep the unrestricted and admitted paths separate.
+    if principal == "admitted":
+        write_scope(root, paths="**")
+        write_rule(root, ceiling=6, audience="structural-reader")
+    reader = owner_principal() if principal == "owner" else RequestPrincipal(
+        audience_id="structural-reader", surface="mcp",
+    )
+    queries = {"hybrid": "rankcatalogue latest", "keyword": "rankcatalogue latest",
+               "activate": "quillon vantry window"}
+    matching = {_write(root, f"match-{index:03d}",
+                       f"type: insight\nstatus: active\nupdated: 2026-10-{index % 20 + 1:02d}\n")
+                for index in range(24)}
+    parent = f"{kb_dirname()}/Notes/match-000"
+    _write(root, "match-000", "type: source\nmedia_type: video\nupdated: 2026-10-20\n")
+    _write(root, "match-001", f"type: source\nparent_media: {parent}\nframe_ts: 7.5\n"
+           "updated: 2026-10-20\n")
+    carried = _write(root, "quillon-vantry-window", "type: note\nstatus: active\n",
+                     "# Quillon vantry window\n\n## Summary\n\n"
+                     "- [decision] The quillon vantry window uses a copper latch. ^latch")
+    expected = {"hybrid": matching, "keyword": matching, "activate": {carried}}
+    counts = RequestCounts(root, monkeypatch)
+    observations = {}
+    for size in (400, 1600):
+        start = 0 if size == 400 else 375
+        stop = 375 if size == 400 else 1575
+        for index in range(start, stop):
+            # Other-script titles, paths, body and links share no query trigrams.
+            relative = f"{kb_dirname()}/余白/資料{index:04d}.md"
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            text = (f"---\ntitle: 資料{index:04d}\ntype: note\nstatus: active\n---\n"
+                    f"静かな資料を保存する。[[余白/資料{(index + 1) % 375:04d}]]\n")
+            assert all(token[offset:offset + 3] not in relative + text
+                       for query in queries.values() for token in query.split()
+                       for offset in range(len(token) - 2))
+            path.write_text(text, encoding="utf-8")
+        with library_scope():
+            file_watcher.FileWatcher(root)._reconcile_once(seed=True)
+            lexstore.ensure_fresh(root)
+            readiness.manage_runtime()
+            readiness.begin_warm()
+            try:
+                assert warmup.warm_retrieval_catalog(root)
+            finally:
+                readiness.finish_warm()
+            assert readiness.retrieval_admission(root)["admitted"]
+            memory_refs.ReferenceIndex(root).rebuild_all()
+            epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+            warmup.prime_recall_resolver(root)
+            index = working_set_index.WorkingSetIndex(root)
+            try:
+                index.rebuild()
+            finally:
+                index.close()
+        # Prove the generated provider and stored catalogue agree before measurement.
+        provider = {path.relative_to(root).as_posix() for path in walk_vault_md(root)}
+        with sqlite3.connect(lexstore.get_store(root).path) as connection:
+            stored = {row[0] for row in connection.execute("SELECT path FROM pages WHERE in_kb=1")}
+        assert len(provider) == len(stored) == size
+        assert provider == stored
+        for operation, query in queries.items():
+            with request_scope(reader):
+                store = lexstore.get_store(root)
+                terms = bm25.tokenize(query, query=True)
+                matched = store.term_document_paths(terms, "kb", None, limit=size)
+                assert matched.readiness.complete
+                bm25_paths = set().union(*map(set, matched.value.values()))
+                keyword = store.search_substring_result(query.split(), "kb", None)
+                assert keyword.readiness.complete
+                assert bm25_paths == set(keyword.value) == expected[operation]
+                if operation == "keyword":
+                    assert len(keyword.value) > 4
+                def invoke(operation=operation, query=query):
+                    if operation == "activate":
+                        return commands.op_activate_context(root, turn=query, include_timings=True)
+                    return commands.op_ask_memory(
+                        root, query=query, mode=operation, scope="kb", result_level="page",
+                        limit=4, graph=True, rerank=False, include_timings=True,
+                    )
+
+                # Maintained indexes alone do not warm the caller's application caches.
+                # The result cache stays disabled so the measured call still executes its queries.
+                assert "warming" not in invoke()
+                working_set_runtime.reset_caches_for_tests(packets_only=True)
+                with counts.request():
+                    result = invoke()
+                sample = counts.snapshot()
+            assert "warming" not in result, result
+            rows = result.get("units", []) if operation == "activate" else result.get("hits", [])
+            paths = {row["provenance"]["path"] if operation == "activate" else row["path"]
+                     for row in rows}
+            assert paths, result
+            sources = paths | {sample["sources"][path] for path in paths
+                               if path in sample["sources"]}
+            sources |= {sample["sources"][path] for path in tuple(sources)
+                        if path in sample["sources"]}
+            sample["selected"] = paths
+            sample["matched"] = bm25_paths
+            sample["read_bound"] = len(sources)
+            sample["unique_page_reads"] = len(set(sample["read_paths"]))
+            sample["outside_output_reads"] = sorted(
+                set(sample["read_paths"]) - {str(root / path) for path in sources}
+            )
+            assert sample["steps"] and sample["connections"] and sample["proofs"]
+            assert sample["candidates"], "the request must execute real candidate queries"
+            observations[size, operation] = sample
+
+    reports, failures = [], []
+    for operation in queries:
+        small, large = (observations[size, operation] for size in (400, 1600))
+        assert small["matched"] == large["matched"]
+        assert small["candidates"] == large["candidates"]
+        assert small["selected"] == large["selected"]
+        # Aggregate across selections, but retain their connection/proof rows in the report.
+        steps = []
+        for sample in (small, large):
+            total = Counter()
+            for (_selection, store, scope, stage), value in sample["steps"].items():
+                total[store, scope, stage] += value
+            steps.append(total)
+        ratios = {}
+        for key in steps[0].keys() | steps[1].keys():
+            first, second = (value.get(key, 0) for value in steps)
+            # Posting-row work is normalized even though these premises hold rows fixed.
+            normalizer = len(small["matched"]) if key[2].endswith((
+                "/_bm25_query", "/_substring_query", "/_keyword_groups_query")) else 1
+            ratio = (second / normalizer) / (first / normalizer) if first else None
+            ratios["|".join(key)] = ratio
+            if ratio is None or ratio > 1.5:
+                failures.append((operation, key, ratio))
+        for size, sample in ((400, small), (1600, large)):
+            if sample["outside_output_reads"]:
+                failures.append((operation, size, "Markdown exceeds selected sources"))
+        read_growth = large["page_reads"] / small["page_reads"] if small["page_reads"] else None
+        if (read_growth is None and large["page_reads"]) or (read_growth is not None and read_growth > 1.5):
+            failures.append((operation, "Markdown read growth", read_growth))
+        reports.append({
+            "operation": operation, "ratios": ratios, "page_read_ratio": read_growth,
+            "sizes": {size: {
+                "steps": {str(key): value for key, value in sample["steps"].items()},
+                "connections": {str(key): value for key, value in sample["connections"].items()},
+                "proofs": {str(key): value for key, value in sample["proofs"].items()},
+                "totals": {"steps": sum(sample["steps"].values()),
+                           "connections": sum(sample["connections"].values()),
+                           "proofs": sum(sample["proofs"].values()),
+                           "page_reads": sample["page_reads"]},
+                "matched_rows": len(sample["matched"]),
+                "unique_page_reads": sample["unique_page_reads"],
+                "selected_sources": sample["read_bound"],
+                "outside_output_reads": sample["outside_output_reads"],
+            } for size, sample in ((400, small), (1600, large))},
+        })
+    report = json.dumps({**runtime, "principal": principal, "bounds_gating": principal == "owner",
+                         "bounds_exceeded": failures, "requests": reports}, sort_keys=True)
+    record_property("structural_recall", report)
+    print(report)
+    # Decision 9 reports admitted bounds until admission stops sizing the candidate pool.
+    if principal == "owner":
+        assert not failures, report
 
 
 def _write(vault: Path, name: str, metadata: str = "", body: str = "rankcatalogue latest") -> str:

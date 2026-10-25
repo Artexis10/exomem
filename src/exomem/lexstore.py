@@ -2495,10 +2495,12 @@ class _AdmittedStatisticsEntry:
 
 @dataclass(frozen=True, slots=True)
 class _AdmittedRecallRows:
-    """One snapshot's admitted `(path, title)` rows and the path set they hold."""
+    """One snapshot's structural rows; retain no caller or lifecycle decisions."""
 
     entries: tuple[tuple[str, str | None], ...]
     paths: frozenset[str]
+    carry_candidates: tuple[str, ...]
+    outside_carry: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -8344,15 +8346,11 @@ class LexicalStore:
             id(context.visible), id(context.status_basis), *snapshot
         )
         if context.generation != generation or context.admitted_paths is None:
-            raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
             col = "in_vault" if scope == "vault" else "in_kb"
-            in_scope = f"p.{col} = 1" + raw_clause
+            rows = self._snapshot_recall_rows(conn, scope, snapshot)
             # Hidden labels never reach classification; navigation and retired
             # pages still belong in the admitted denominator.
-            candidates = [
-                str(row[0])
-                for row in conn.execute(f"SELECT p.path FROM pages p WHERE {in_scope}", raw_params)
-            ]
+            candidates = rows.carry_candidates
             admission = admission_of(context.visible)
             identity = admission.identity() if admission is not None else None
             if identity is None:
@@ -8369,12 +8367,7 @@ class LexicalStore:
             # the scope included. Stops at the first withheld row.
             context.complete = context.catalogue_ranking and (
                 len(context.admitted_paths) == len(candidates)
-                and all(
-                    context.visible(str(row[0]))
-                    for row in conn.execute(
-                        f"SELECT p.path FROM pages p WHERE NOT ({in_scope})", raw_params
-                    )
-                )
+                and all(context.visible(path) for path in rows.outside_carry)
             )
             if context.catalogue_ranking and not context.complete:
                 # Configuration said nothing can be withheld and this snapshot
@@ -9422,43 +9415,54 @@ class LexicalStore:
             with self._query_connection() as conn:
                 if not self._recall_checkpoint_current(conn, scope, checkpoint):
                     return None
-                key = (scope, *self._snapshot_generation(conn))
-                with self._term_frequency_cache_lock:
-                    rows = self._admitted_recall_rows.get(key)
-                    if rows is not None:
-                        self._admitted_recall_rows.move_to_end(key)
-                        return rows
-                    fill = self._admitted_recall_row_fills.setdefault(key, threading.Lock())
-                try:
-                    with fill:
-                        with self._term_frequency_cache_lock:
-                            rows = self._admitted_recall_rows.get(key)
-                        if rows is None:
-                            col = "in_vault" if scope == "vault" else "in_kb"
-                            with call_spans.span("lexical.resolver_entries", {}) as measured:
-                                entries = tuple(
-                                    (str(path), title)
-                                    for path, title in conn.execute(
-                                        f"SELECT path, title FROM pages WHERE {col} = 1 "
-                                        "ORDER BY path"
-                                    )
-                                )
-                                rows = _AdmittedRecallRows(
-                                    entries, frozenset(path for path, _title in entries)
-                                )
-                                measured["rows"] = len(entries)
-                            with self._term_frequency_cache_lock:
-                                self._admitted_recall_rows[key] = rows
-                                while len(self._admitted_recall_rows) > _ADMITTED_RECALL_ROWS_MAX:
-                                    self._admitted_recall_rows.popitem(last=False)
-                        return rows
-                finally:
-                    with self._term_frequency_cache_lock:
-                        if self._admitted_recall_row_fills.get(key) is fill:
-                            del self._admitted_recall_row_fills[key]
+                return self._snapshot_recall_rows(conn, scope, self._snapshot_generation(conn))
         except sqlite3.Error as error:
             self._catalog_readiness_error(error, backend_name)
             return None
+
+    def _snapshot_recall_rows(
+        self, conn: sqlite3.Connection, scope: str, snapshot: tuple,
+    ) -> _AdmittedRecallRows:
+        """Reuse structural paths only after the caller proves its connection's snapshot."""
+        key = (scope, *snapshot)
+        with self._term_frequency_cache_lock:
+            rows = self._admitted_recall_rows.get(key)
+            if rows is not None:
+                self._admitted_recall_rows.move_to_end(key)
+                return rows
+            fill = self._admitted_recall_row_fills.setdefault(key, threading.Lock())
+        try:
+            with fill:
+                with self._term_frequency_cache_lock:
+                    rows = self._admitted_recall_rows.get(key)
+                if rows is None:
+                    col = "in_vault" if scope == "vault" else "in_kb"
+                    raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
+                    with call_spans.span("lexical.resolver_entries", {}) as measured:
+                        entries, candidates, outside = [], [], []
+                        # Cache the SQL partitions, then decide visibility anew for each request.
+                        for path, title, in_scope, carry in conn.execute(
+                            f"SELECT p.path, p.title, p.{col}, (p.{col} = 1{raw_clause}) "
+                            "FROM pages p ORDER BY p.path", raw_params,
+                        ):
+                            path = str(path)
+                            if in_scope == 1:
+                                entries.append((path, title))
+                            (candidates if carry else outside).append(path)
+                        rows = _AdmittedRecallRows(
+                            tuple(entries), frozenset(path for path, _title in entries),
+                            tuple(candidates), tuple(outside),
+                        )
+                        measured["rows"] = len(entries)
+                    with self._term_frequency_cache_lock:
+                        self._admitted_recall_rows[key] = rows
+                        while len(self._admitted_recall_rows) > _ADMITTED_RECALL_ROWS_MAX:
+                            self._admitted_recall_rows.popitem(last=False)
+                return rows
+        finally:
+            with self._term_frequency_cache_lock:
+                if self._admitted_recall_row_fills.get(key) is fill:
+                    del self._admitted_recall_row_fills[key]
 
     def _serve_from_ready_catalog_result(
         self,
