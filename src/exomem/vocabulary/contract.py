@@ -44,14 +44,6 @@ NEAR_DUPLICATE_DISTANCE = 2
 _CONTINUATION_RE = re.compile(r"^v1:([0-9a-f]{16}):(\d{1,6})$")
 
 
-def restricted_reason(vault_root: Path) -> str | None:
-    """Why whole-vault content is unavailable to the caller, or None."""
-    from ..governance import egress
-
-    refusal = egress.owner_only_aggregate(vault_root)
-    return None if refusal is None else str(refusal.get("reason") or "audience_restricted")
-
-
 def queues_for_owner(vault_root: Path) -> str | None:
     """Why a save should be queued for the owner instead of written, or None.
 
@@ -158,9 +150,12 @@ def _admission_refusal(
     history_storage_level: Callable[[], tuple[int, bool]],
 ) -> dict[str, Any] | None:
     """Keep instance admission branches shared by readers and publication witnesses."""
-    from ..governance.egress import LEVEL_FULL
+    from ..governance.egress import LEVEL_FULL, unrestricted_content_access
+    from ..governance.principal import effective_principal
+    from ..governance.raw_protection import is_owner
 
     root = Path(vault_root)
+    who = effective_principal()
     if spec.binding_revision is not None:
         document = instances.configuration(root)
         if document is None or instances.revision(document) != spec.binding_revision:
@@ -169,6 +164,8 @@ def _admission_refusal(
         path = spec.overlay(root).relative_to(root).as_posix()
         if release_level(path) < LEVEL_FULL or history_storage_level()[0] < LEVEL_FULL:
             return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
+        return None
+    if is_owner(who) and unrestricted_content_access(root, who):
         return None
     if instances.unassigned_pack_only(root, spec):
         # No overlay or history exists and none can be written unassigned, so

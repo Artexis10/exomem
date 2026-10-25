@@ -400,7 +400,7 @@ def test_warm_registry_load_does_not_read_the_overlay_again(
 
 
 def test_cached_planning_values_do_not_read_unrelated_notes(store, monkeypatch) -> None:
-    from exomem import held_fs
+    from exomem import held_fs, reserved_paths
     from exomem.collection_store.preview import preview_store
     from exomem.planning_values import PlanningValues, registry_path
 
@@ -413,15 +413,13 @@ def test_cached_planning_values_do_not_read_unrelated_notes(store, monkeypatch) 
     unrelated = store.root / "Knowledge Base/Notes/Unrelated.md"
     unrelated.parent.mkdir(parents=True)
     unrelated.write_text("# Unrelated note\n", encoding="utf-8")
-    identity = unrelated.stat()
+    identity = reserved_paths.inspect_generic_path(store.root, unrelated.relative_to(store.root).as_posix())
     with held_fs.acquire(store.root).require() as fs:
         backend = type(fs)
     read = backend.read
 
     def admit_selected_bytes(fs, file, **kwargs):
-        assert (file.identity.device, file.identity.inode) != (
-            identity.st_dev, identity.st_ino
-        ), "Planning value admission read an unrelated note"
+        assert file.identity != identity, "Planning value admission read an unrelated note"
         return read(fs, file, **kwargs)
 
     with preview_store(store.root, store.handle):
@@ -539,6 +537,7 @@ def test_withheld_registry_is_not_loaded_for_private_dependent_operations(
     from exomem.vocabulary import contract, registry
 
     monkeypatch.setattr(egress, "release_level_for_path_only", lambda *a, **kw: egress.LEVEL_NONE)
+    monkeypatch.setattr(egress, "unrestricted_content_access", lambda *a, **kw: False)
 
     def private_read(*args, **kwargs):
         pytest.fail("private registry producer ran before admission")
