@@ -29,14 +29,12 @@ STATUS_CLASSIFICATION_RULE = (
 
 # This explains the existing preview boundary; it grants no authority to save a review or content.
 EXISTING_VALIDATION_GUIDANCE = (
-    "Existing-page validation evaluates the proposed result without saving content or review state. "
-    "A validation request includes this nonpersisting assessment. "
-    "If relation review is required, inspect the current page and candidate evidence. "
-    'When no truthful relation applies, repeat the same validation with relation_disposition="reviewed_none" '
-    "and a bounded evidence-based relation_review_reason. Never infer that outcome from missing edges. "
-    "Preserve existing typed relations and metadata. "
-    "If evidence is insufficient or a material factual, meaning or edge choice remains unresolved, report that condition. "
-    "Commit requires separate write authority and the returned guards."
+    "Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. "
+    "Inspect the current page and candidate evidence. "
+    'If no truthful relation applies, revalidate with relation_disposition="reviewed_none" and a bounded evidence-based relation_review_reason. '
+    "Missing edges prove nothing; preserve typed relations and metadata. "
+    "Report insufficient evidence or unresolved material choices. "
+    "Commit needs separate write authority and returned guards."
 )
 
 

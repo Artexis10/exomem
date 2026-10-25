@@ -24,27 +24,28 @@ from test_mcp_schema_fidelity import _build_server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Measured on the same 0.143.2 candidate with scripts/measure-tool-schema-bytes.py:
-# grouped compatibility: 93,949 bytes; nested jobs: 177,426 bytes.
-# Exact operation inputs, conditional effects and shared jobs add 83,477 bytes.
-# This rebase buys those contracts; it claims no routing or efficiency gain before evaluation.
+# Measured on the same 0.144.0 candidate with scripts/measure-tool-schema-bytes.py:
+# grouped compatibility: 95,235 bytes; nested jobs: 180,062 bytes.
+# Related jobs and exact inputs add 84,827 bytes over this grouped surface.
+# Preview-review guidance adds 2,636 bytes over the prior nested measurement (177,426).
+# Simplification removed 855 bytes; no efficiency gain is claimed before evaluation.
 # Each ceiling rounds that tool's measured wire size up to the next 50 bytes.
 # The separate bootstrap core budget stays unchanged.
-TOTAL_BUDGET = 178_300
+TOTAL_BUDGET = 180_950
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
     "adopt_vault": 1350,
     "adoption_studio": 3800,
     "bootstrap": 1450,
-    "browse_memory": 6850,
+    "browse_memory": 7350,
     "capture_source": 3350,
     "change_adoption": 6300,
     "change_connections": 3200,
-    "change_files": 7550,
+    "change_files": 8050,
     "change_governance": 5100,
     "change_media": 1350,
-    "change_observations": 7300,
+    "change_observations": 8150,
     "change_plans": 4100,
     "change_records": 7350,
     "change_schema": 10500,
@@ -55,16 +56,16 @@ TOOL_CEILINGS: dict[str, int] = {
     "connect_memory": 4500,
     "coordination_status": 500,
     "create_note": 5700,
-    "edit_note": 6950,
+    "edit_note": 7150,
     "episode_memory": 4200,
     "govern_memory": 3100,
     "grant_session_access": 2050,
     "maintain_memory": 3750,
     "manage_authorization_session": 2550,
-    "manage_memory_file": 4650,
-    "observe_memory": 4450,
+    "manage_memory_file": 5150,
+    "observe_memory": 5050,
     "plan_memory": 2700,
-    "prepare_note": 4400,
+    "prepare_note": 5000,
     "preserve_artifacts": 2300,
     "preserve_evidence": 1350,
     "process_media": 1050,
