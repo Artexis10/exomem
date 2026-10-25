@@ -13,6 +13,7 @@ paths and escalates only if they do not land.
 
 from __future__ import annotations
 
+import errno
 import logging
 import sqlite3
 import threading
@@ -171,6 +172,146 @@ def test_a_stranded_catalogue_catches_up_without_a_whole_corpus_pass(
     assert lexstore.search_bm25(tmp_path, "afterchange", k=3, scope="kb")
     assert lexstore.search_bm25(tmp_path, "latercontent", k=3, scope="kb")
     assert lexstore.search_bm25(tmp_path, "beforeremoval", k=3, scope="kb") == []
+
+
+def test_a_page_saved_during_catch_up_converges_without_a_whole_corpus_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """An edit between a bounded upsert's read and its commit is ordinary writing.
+
+    The rows roll back and the catalogue stays unproven, as before. Nothing
+    about the store is wrong, though, and the save's own event asks for the
+    page again, so a catch-up that meets a second save keeps its claim for a
+    later attempt instead of rebuilding the corpus while the editor is busy.
+    """
+    store, changed, _removed = live_catalogue
+    saves = ["# Edited\n\nsecondsave\n", "# Edited again\n\nthirdsave\n"]
+    real_insert = store._insert_page
+
+    def insert_while_the_editor_saves(conn, path, *args, **kwargs):
+        real_insert(conn, path, *args, **kwargs)
+        if path == changed and saves:
+            changed.write_text(saves.pop(0), encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[changed])
+
+    monkeypatch.setattr(store, "_insert_page", insert_while_the_editor_saves)
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    changed.write_text("# After\n\nfirstsave\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+
+    # The second save lands inside the watcher batch, the third inside the
+    # lag-only catch-up that batch's failure scheduled.
+    assert store.apply_watcher_batch([changed], []) is False
+    assert _wait_for_flight_end(tmp_path)
+    assert saves == []
+    assert rebuilds == [], "a page saved during catch-up rebuilt the entire catalogue"
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is None, "a catalogue missing the latest save proved current"
+
+    # The editor has stopped; the runtime's recovery retries the kept claim.
+    assert lexstore.retry_pending_repair(tmp_path.resolve()) is True
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == []
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "thirdsave", k=3, scope="kb")
+    assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb") == []
+
+
+def test_a_page_deleted_during_a_deferred_retry_keeps_its_claim_without_rebuilding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """A deletion mid-apply is the same moving source as an edit, on the contended path."""
+    store, changed, _removed = live_catalogue
+    changed.write_text("# After\n\nafterchange\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    real_insert = store._insert_page
+    deleted = False
+
+    def insert_while_the_page_is_deleted(conn, path, *args, **kwargs):
+        nonlocal deleted
+        real_insert(conn, path, *args, **kwargs)
+        if path == changed and not deleted:
+            deleted = True
+            changed.unlink()
+            freshness.on_files_changed(tmp_path, deleted=[changed])
+
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    _contend_once(monkeypatch, store)
+    monkeypatch.setattr(store, "_insert_page", insert_while_the_page_is_deleted)
+
+    assert store.apply_watcher_batch([changed], []) is False
+    assert _wait_for_flight_end(tmp_path)
+    assert deleted
+    assert rebuilds == [], "a page deleted during its deferred retry rebuilt the catalogue"
+
+    # True only while preserved work is pending: the deferred claim survived.
+    assert lexstore.retry_pending_repair(tmp_path.resolve()) is True
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == []
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "beforechange", k=3, scope="kb") == []
+    assert lexstore.search_bm25(tmp_path, "afterchange", k=3, scope="kb") == []
+
+
+def test_a_catch_up_read_failure_that_is_not_source_movement_still_rebuilds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    live_catalogue,
+) -> None:
+    """Only a source that moved is worth waiting for; any other failure keeps the full pass."""
+    caplog.set_level(logging.INFO, logger="exomem.lexstore")
+    store, changed, _removed = live_catalogue
+    changed.write_text("# After\n\nafterchange\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    real_insert = store._insert_page
+    failed = False
+
+    def insert_with_one_read_failure(conn, path, *args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError(errno.EIO, "injected read failure")
+        return real_insert(conn, path, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_insert_page", insert_with_one_read_failure)
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert failed
+    assert rebuilds == [True]
+    assert any("catch-up declined (replay_failed)" in message for message in caplog.messages)
+    assert lexstore.search_bm25(tmp_path, "afterchange", k=3, scope="kb")
 
 
 def test_a_lag_over_the_foreground_cap_still_rebuilds(

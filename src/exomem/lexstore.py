@@ -1162,6 +1162,16 @@ class _DeltaReplayStale(RuntimeError):
     """The live freshness target moved while a bounded replay was materialized."""
 
 
+class _SourceMoved(OSError):
+    """A requested source changed or vanished between its bounded snapshot and commit.
+
+    Ordinary concurrent editing, not store or disk damage: the edit's own event
+    asks for the page again, so repair keeps its targeted claim instead of
+    rebuilding the corpus. It stays an OSError so every caller that already
+    declines a moved read keeps doing so.
+    """
+
+
 def checkpoint_state(checkpoint) -> tuple | None:
     """Comparable projected state, intentionally excluding local history.
 
@@ -2005,6 +2015,39 @@ def _request_full_rebuild(key: Path, *, lag_only: bool = False) -> None:
     _FULL_REBUILD_REQUESTED.add(key)
 
 
+def _keep_claim_for_moving_source(
+    key: Path, paths: list[Path], error: _SourceMoved, *, lag_only: bool
+) -> bool:
+    """Keep a claim a moving source refused; return whether the flight yields.
+
+    The caller holds `_REPAIRS_LOCK`. Admission stays revoked. The source's own
+    event re-requests the page, and the runtime's catalogue recovery retries a
+    kept claim on its backoff, so yielding loses no repair and cannot spin on
+    an editor that is still saving. Work with another cause that arrived during
+    the attempt keeps this flight, because its caller was told it would.
+    """
+    log.info(
+        "lexical targeted repair kept paths=%d for a moving source (%s); "
+        "retrying when it settles",
+        len(paths),
+        error,
+    )
+    other_cause = bool(_DEFERRED_UPSERTS.get(key)) or (
+        key in _FULL_REBUILD_REQUESTED and key not in _LAG_ONLY_REBUILDS
+    )
+    if lag_only:
+        _request_full_rebuild(key, lag_only=True)
+    if paths:
+        _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
+    if other_cause:
+        return False
+    _FULL_REBUILDS_IN_FLIGHT.discard(key)
+    _FULL_REBUILD_REOBSERVED.pop(key, None)
+    _REPAIRS_IN_FLIGHT.discard(key)
+    _set_repair_progress(key, "idle", result="source_changed")
+    return True
+
+
 def _admit_if_current(vault_root: Path) -> bool:
     """Admit a configured runtime, or prove an offline catalogue, when exactly current."""
     from . import freshness as freshness_module
@@ -2039,6 +2082,8 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
         if _admit_if_current(vault_root):
             return True
         return _log_catch_up_decline("not_current")
+    except _SourceMoved:
+        raise
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         log.info("lexical catch-up declined (%s); rebuilding", error)
         return False
@@ -2187,7 +2232,14 @@ def _schedule_repair(
                 if rebuild and lag_only:
                     with _REPAIRS_LOCK:
                         _set_repair_progress(key, "targeted")
-                    if _caught_up_without_rebuild(vault_root, store):
+                    try:
+                        caught_up = _caught_up_without_rebuild(vault_root, store)
+                    except _SourceMoved as error:
+                        with _REPAIRS_LOCK:
+                            if _keep_claim_for_moving_source(key, paths, error, lag_only=True):
+                                return
+                        continue
+                    if caught_up:
                         # A request arriving meanwhile is level-triggered: the
                         # next iteration consumes it with its own cause.
                         rebuild = False
@@ -2195,7 +2247,13 @@ def _schedule_repair(
                         if not paths:
                             continue
                 targeted_started = time.monotonic()
-                full_pass = rebuild or not store.retry_deferred_upsert(paths)
+                try:
+                    full_pass = rebuild or not store.retry_deferred_upsert(paths)
+                except _SourceMoved as error:
+                    with _REPAIRS_LOCK:
+                        if _keep_claim_for_moving_source(key, paths, error, lag_only=False):
+                            return
+                    continue
                 if paths and not rebuild:
                     # The deferral above logs "retrying these paths" and, until
                     # now, nothing ever said what became of them. A deferral
@@ -6130,9 +6188,10 @@ class LexicalStore:
         the vault lock has almost always finished.
 
         Returns whether the rows landed. False escalates to `rebuild_atomic`,
-        which is the only correct answer to anything that is not contention: a
-        sqlite error or a moved source says the store or the disk is wrong, and
-        re-applying rows cannot fix either.
+        the answer to anything that is neither contention nor a moving source:
+        a sqlite error or a failed read says the store or the disk is wrong,
+        and re-applying rows cannot fix either. A source that moved under the
+        apply raises `_SourceMoved` instead, so the caller keeps the claim.
         """
         if self._failed or not paths:
             return False
@@ -6145,6 +6204,8 @@ class LexicalStore:
         except VaultLockError as e:
             log.info("lexical targeted retry still contended (%s); rebuilding", e)
             return False
+        except _SourceMoved:
+            raise
         except (sqlite3.Error, OSError) as e:
             log.info("lexical targeted retry failed (%s); rebuilding", e)
             return False
@@ -6160,7 +6221,8 @@ class LexicalStore:
         replay committed (trivially, when nothing lags). A retired or stale
         store, a foreign or adopted origin, lost history, a reconcile-tainted
         delta or an oversized one returns False, logs which refusal it was and
-        keeps the full pass.
+        keeps the full pass. A source that moves under the replay raises
+        `_SourceMoved`, and the worker keeps the lag-only claim.
         """
         from . import freshness as freshness_module
 
@@ -6292,10 +6354,12 @@ class LexicalStore:
                 # edit rolls the transaction back rather than false-emptying the
                 # recursive exact-category retry.
                 for path, _rel, signature, in_kb, in_vault in prepared:
-                    if freshness_module.stat_signature(path) != signature or self._membership(
-                        path
-                    ) != (in_kb, in_vault):
-                        raise OSError(f"source changed during bounded upsert: {path.name}")
+                    try:
+                        current = freshness_module.stat_signature(path)
+                    except FileNotFoundError:
+                        current = None
+                    if current != signature or self._membership(path) != (in_kb, in_vault):
+                        raise _SourceMoved(f"source changed during bounded upsert: {path.name}")
             self._publish_live_witnesses(
                 conn,
                 witness_targets,
