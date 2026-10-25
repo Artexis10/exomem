@@ -881,16 +881,27 @@ def test_a_migrator_the_supervisor_stopped_after_it_published_leaves_the_vault_s
     operator_file(tmp_path)
     # Short, so the lease each stopped migrator keeps expires within the test.
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_TTL", "3")
-    monkeypatch.setattr(service_manager, "MIGRATION_SECONDS", 10.0)
-    monkeypatch.setattr(service_manager, "MIGRATION_FINISH_SECONDS", 4.0)
+    marker_install_ready = tmp_path / "marker-install-ready"
     # Every finish outlasts the wait: the marker install never returns before the stop.
     slow = candidate(tmp_path, MIGRATE, name="-slow-finish", fault=(
-        "import time\n"
+        "import pathlib, time\n"
         "from exomem.collection_store import admission\n"
         "def install_marker(*arguments, **options):\n"
+        f"    pathlib.Path({str(marker_install_ready)!r}).touch()\n"
         "    time.sleep(60)\n"
         "admission._install_marker = install_marker\n"))
-    result = upgrade(tmp_path, Handoff(tmp_path, root), slow)
+
+    class PublishedMigrator(Handoff):
+        async def _spawn(self, command, **options):
+            marker_install_ready.unlink(missing_ok=True)
+            await super()._spawn(command, **options)
+            # Stop after publication; the budget cases cover the elapsed-time limit.
+            while not marker_install_ready.exists():
+                assert self.child.returncode is None, "the migrator exited before publication"
+                await asyncio.sleep(0.01)
+            raise TimeoutError("simulated timeout after publication")
+
+    result = upgrade(tmp_path, PublishedMigrator(tmp_path, root), slow)
     assert result["ok"], result
     assert result["phase"] == "ready"
     assert result["handoff"]["migration"]["collections"] == {

@@ -138,7 +138,8 @@ def test_unavailable_fts5_keeps_primary_python_rung_but_marks_widening_unavailab
     """Forced FTS5-unavailable (the custom-build shape): bm25.search answers
     from rank-bm25 and the keyword lane still works. The optional outside-KB
     lane reports its maintained index as unavailable instead of launching a
-    second whole-vault Python build. Runs on every install."""
+    second whole-vault Python build. Metadata repair may still publish normal
+    SQLite tables without FTS5. Runs on every install."""
 
     def _boom(conn):
         raise sqlite3.OperationalError("no such module: fts5")
@@ -167,7 +168,6 @@ def test_unavailable_fts5_keeps_primary_python_rung_but_marks_widening_unavailab
     after = find_module.degradation_counts()
     assert after.get("outside_kb_lexical", 0) == before.get("outside_kb_lexical", 0) + 1
     assert failed == ["outside_kb_lexical"]
-    assert not lexstore.lexical_path(tmp_path).exists()
 
 
 @needs_fts5
