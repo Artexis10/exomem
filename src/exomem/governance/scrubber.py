@@ -35,7 +35,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlsplit
 
 from ..issued_cursor import is_issued_cursor
 from . import authorization_sessions
@@ -43,6 +43,7 @@ from . import authorization_sessions
 #: What replaces a blocked value. Deliberately fixed text: a per-credential
 #: description would itself carry information about what was found.
 NOTICE = "[credential blocked by exomem egress policy]"
+INSPECTION_UNAVAILABLE_NOTICE = "[content withheld: JSON inspection unavailable]"
 
 # The future authorization-session wire token is parsed here, rather than by
 # each future transport, so the terminal scanner and issuance validation share
@@ -622,7 +623,11 @@ def _scrub_plain_text(text: str) -> tuple[str, bool]:
 
 def _scrub_uri(text: str, *, structural: bool) -> tuple[str, bool] | None:
     """Inspect decoded URI content without scanning encoding as credential text."""
-    if ":" not in text or any(character.isspace() for character in text):
+    # URI references can occur inside prose; both standard decoding forms keep explicit checks intact.
+    for decoded in (unquote(text), unquote_plus(text)):
+        if decoded != text and _scrub_explicit(decoded)[1]:
+            return NOTICE, True
+    if ":" not in text:
         return None
     try:
         uri = urlsplit(text)
@@ -632,8 +637,10 @@ def _scrub_uri(text: str, *, structural: bool) -> tuple[str, bool] | None:
         return None
     if _scrub_explicit(text)[1]:
         return NOTICE, True
-    # urlsplit normalizes scheme case and strips leading controls; retain both.
-    components = [text.partition(":")[0], *(unquote(component) for component in uri[1:])]
+    scheme = text.partition(":")[0]
+    # URL parsing removes these ASCII controls; retain the original case for entropy.
+    normalized_scheme = scheme.translate(str.maketrans("", "", "\t\r\n"))
+    components = [scheme, normalized_scheme, *(unquote(component) for component in uri[1:])]
     # URI queries may use literal plus signs or form separators. Inspect both
     # interpretations; percent decoding must never erase a credential boundary.
     for key, value in parse_qsl(uri.query, keep_blank_values=True):
@@ -738,8 +745,11 @@ def scrub_json_text(text: str) -> tuple[str, bool]:
             # JSON text never acquired structural-field or issuance authority.
             classify=lambda value, _structural: scrub_text(value),
         )
-    except (ValueError, RecursionError):
+    except json.JSONDecodeError:
         return scrub_text(text)
+    except (ValueError, RecursionError):
+        # Parser or walker limits cannot downgrade JSON inspection to a weaker raw-text scan.
+        return INSPECTION_UNAVAILABLE_NOTICE, True
     if blocked and duplicate_objects:
         # Ambiguous duplicate objects cannot preserve their shape when serialized.
         return NOTICE, True
