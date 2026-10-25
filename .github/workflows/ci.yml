@@ -14,7 +14,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: 713c5861ba57aadc7799ec8469043aa276067c77
+        ref: 2dbfb8c9981a9acb367390e56551f0bba85af72f
         fetch-depth: 0
     - uses: astral-sh/setup-uv@v5
       with:
@@ -121,18 +121,22 @@ jobs:
         \ directory:\n        scratch = Path(directory)\n        try:\n          \
         \  worker = gate._Worker(gate.ROOT, scratch / \"vault\", scratch / \"head\"\
         , cpus, profile)\n            report[\"environment\"] = worker.environment\n\
-        \            report[\"samples\"] = []\n            for principal_name in (\"\
-        owner\", \"admitted\"):\n                for series in (\"unit\", \"mixed\"\
-        ):\n                    case = selected[series]\n                    for ordinal\
-        \ in range(2):\n                        request = {**case, \"principal\":\
-        \ principal_name, \"rows\": gate.REFERENCE[\"stage_rows\"]}\n            \
-        \            result = worker.exchange(request)\n                        report[\"\
-        samples\"].append({\"principal\": principal_name, \"series\": series,\n  \
-        \                                                \"ordinal\": ordinal, **result})\n\
-        \            failures = []\n            for sample in report[\"samples\"]:\n\
-        \                proof = sample[\"boundary_proof\"]\n                callers\
-        \ = {row[\"module\"] for row in proof[\"postfilter_callers\"]}\n         \
-        \       if sample[\"state\"] != \"ok\":\n                    failures.append(\"\
+        \            report[\"samples\"] = []\n            # The real gate discards\
+        \ one warm-up call per principal and series.\n            for principal_name\
+        \ in (\"owner\", \"admitted\"):\n                for case in selected.values():\n\
+        \                    worker.exchange({**case, \"principal\": principal_name,\
+        \ \"rows\": gate.REFERENCE[\"stage_rows\"]})\n            for principal_name\
+        \ in (\"owner\", \"admitted\"):\n                for series in (\"unit\",\
+        \ \"mixed\"):\n                    case = selected[series]\n             \
+        \       for ordinal in range(2):\n                        request = {**case,\
+        \ \"principal\": principal_name, \"rows\": gate.REFERENCE[\"stage_rows\"]}\n\
+        \                        result = worker.exchange(request)\n             \
+        \           report[\"samples\"].append({\"principal\": principal_name, \"\
+        series\": series,\n                                                  \"ordinal\"\
+        : ordinal, **result})\n            failures = []\n            for sample in\
+        \ report[\"samples\"]:\n                proof = sample[\"boundary_proof\"\
+        ]\n                callers = {row[\"module\"] for row in proof[\"postfilter_callers\"\
+        ]}\n                if sample[\"state\"] != \"ok\":\n                    failures.append(\"\
         sample-not-ok\")\n                if not {\"exomem.writer_lease\", \"exomem.command_surface\"\
         } <= callers:\n                    failures.append(\"terminal-pass-missing\"\
         )\n                if not all(row[\"ownership_active\"] for row in proof[\"\
