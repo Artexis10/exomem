@@ -74,27 +74,29 @@ jobs:
         \    def observed_instrument():\n        with instrument() as value:\n   \
         \         yield value\n        observed[\"parent_conflicts\"] = [collector.parent_conflicts()\
         \ for collector in value[1]]\n    def observed_ask(**kwargs):\n        result\
-        \ = ask_memory(**kwargs)\n        observed[\"timing_suppressed\"] = \"timings\"\
-        \ not in result\n        timed_hits.extend(result.get(\"hits\", []))\n   \
-        \     return result\n\n    # These fixed application boundaries observe the\
-        \ existing command, not user text.\n    egress.postfilter = observed_filter\n\
-        \    egress._decide_path = observed_decide\n    ownership.ReadScope.finish\
-        \ = observed_finish\n    command_surface._log_tool_success = observed_log\n\
-        \    adapter.instrument = observed_instrument\n    try:\n        result =\
-        \ _proof_sample_original(observed_ask, request)\n    finally:\n        egress.postfilter\
-        \ = postfilter\n        egress._decide_path = decide\n        ownership.ReadScope.finish\
-        \ = finish\n        command_surface._log_tool_success = log_success\n    \
-        \    adapter.instrument = instrument\n\n    # Compare the same real bound\
-        \ command outside its diagnostic timer/collector.\n    caller = (principal.owner_principal(surface=\"\
-        library\") if request[\"principal\"] == \"owner\"\n              else principal.RequestPrincipal(audience_id=\"\
+        \ = ask_memory(**kwargs)\n        observed[\"timing_suppressed\"] = not isinstance(result,\
+        \ dict) or \"timings\" not in result\n        timed_hits.extend(result.get(\"\
+        hits\", []) if isinstance(result, dict) else result)\n        return result\n\
+        \n    # These fixed application boundaries observe the existing command, not\
+        \ user text.\n    egress.postfilter = observed_filter\n    egress._decide_path\
+        \ = observed_decide\n    ownership.ReadScope.finish = observed_finish\n  \
+        \  command_surface._log_tool_success = observed_log\n    adapter.instrument\
+        \ = observed_instrument\n    try:\n        result = _proof_sample_original(observed_ask,\
+        \ request)\n    finally:\n        egress.postfilter = postfilter\n       \
+        \ egress._decide_path = decide\n        ownership.ReadScope.finish = finish\n\
+        \        command_surface._log_tool_success = log_success\n        adapter.instrument\
+        \ = instrument\n\n    # Compare the same real bound command outside its diagnostic\
+        \ timer/collector.\n    caller = (principal.owner_principal(surface=\"library\"\
+        ) if request[\"principal\"] == \"owner\"\n              else principal.RequestPrincipal(audience_id=\"\
         benchmark-admitted\", surface=\"mcp\"))\n    adapter.clear_results()\n   \
         \ with principal.request_scope(caller), principal.invocation_scope():\n  \
         \      untimed = ask_memory(query=request[\"query\"], include_timings=False,\n\
         \                            limit=DEFAULT_LIMIT, rerank=False, **request[\"\
         arguments\"])\n    stable = lambda value: hashlib.sha256(json.dumps(value,\
-        \ sort_keys=True).encode()).hexdigest()\n    observed[\"hits_equal_untimed\"\
-        ] = stable(timed_hits) == stable(untimed.get(\"hits\", []))\n    observed[\"\
-        hit_count\"] = len(timed_hits)\n    observed[\"preparation\"] = dict(_proof_preparation)\n\
+        \ sort_keys=True).encode()).hexdigest()\n    untimed_hits = untimed.get(\"\
+        hits\", []) if isinstance(untimed, dict) else untimed\n    observed[\"hits_equal_untimed\"\
+        ] = stable(timed_hits) == stable(untimed_hits)\n    observed[\"hit_count\"\
+        ] = len(timed_hits)\n    observed[\"preparation\"] = dict(_proof_preparation)\n\
         \    result[\"boundary_proof\"] = observed\n    return result\n\n_prepare_worker\
         \ = _proof_prepare\n_worker_sample = _proof_sample\n'''\ntree = ast.parse(original,\
         \ filename=str(script))\nassert isinstance(tree.body[-1], ast.If)\ntree.body[-1:-1]\
