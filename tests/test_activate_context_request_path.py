@@ -1028,6 +1028,98 @@ def test_a_turn_naming_no_anchor_is_served_that_notes_units(
     assert working_set_runtime.decode_continuity(packet["continuity"])["refs"] == [CARRY_PAGE]
 
 
+@pytest.mark.parametrize("fail_role", [False, True])
+def test_managed_activation_selects_around_encoding_and_restores_the_caller_scope(
+    carried_vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, budget_free,
+    fail_role: bool,
+) -> None:
+    """Carry and role queries share one view, and neither encoding nor scope exit retains it."""
+    from dataclasses import replace
+
+    from test_working_set_carry import CARRY_PAGE, CARRY_TURN
+    from test_working_set_index_vectors import _Encoder
+
+    from exomem import embeddings, ranking_config
+    from exomem.governance import egress
+
+    warm_managed_cell(carried_vault)
+    encoder = _Encoder()
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: encoder.fingerprint)
+    monkeypatch.setattr(embeddings, "embed_activation_passages_if_loaded", encoder.passages)
+    monkeypatch.setattr(
+        ranking_config, "DEFAULT_RANKING",
+        replace(ranking_config.DEFAULT_RANKING, working_set_semantic_min_population=1),
+    )
+    index = working_set_index.WorkingSetIndex(carried_vault)
+    try:
+        index.rebuild()
+    finally:
+        index.close()
+
+    lexical_views = []
+    compiled_views = []
+    stages = []
+    lexical_query = working_set_runtime._lexical_query
+    carry = working_set_runtime.carry_candidates
+    units_lane = working_set._units_lane
+    label_origins = working_set._label_origins
+
+    def lexical(*args, **kwargs):
+        view = lexstore._admitted_catalog_view(carried_vault)
+        assert view is not None
+        lexical_views.append(view)
+        return lexical_query(*args, **kwargs)
+
+    def encode(text):
+        assert lexical_views and lexical_views[0].connection is None
+        assert lexstore._admitted_catalog_view(carried_vault) is None
+        stages.append("encode")
+        return encoder.vector(text)
+
+    def observe_carry(*args, **kwargs):
+        view = lexstore._admitted_catalog_view(carried_vault)
+        assert view is not None and view.connection is not None
+        compiled_views.append(view)
+        stages.append("carry")
+        return carry(*args, **kwargs)
+
+    def observe_units(*args, **kwargs):
+        view = lexstore._admitted_catalog_view(carried_vault)
+        assert compiled_views and view is compiled_views[0]
+        assert view.connection is compiled_views[0].connection
+        stages.append("role")
+        if fail_role:
+            raise egress.ReaderViewUnavailable("role interrupted")
+        return units_lane(*args, **kwargs)
+
+    def label(*args, **kwargs):
+        assert lexstore._admitted_catalog_view(carried_vault) is None
+        assert compiled_views[0].connection is None
+        stages.append("origins")
+        return label_origins(*args, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "_lexical_query", lexical)
+    monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", encode)
+    monkeypatch.setattr(working_set_runtime, "carry_candidates", observe_carry)
+    monkeypatch.setattr(working_set, "_units_lane", observe_units)
+    monkeypatch.setattr(working_set, "_label_origins", label)
+    with lexstore.admitted_catalog_scope(carried_vault):
+        caller = lexstore._ADMITTED_CATALOG.get()
+        packet = commands.op_activate_context(carried_vault, turn=CARRY_TURN)
+        assert lexstore._ADMITTED_CATALOG.get() is caller
+
+    assert stages[0] == "encode" and "carry" in stages and "role" in stages
+    assert all(view.connection is None for view in lexical_views + compiled_views)
+    assert lexstore._admitted_catalog_view(carried_vault) is None
+    if fail_role:
+        assert packet["abstention"] == {"reason": "unavailable"}
+    else:
+        assert packet["abstained"] is False
+        assert stages[-1] == "origins"
+        assert {unit["provenance"]["path"] for unit in packet["units"]} == {CARRY_PAGE}
+
+
 def test_a_named_anchor_still_wins_through_the_whole_door(
     carried_vault: Path, budget_free
 ) -> None:

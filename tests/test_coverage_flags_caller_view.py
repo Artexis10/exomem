@@ -472,6 +472,52 @@ def test_a_withheld_write_leaves_the_restricted_lexical_lane_as_it_was(
     assert _lexical_flag(activation.vault) == "available"
 
 
+def test_withheld_lag_repair_waits_for_both_activation_selections(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first phase cannot publish away the checkpoint pinned for later role reads."""
+    before = _activate(activation.vault)
+    store = lexstore.get_store(activation.vault)
+    checkpoint = store.published_recall_checkpoint("kb")
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+    dispatches = []
+    role_checkpoints = []
+    signature_evidence = working_set.signature_evidence
+    units_lane = working_set._units_lane
+
+    def publish(root, **_kwargs):
+        dispatches.append(working_set_runtime._DEFERRED_LEXICAL_REPAIRS.get())
+        assert lexstore._admitted_catalog_view(root) is None
+        for scope in freshness.SCOPES:
+            stored = store.published_recall_checkpoint(scope)
+            delta = freshness.recall_delta_since(root, scope, stored)
+            assert delta.complete and not delta.requires_source_proof
+            store.apply_catalog_delta(scope, delta)
+
+    def semantic(*args, **kwargs):
+        assert dispatches == []
+        assert store.published_recall_checkpoint("kb") == checkpoint
+        assert lexstore._admitted_catalog_view(activation.vault) is None
+        return signature_evidence(*args, **kwargs)
+
+    def role(*args, **kwargs):
+        view = lexstore._admitted_catalog_view(activation.vault)
+        assert view is not None
+        role_checkpoints.append(view.checkpoints["kb"])
+        assert kwargs["freshness_snapshot"].lexical_checkpoint("kb") == checkpoint
+        assert dispatches == []
+        return units_lane(*args, **kwargs)
+
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", publish)
+    monkeypatch.setattr(working_set, "signature_evidence", semantic)
+    monkeypatch.setattr(working_set, "_units_lane", role)
+
+    assert _activate(activation.vault) == before
+    assert role_checkpoints and all(item == checkpoint for item in role_checkpoints)
+    assert dispatches == [None]
+    assert store.published_recall_checkpoint("kb") != checkpoint
+
+
 def test_a_visible_write_serves_no_lexical_hits_to_the_restricted_reader(
     activation: SimpleNamespace,
 ) -> None:

@@ -161,7 +161,9 @@ def _admitted_catalog_view(vault_root: Path) -> _CatalogReadView | None:
 
 
 @contextlib.contextmanager
-def catalog_selection_scope(vault_root: Path):
+def catalog_selection_scope(
+    vault_root: Path, *, lag_dispatch: Callable[[Path], None] | None = None
+):
     """Admit and retain SQL selection, closing before provider work begins."""
     from . import freshness as freshness_module
 
@@ -189,7 +191,10 @@ def catalog_selection_scope(vault_root: Path):
             _ADMITTED_CATALOG.reset(token)
         if lagging:
             # Preserve convergence without handing repair an active SQL reader.
-            _schedule_runtime_catalog_repair(root, lag_only=True)
+            if lag_dispatch is None:
+                _schedule_runtime_catalog_repair(root, lag_only=True)
+            else:
+                lag_dispatch(root)
 
 
 def _checkpoint_policy_current(vault_root: Path, checkpoint: object) -> bool:
@@ -9141,6 +9146,12 @@ class LexicalStore:
         the live recall policy and access identity, and the catalogue's
         semantic identity must all agree. The caller owns the read snapshot.
         """
+        view = _admitted_catalog_view(self.vault_root)
+        if (
+            checkpoint is not None and view is not None
+            and view.store is self and view.connection is conn
+        ):
+            return self._view_readiness(view, scope, checkpoint).complete
         with call_spans.span("lexical.proof"):
             if not conn.in_transaction:
                 conn.execute("BEGIN")

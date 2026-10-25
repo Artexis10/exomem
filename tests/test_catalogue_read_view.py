@@ -1072,3 +1072,30 @@ def test_copied_context_cannot_transfer_a_sqlite_view_to_another_thread(
                 after = worker.submit(inherited.run, store.page_content_hashes, [rel]).result(5)
             assert after[rel] is not None and after != before
             assert store.page_content_hashes([rel]) == before
+
+
+def test_admission_readers_still_require_an_explicit_checkpoint_inside_selection(
+    vault: Path, warm_managed_cell
+) -> None:
+    """A retained view cannot turn an unknown admission checkpoint into authority."""
+    from exomem.published_admission import Admission
+
+    warm_managed_cell(vault)
+    store = lexstore.get_store(vault)
+    checkpoint = store.published_recall_checkpoint("kb")
+    paths = store.recall_admitted_paths("kb", checkpoint)
+    assert paths
+    denied = min(paths)
+    admission = Admission(lambda: "selection-reader", lambda path, publish: (path != denied, True))
+    admitted = store.published_admitted_paths("kb", checkpoint, admission, paths)
+    assert admitted == paths - {denied}
+    assert store.published_withheld_paths("kb", checkpoint, admission, paths) == {denied}
+
+    with lexstore.admitted_catalog_scope(vault), lexstore.catalog_selection_scope(vault):
+        assert store.recall_admitted_paths("kb", None) is None
+        assert store.recall_resolver_entries("kb", None) is None
+        assert store.published_admitted_paths("kb", None, admission, paths) is None
+        assert store.published_withheld_paths("kb", None, admission, paths) == frozenset()
+        assert store.recall_admitted_paths("kb", checkpoint) == paths
+        assert store.published_admitted_paths("kb", checkpoint, admission, paths) == admitted
+        assert store.published_withheld_paths("kb", checkpoint, admission, paths) == {denied}
