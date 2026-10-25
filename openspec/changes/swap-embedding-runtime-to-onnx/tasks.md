@@ -77,10 +77,10 @@ Retirement scope (2026-10-11): Retirement supersedes the Hosted image and provis
   - Platform memory delta on the node in service (4 vCPU, 7.57 GiB allocatable), from
     metrics-server working sets, 30 one-minute samples on 2026-10-25 across a gateway
     rollout and two cell restarts: platform pods 471–490 MiB; K3s, containerd and the
-    OS outside pods 1743–2236 MiB; **delta 2214–2726 MiB, median about 2280 MiB**.
+    OS outside pods 1743–2236 MiB; **delta per sample 2223–2706 MiB, median about 2281 MiB**.
     These are sampled working sets, not lifetime peaks, and include reclaimable cache.
-  - Live cells differ from the synthetic run: one owner cell's working set was 1488 MiB
-    and a small cell's 463 MiB in the same window. Task 5.2 sizes from live cells.
+  - Live cells differ from the synthetic run: one owner cell's working set was 1488–1645 MiB
+    before its restart, and a small cell's 463 MiB, in the same window. Task 5.2 sizes from live cells.
 
 - [ ] 5.2 Set the cell resource requests and limits and the namespace quota from that
   measurement, keeping the declared and rendered worker policy in step.
