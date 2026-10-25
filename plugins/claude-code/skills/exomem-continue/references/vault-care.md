@@ -95,7 +95,7 @@ Both update on every confirmed write.
 
 ## Audit (lint) checks
 
-The **review_memory(mode="audit")** operation runs read-only checks and proposes fixes (never
+The **read_review/triage_memory(mode="audit")** operation runs read-only checks and proposes fixes (never
 auto-fixes); every audit presentation remains read-only. The default
 `detail="actionable"` puts current blockers first, then malformed semantic units
 and unregistered relation work, then ordinary findings. Grandfathered relation-
@@ -127,7 +127,7 @@ is in **`audit-checks.md`**.
 - Assign numeric confidence scores. Use citation count and recency as the trust
   signal.
 - Apply retention decay or "forgetting curves." Old material stays. If superseded,
-  mark it; if irrelevant, archive into an `_archive/` subfolder. (`review_memory`'s
+  mark it; if irrelevant, archive into an `_archive/` subfolder. (`read_review/triage_memory`'s
   `stale_review` check **surfaces** old/cold/low-inbound conclusions as *review
   candidates* for you to judge — but never auto-decays, down-ranks, hides, or moves
   anything; review surfacing has no effect on `search_memory`/`find` ordering.
@@ -144,7 +144,14 @@ is in **`audit-checks.md`**.
 - Modify `Sources/` or `Evidence/` files after creation. Mistakes get superseded,
   not edited.
 
-## Maintenance modes (`maintain_memory`)
+## Maintenance modes (`check_memory/repair_memory`)
+
+Remote `repair_memory` publishes only structured-file and tag-variant writes.
+`check_memory` publishes the admitted read-only maintenance variants, including
+curation work items, previews and status. Other repairs and curation writes
+require the host CLI. A proposal persists workflow state and remains a write.
+Follow the active schema; a descriptive mode name never grants remote admission.
+
 
 Audit is read-only. `fix` and `backfill-ids` rewrite content (wikilinks, frontmatter, stable IDs) and dry-run by default. `reconcile` heals index-count and sidecar drift from out-of-band edits, is idempotent and non-destructive, and writes by default (`dry_run=true` previews). Remote callers may audit or preview; write modes are operator-only and return `MAINTENANCE_REQUIRES_CLI` before taking the mutation boundary.
 

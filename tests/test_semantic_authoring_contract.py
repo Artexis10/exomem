@@ -411,7 +411,7 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         "`empty_rich_unit`",
         "`create_note`",
         "`supersede_note`",
-        "`observe_memory`",
+        "`change_observations`",
         "Tier 2",
         "independent obligations",
     ):
@@ -516,7 +516,7 @@ def test_tool_write_guidance_is_bounded_and_routes_to_full_bootstrap() -> None:
         whole_page = tool in {"remember", "replace_memory"}
         assert (portable["short_selection_rule"] in guidance) is whole_page
         assert (portable["examples"]["role"] in guidance) is whole_page
-        assert 'call bootstrap(profile="full")' in guidance
+        assert 'call bootstrap with operation.kind="instructions", profile="full"' in guidance
 
         # It must NOT duplicate the 16-label vocabulary table, the alias table,
         # the domain/breadth/rich examples, or the full concise contract body.

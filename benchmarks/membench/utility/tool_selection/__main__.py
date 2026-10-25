@@ -33,9 +33,8 @@ EXIT_REFUSED = 2
 EXIT_VOID = 3
 EXIT_PAUSED = 75
 
-#: Design D9: the dev round runs two repeats; the held-out round, about 90 to 120 cases.
+#: The diagnostic round keeps two repeats. Root freezes a fresh decision size after development.
 DEFAULT_REPEATS = 2
-HELDOUT_SIZES = (90, 120)
 #: The committed calibration of ``plan``: the means of the live smoke sessions,
 #: replaced by a dev round's own means with the ``calibrate`` stage.
 DEFAULT_CALIBRATION = Path(__file__).resolve().parent / "calibration.json"
@@ -99,7 +98,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     calibration = planning.load_calibration(path) if path.exists() else None
     schema_bytes = dict(_pairs(args.schema_bytes, "--schema-bytes", int))
     sizes = {"dev": len(_cases(args))}
-    for size in HELDOUT_SIZES:
+    for size in args.heldout_count or ():
         sizes[f"heldout-{size}"] = size
     rounds = {
         name: planning.estimate_round(
@@ -194,6 +193,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     layout = Layout.at(Path(args.run))
     envelope = _envelope(args)
     launcher = shlex.split(args.claude_launcher or "")
+    case_payload = [case.as_dict() for case in cases]
     recorded = (
         json.loads(
             json.dumps(
@@ -212,6 +212,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "tool_search": args.tool_search,
                     "call_budget": args.call_budget,
                     "case_ids": [case.case_id for case in cases],
+                    "cases": case_payload,
+                    "cases_sha256": hashlib.sha256(json.dumps(case_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                 }
             )
         )
@@ -220,7 +222,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         layout.run.mkdir(parents=True, exist_ok=True)
         _record_inputs(layout, recorded)
         (layout.run / "cases.json").write_text(
-            json.dumps([case.as_dict() for case in cases], indent=2), encoding="utf-8"
+            json.dumps(case_payload, indent=2), encoding="utf-8"
         )
     plan = plan_sessions(cases, arm_ids=arms, repeats=args.repeats, seed=args.seed)
     first_spec = ex.arm_spec(arms[0], ("*",))
@@ -373,7 +375,10 @@ def cmd_readout(args: argparse.Namespace) -> int:
     from . import readout as ro
 
     cases, results = _scored_run(args)
-    report = ro.readout(results, cases, delta=args.delta, seed=args.seed)
+    inputs_path = Path(args.run) / "inputs.json"
+    inputs = json.loads(inputs_path.read_text()) if inputs_path.exists() else {}
+    report = ro.readout(results, cases, delta=args.delta, seed=args.seed,
+                        expected_repeats=inputs.get("repeats"), expected_arms=inputs.get("arms"))
     ro.write_readout(report, Path(args.run) / "readout.json")
     print(ro.format_readout(report))
     return 0
@@ -403,12 +408,52 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
 def cmd_seed_vault(args: argparse.Namespace) -> int:
     from .cases import Case
-    from .vault import seed_vault
+    from .vault import read_end_state, seed_vault
 
     raw = json.loads(args.case_json)
     case = Case(raw["case_id"], raw["template"], raw["seed"], raw["params"])
     seed_vault(Path(args.out), case.seed_steps())
+    if args.snapshot_out:
+        snapshot = read_end_state(Path(args.out))
+        Path(args.snapshot_out).write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+        if case.template_id == "source-derived":
+            from .development import admit_fixture
+
+            admit_fixture(case.params, snapshot)
     return 0
+
+
+def cmd_snapshot_vault(args: argparse.Namespace) -> int:
+    from .vault import read_end_state
+
+    Path(args.out).write_text(json.dumps(read_end_state(Path(args.vault)), indent=2), encoding="utf-8")
+    return 0
+
+
+def cmd_admit(args: argparse.Namespace) -> int:
+    """Materialize source fixtures without a host adapter or an actor."""
+    from membench.utility.switch_eval.state import Layout, StateError
+
+    from .executor import arm_spec, seed_case
+
+    layout = Layout.at(Path(args.run))
+    layout.run.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for case in _cases(args):
+        if case.params.get("blocked"):
+            row = {"case_id": case.case_id, "status": "blocked", "reason": case.params["blocked"]}
+        else:
+            try:
+                row = {"case_id": case.case_id, "status": "admitted",
+                       **seed_case(layout.run, case, parent_env=dict(os.environ), spec=arm_spec("grouped", ("*",)))}
+            except StateError as error:
+                row = {"case_id": case.case_id, "status": "failed", "reason": str(error)}
+        rows.append(row)
+        print(f"{case.case_id}: {row['status']}")
+    record = {"harness_digest": _harness_digest(), "cases": rows,
+              "actor_sessions": 0, "paid_api_calls": 0}
+    (layout.run / "fixture-admission.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return 0 if all(row["status"] == "admitted" for row in rows) else EXIT_REFUSED
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -438,6 +483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="ARM=BYTES of an arm's tool schemas, when known (repeatable)",
     )
     p.set_defaults(func=cmd_plan)
+    p.add_argument("--heldout-count", type=int, action="append", help="an explicit prospective count; no held-out cases are generated")
 
     p = sub.add_parser("run", help="seed, probe and play every session")
     common(p)
@@ -475,7 +521,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = sub.add_parser("seed-vault", help=argparse.SUPPRESS)
     p.add_argument("--case-json", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--snapshot-out")
     p.set_defaults(func=cmd_seed_vault)
+
+    p = sub.add_parser("snapshot-vault", help=argparse.SUPPRESS)
+    p.add_argument("--vault", required=True)
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_snapshot_vault)
+
+    p = sub.add_parser("admit", help="materialize and check fixtures without starting actors")
+    common(p)
+    p.add_argument("--run", required=True)
+    p.set_defaults(func=cmd_admit)
 
     args = parser.parse_args(argv)
     return args.func(args)

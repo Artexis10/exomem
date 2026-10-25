@@ -22,12 +22,12 @@ and index updates are determined by the operation, not the caller.
 |---|---|---|
 | **bootstrap** | Return a portable, versioned operating contract for generic MCP clients. A skill-aware agent fetches session state when current policy or capabilities are absent, with compact fallback when its exposed schema or server cannot accept the skill contract; use diagnostics profile for timing/performance interpretation | — |
 | **add** | Capture raw input as immutable source | `Sources/<Kind>/[<Domain>/]` |
-| **episode_memory** | Record a bounded recap of a conversation — worked on, decided, left open, at most three verbatim user statements — once at a decision or stopping point (`action="record"`); reuse its `episode` key for later revisions, which retire the previous one. `action="inspect"` reads the key's revision history. Where `candidates` reports `execution: enabled`, `prepare`, `disposition`, `resume` and the final `coverage` pass run its typed candidates ([engagement](engagement.md)) | `Sources/Episodes/` |
+| **record_episode/read_episode** | Record a bounded recap of a conversation — worked on, decided, left open, at most three verbatim user statements — once at a decision or stopping point (`action="record"`); reuse its `episode` key for later revisions, which retire the previous one. `action="inspect"` reads the key's revision history. Where `candidates` reports `execution: enabled`, `prepare`, `disposition`, `resume` and the final `coverage` pass run its typed candidates ([engagement](engagement.md)) | `Sources/Episodes/` |
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see the media transport guidance below), not this tool | `Evidence/<scope>/` |
 | **edit** | In-place edit through one `edit_note` tool. New clients send required nested `operation` with one `kind`: `replace_body`, `replace_tags`, `replace_string`, `batch_replace`, `edit_section`, `patch_frontmatter`, or `fill_row`. See `operations.md` for fields. Bumps `updated:` | the page |
-| **observe_memory** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove require the current parent `expected_hash` and unit `expected_fingerprint`. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
+| **prepare_note/change_observations** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove require the current parent `expected_hash` and unit `expected_fingerprint`. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
 | **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
 | **graph_context** | Return a bounded typed graph neighborhood for a page or query from the derived graph sidecar. Read-only | — |
@@ -115,10 +115,10 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   - **No path for the bytes:** tell the user the original was not preserved and
     offer the browser upload form. Custody is proven only by a returned
     `stored_path`, `size` and `hash`, never by a minted token or a saved transcript.
-- **Media processing is automatic and actionable — `process_media`.** Supported
+- **Media processing is automatic and actionable — `read_media/change_media`.** Supported
   audio and video preserved through Exomem or copied directly into the governed
   Knowledge Base are reconciled into durable timestamped transcription work.
-  Call `process_media(path=..., operation="process")` for immediate targeted
+  Call `change_media(operation={'kind': 'process', 'path': ...})` for immediate targeted
   reconciliation, `operation="status"` for bounded per-artifact state and next
   actions, or `operation="retry"` after fixing a recorded blocked/failed reason.
   These actions enqueue or inspect work; they do not wait for model completion or
@@ -190,7 +190,7 @@ reference for the canonical operation leaves that product commands route to.
 - "what should this link to," "densify this page's links" → **suggest_links**
 - "what does this connect to in the graph," "show typed relations" → **graph_context**
 - "suggest relations," "what should this support / contradict / supersede" → **suggest_relations**
-- "which relations recur," "review unknown relation labels" → **schema_memory** (`subject="relations"`; proposal-first)
+- "which relations recur," "review unknown relation labels" → **read_schema/change_schema** (`subject="relations"`; proposal-first)
 - "use an epistemic / provenance / causal lens" → **graph_context** (`traversal_profile=...`)
 - "what should I compile next," "drain the source backlog" → **propose_compilation**
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
@@ -218,7 +218,7 @@ When you say something oblique like "interesting, save it," default to
 **capture_source** and ask whether to compile only if there is a durable
 conclusion.
 
-## schema_memory operation matrix
+## read_schema/change_schema operation matrix
 
 Read-only unless the operation says save. Saves need `why`, plus `expected_hash` when updating an existing registry or contract.
 

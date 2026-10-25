@@ -479,7 +479,11 @@ def test_the_product_resolver_reads_a_nested_call_as_its_server_does() -> None:
 
     assert (nested_query.command, nested_query.action, nested_query.read_only) == ("record_memory", "query", True)
     assert (nested_append.command, nested_append.action, nested_append.read_only) == ("record_memory", "append", False)
+    # The execution boundary keeps the selected command even when business fields refuse.
+    assert write_sent_to_read_tool.command == "record_memory"
+    assert write_sent_to_read_tool.action == "append"
     assert not write_sent_to_read_tool.resolved
+    assert grouped_form_under_nested.command is None
     assert not grouped_form_under_nested.resolved
 
 
@@ -751,12 +755,12 @@ def _calibration_file(tmp_path: Path) -> Path:
 def test_the_plan_stage_prints_session_counts_and_token_estimates_for_each_round(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["plan", "--calibration", str(_calibration_file(tmp_path))]) == 0
+    assert main(["plan", "--calibration", str(_calibration_file(tmp_path)), "--heldout-count", "64"]) == 0
 
     out = capsys.readouterr().out
     assert "round dev: 20 cases x 2 arms x 2 repeats = 80 sessions" in out
-    assert "round heldout-90: 90 cases x 2 arms x 2 repeats = 360 sessions" in out
-    assert "round heldout-120: 120 cases x 2 arms x 2 repeats = 480 sessions" in out
+    assert "round heldout-64: 64 cases x 2 arms x 2 repeats = 256 sessions" in out
+    assert "round heldout-90" not in out
     assert f"{80 * 200_000:,} input tokens" in out
     assert f"{80 * 400:,} output tokens" in out
 

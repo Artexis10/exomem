@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 90f3b07b4868ffd6eecfe2fb45e7e80c837c92ddb890bedfb1955141d7a46d6b
+  skill_contract: 19ca698c1d33e2ba977d1381a65f7e1cc38ecf5df7b922a16264e681f8844cb0
   version: "0.1.0"
 ---
 
@@ -16,18 +16,18 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 
 ## Portable operating rules
 
-Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(profile="compact")` directly. Otherwise obtain `bootstrap(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(profile="compact")` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact'})` directly. Otherwise obtain `bootstrap(operation={"kind": "instructions", "profile": "session", "skill_contract": <metadata.skill_contract>})` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact'})` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
-Use `configure_memory` set/clear only for an explicit user request to change saved engagement.
+Use `bootstrap/change_settings` set/clear only for an explicit user request to change saved engagement.
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
-in the first write. Use `connect_memory(operation="suggest-links")` when useful
+in the first write. Use `read_connections(operation={'kind': 'suggest-links'})` when useful
 connections are still unknown, not to recheck links already established in context.
 Honor the live confirmation ceiling;
 a workflow or standing capture preference does not grant restructure authority.
@@ -44,21 +44,21 @@ identity after an uncertain commit.
    Pass `source_kind` and `domain` on a `capture_source` call — both are open
    vocabularies, so name the label that fits even if it is unfamiliar. A kind is
    required, and there is no catch-all.
-3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `search_memory`.
+3. Media processing is automatic; use `read_media/change_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `search_memory`.
 4. If distilling, reuse the returned proposal, or call `prepare_note` when none exists, to obtain a draft.
 
    Request `compile_guidance=true` during capture to get the proposal in that call.
    Include the captured path in `sources:` to link provenance and mark the Source processed.
 
-5. Reuse known connections; use `connect_memory(operation="suggest-links")` only for missing candidates, then review them.
+5. Reuse known connections; use `read_connections(operation={'kind': 'suggest-links'})` only for missing candidates, then review them.
 6. Write with `create_note`, carrying sources and accepted links in the first write.
 
 ## Vocabulary
 
 Read [vocabulary](references/vocabulary.md) before changing a registry.
 If the vocabulary reference is missing, inspect the exposed bootstrap schema.
-Use `bootstrap(profile="compact", section="vocabulary")`, or
-`bootstrap(profile="full")` when `section` is unavailable. Follow the returned
+Use `bootstrap(operation={'kind': 'instructions', 'profile': 'compact', 'section': 'vocabulary'})`, or
+`bootstrap(operation={'kind': 'instructions', 'profile': 'full'})` when `section` is unavailable. Follow the returned
 inspect routes and `save` contract. Reuse or alias before proposing justified
 new meaning; save with the current hash and `why`. Report saved versus queued
 and the returned restore route. Use only exposed operations.
@@ -102,10 +102,10 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`, `- verdict: <epistemic outcome>`, `- check_by: <ISO revisit date>`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, relations, verdict and check_by; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit.
 - Epistemic corrections: Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Keep an anchored unit's identity when its wording changes. Preserve a false historical proposition and author its verdict; add a distinct corrective unit when useful. Refutation and contradiction do not imply supersession or reduce rank. The semantic writer retains prior interpretations atomically. Read revision_history with read_memory(include_history=true), optionally for unit_ref, using history_limit and history_continuation. When it carries lookup=stale, repeat the same call shortly instead of reading absence or paging on. Existing history remains the page's operation log. Entities and legacy pages use their existing edit owner; Records use guarded row corrections and history. Corrections need no dated child, special user nudge, or confirmation beyond the active engagement policy.
 - Rich boundary: A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. `empty_rich_unit` means a recognized rich heading has no substantive body; Add substantive body content or remove the empty recognized heading.
-- Exact applicability: obtain `bootstrap(profile="compact", section="authoring")` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(profile="full")` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `schema_memory(subject="note-types", operation="inspect")` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
+- Exact applicability: obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact', 'section': 'authoring'})` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(operation={'kind': 'instructions', 'profile': 'full'})` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `read_schema(operation={'kind': 'inspect', 'subject': 'note-types'})` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
-- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `observe_memory` for one unit, and `edit_note` for a small edit or activation. Tier 2 manage_memory_file create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
+- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `change_observations` for one unit, and `edit_note` for a small edit or activation. Tier 2 change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
 - Findings: `missing_semantic_unit` means an applicable live-class compiled result has no valid non-empty unit; `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.
 - Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`.
 - Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body.

@@ -482,6 +482,17 @@ def bootstrap_projection(
     (role and domain) examples.
     """
     projection = contract.as_dict()
+    from . import capabilities
+
+    projection["minimum_semantic_unit"]["status_registry"] = capabilities.active_call_route(
+        "schema_memory", {"subject": "statuses", "operation": "inspect"}
+    )
+    projection["routes"]["single_semantic_unit"] = capabilities.active_tools_text("observe_memory", "write")
+    projection["routes"]["tier_2"] = (
+        f"{capabilities.active_tools_text('manage_memory_file', 'write')} create, overwrite, and append "
+        "receive the same semantic precommit contract on the complete resulting compiled Markdown; "
+        "prefer create_note or supersede_note when their typed route fits."
+    )
     if profile != "full":
         rich = dict(projection["rich"])
         rich.pop("correction_detail")
@@ -542,7 +553,7 @@ def render_tool_guidance(
             f"Role example: {portable['examples']['role']}" if whole_page else "",
             f"`missing_semantic_unit`: {missing['compact_remediation']}",
             f"`empty_rich_unit`: {findings['empty_rich_unit']['remediation']}",
-            'Keys/examples: call bootstrap(profile="full").',
+            'Keys/examples: call bootstrap with operation.kind="instructions", profile="full".',
         )
         if part
     )
@@ -620,7 +631,10 @@ def render_concise(
     rich = contract.rich
     roles = contract.semantic_roles
     minimum = contract.minimum_semantic_unit
-    routes = contract.routes
+    from .operation_entries import DEFAULT_TOOL_SHAPE, call_text, tools_text
+
+    routes = {**contract.routes, "single_semantic_unit": tools_text("observe_memory", DEFAULT_TOOL_SHAPE, "write"),
+              "tier_2": "change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits."}
     findings = contract.findings
     portable = contract.portable_categories
     portable_keys = ", ".join(f"`{key}`" for key in portable["core_keys"])
@@ -675,14 +689,13 @@ def render_concise(
         f"- Rich boundary: {rich['heading_boundary_rule']} `empty_rich_unit` means "
         f"{findings['empty_rich_unit']['when']}; "
         f"{findings['empty_rich_unit']['remediation']}\n"
-        '- Exact applicability: obtain `bootstrap(profile="compact", '
-        'section="authoring")` and read `semantic_authoring.minimum_semantic_unit` '
+        f"- Exact applicability: obtain `{call_text('bootstrap', {'profile': 'compact', 'section': 'authoring'}, DEFAULT_TOOL_SHAPE)}` and read `semantic_authoring.minimum_semantic_unit` "
         "for current structural applicability and the status-class rule. "
         "If the exposed bootstrap schema lacks `section`, use "
-        '`bootstrap(profile="full")` instead; released profiles reject section arguments. '
+        f"`{call_text('bootstrap', {'profile': 'full'}, DEFAULT_TOOL_SHAPE)}` instead; released profiles reject section arguments. "
         f"Apply `compiled_intent(after_state) = {minimum['compiled_intent']}`. "
         f"Shipped compiled types: {destinations}. More may be registered; "
-        '`schema_memory(subject="note-types", operation="inspect")` lists the live set. '
+        f"`{call_text('schema_memory', {'subject': 'note-types', 'operation': 'inspect'}, DEFAULT_TOOL_SHAPE)}` lists the live set. "
         f"{minimum['structural_rule']} The minimum predicate applies when "
         f"{applies}. "
         f"{minimum['lifecycle_rule']}\n"

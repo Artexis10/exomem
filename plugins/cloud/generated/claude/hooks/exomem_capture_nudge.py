@@ -134,6 +134,18 @@ _KB_WRITE = re.compile(
 # Stamped from `exomem.operation_entries.write_selectors()`; the hook cannot import the package,
 # and `tests/test_single_purpose_guidance.py` fails when this list and the entries drift.
 _COLLECTION_WRITES = (
+    "change_connections:accept-relation",
+    "change_connections:create-entity",
+    "change_files:append",
+    "change_files:create",
+    "change_files:delete",
+    "change_files:move",
+    "change_files:reclassify",
+    "change_files:recover",
+    "change_files:revert-reclassification",
+    "change_observations:add",
+    "change_observations:remove",
+    "change_observations:update",
     "change_plans:add",
     "change_plans:create",
     "change_plans:rebaseline",
@@ -148,12 +160,30 @@ _COLLECTION_WRITES = (
     "change_records:rebaseline",
     "change_records:revise",
     "change_records:update",
+    "connect_memory:accept-relation",
+    "connect_memory:create-entity",
+    "episode_memory:disposition",
+    "episode_memory:prepare",
+    "episode_memory:record",
+    "episode_memory:resume",
+    "manage_memory_file:delete",
+    "manage_memory_file:move",
+    "manage_memory_file:reclassify",
+    "manage_memory_file:recover",
+    "manage_memory_file:revert-reclassification",
+    "observe_memory:add",
+    "observe_memory:remove",
+    "observe_memory:update",
     "plan_memory:add",
     "plan_memory:create",
     "plan_memory:rebaseline",
     "plan_memory:revise",
     "plan_memory:triage",
     "plan_memory:update",
+    "record_episode:disposition",
+    "record_episode:prepare",
+    "record_episode:record",
+    "record_episode:resume",
     "record_memory:append",
     "record_memory:bulk_upsert",
     "record_memory:create",
@@ -173,13 +203,13 @@ REMINDER_SHORT = (
     "[Exomem capture check] Per live policy: no transcripts; supersede_note supersedes a "
     "contradicted conclusion; intent->Planning, outcome->Records; "
     "no transient code/test/CI; nothing durable: stop. "
-    'Rules: Exomem skill or bootstrap(profile="compact").'
+    'Rules: Exomem skill or bootstrap with operation.kind="instructions", profile="compact".'
 )
 
 #: The episode ask. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] Decision or stopping point reached? episode_memory once: "
-    'action="record", episode="{key}", subject, summary, short worked_on/decided/open items. '
+    "[Exomem episode check] Decision or stopping point reached? record_episode once: "
+    'operation.kind="record", episode="{key}", subject, summary, short worked_on/decided/open items. '
     "Otherwise do nothing."
 )
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
@@ -187,9 +217,9 @@ EPISODE_ASK = (
 COVERAGE_ASK = (
     "[Exomem episode coverage] Episode {key} is not covered through its current "
     "input; its ledger's next step is {next}. A committed note or a Saved marker "
-    'does not cover it. Read episode_memory action="candidates" and continue: '
+    'does not cover it. Read read_episode with operation.kind="candidates" and continue: '
     'decide each candidate, resume the routed ones, or make the final pass '
-    '(action="coverage", then resume with postcommit=true). Deferred work may '
+    '(read_episode kind="coverage", then record_episode kind="resume" with postcommit=true). Deferred work may '
     "stay deferred."
 )
 _WORKFLOW_ACTIONS = frozenset({"prepare", "disposition", "resume"})
@@ -786,9 +816,15 @@ def _successful_episode_record(tool: dict) -> bool:
         return False
     tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
     return (
-        bool(re.search(r"(?:exomem|knowledge[_-]?base).*episode_memory", str(tool.get("name") or ""), re.I))
-        and str(tool_input.get("action") or "") == "record"
+        _episode_writer(tool.get("name"))
+        and _operation_of(tool_input) == "record"
     )
+
+
+def _episode_writer(name: object) -> bool:
+    """Recognize the legacy and current closed API spellings of the episode writer."""
+    name = str(name or "").lower()
+    return bool(re.search(_KB_SERVER, name, re.I)) and name.endswith(("episode_memory", "record_episode"))
 
 
 def _workflow_episode(tools: list[dict]) -> str | None:
@@ -798,12 +834,11 @@ def _workflow_episode(tools: list[dict]) -> str | None:
         if tool.get("failed"):
             continue
         tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
-        episode = tool_input.get("episode")
+        payload = tool_input.get("operation") if isinstance(tool_input.get("operation"), dict) else tool_input
+        episode = payload.get("episode")
         if (
-            re.search(
-                r"(?:exomem|knowledge[_-]?base).*episode_memory", str(tool.get("name") or ""), re.I
-            )
-            and str(tool_input.get("action") or "") in _WORKFLOW_ACTIONS
+            _episode_writer(tool.get("name"))
+            and _operation_of(tool_input) in _WORKFLOW_ACTIONS
             and isinstance(episode, str)
             and _EPISODE_KEY_RE.fullmatch(episode)
         ):

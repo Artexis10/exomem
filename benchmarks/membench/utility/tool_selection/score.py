@@ -14,9 +14,13 @@ tasks. Calls reach those readouts through the injected resolver (see
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from membench.utility.switch_eval.tap import tool_payloads
@@ -24,10 +28,17 @@ from membench.utility.switch_eval.tap import tool_payloads
 from .cases import Case
 from .resolve import Resolver, resolve_call
 from .templates import READ, WRITE, CollectionKey, Key, ManifestKey
+from .vault import authored_unit, markdown_facts
 
 #: Refusal codes of the Records and Planning argument envelope: the product's
 #: closed set for a call whose arguments the selected action does not accept.
-ARGUMENT_REFUSALS = frozenset({"INVALID_RECORD_ARGUMENTS", "INVALID_PLAN_ARGUMENTS"})
+# Closed refusal codes from the corresponding commands' argument-validation boundaries.
+ARGUMENT_REFUSALS = frozenset({
+    "INVALID_RECORD_ARGUMENTS", "INVALID_PLAN_ARGUMENTS", "INVALID_PREFERENCE_ARGUMENTS",
+    "INVALID_REVIEW_ARGUMENTS", "INVALID_REVIEW_CONTEXT_ARGUMENTS", "INVALID_SCHEMA_ARGUMENT",
+    "INVALID_SCHEMA_OPERATION", "INVALID_SCHEMA_SUBJECT", "INVALID_OBSERVE_OPERATION",
+    "INVALID_FILE_OPERATION",
+})
 
 #: Outcomes whose end state is scorable: the session ran and the agent acted
 #: (or failed to). A harness fault is retried and a struck session is not run.
@@ -81,6 +92,8 @@ def answer_matches(answer: Any, key: Key) -> bool:
         )
     if key.answer_mode == "text":
         return isinstance(answer, str) and answer.strip().casefold() == str(expected).strip().casefold()
+    if key.answer_mode == "structured":
+        return type(answer) is type(expected) and json.dumps(answer, sort_keys=True) == json.dumps(expected, sort_keys=True)
     raise ValueError(f"unknown answer mode: {key.answer_mode!r}")
 
 
@@ -171,11 +184,215 @@ def check_end_state(key: Key, before: Mapping, after: Mapping) -> list[str]:
     for path in sorted((set(before["collections"]) | set(after["collections"])) - named):
         if before["collections"].get(path) != after["collections"].get(path):
             reasons.append(f"collection {path} changed but the task did not name it")
+    reasons.extend(_canonical_checks(key, before, after, final=True))
     return reasons
 
 
 def state_changed(before: Mapping, after: Mapping) -> bool:
-    return before["collections"] != after["collections"]
+    return canonical_data(before) != canonical_data(after)
+
+
+def canonical_data(state: Mapping) -> dict:
+    return {name: value for name, value in state.items() if name not in ("evidence", "unknown")}
+
+
+def _source(state: Mapping, path: str) -> str:
+    return base64.b64decode(state["evidence"]["files"][path]["base64"]).decode("utf-8")
+
+
+def _canonical_checks(key: Key, before: Mapping, after: Mapping, *, final: bool) -> list[str]:
+    """Check declared changes and every undeclared canonical domain, including intermediate effects."""
+    if "files" not in before and "files" not in after:
+        return []  # Archived collection-only recordings remain readable under their original instrument.
+    from exomem import (
+        compiled_history,
+        memory_refs,
+        record_history,
+        relation_review,
+        semantic_contract,
+    )
+    from exomem.kbdir import kb_dirname
+
+    reasons = []
+    allowed = {item.path for item in key.files}
+    named = {item.manifest for item in (*key.collections, *key.manifests)}
+    log_targets = set(allowed)
+    allowed_empty = set()
+    for state in (before, after):
+        for path in named:
+            collection = state.get("collections", {}).get(path, {})
+            allowed.add(path)
+            if collection.get("source_path"):
+                log_targets.add(collection["source_path"])
+                allowed_empty.add(collection["source_path"])
+    for key_collection in key.collections:
+        prior_collection = before.get("collections", {}).get(key_collection.manifest, {})
+        actual_collection = after.get("collections", {}).get(key_collection.manifest, {})
+        prior_items = prior_collection.get("items", {})
+        actual_items = actual_collection.get("items", {})
+        for attribute in ("profile", "title", "natural_key", "fields"):
+            if prior_collection.get(attribute) != actual_collection.get(attribute):
+                reasons.append(f"collection {key_collection.manifest} changed its {attribute}")
+        for item_key, item in {**prior_items, **actual_items}.items():
+            desired = next((row for row in key_collection.rows if _identity(row, key_collection.natural_key)
+                            == _identity(item["values"], key_collection.natural_key)), None)
+            prior = prior_items.get(item_key)
+            if desired is None or prior is not None and all(_same(prior["values"].get(name), value) for name, value in desired.items()):
+                continue
+            allowed.add(item["path"])
+            log_targets.add(item["path"])
+            if prior is not None:
+                directory = record_history.history_dir(prior_collection["id"], item_key)
+                for path, fact in after.get("files", {}).items():
+                    if path.startswith(directory + "/") and path not in before.get("files", {}):
+                        entry = fact.get("value", {})
+                        if (entry.get("path") == prior["path"] and entry.get("prior", {}).get("values") == prior["values"]):
+                            allowed.add(path)
+    for item in key.files:
+        prior = before.get("files", {}).get(item.path)
+        actual = after.get("files", {}).get(item.path)
+        if actual is None or prior is None:
+            reasons.append(f"authored page {item.path} is missing")
+            continue
+        if final or actual != prior:
+            if item.units is not None and actual.get("units") != list(item.units):
+                reasons.append(f"semantic units in {item.path} do not match the requested facts")
+            if item.units is not None and actual.get("remainder") != prior.get("remainder"):
+                reasons.append(f"page remainder in {item.path} changed")
+            if item.body is not None and actual.get("body") != markdown_facts(item.body):
+                reasons.append(f"authored body in {item.path} does not match the requested facts")
+            # The writer owns updated; every other frontmatter fact must survive this task.
+            if {k: v for k, v in actual["frontmatter"].items() if k != "updated"} != {
+                k: v for k, v in prior["frontmatter"].items() if k != "updated"
+            }:
+                reasons.append(f"frontmatter in {item.path} changed outside the request")
+        identity = prior.get("frontmatter", {}).get("exomem_id")
+        if identity:
+            parent = memory_refs.memory_ref(identity)
+            history = compiled_history.history_dir(parent)
+            for path, fact in after.get("files", {}).items():
+                if not path.startswith(history + "/") or path in before.get("files", {}):
+                    continue
+                entry = fact.get("value", {})
+                if (entry.get("path") == item.path and entry.get("prior", {}).get("source") == _source(before, item.path)
+                        and entry.get("before_hash") == hashlib.sha256(_source(before, item.path).encode()).hexdigest()
+                        and entry.get("after_hash") == hashlib.sha256(_source(after, item.path).encode()).hexdigest()):
+                    allowed.add(path)
+            fingerprint = semantic_contract.review_content_fingerprint(identity, _source(after, item.path))
+            for path in (relation_review.lifecycle_prepared_path(Path("."), identity),
+                         relation_review.lifecycle_decision_path(Path("."), identity, fingerprint)):
+                value = after.get("files", {}).get(path.as_posix(), {}).get("value", {})
+                if value.get("page_identity") == identity and value.get("after_fingerprint") == fingerprint:
+                    allowed.add(path.as_posix())
+    if key.preference is not None:
+        preference = after.get("preferences", {})
+        if final or preference != before.get("preferences"):
+            if any(preference.get(name) != key.preference[name] for name in ("stored", "contexts")):
+                reasons.append("saved preferences differ from the requested context clear")
+            try:
+                receipt = uuid.UUID(preference.get("receipt_id", ""))
+                if (receipt.version != 4 or preference["revision"] == before["preferences"]["revision"]
+                        or preference["receipt_id"] == before["preferences"]["receipt_id"]):
+                    reasons.append("preference change identity did not advance")
+            except (ValueError, TypeError, AttributeError):
+                reasons.append("preference change identity is invalid")
+    elif before.get("preferences") != after.get("preferences"):
+        reasons.append("preferences changed outside the request")
+    if key.question is not None:
+        prior = before.get("review", {})
+        actual = after.get("review", {})
+        old = prior.get("vocabulary", {}).get("items", {})
+        new = actual.get("vocabulary", {}).get("items", {})
+        added = [value for ref, value in new.items() if ref not in old]
+        if final or actual != prior:
+            if len(added) != key.question["new_exact_count"]:
+                reasons.append("meaning-question count differs from the request")
+            for value in added:
+                question = key.question
+                path = question["anchor_path"]
+                digest = before["evidence"]["files"][path]["sha256"]
+                if (any(value.get(name) != question[name] for name in ("family", "signal", "question"))
+                        or set(value.get("paths", {}).values()) != {path}
+                        or set(value.get("target_versions", {}).values()) != {digest}
+                        or any(entry.get("version") != digest or entry.get("origin") != question["signal"]
+                               for entry in value.get("evidence", []))):
+                    reasons.append("meaning-question facts or page evidence differ from the seed")
+            trimmed = json.loads(json.dumps(actual))
+            trimmed.get("vocabulary", {})["items"] = {ref: value for ref, value in new.items() if ref in old}
+            if trimmed != prior:
+                reasons.append("review decisions or unrelated review state changed")
+    elif before.get("review") != after.get("review"):
+        reasons.append("review state changed outside the request")
+    if key.registry is not None:
+        # RegistrySpec owns the selected overlay and history paths; no vocabulary keys live in the scorer.
+        owner = after.get("registry_paths", {}).get(key.registry["subject"], {})
+        overlay = owner.get("overlay", "unavailable")
+        allowed.add(overlay)
+        log_targets.add(overlay)
+        history = owner.get("history", "unavailable")
+        prior = before.get("files", {}).get(overlay, {}).get("value", {})
+        actual = after.get("files", {}).get(overlay, {}).get("value", {})
+        expected = json.loads(json.dumps(prior))
+        expected.setdefault(key.registry["subject"], {}).update(key.registry["delta"]["upsert"])
+        if (final or actual != prior) and actual != expected:
+            reasons.append("registry delta changed facts outside the authored proposal")
+        additions = [path for path in after.get("files", {}) if path.startswith(history + "/") and path not in before.get("files", {})]
+        if (final or additions) and len(additions) != 1:
+            reasons.append("registry save did not retain exactly one previous overlay")
+        for path in additions:
+            if after["files"][path].get("value") != prior:
+                reasons.append("registry history does not preserve the previous overlay")
+            allowed.add(path)
+        prior_versions = before.get("registry_history", {}).get(key.registry["subject"], [])
+        versions = after.get("registry_history", {}).get(key.registry["subject"], [])
+        new_versions = [version for version in versions if version not in prior_versions]
+        if (final or new_versions) and (len(new_versions) != 1 or new_versions[0].get("why") != key.registry["reason"]):
+            reasons.append("registry history does not retain the requested save reason")
+    for path in set(before.get("files", {})) | set(after.get("files", {})):
+        if path in allowed or before.get("files", {}).get(path) == after.get("files", {}).get(path):
+            continue
+        if key.kind == WRITE and path == f"{kb_dirname()}/log.md" and _allowed_log_change(
+            before.get("files", {}).get(path, {}), after.get("files", {}).get(path, {}), log_targets
+        ):
+            continue
+        reasons.append(f"authored file {path} changed outside the request")
+    if (set(before.get("empty_directories", [])) - allowed_empty) != (set(after.get("empty_directories", [])) - allowed_empty):
+        reasons.append("empty directories changed outside the request")
+    for domain in ("media", "machine", "registry_paths", "other_preferences"):
+        if before.get(domain) != after.get(domain):
+            reasons.append(f"{domain} changed outside the request")
+    for subject in set(before.get("registry_history", {})) | set(after.get("registry_history", {})):
+        if key.registry is not None and subject == key.registry["subject"]:
+            continue
+        if before.get("registry_history", {}).get(subject) != after.get("registry_history", {}).get(subject):
+            reasons.append(f"registry history for {subject} changed outside the request")
+    return reasons
+
+
+def _allowed_log_change(before: Mapping, after: Mapping, targets: set[str]) -> bool:
+    """Admit one source-defined operation-log entry for an intended target, preserving prior entries."""
+    from exomem.kbdir import kb_prefix
+
+    def sections(tokens):
+        starts = [index for index, token in enumerate(tokens)
+                  if token["type"] == "heading_open" and token["tag"] == "h2"]
+        if not starts:
+            return tokens, []
+        return tokens[:starts[0]], [
+            tokens[start:end] for start, end in zip(starts, [*starts[1:], len(tokens)], strict=True)
+        ]
+
+    if before.get("frontmatter") != after.get("frontmatter"):
+        return False
+    old_prefix, old = sections(before.get("body", []))
+    new_prefix, new = sections(after.get("body", []))
+    added = len(new) - len(old)
+    if old_prefix != new_prefix or added != 1 or new[added:] != old:
+        return False
+    header = "".join(child.get("content") or "" for child in new[0][1].get("children", []))
+    _, separator, target = header.partition(" | ")
+    expected = {path.removeprefix(kb_prefix()).removesuffix(".md") for path in targets}
+    return bool(separator) and target in expected
 
 
 # --------------------------------------------------------------------------
@@ -190,16 +407,23 @@ def compact_calls(tap_events: Sequence[Mapping]) -> list[dict]:
     codes in the result envelope (read as JSON, never from prose).
     """
 
+    from exomem import mutation_terminal
+
     calls = []
     for event in tap_events:
         if event.get("event") != "call":
             continue
         result = event.get("result") if isinstance(event.get("result"), Mapping) else {}
         envelope = {"result": event.get("result"), "error": event.get("error")}
+        payloads = list(tool_payloads(envelope))
+        for value in list(payloads):
+            if isinstance(value, Mapping):
+                payloads.extend(value.get(name) for name in ("receipt", "leaf_result", "details")
+                                if isinstance(value.get(name), Mapping))
         codes = sorted(
             {
                 str(value[name])
-                for value in tool_payloads(envelope)
+                for value in payloads
                 if isinstance(value, dict)
                 for name in ("code", "error_code")
                 if isinstance(value.get(name), str)
@@ -213,6 +437,21 @@ def compact_calls(tap_events: Sequence[Mapping]) -> list[dict]:
                 "outcome": event.get("outcome"),
                 "errored": bool(event.get("error") or result.get("isError")),
                 "codes": codes,
+                "canonical_state": event.get("canonical_state"),
+                "terminals": [
+                    {name: value[name] for name in ("_terminal", "version", "state", "mutated", "receipt_id") if name in value}
+                    for value in payloads
+                    # The marker, version and boolean field are the source-defined terminal protocol.
+                    if isinstance(value, dict) and value.get("_terminal") == "exomem.mutation-terminal"
+                    and type(value.get("version")) is int and value["version"] == 1
+                    and type(value.get("mutated")) is bool
+                ],
+                "receipts": [value for value in payloads if isinstance(value, Mapping) and (
+                    mutation_terminal.valid_collection_receipt(value)
+                    or mutation_terminal.valid_structured_files_receipt(value)
+                    or mutation_terminal.valid_control_receipt(value)
+                )],
+                "result": event.get("result"),
             }
         )
     return calls
@@ -231,8 +470,12 @@ class CaseResult:
     reasons: list[str] = field(default_factory=list)
     #: Read tasks only: the vault changed, or a write-capable call was served.
     wrong_write: bool = False
-    state_changed: bool = False
+    state_changed: bool | None = None
     write_calls_served: int = 0
+    write_attempts: int = 0
+    committed_effects: int = 0
+    unexpected_mutations: int = 0
+    effect_unknown_calls: int = 0
     calls: int = 0
     unresolved_calls: int = 0
     argument_refusals: int = 0
@@ -269,35 +512,104 @@ def score_session(
     result.output_tokens = turn.get("output_tokens")
     result.wall_seconds = turn.get("wall_seconds")
     result.calls = len(calls)
-    targets = {(op.command, op.action, op.mode) for op in key.target_ops}
+    before = facts.get("end_state_before") or {}
+    previous = before
     for call in calls:
         resolved = resolve_call(resolver, str(call["name"]), call.get("arguments"), session["arm"])
-        served = call["outcome"] == "served" and not call["errored"]
+        served = call["outcome"] == "served"
+        if resolved.read_only is False:
+            result.write_attempts += 1
         if not resolved.resolved:
             result.unresolved_calls += 1
         if resolved.resolved and result.first_correct_ordinal is None and (
-            (resolved.command, resolved.action, resolved.mode) in targets
+            any((resolved.command, resolved.action, resolved.mode) == (op.command, op.action, op.mode)
+                and all(type(resolved.arguments.get(name)) is type(value) and resolved.arguments.get(name) == value
+                        for name, value in op.constraints.items()) for op in key.target_ops)
         ):
             result.first_correct_ordinal = int(call["ordinal"])
-        # A call the product refused with an error code wrote nothing; only the
-        # state check can count a write from a call that carried no code.
-        if served and not call["codes"] and resolved.resolved and resolved.read_only is False:
+        snapshot = call.get("canonical_state")
+        known_state = snapshot is not None and not snapshot.get("unknown") and not previous.get("unknown")
+        changed = known_state and state_changed(previous, snapshot)
+        terminals = call.get("terminals") or []
+        committed = any(terminal.get("mutated") is True for terminal in terminals) or any(
+            receipt.get("outcome") == "committed" for receipt in call.get("receipts") or []
+        )
+        settled_noop = any(terminal.get("mutated") is False for terminal in terminals)
+        refused_arguments = bool(ARGUMENT_REFUSALS.intersection(call["codes"]))
+        if served and resolved.read_only is False and (committed or settled_noop or not call["codes"] and not call["errored"]):
             result.write_calls_served += 1
-        if ARGUMENT_REFUSALS.intersection(call["codes"]):
+        if served and (committed or changed):
+            result.committed_effects += 1
+        if served and (changed or committed) and (
+            key.kind == READ or known_state and _canonical_checks(key, before, snapshot, final=False)
+        ):
+            result.unexpected_mutations += 1
+        if served and (resolved.read_only is not True) and (call["codes"] or call["errored"]) and not (
+            committed or known_state or refused_arguments or settled_noop
+        ):
+            result.effect_unknown_calls += 1
+        if snapshot is not None:
+            if snapshot.get("unknown"):
+                result.effect_unknown_calls += 1
+            previous = snapshot
+        if refused_arguments:
             result.argument_refusals += 1
+    if key.kind == READ:
+        result.wrong_write = result.write_calls_served > 0 or result.unexpected_mutations > 0
     if not result.scored:
         result.reasons.append(f"session outcome {outcome}")
         return result
 
     before, after = facts["end_state_before"], facts["end_state_after"]
-    result.state_changed = state_changed(before, after)
+    result.state_changed = None if before.get("unknown") or after.get("unknown") else state_changed(before, after)
+    if key.kind == READ and result.state_changed is True:
+        result.wrong_write = True
+    if (before.get("unknown") or after.get("unknown") or result.effect_unknown_calls
+            or case.template_id == "source-derived" and ("files" not in before or "files" not in after)):
+        result.scored = False
+        result.reasons.append("canonical state or a write effect is unresolved")
+        result.reasons.extend(f"canonical read unavailable: {finding}" for finding in [
+            *before.get("unknown", []), *after.get("unknown", [])
+        ])
+        return result
     if key.kind == READ:
-        result.wrong_write = result.state_changed or result.write_calls_served > 0
         if not answer_matches(parse_answer(session.get("answer")), key):
             result.reasons.append("answer does not match the seeded facts")
+        if key.preview is not None and not _preview_observed(key, calls, resolver, session["arm"]):
+            result.reasons.append("the requested preview has no successful structured evidence")
         if result.wrong_write:
             result.reasons.append("a read task wrote")
     elif key.kind == WRITE:
         result.reasons.extend(check_end_state(key, before, after))
+        if result.unexpected_mutations:
+            result.reasons.append("an intermediate mutation changed facts outside the request")
+    if not result.unexpected_mutations and result.state_changed and (
+        key.kind == READ or _canonical_checks(key, before, after, final=False)
+    ):
+        result.unexpected_mutations = 1
     result.success = not result.reasons
     return result
+
+
+def _preview_observed(key: Key, calls: Sequence[Mapping], resolver: Resolver, shape: str) -> bool:
+    expected = key.preview
+    for call in calls:
+        if call["outcome"] != "served" or call["errored"] or call["codes"]:
+            continue
+        resolved = resolve_call(resolver, str(call["name"]), call.get("arguments"), shape)
+        if not any((resolved.command, resolved.action) == (op.command, op.action) for op in key.target_ops):
+            continue
+        payloads = [value for value in tool_payloads({"result": call.get("result")}) if isinstance(value, Mapping)]
+        if "delta" in expected:
+            if resolved.arguments.get("proposal") == expected["delta"] and any(value.get("valid") is True for value in payloads):
+                return True
+        elif "proposed_content" in expected:
+            if (resolved.arguments.get("content") == expected["proposed_content"]
+                    and any(value.get("mutated") is False and authored_unit(value.get("unit", {})) == expected["unit"]
+                            for value in payloads)):
+                return True
+        elif "contains_proposed_paragraph" in expected:
+            if (markdown_facts(resolved.arguments.get("content") or "") == markdown_facts(expected["contains_proposed_paragraph"])
+                    and any(value.get("mutated") is False and value.get("path") == expected["path"] for value in payloads)):
+                return True
+    return False

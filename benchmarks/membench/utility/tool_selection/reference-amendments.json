@@ -1,0 +1,42 @@
+{
+  "amendments": [
+    {
+      "number": 1,
+      "stage": "free fixture admission, before actor generation",
+      "reason": "The illustrative experiment fixtures did not satisfy the existing note writer contract.",
+      "source_anchors": [
+        "src/exomem/commands.py::op_note",
+        "src/exomem/note.py::_resolve_path",
+        "src/exomem/semantic_contract.py::_missing_semantic_unit_finding",
+        "src/exomem/observe_memory.py::_render_unit",
+        "src/exomem/commands.py::op_link",
+        "src/exomem/link.py::_render_entity"
+      ],
+      "changes": [
+        "Declare domain laboratory, started 2026-10-01 and duration ongoing for both experiments.",
+        "Use the registry-projected Laboratory folder and the writer's 2026-10 filename prefix.",
+        "Create the cache page as active with its first declared rich unit; add the sibling through observe_memory.",
+        "Put the unchanged primary-marker paragraph below a Hypothesis heading on the active flight checklist.",
+        "Bind generated page identities from the admitted fixture; do not treat illustrative UUIDs as expected content.",
+        "Materialize authored Markdown bodies as LF text before product calls; no literal backslash-n remains in body fields.",
+        "Declare active lifecycle explicitly and materialize the entity summary below the documented Summary heading; check its complete declared body."
+      ],
+      "expected_fact_changes": "No observation content, category, metadata, preference, question or requested append fact changed.",
+      "original_reference": "The evaluator's source draft remains unchanged. The development case file records its SHA-256."
+    },
+    {
+      "number": 2,
+      "stage": "free fixture admission, before actor generation",
+      "reason": "The category registry refuses noncanonical delta keys.",
+      "source_anchors": [
+        "src/exomem/vocabulary/registry.py::apply_delta",
+        "src/exomem/semantic_language_registry.py::_CategoryAdapter.normalize_key"
+      ],
+      "changes": [
+        "Use follow_up for the seeded category key and release_check for the requested category key.",
+        "Keep the independently authored descriptions and the natural-language release-check request."
+      ],
+      "expected_fact_changes": "Only the source-owned canonical key spelling changes; no category meaning or existing entry changes."
+    }
+  ]
+}

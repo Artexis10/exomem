@@ -51,6 +51,16 @@ class Op:
     command: str
     action: str
     mode: str | None = None
+    constraints: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FileKey:
+    """Authored facts for one requested page; generated identities remain fixture guards."""
+
+    path: str
+    body: str | None = None
+    units: tuple[Mapping[str, Any], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +98,11 @@ class Key:
     #: Reads only: the expected JSON answer and how it is compared.
     answer: Any = None
     answer_mode: str | None = None
+    files: tuple[FileKey, ...] = ()
+    preference: Mapping[str, Any] | None = None
+    question: Mapping[str, Any] | None = None
+    registry: Mapping[str, Any] | None = None
+    preview: Mapping[str, Any] | None = None
 
 
 # --------------------------------------------------------------------------

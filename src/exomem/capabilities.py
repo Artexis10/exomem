@@ -7,7 +7,7 @@ import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import operation_entries
@@ -28,6 +28,8 @@ class ActiveSurfaceDescriptor:
     #: How this surface spells a converted command (see `operation_entries.TOOL_SHAPES`).
     #: Only an MCP surface lists renderings; every other surface keeps the grouped spelling.
     tool_shape: str = "grouped"
+    #: The exact filtered registry used by discovery and invocation resolution.
+    contributing_commands: tuple[Any, ...] = field(default=(), repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if self.tool_shape not in operation_entries.TOOL_SHAPES:
@@ -83,14 +85,22 @@ class ActiveSurfaceDescriptor:
             "active_capability_sha256": self.fingerprint,
         }
 
-    def _shape_metadata(self) -> dict[str, str]:
+    def _shape_metadata(self) -> dict[str, Any]:
         """The tool shape, stated only when it is not the grouped spelling every other surface uses.
 
         Two shapes list the same names and take different arguments, so the fingerprint
         has to tell them apart; leaving the default out keeps every grouped surface's
         fingerprint as it was.
         """
-        return {} if self.tool_shape == "grouped" else {"tool_shape": self.tool_shape}
+        if self.tool_shape == "grouped":
+            return {}
+        routes = {}
+        for command in self.contributing_commands:
+            for rendering in command.renderings:
+                routes.setdefault(rendering.name, []).extend(rendering.kinds)
+        return {"tool_shape": self.tool_shape,
+                **({"available_operations": {name: sorted(set(kinds)) for name, kinds in sorted(routes.items())}}
+                   if routes else {})}
 
 
 _ACTIVE_SURFACE: ContextVar[ActiveSurfaceDescriptor | None] = ContextVar(
@@ -137,6 +147,12 @@ def active_call_text(command: str, arguments: Mapping[str, Any]) -> str:
 
 def active_tools(command: str, effect: operation_entries.Effect | None = None) -> tuple[str, ...]:
     """The tools the surface serving this call lists for a grouped command, one side if asked."""
+    active = current_active_surface()
+    if active is not None and active.tool_shape != "grouped" and active.contributing_commands:
+        source = next((item for item in active.contributing_commands if command in item.callable_names), None)
+        if source is None:
+            return ()
+        return tuple(rendering.name for rendering in source.renderings if effect in (None, rendering.effect)) if source.renderings else (source.public_name,)
     return operation_entries.listed_tools(command, current_tool_shape(), effect)
 
 
@@ -147,4 +163,33 @@ def active_call_route(command: str, arguments: Mapping[str, Any]) -> dict[str, A
 
 def active_tools_text(command: str, effect: operation_entries.Effect | None = None) -> str:
     """The tools the serving surface lists for a grouped command, for one line of prose."""
-    return operation_entries.tools_text(command, current_tool_shape(), effect)
+    return "/".join(active_tools(command, effect))
+
+
+def project_call_routes(value: Any) -> Any:
+    """Spell authored structured routes for the serving surface using operation entries."""
+    if current_tool_shape() == "grouped":
+        return value
+    if isinstance(value, list | tuple):
+        return [project_call_routes(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {key: project_call_routes(item) for key, item in value.items()}
+    tool = result.get("tool")
+    operations = operation_entries.OPERATIONS.get(tool) if isinstance(tool, str) else None
+    if operations is None:
+        return result
+    argument_key = "arguments" if "arguments" in result else "args"
+    arguments = result.get(argument_key)
+    if isinstance(arguments, Mapping) and isinstance(arguments.get("operation"), Mapping):
+        return result
+    if arguments is None:
+        fields = operations.every_field() | ({operations.selector} if operations.selector else set())
+        arguments = {key: result.pop(key) for key in list(result) if key in fields}
+    if operations.selector and operations.selector not in arguments:
+        result.pop("tool")
+        result["tools"] = list(active_tools(tool))
+        return result
+    name, arguments = active_spell_call(tool, arguments)
+    result.update(tool=name, **{argument_key: arguments})
+    return result

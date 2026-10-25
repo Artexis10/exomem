@@ -35,7 +35,7 @@ stored knowledge.
   outbound body wikilinks or canonical note/block relations. It excludes
   archived/superseded pages, indexes, append-only/read-only trees, hubs, and
   snapshots. This is an informational Inbox proposal, not a write failure:
-  inspect `connect_memory(operation="suggest-relations")` or `suggest-links`,
+  inspect `read_connections(operation={'kind': 'suggest-relations'})` or `suggest-links`,
   then add only defensible edges under `## Relations` (or block `relations:`
   metadata). Never turn semantic proximity into a durable edge automatically.
 

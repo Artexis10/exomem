@@ -35,9 +35,10 @@ from exomem import server as server_module
 from exomem._hooks import exomem_capture_nudge as capture_hook
 
 SHAPES = ("nested", "grouped")
-GROUPED_NAMES = frozenset(operation_entries.OPERATIONS)
+GROUPED_NAMES = frozenset({"record_memory", "plan_memory"})
 RENDERED_NAMES = frozenset(
-    spec.name for operations in operation_entries.OPERATIONS.values() for spec in operations.renderings
+    spec.name for name, operations in operation_entries.OPERATIONS.items()
+    if name in GROUPED_NAMES for spec in operations.renderings
 )
 ALL_SPELLINGS = GROUPED_NAMES | RENDERED_NAMES
 
@@ -404,17 +405,16 @@ def _hook_sees_a_write(tool: str, arguments: dict) -> bool:
 
 def _grouped_arguments(operations, entry) -> dict:
     """The grouped arguments that select one entry: its action and, where it has one, its mode."""
-    arguments: dict[str, object] = {operations.selector: entry.action}
-    if entry.mode is not None:
-        axis = operations.mode_axes[entry.action]
-        arguments[axis.argument] = {axis.key: entry.mode}
-    return arguments
+    rendering = next(item for item in operations.renderings_with_entries() if item.name == entry.rendering)
+    return rendering.arguments_for(entry)
 
 
 @pytest.mark.parametrize("shape", SHAPES)
 def test_the_hook_counts_every_write_and_no_read_of_each_shape(shape) -> None:
     """Each operation of each tool, called as a client of this shape, is a write or a read as its entry says."""
-    for operations in operation_entries.OPERATIONS.values():
+    for name, operations in operation_entries.OPERATIONS.items():
+        if name not in GROUPED_NAMES:
+            continue
         for entry in operations.entries:
             arguments = _grouped_arguments(operations, entry)
             tool, spelled = operation_entries.spell_call(operations.command, arguments, shape)

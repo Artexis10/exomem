@@ -11,11 +11,11 @@ knowledge and inspect matching pages before creating another. Capture external
 originals into Source/Evidence first and include their returned references in
 `sources:` on the first compiled write; a URL or derivative is not the original.
 Honest `sources: []` is valid for live reasoning with no captured external input.
-Use `connect_memory(operation="suggest-links")` on a draft when relevant connections
+Use `read_connections(operation={'kind': 'suggest-links'})` on a draft when relevant connections
 are missing, and `suggest-relations` when their direction is unresolved. Reuse
 current evidence instead of repeating discovery; accept only reviewed, meaningful
 connections under the envelope. Never fabricate an edge to satisfy a quota.
-Keep the full semantic grammar below visible when authoring; use `observe_memory`
+Keep the full semantic grammar below visible when authoring; use `prepare_note/change_observations`
 for one semantic unit rather than fragile whole-page string edits.
 
 Wikilink every person, organisation, place, piece of equipment or product a
@@ -32,21 +32,21 @@ Before saving durable knowledge, consider whether the material calls for reuse,
 enrichment, a justified new entity or type, an honest generic connection, no
 edge, or deferral. This is a meaning check, not a requirement to invent
 structure or meet a quota. Resolve entity types with
-`schema_memory(operation="resolve-entity-type", subject="entity-types")` and
-relations with `connect_memory(operation="resolve-relation")`; reuse a truthful
+`read_schema(operation={'kind': 'resolve-entity-type', 'subject': 'entity-types'})` and
+relations with `read_connections(operation={'kind': 'resolve-relation'})`; reuse a truthful
 existing canonical identity when it fits.
 
 If a useful distinction is absent from the queue, anchor a meaning question with
-`review_memory(mode="vocabulary", path=..., query=..., family=...)`: use a source
+`triage_memory(operation={'kind': 'question', 'path': ..., 'query': ..., 'family': ...})`: use a source
 page for a new identity/type, or the existing entity page for reuse/enrichment.
 For a selected relation candidate, use its source path and add its current `ref`
 with `family="relation-type/v1"`. This reviews both endpoints and returns an
 `application_route` for that directed pair; record the decision before applying it.
-At a durable capture boundary, call `review_memory(mode="vocabulary")` (four
+At a durable capture boundary, call `read_review(operation={'kind': 'vocabulary'})` (four
 actionable items by default; `state="all"` includes decision history), inspect a namespaced item with
-`review_item_context(ref="exomem://review/vocabulary/<item>")`, and record the
+`read_review(operation={'kind': 'item-context', 'ref': 'exomem://review/vocabulary/<item>'})`, and record the
 reviewed snapshot through
-`triage_memory(action="decide-vocabulary", ref="exomem://review/vocabulary/<item>", decision=...)`.
+`triage_memory(operation={'kind': 'decision', 'action': 'decide-vocabulary', 'ref': 'exomem://review/vocabulary/<item>', 'decision': ...})`.
 Its decision carries the item fingerprint, family, registry hashes, target
 versions, outcome, rationale, and canonical `choice`; it is not execution or permission.
 `generic, no-edge, or defer` are valid truthful outcomes. A proposed

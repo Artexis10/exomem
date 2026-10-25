@@ -194,7 +194,9 @@ def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     live = _live_schemas(_build_server(monkeypatch, tmp_path))
-    properties = live["manage_memory_file"]["inputSchema"]["properties"]
+    branches = live["change_files"]["inputSchema"]["properties"]["operation"]["oneOf"]
+    by_kind = {branch["properties"]["kind"]["const"]: branch["properties"] for branch in branches}
+    properties = {**by_kind["create"], **by_kind["append"]}
     required = {
         "validate_only",
         "semantic_transition_token",
@@ -212,8 +214,10 @@ def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
 
 
 def test_maintain_memory_schema_documents_the_reconcile_only_graph_reset() -> None:
-    schema = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["maintain_memory"]
-    rebuild_graph = schema["inputSchema"]["properties"]["rebuild_graph"]
+    schema = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["check_memory"]
+    branches = schema["inputSchema"]["properties"]["operation"]["oneOf"]
+    reconcile = next(branch for branch in branches if branch["properties"]["kind"]["const"] == "reconcile")
+    rebuild_graph = reconcile["properties"]["rebuild_graph"]
 
     assert rebuild_graph["default"] is False
     assert "reconcile" in rebuild_graph["description"].lower()
@@ -302,41 +306,24 @@ def test_hand_registered_exceptions_are_explicit(
 def test_process_media_mcp_schema_annotations_and_leaf_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem import commands as commands_module
     from exomem import media_jobs
 
     mcp = _build_server(monkeypatch, tmp_path)
     vault = tmp_path / "schema_vault"
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
-    tool = tools["process_media"].to_mcp_tool().model_dump(mode="json", by_alias=True)
+    tool = tools["change_media"].to_mcp_tool().model_dump(mode="json", by_alias=True)
     schema = tool["inputSchema"]
-    [command] = [cmd for cmd in commands_module.PRODUCT_COMMANDS if cmd.name == "process_media"]
-    operation_param = next(param for param in command.params if param.name == "operation")
-    assert set(schema["properties"]) == {
-        "path",
-        "paths",
-        "operation",
-        "response_detail",
-    }
-    assert schema.get("required", []) == []
-    assert schema["properties"]["operation"]["enum"] == list(operation_param.choices)
-    assert schema["properties"]["response_detail"]["enum"] == [
-        "compact",
-        "full",
-        "legacy",
-    ]
-    assert "governed" in schema["properties"]["path"]["description"].lower()
-    assert "process" in schema["properties"]["operation"]["description"].lower()
-    assert tool["annotations"] == {
-        "title": command.public_title,
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": False,
-    }
+    assert set(schema["properties"]) == {"operation", "response_detail"}
+    assert schema["required"] == ["operation"]
+    variants = schema["properties"]["operation"]["oneOf"]
+    assert {branch["properties"]["kind"]["const"] for branch in variants} == {"process", "retry"}
+    assert all("governed" in branch["properties"]["path"]["description"].lower() for branch in variants)
+    assert schema["properties"]["response_detail"]["enum"] == ["compact", "full", "legacy"]
+    assert tool["annotations"]["readOnlyHint"] is False
+    assert tools["read_media"].annotations.read_only_hint is True
 
     result = asyncio.run(
-        mcp.call_tool("process_media", {"operation": "status"}, run_middleware=True)
+        mcp.call_tool("read_media", {"operation": {"kind": "status"}}, run_middleware=True)
     )
     structured = result.structured_content
     assert structured["operation"] == "status"

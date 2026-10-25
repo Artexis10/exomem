@@ -24,9 +24,9 @@ from starlette.middleware import Middleware as ASGIMiddleware
 from . import capabilities, cloud_cell, edit_operations, guards, multi_edit
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
-from .command_surface import DEFAULT_TOOL_SHAPE, TOOL_SHAPES, listed_names, rendering_annotations
+from .command_surface import DEFAULT_TOOL_SHAPE, TOOL_SHAPES, listed_names
 from .edge_ingress import EdgeIngressMiddleware
-from .operation_schema import rendering_handler
+from .operation_schema import shared_rendering_tool
 from .server_assets import (
     register_asset_routes,
     register_health_routes,
@@ -64,10 +64,15 @@ class PreferredToolDiscovery(Transform):
             if shape == "grouped"
             else frozenset(command.name for command in commands if command.renderings)
         )
+        self.public_tools = {}
 
     async def list_tools(self, tools):
-        hidden = self.compatibility_names | self.rendered_names
-        return [tool for tool in tools if tool.name not in hidden]
+        hidden = self.compatibility_names | self.rendered_names | self.public_tools.keys()
+        return [tool for tool in tools if tool.name not in hidden] + list(self.public_tools.values())
+
+    async def get_tool(self, name, call_next, *, version=None):
+        original = await call_next(name, version=version)
+        return original if original is not None else self.public_tools.get(name)
 
 
 class PublicCommandNameMiddleware(Middleware):
@@ -85,7 +90,7 @@ class PublicCommandNameMiddleware(Middleware):
         self.shape = shape
 
     async def on_call_tool(self, context, call_next):
-        from .cli_ops import OpError
+        from .cli_ops import OpError, envelope, public_refusal
         from .command_surface import (
             find_rendering,
             rendered_call_writes,
@@ -116,9 +121,16 @@ class PublicCommandNameMiddleware(Middleware):
             )
             refusal = None
         except OpError as error:
-            command, refusal = found[0], error
-            flat = dict(arguments)
-            writes = rendered_call_writes(command, found[1], arguments, passthrough=passthrough)
+            command = getattr(error, "command", None)
+            if command is None:
+                # Unknown public kinds have no authorization route or egress projector.
+                log.info("public operation refused: tool=%s code=%s", name, error.code)
+                from fastmcp.tools import ToolResult
+
+                return ToolResult(content=[], structured_content=envelope(False, error=public_refusal(error)))
+            refusal = error
+            flat = error.arguments
+            writes = rendered_call_writes(command, error.rendering, arguments, passthrough=passthrough)
         message = context.message.model_copy(update={"name": command.name, "arguments": flat})
         with rendering_scope(name, refusal, writes=writes):
             return await call_next(context.copy(message=message))
@@ -805,7 +817,8 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
     # Cloud traces retain their content-free form after name normalization.
     mcp.add_middleware(CallTraceMiddleware(hosted=cloud))
     mcp.add_middleware(RenderedRefusalMiddleware())
-    mcp.add_transform(PreferredToolDiscovery(product_commands, shape=tool_shape))
+    discovery = PreferredToolDiscovery(product_commands, shape=tool_shape)
+    mcp.add_transform(discovery)
     legacy_commands = (
         # A cell has no legacy clients, and a leaf's alias would re-expose
         # a command CLOUD_SURFACE_EXCLUSIONS just removed (design D1.3) --
@@ -825,9 +838,9 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             else "product"
         ),
         tier2_enabled=expose_tier2,
-        product_commands=tuple(
+        product_commands=tuple(dict.fromkeys(
             name for command in product_commands for name in listed_names(command, tool_shape)
-        ),
+        )),
         # A hidden spelling stays callable: the compatibility alias of a preferred name, and
         # the grouped name of a command whose operations the surface lists as renderings.
         compatibility_commands=tuple(
@@ -836,6 +849,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             if command.preferred_name or (command.renderings and tool_shape != "grouped")
         ),
         tool_shape=tool_shape,
+        contributing_commands=tuple(product_commands),
         exported_aliases=tuple(command.name for command in legacy_commands),
         hand_registered_tools=tuple(
             sorted(commands_module.HAND_REGISTERED_EXCEPTIONS)
@@ -849,6 +863,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             for exclusion in commands_module.CLOUD_SURFACE_EXCLUSIONS.values()
         ) if cloud else (),
     )
+    public_contributors = {}
     for cmd in product_commands:
         if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
             continue
@@ -880,10 +895,10 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             mcp.tool(bound, **tool_kwargs)
         if tool_shape != "grouped":
             for rendering in cmd.renderings:
-                mcp.tool(
-                    rendering_handler(rendering, grouped),
-                    **{**tool_kwargs, "annotations": rendering_annotations(rendering)},
-                )
+                public_contributors.setdefault(rendering.name, []).append((rendering, grouped))
+
+    discovery.public_tools = {name: shared_rendering_tool(contributors)
+                              for name, contributors in public_contributors.items()}
 
     if legacy_commands:
         _register_legacy_mcp_tools(
