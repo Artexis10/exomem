@@ -5637,7 +5637,7 @@ def _scrub_tool_result(result: Any, vault_root: Path) -> tuple[Any, bool]:
     for block in getattr(result, "content", ()) or ():
         if getattr(block, "type", None) != "text":
             continue
-        cleaned, hit = scrubber.scrub_text(getattr(block, "text", "") or "")
+        cleaned, hit = scrubber.scrub_json_text(getattr(block, "text", "") or "")
         if hit:
             blocked = True
             try:
