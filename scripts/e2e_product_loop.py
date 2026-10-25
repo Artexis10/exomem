@@ -2717,8 +2717,12 @@ def _e2e_workdir(*, keep: bool):
         try:
             yield str(path)
         except BaseException:
-            _publish_server_logs(path)
-            _publish_server_logs(path / "s1", label="s1")
+            try:
+                # Each harness service, including forked copies, owns an isolated home/logs tree.
+                for home in sorted(path.glob("**/home")):
+                    _publish_server_logs(home.parent, label=home.parent.relative_to(path).as_posix())
+            except OSError as exc:
+                print(f"product-e2e: could not collect all server logs ({exc})", file=sys.stderr)
             raise
 
 
