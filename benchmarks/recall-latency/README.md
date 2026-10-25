@@ -6,6 +6,14 @@ paired margin and sample minimum. This directory owns reference data and schemas
 
 `--paired` compares the current checkout with the latest GitHub Release tag.
 Both persistent workers use the same corpus, cases, encoder digest and two CPUs.
+The head arm keeps the parent benchmark interpreter. CI starts it with the frozen `recall-benchmark` dependency group.
+The tag arm uses one isolated runtime from its archived `uv.lock`, with only the `embeddings-onnx` extra and no default groups.
+The current pinned uv reads that lock with `--frozen --no-config`; it never resolves or updates the tag lock.
+[`--frozen`](https://docs.astral.sh/uv/concepts/projects/sync/) reads the existing lock without checking its freshness.
+[`--no-config`](https://docs.astral.sh/uv/concepts/configuration-files/) bypasses historical writer settings and persistent configuration.
+The runner clears inherited `VIRTUAL_ENV` and places the tag environment inside its owned paired scratch directory.
+It checks the lock hash after preparation and verifies the worker's interpreter prefix before accepting its measurements.
+Preparation stays outside request timers. Cleanup resumes owned workers before removing the scratch directory and the tag runtime.
 Each case runs three times per arm, with the first arm alternating between cases.
 The inactive worker stops outside measurement so its native pool cannot slow the other arm.
 The adapter wraps real timing boundaries and delegates their original bodies.
@@ -57,6 +65,11 @@ and rounds them down to buckets of 500; it never loads a model.
 `summary.schema.json` rejects content fields and unknown report fields.
 Validate every live summary before publishing it. The summary includes only
 case codes, measurements, counts, versions, digests and closed states.
+Each worker records `runtime_lock_digest`, the SHA-256 of that arm's source `uv.lock`.
+Its closed `runtime_policy` names the launch recipe: `parent-benchmark` or `frozen-tag-runtime`.
+The digest identifies the lock input; it is not an inventory of installed packages.
+Private startup exchanges verify interpreter prefixes; public reports contain no environment paths.
+Runtime preparation and worker failures retain their closed reason and phase. A failed tag runtime produces a refusal without a head runtime fallback.
 A failed or refused live result opens follow-up work and gates no release.
 Legacy flags retain their narrower observation report and cannot certify this reference.
 Failed stages and degraded reads remain unknown samples. A transport failure still produces a validated attempt with a closed error code.

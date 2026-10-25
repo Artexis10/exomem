@@ -19,7 +19,7 @@ from collections import defaultdict
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -31,22 +31,28 @@ _bootstrap.add_argument("--mcp-url")
 _bootstrap.add_argument("--worker-source", type=Path)
 _bootstrap.add_argument("--worker-cpus")
 _boot_args = _bootstrap.parse_known_args()[0]
-if _boot_args.worker_source:
-    # Pin before importing application modules or any native encoder dependency.
-    os.sched_setaffinity(0, set(json.loads(_boot_args.worker_cpus)))
-    sys.path.insert(0, str(_boot_args.worker_source / "src"))
-elif (_boot_args.package_mode or ("installed" if _boot_args.mcp_url else "source")) == "source" and str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+try:
+    if _boot_args.worker_source:
+        # Pin before importing application modules or any native encoder dependency.
+        os.sched_setaffinity(0, set(json.loads(_boot_args.worker_cpus)))
+        sys.path.insert(0, str(_boot_args.worker_source / "src"))
+    elif (_boot_args.package_mode or ("installed" if _boot_args.mcp_url else "source")) == "source" and str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
 
+    from exomem.request_latency_contract import load_contract
 
-from exomem.request_latency_contract import load_contract  # noqa: E402
-
-CONTRACT = load_contract()
-if _boot_args.worker_source:
-    # Both arms read head's canonical bars; the tag supplies product code only.
-    CONTRACT = type(CONTRACT).model_validate_json(
-        (SRC / "request_latency_contract.json").read_text()
-    )
+    CONTRACT = load_contract()
+    if _boot_args.worker_source:
+        # Both arms read head's canonical bars.
+        CONTRACT = type(CONTRACT).model_validate_json(
+            (SRC / "exomem" / "request_latency_contract.json").read_text()
+        )
+except Exception as error:  # noqa: BLE001 - bootstrap errors can contain local paths.
+    if not _boot_args.worker_source:
+        raise
+    print(json.dumps({"state": "worker-error", "error_class": type(error).__name__,
+                      "reason": "benchmark-worker-bootstrap-failed", "phase": "worker-bootstrap"}), flush=True)
+    raise SystemExit(1) from None
 HYBRID_BAR = CONTRACT.bar("governed-hybrid")
 KEYWORD_BAR = CONTRACT.bar("governed-keyword")
 HYBRID_P95_MS = HYBRID_BAR.threshold_ms
@@ -866,12 +872,17 @@ REFERENCE = CONTRACT.references[HYBRID_BAR.reference]
 PAIRING = REFERENCE["paired"]
 
 
+# These are the closed phases of the benchmark protocol, not application stages.
+MeasurementPhase = Literal["reference-preparation", "release-archive", "tag-runtime-preparation",
+                           "worker-bootstrap", "worker-startup", "worker-request", "paired-measurement"]
+
+
 class MeasurementRefused(ValueError):
     """A closed instrument failure code, safe to include in public evidence."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, phase: MeasurementPhase | None = None):
         super().__init__(code)
-        self.code = code
+        self.code, self.phase = code, phase
 
 
 def validate_document(document: dict, schema: str, *, directory: Path = BENCHMARK,
@@ -892,7 +903,7 @@ def validate_document(document: dict, schema: str, *, directory: Path = BENCHMAR
 def paired_statistic(ratios: list[float]) -> dict[str, Any]:
     """Student-t interval over independent cases' log median ratios."""
     if any(isinstance(value, bool) or not math.isfinite(value) or value <= 0 for value in ratios):
-        raise ValueError("invalid-paired-ratio")
+        raise MeasurementRefused("invalid-paired-ratio")
     if len(ratios) < PAIRING["minimum_cases"]:
         return {"state": "insufficient samples", "cases": len(ratios)}
     from scipy.stats import t
@@ -1122,7 +1133,7 @@ def absolute_cli(output: Path, *, quiescence_bound: float) -> int:
                 scratch = Path(temporary)
                 cpus = sorted(os.sched_getaffinity(0))[:REFERENCE["reference_cpus"]]
                 if len(cpus) != REFERENCE["reference_cpus"]:
-                    raise ValueError("two-cpu-reference-unavailable")
+                    raise MeasurementRefused("two-cpu-reference-unavailable")
                 worker = _Worker(ROOT, scratch / "vault", scratch / "state", cpus, profile)
                 try:
                     for principal_name in ("owner", "admitted"):
@@ -1147,7 +1158,9 @@ def absolute_cli(output: Path, *, quiescence_bound: float) -> int:
                     worker = None
     except (ValueError, OSError) as error:
         report.update(state="not measured",
-                      reason=error.code if isinstance(error, MeasurementRefused) else type(error).__name__)
+                      reason=error.code if isinstance(error, MeasurementRefused) else type(error).__name__,
+                      phase=(error.phase or "reference-preparation") if isinstance(error, MeasurementRefused)
+                      else "reference-preparation")
     finally:
         if worker is not None:
             worker.close()
@@ -1172,12 +1185,12 @@ def reference_cases(profile: dict, directory: Path = BENCHMARK) -> tuple[list[di
     for series in {case["series"] for case in cases}:
         selected = [case for case in cases if case["series"] == series]
         if len(selected) < REFERENCE["queries_min"]:
-            raise ValueError("reference-case-count-below-profile")
+            raise MeasurementRefused("reference-case-count-below-profile")
         lengths = [len(case["query"].split()) for case in selected]
         # These word bands are the measurement contract's closed sampling bins.
         if ([sum(1 <= n <= 3 for n in lengths), sum(4 <= n <= 9 for n in lengths),
              sum(15 <= n <= 40 for n in lengths)] != [10, 20, 10]):
-            raise ValueError("reference-query-bands-invalid")
+            raise MeasurementRefused("reference-query-bands-invalid")
     return cases, digest
 
 
@@ -1200,14 +1213,14 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
         for rel in (rels[0], rels[len(rels) // 2], rels[-1]):
             digest = conn.execute("SELECT content_hash FROM pages WHERE path=?", (rel,)).fetchone()
             if digest is None or digest[0] != hashlib.sha256((vault_root / rel).read_bytes()).hexdigest():
-                raise ValueError("stored-page-source-mismatch")
+                raise MeasurementRefused("stored-page-source-mismatch")
     with sqlite3.connect(index.path) as conn:
         chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
         vector_units = conn.execute("SELECT count(*) FROM semantic_unit_vectors").fetchone()[0]
         for blob, in conn.execute("SELECT vector FROM chunks ORDER BY file_path, chunk_idx LIMIT 3"):
             vector = np.frombuffer(blob, dtype=np.float32)
             if not np.isfinite(vector).all() or not np.isclose(np.linalg.norm(vector), 1.0):
-                raise ValueError("stored-vector-invalid")
+                raise MeasurementRefused("stored-vector-invalid")
     source_words, _digest = reference_source(profile, BENCHMARK)
     source_terms = {word.strip(string.punctuation).casefold() for word in source_words}
     sizes, links, transcript_sizes = [], [], []
@@ -1230,7 +1243,7 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
         or any(not profile["transcript_bytes"][0] <= size <= profile["transcript_bytes"][1]
                for size in transcript_sizes)
         or not profile["median_page_bytes"][0] <= median <= profile["median_page_bytes"][1]):
-        raise ValueError("stored-corpus-below-reference-profile")
+        raise MeasurementRefused("stored-corpus-below-reference-profile")
     return {"pages": pages, "chunks": chunks, "units": units, "unit_pages": unit_pages,
             "vector_units": vector_units, "median_page_bytes": median, "spot_checks": 6,
             "vocabulary_terms": vocabulary, "wikilinks_min": min(links), "wikilinks_max": max(links),
@@ -1253,11 +1266,11 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
     model = embeddings.get_model()
     artifact = getattr(model, "profile", None)
     if artifact is None or not artifact.artifact_digest:
-        raise ValueError("served-encoder-artifact-unknown")
+        raise MeasurementRefused("served-encoder-artifact-unknown")
     probe = embeddings.embed_texts(["reference encoder warmup"], is_query=True)
     identity = recall_space.current_identity(int(probe.shape[1]))
     if identity.fingerprint != artifact.fingerprint():
-        raise ValueError("resident-encoder-identity-mismatch")
+        raise MeasurementRefused("resident-encoder-identity-mismatch")
     with principal.library_scope():
         manifest = vault_root / "reference-corpus.json"
         if manifest.exists():
@@ -1269,7 +1282,7 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
 
         def seeded(texts, *, is_query=False):
             if is_query:
-                raise ValueError("query-encoder-substituted-during-build")
+                raise MeasurementRefused("query-encoder-substituted-during-build")
             vectors = []
             for text in texts:
                 seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "little")
@@ -1284,7 +1297,7 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
         finally:
             embeddings.embed_texts = original
         if index.identity != identity:
-            raise ValueError("seeded-index-identity-mismatch")
+            raise MeasurementRefused("seeded-index-identity-mismatch")
         from exomem import lexstore
 
         lexstore.ensure_fresh(vault_root)
@@ -1338,11 +1351,17 @@ def _worker_sample(vault_root: Path, request: dict) -> dict:
 
 def worker_main(vault_root: Path) -> int:
     """Persistent JSON-lines worker; never emit product output or raw exceptions."""
+    phase: MeasurementPhase = "worker-startup"
+    preparation_started = False
     try:
         startup = json.loads(sys.stdin.readline())
+        runtime = _runtime_provenance(_boot_args.worker_source, startup)
+        preparation_started = True
         with redirect_stdout(sys.stderr):
             environment = _prepare_worker(vault_root, startup)
-        print(json.dumps({"state": "ready", "environment": environment}), flush=True)
+        print(json.dumps({"state": "ready", "runtime_prefix": sys.prefix,
+                          "environment": {**environment, **runtime}}), flush=True)
+        phase = "worker-request"
         for line in sys.stdin:
             request = json.loads(line)
             if request.get("stop"):
@@ -1351,21 +1370,81 @@ def worker_main(vault_root: Path) -> int:
                 sample = _worker_sample(vault_root, request)
             print(json.dumps(sample, allow_nan=False), flush=True)
     except Exception as error:  # noqa: BLE001 - raw errors can contain corpus content.
-        print(json.dumps({"state": "worker-error", "error_class": type(error).__name__}), flush=True)
+        response = {"state": "worker-error", "error_class": type(error).__name__, "phase": phase}
+        if isinstance(error, MeasurementRefused):
+            response.update(reason=error.code, phase=error.phase or phase)
+        print(json.dumps(response), flush=True)
         return 1
     finally:
-        from exomem import readiness
+        if preparation_started:
+            from exomem import readiness
 
-        readiness.unmanage_runtime()
+            readiness.unmanage_runtime()
     return 0
+
+
+def _runtime_lock_digest(source: Path, *, phase: MeasurementPhase | None = None) -> str:
+    import hashlib
+
+    try:
+        return hashlib.sha256((source / "uv.lock").read_bytes()).hexdigest()
+    except OSError as error:
+        raise MeasurementRefused("runtime-lock-unavailable", phase=phase) from error
+
+
+def _runtime_provenance(source: Path, startup: dict, *, prefix: str | None = None) -> dict:
+    """Check the private interpreter prefix before accepting public provenance."""
+    if Path(sys.prefix if prefix is None else prefix).resolve() != Path(startup["runtime_prefix"]).resolve():
+        raise MeasurementRefused("runtime-prefix-mismatch", phase="worker-startup")
+    digest = _runtime_lock_digest(source, phase="worker-startup")
+    if digest != startup["runtime_lock_digest"]:
+        raise MeasurementRefused("runtime-lock-changed", phase="worker-startup")
+    return {"runtime_lock_digest": digest, "runtime_policy": startup["runtime_policy"]}
+
+
+def _prepare_tag_runtime(base: Path, scratch: Path) -> Path:
+    """Read the immutable tag lock into one owned environment, outside timers."""
+    import subprocess
+
+    phase: MeasurementPhase = "tag-runtime-preparation"
+    try:
+        digest = _runtime_lock_digest(base)
+        runtime = (scratch / "tag-runtime").absolute()
+        environment = dict(os.environ)
+        environment.pop("VIRTUAL_ENV", None)
+        environment["UV_PROJECT_ENVIRONMENT"] = str(runtime)
+        # Frozen reads use the lock's sources; historical writer settings do not apply.
+        result = subprocess.run(
+            ["uv", "--no-config", "sync", "--frozen", "--no-default-groups", "--extra", "embeddings-onnx",
+             "--no-python-downloads", "--python", sys.executable], cwd=base, env=environment,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if _runtime_lock_digest(base) != digest:
+            raise MeasurementRefused("tag-runtime-lock-changed", phase=phase)
+        if result.returncode:
+            raise MeasurementRefused("tag-runtime-install-failed", phase=phase)
+        python = runtime / "bin" / "python"
+        if not python.is_file():
+            raise MeasurementRefused("tag-runtime-python-unavailable", phase=phase)
+        return python
+    except MeasurementRefused as error:
+        raise MeasurementRefused(error.code, phase=phase) from error
+    except OSError as error:
+        raise MeasurementRefused("tag-runtime-install-failed", phase=phase) from error
 
 
 class _Worker:
     """One owned child; suspend its idle native pool outside the timed call."""
 
-    def __init__(self, source: Path, vault: Path, state: Path, cpus: list[int], profile: dict):
+    # These policies name the benchmark's two fixed launch recipes.
+    def __init__(self, source: Path, vault: Path, state: Path, cpus: list[int], profile: dict,
+                 *, python: Path | str | None = None, runtime_prefix: Path | None = None,
+                 runtime_policy: Literal["parent-benchmark", "frozen-tag-runtime"] = "parent-benchmark"):
         import subprocess
 
+        startup = {"profile": profile, "runtime_lock_digest": _runtime_lock_digest(source, phase="worker-startup"),
+                   "runtime_prefix": str(runtime_prefix if runtime_prefix is not None else sys.prefix),
+                   "runtime_policy": runtime_policy}
         # Only declared cache and resource settings cross into disposable workers.
         environment = {key: os.environ[key] for key in profile["worker_environment"] if key in os.environ}
         environment.update(EXOMEM_STATE_ROOT=str(state), EXOMEM_VAULT_PATH=str(vault),
@@ -1373,30 +1452,46 @@ class _Worker:
                            EXOMEM_DISABLE_CLIP="1", EXOMEM_DISABLE_MEDIA_EXTRACTION="1")
         environment.pop("EXOMEM_DISABLE_EMBEDDINGS", None)
         environment.pop("KB_MCP_DISABLE_EMBEDDINGS", None)
-        self.process = subprocess.Popen(
-            [sys.executable, "-u", str(Path(__file__).resolve()), "--worker-source", str(source),
-             "--worker-cpus", json.dumps(cpus), "--worker-vault", str(vault)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env=environment, text=True,
-        )
+        try:
+            self.process = subprocess.Popen(
+                [str(python if python is not None else sys.executable), "-u", str(Path(__file__).resolve()), "--worker-source", str(source),
+                 "--worker-cpus", json.dumps(cpus), "--worker-vault", str(vault)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env=environment, text=True,
+            )
+        except OSError as error:
+            raise MeasurementRefused("benchmark-worker-launch-failed", phase="worker-startup") from error
         self.paused = False
         try:
-            self.environment = self.exchange({"profile": profile})["environment"]
+            response = self.exchange(startup, phase="worker-startup")
+            if not isinstance(response.get("environment"), dict) or not isinstance(response.get("runtime_prefix"), str):
+                raise MeasurementRefused("benchmark-worker-startup-invalid", phase="worker-startup")
+            self.environment = {**response["environment"],
+                                **_runtime_provenance(source, startup, prefix=response["runtime_prefix"])}
         except BaseException:
             self.close()
             raise
         self.pause()
 
-    def exchange(self, request: dict) -> dict:
+    def exchange(self, request: dict, *, phase: MeasurementPhase = "worker-request") -> dict:
         self.resume()
-        self.process.stdin.write(json.dumps(request) + "\n")
-        self.process.stdin.flush()
-        line = self.process.stdout.readline()
+        try:
+            self.process.stdin.write(json.dumps(request) + "\n")
+            self.process.stdin.flush()
+            line = self.process.stdout.readline()
+        except OSError as error:
+            raise MeasurementRefused("benchmark-worker-pipe-failed", phase=phase) from error
         if not line:
-            raise ValueError("benchmark-worker-ended")
-        response = json.loads(line)
+            raise MeasurementRefused("benchmark-worker-ended", phase=phase)
+        try:
+            response = json.loads(line)
+        except ValueError as error:
+            raise MeasurementRefused("benchmark-worker-invalid-response", phase=phase) from error
+        if not isinstance(response, dict):
+            raise MeasurementRefused("benchmark-worker-invalid-response", phase=phase)
         if response.get("state") == "worker-error":
-            raise ValueError("benchmark-worker-failed-" + response["error_class"])
+            reason = response.get("reason") or "benchmark-worker-failed-" + response["error_class"]
+            raise MeasurementRefused(reason, phase=response.get("phase", phase))
         return response
 
     def pause(self) -> None:
@@ -1433,14 +1528,17 @@ class _Worker:
 def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
                cases: list[dict], accept_path: Path = BENCHMARK / "accept.json") -> dict:
     if not hasattr(os, "sched_getaffinity") or len(os.sched_getaffinity(0)) < REFERENCE["reference_cpus"]:
-        raise ValueError("two-cpu-reference-unavailable")
+        raise MeasurementRefused("two-cpu-reference-unavailable")
     cpus = sorted(os.sched_getaffinity(0))[:REFERENCE["reference_cpus"]]
     workers: dict[str, _Worker] = {}
     samples = []
     try:
+        python = _prepare_tag_runtime(base, scratch)
         # Head generates the corpus once from its registry; base reads those bytes.
         for arm, source in (("head", ROOT), ("base", base)):
-            workers[arm] = _Worker(source, scratch / "vault", scratch / arm, cpus, profile)
+            runtime = ({"python": python, "runtime_prefix": python.parent.parent,
+                        "runtime_policy": "frozen-tag-runtime"} if arm == "base" else {})
+            workers[arm] = _Worker(source, scratch / "vault", scratch / arm, cpus, profile, **runtime)
         environments = {arm: worker.environment for arm, worker in workers.items()}
         if environments["head"]["sqlite_version"] not in profile["sqlite_versions"]:
             raise MeasurementRefused("reference-sqlite-unsupported")
@@ -1448,7 +1546,7 @@ def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
             or environments["base"]["encoder_identity"] != environments["head"]["encoder_identity"]
             or environments["base"]["corpus"] != environments["head"]["corpus"]
             or environments["base"]["sqlite_version"] != environments["head"]["sqlite_version"]):
-            raise ValueError("paired-reference-inputs-differ")
+            raise MeasurementRefused("paired-reference-inputs-differ")
         # One warm-up per series and principal, with the real encoder restored.
         first_cases = {case["series"]: case for case in reversed(cases)}
         for worker in workers.values():
@@ -1509,10 +1607,10 @@ def live_cli(transport: ServedTransport, *, cases_path: Path, corpus_path: Path 
     cases = json.loads(cases_path.read_text())
     expected = {row["series"] for row in json.loads((BENCHMARK / profile["case_file"]).read_text())}
     if {case["series"] for case in cases} != expected:
-        raise ValueError("live-series-incomplete")
+        raise MeasurementRefused("live-series-incomplete")
     if any(sum(case["series"] == series for case in cases) < REFERENCE["queries_min"]
            for series in expected):
-        raise ValueError("live-cases-insufficient")
+        raise MeasurementRefused("live-cases-insufficient")
     report = {"schema_version": 1, "mode": "live", "state": "not measured",
               "contract_revision": CONTRACT.revision, "series": [], "samples": [],
               "nonce_strategy": "trailing-whitespace"}
@@ -1589,15 +1687,18 @@ def paired_cli(output: Path) -> int:
 
     report: dict = {"schema_version": 1, "mode": "paired", "state": "refused",
                     "contract_revision": CONTRACT.revision, "series": [], "samples": []}
+    phase: MeasurementPhase = "reference-preparation"
     try:
         profile = json.loads((BENCHMARK / "profile.json").read_text())
         cases, digest = reference_cases(profile)
+        phase = "release-archive"
         tag = subprocess.check_output(
             ["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"], text=True,
             cwd=ROOT, stderr=subprocess.DEVNULL,
         ).strip()
         if not tag or tag.startswith("-"):
-            raise ValueError("latest-release-tag-unavailable")
+            raise MeasurementRefused("latest-release-tag-unavailable")
+        report["tag"] = tag
         with tempfile.TemporaryDirectory(prefix="exomem-recall-latency-") as temporary:
             scratch = Path(temporary)
             base = scratch / "base"
@@ -1607,11 +1708,13 @@ def paired_cli(output: Path) -> int:
                 subprocess.run(["git", "archive", tag], cwd=ROOT, stdout=stream, check=True)
             # Git owns this archive; the checkout contains no external tar input.
             subprocess.run(["tar", "-xf", str(archive), "-C", str(base)], check=True)
+            phase = "paired-measurement"
             report = paired_run(base=base, tag=tag, scratch=scratch, profile=profile, cases=cases)
             report["source_digest"] = digest
     except (ValueError, OSError, subprocess.SubprocessError, ValidationError) as error:
         # Closed local error codes; never print arbitrary subprocess output.
         report["reason"] = error.code if isinstance(error, MeasurementRefused) else type(error).__name__
+        report["phase"] = (error.phase or phase) if isinstance(error, MeasurementRefused) else phase
     validate_document(report, "summary.schema.json")
     output.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
     print(json.dumps({"state": report["state"], "artifact": output.name}))

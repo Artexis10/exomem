@@ -632,6 +632,17 @@
     },
     "corpus": {
       "$ref": "#/$defs/live_corpus"
+    },
+    "phase": {
+      "enum": [
+        "reference-preparation",
+        "release-archive",
+        "tag-runtime-preparation",
+        "worker-bootstrap",
+        "worker-startup",
+        "worker-request",
+        "paired-measurement"
+      ]
     }
   },
   "required": [
@@ -772,6 +783,16 @@
             "type": "integer",
             "minimum": 0
           }
+        },
+        "runtime_lock_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "runtime_policy": {
+          "enum": [
+            "parent-benchmark",
+            "frozen-tag-runtime"
+          ]
         }
       },
       "required": [
@@ -780,7 +801,9 @@
         "encoder_identity",
         "sqlite_version",
         "python_version",
-        "cpus"
+        "cpus",
+        "runtime_lock_digest",
+        "runtime_policy"
       ]
     },
     "measurement": {

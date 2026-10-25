@@ -1216,3 +1216,110 @@ def test_missing_prose_refuses_before_a_worker_or_encoder_starts(tmp_path: Path,
     (tmp_path / "profile.json").write_text(json.dumps(profile))
     with pytest.raises(gate.MeasurementRefused, match="reference-prose"):
         gate.reference_cases(profile, tmp_path)
+
+
+@pytest.mark.skipif(not hasattr(gate.os, "sched_getaffinity"), reason="The worker uses the Linux reference profile")
+@pytest.mark.parametrize("invalid_cpus", [False, True])
+def test_actual_worker_bootstrap_reports_failures_before_model_preparation(tmp_path: Path, invalid_cpus) -> None:
+    import subprocess
+
+    environment = {key: gate.os.environ[key] for key in ("PATH", "HOME") if key in gate.os.environ}
+    environment.update(EXOMEM_STATE_ROOT=str(tmp_path / "state"), EXOMEM_VAULT_PATH=str(tmp_path / "vault"))
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "recall_latency_gate.py"), "--worker-source", str(ROOT),
+         "--worker-cpus", "{" if invalid_cpus else json.dumps(
+             sorted(gate.os.sched_getaffinity(0))[:gate.REFERENCE["reference_cpus"]]),
+         "--worker-vault", str(tmp_path / "vault")],
+        input="{", env=environment, cwd=tmp_path, text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 1
+    response = json.loads(result.stdout)
+    assert response["state"] == "worker-error"
+    assert response["error_class"] == "JSONDecodeError"
+    assert response["phase"] == ("worker-bootstrap" if invalid_cpus else "worker-startup")
+    if invalid_cpus:
+        assert response["reason"] == "benchmark-worker-bootstrap-failed"
+
+
+@pytest.mark.skipif(not hasattr(gate.os, "sched_getaffinity"), reason="The worker uses the Linux reference profile")
+def test_worker_uses_the_selected_runtime_and_preserves_closed_failures(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+    import types
+    import venv
+
+    runtime = tmp_path / "tag-runtime"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(runtime)
+    python = runtime / "bin" / "python"
+    site = Path(subprocess.check_output(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"], text=True,
+    ).strip())
+    (site / "benchmark_dependency.py").write_text("VERSION = 'tag'\n")
+    parent_dependency = types.ModuleType("benchmark_dependency")
+    parent_dependency.VERSION = "parent"
+    monkeypatch.setitem(sys.modules, "benchmark_dependency", parent_dependency)
+    source = tmp_path / "tag"
+    source.mkdir()
+    (source / "uv.lock").write_text("tag dependency snapshot\n")
+    script = tmp_path / "worker.py"
+    script.write_text(
+        "import json, sys\n"
+        "from benchmark_dependency import VERSION\n"
+        "json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'state': 'ready', 'runtime_prefix': sys.prefix, "
+        "'environment': {'dependency': VERSION}}), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    print(json.dumps({'state': 'worker-error', 'error_class': 'MeasurementRefused', "
+        "'reason': 'stored-vector-invalid', 'phase': 'worker-request'}), flush=True)\n"
+    )
+    monkeypatch.setattr(gate, "__file__", str(script))
+    profile = {"worker_environment": ["PATH"]}
+    worker = gate._Worker(source, tmp_path / "vault", tmp_path / "state", [], profile,
+                          python=python, runtime_prefix=runtime, runtime_policy="frozen-tag-runtime")
+    try:
+        assert parent_dependency.VERSION == "parent"
+        assert worker.environment["dependency"] == "tag"
+        assert worker.environment["runtime_policy"] == "frozen-tag-runtime"
+        assert worker.environment["runtime_lock_digest"] == gate._runtime_lock_digest(source)
+        with pytest.raises(gate.MeasurementRefused, match="stored-vector-invalid") as refused:
+            worker.exchange({"measure": True})
+        assert refused.value.phase == "worker-request"
+    finally:
+        worker.close()
+    with pytest.raises(gate.MeasurementRefused, match="runtime-prefix-mismatch"):
+        gate._Worker(source, tmp_path / "vault", tmp_path / "other-state", [], profile,
+                     python=python, runtime_prefix=tmp_path / "incorrect-runtime",
+                     runtime_policy="frozen-tag-runtime")
+
+
+@pytest.mark.parametrize("changed_lock, reason", [
+    (False, "tag-runtime-install-failed"), (True, "tag-runtime-lock-changed"),
+])
+def test_tag_runtime_failure_writes_a_refusal_without_head_fallback(tmp_path: Path, monkeypatch,
+                                                                  changed_lock, reason) -> None:
+    import subprocess
+
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "uv.lock").write_text("tag dependency snapshot\n")
+    def install(*args, **kwargs):
+        if changed_lock:
+            (base / "uv.lock").write_text("changed snapshot\n")
+        return subprocess.CompletedProcess([], 0 if changed_lock else 1)
+    monkeypatch.setattr(subprocess, "run", install)
+    monkeypatch.setattr(gate.os, "sched_getaffinity", lambda pid: {0, 1}, raising=False)
+    monkeypatch.setattr(gate, "_Worker", lambda *args, **kwargs: pytest.fail("A failed tag runtime started a worker"))
+    with pytest.raises(gate.MeasurementRefused, match=reason) as refused:
+        gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path, profile={}, cases=[])
+    assert refused.value.phase == "tag-runtime-preparation"
+
+    def incomplete_run(**kwargs):
+        raise refused.value
+    monkeypatch.setattr(gate, "paired_run", incomplete_run)
+    monkeypatch.setattr(gate, "reference_cases", lambda profile: ([], "0" * 64))
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: "v1.0.0")
+    output = tmp_path / "summary.json"
+    assert gate.paired_cli(output) == 1
+    report = json.loads(output.read_text())
+    assert report["state"] == "refused" and report["samples"] == []
+    assert report["reason"] == reason and report["phase"] == "tag-runtime-preparation"
+    assert "snapshot" not in output.read_text()
