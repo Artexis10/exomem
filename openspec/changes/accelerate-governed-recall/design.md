@@ -527,27 +527,39 @@ it with the current path on the reference corpus.
   their admitted hashes. A mismatch omits that evidence, marks coverage incomplete
   and prevents the partial selection from entering the shared result cache.
   Policy and semantic identity changes keep their existing refusal behavior.
-- **Unit lanes.** `_hydrate_indexed_unit_records` (`find.py:2188`) rebuilds each
-  candidate parent's unit state (`semantic_index.py:250`, `:189`), then resolves
-  its prose carriers through a governance policy load per parent
-  (`find_results.py:15`, `governance/egress.py:4342`, `governance/policy.py:1297`).
-  `search_semantic_units` stacks the candidate unit vectors on every query
-  (`embedding_index.py:1765`). The unit sidecar already holds the parent
-  generation and unit metadata for the current generation, the policy is one
-  snapshot per request, and the unit matrix is built once per generation.
-  The admitted branch of `search_semantic_units_result`
-  (`lexstore.py:7980-7989`) loads every admitted unit's stemmed text and
-  rebuilds the term frequencies on each call, with no cache. That is the
-  pattern #1649 removes for pages, so a restricted unit search pays for every
-  admitted unit on every query. It is old debt from the #1649 review, and
-  slice 6.6 computes those statistics once per catalogue generation and
-  admitted set.
+- **Unit lanes.** The shipped unit path already reuses the neutral matrix and
+  admitted lexical statistics by generation. It also retains parent reads for
+  selected hydration. Task 6.6 must preserve those mechanisms rather than add
+  another cache for the same work.
+
+  A hosted reference diagnostic on 2026-10-25 found another cost before scoring.
+  One unit query made 3,250 exact bridge snapshot reads and 3,524,084 filesystem
+  name comparisons ([run 40232728916](https://github.com/Artexis10/exomem/actions/runs/40232728916)).
+  The profile includes instrumentation overhead and establishes no latency gain.
+  The remaining admission work needs a separate design that preserves release
+  decisions before scoring and their policy, caller and source dependencies.
 
   Mixed recall also freezes its combined page and unit slots before canonical
   hydration. Each lane retains its original collection limit and rank. Managed
   keyword groups provide their emitted page identities; non-reranked semantic
   recall uses its proved metadata prefix. The existing fusion weights and unit
   cap choose the combined pool. Only selected pages and unit parents are read.
+  Mixed demand is finite. An exhausted unit window need not degrade a complete
+  finite prefix when enough units survive the parent cap and every represented
+  parent has a complete admitted structural bound at or below that cap.
+  The represented set includes page-only results. A complete selected structure
+  proves this bound; the number of stored occurrence rows does not.
+
+  The unit lane retains its acquired ranking and actual exhaustion evidence.
+  Relation filtering still follows unit ranking, so it cannot change the admitted
+  BM25 corpus. Parent capping precedes finite selection. Exhaustive structured
+  acquisition keeps its existing path. Only candidate-window classification is
+  deferred until the mixed plan freezes, before canonical hydration.
+  An exhausted window with a larger or unproved represented parent remains
+  incomplete. Prefix counts cannot become exact positive truncation totals.
+  Complete acquisitions retain their existing exact counts. General positive
+  count proofs beyond an exhausted window remain deferred until vector coverage
+  and reference ownership can attest the actual scoring snapshot.
   Lost evidence leaves an empty slot; it cannot promote another rank or move a
   truncation annotation to another hit.
 

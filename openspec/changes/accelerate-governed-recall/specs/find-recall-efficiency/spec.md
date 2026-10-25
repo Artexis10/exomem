@@ -137,3 +137,39 @@ by a scan.
 
 - **WHEN** a recall requests widening while the catalogue generation is stale
 - **THEN** the widening stage is reported as declined and the KB results are returned unchanged
+
+
+### Requirement: Finite Mixed Completeness Uses Admitted Structural Evidence
+
+Mixed recall SHALL determine its finite demand after relation filtering and
+per-parent capping, without changing the admitted corpus used by unit ranking.
+An exhausted candidate window MAY serve that demand without candidate-window
+degradation only when enough capped units survive and every frozen represented
+parent has a complete admitted structural bound at or below the existing cap.
+This set SHALL include parents represented only by page hits. Stored occurrence
+row counts alone MUST NOT prove that structural bound.
+
+An exhausted window with a larger or unproved represented parent SHALL remain
+incomplete. It MUST NOT report an unproved positive prefix count as an exact
+cap-only omission total. Complete acquisition SHALL preserve its exact counts.
+Exhaustive structured acquisition SHALL retain its existing semantics. The mixed
+plan and annotation targets SHALL freeze before canonical hydration; lost
+selected evidence MUST NOT refill a slot or move an annotation.
+
+#### Scenario: Small parents prove finite completeness beyond the raw window
+
+- **WHEN** a unit window exhausts, enough units survive the cap, and every frozen represented parent has a complete admitted structure within the cap
+- **THEN** mixed recall omits candidate-window degradation while preserving every other failure signal
+- **AND** page-only parents participate in the structural proof
+
+#### Scenario: An unproved cap count remains incomplete
+
+- **WHEN** a unit window exhausts and a frozen represented parent exceeds the cap or lacks a complete admitted structure
+- **THEN** mixed recall retains candidate-window degradation
+- **AND** it does not present a prefix count as an exact positive truncation total
+
+#### Scenario: Missing occurrence rows cannot prove a smaller parent
+
+- **WHEN** stored occurrence rows omit units from a complete admitted parent structure
+- **THEN** mixed completeness uses the structure's upper bound rather than the stored row count
+- **AND** selected evidence loss leaves the frozen ranks and annotation targets unchanged

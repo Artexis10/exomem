@@ -3554,6 +3554,7 @@ class EligibilityMetadata:
     ranking: RankingPage | None = None
     occurrences: tuple[tuple[SemanticUnitLexicalHit, Any, Mapping[str, Any], str], ...] = ()
     content_hash: str | None = None
+    selected_parent: Any | None = None
 
 
 def parent_children_result(
@@ -3630,12 +3631,13 @@ def _eligibility_metadata_query(
     from .vocabulary.registry import RegistryError
 
     view = "NULL" if parents_only else "p.eligibility_view_json"
-    ranking = "p.ranking_json, p.content_hash" if include_ranking else "NULL, NULL"
+    ranking = "p.ranking_json" if include_ranking else "NULL"
+    content_hash = "p.content_hash" if include_ranking or include_occurrences else "NULL"
     rows = conn.execute(
         "WITH requested AS (SELECT value AS path FROM json_each(?)), "
         "wanted AS (SELECT path FROM requested UNION "
         "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
-        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated, {ranking} "
+        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated, {ranking}, {content_hash} "
         "FROM wanted w CROSS JOIN pages p ON p.path = w.path WHERE p.in_vault = 1",
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
@@ -3694,9 +3696,17 @@ def _eligibility_metadata_query(
         view.require_complete()
         from dataclasses import replace
 
-        for path, values in units.items():
+        if include_occurrences:
+            # Retain structural bounds even when no occurrence row survives.
+            # Unavailable bounds do not change the existing occurrence coverage outcome.
+            view.parents.prefetch(result)
+        for path in result:
+            parent = view.parents.parent(path) if include_occurrences else None
+            if parent is not None and parent.metadata.get("parent_source_hash") != result[path].content_hash:
+                parent = None
             result[path] = replace(
-                result[path], units=tuple(values), occurrences=tuple(occurrences.get(path, ())),
+                result[path], units=tuple(units.get(path, ())),
+                occurrences=tuple(occurrences.get(path, ())), selected_parent=parent,
             )
     except RegistryError:
         # Unavailable definitions are a dependent outcome, not a corrupt snapshot.
