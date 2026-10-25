@@ -114,7 +114,8 @@ its read entry points.
   Ranking, temporal, graph-seed and unit stages read metadata from the catalogue
   and sidecars of the current generation. Markdown reads track the candidate
   count plus a fixed overfetch, and each derived store opens one connection and
-  runs one readiness proof per scope per request. Keyword recall reads every
+  runs one readiness proof per scope per selection. Selections close before
+  provider work and after synchronous compilation. Keyword recall reads every
   matching page today (`find.py:4115`); it orders and limits its matches in SQL
   before any page read, with identical results.
 - Timing diagnostics cover the whole `ask_memory` request, including the
