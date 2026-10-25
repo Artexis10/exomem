@@ -32,6 +32,9 @@ jobs:
           set -o pipefail
           uv run --frozen --python 3.13 python -m pytest -q \
             tests/test_collection_store_runtime.py::test_close_waits_until_authority_grant_is_released \
+            tests/test_collection_store_runtime.py::test_close_drains_a_guard_rejected_after_shared_grant_acquisition \
+            tests/test_collection_store_runtime.py::test_authority_grant_acquisition_timeout_does_not_block_close \
+            tests/test_collection_store_runtime.py::test_explicit_close_drains_authority_holders_without_owning_boundary \
             -o timeout=60 \
             --junitxml=test-results/lease-drain-discriminator.xml \
             2>&1 | tee test-results/lease-drain-discriminator.log

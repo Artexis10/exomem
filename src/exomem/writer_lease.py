@@ -4472,13 +4472,15 @@ class LeaseManager:
         # failure, so `status()` can surface a fault instead of only ever
         # flipping `coordinator_healthy` to False with no further detail.
         self._last_coordinator_error: tuple[str, float] | None = None
-        # Idle-release accounting (R5), both guarded by `self._lock`.
+        # Idle-release accounting (R5), guarded by `self._lock`.
         # `_active_mutations` is incremented/decremented ONLY by
         # `writer_authority_guard()`, which sets every command fence, so
         # `count == 0` means no command holds a fence from that guard. The
         # collection-store fence setters are not counted (see that guard).
         # Shared grant claims also protect commands in other local processes.
         self._active_mutations = 0
+        # Whole guard lifetimes include claim acquisition and release, beyond captured fence work.
+        self._active_authority_guards = 0
         self._last_activity_monotonic = time.monotonic()
         self._collection_store = None
         # Set by start_server_lifecycle: generic file writes must protect the store's ownership.
@@ -5059,67 +5061,79 @@ class LeaseManager:
                     "the registered vault attachment is not serving mutations",
                     "Complete or recover the authenticated attachment transition before retrying.",
                 ) from None
-        with self._replica_grant_claim():
+        registered = False
+        try:
             if self.config.enabled or self._collection_store is not None:
                 with self._lock:
                     self._require_store_admitted()
-                    lease = self._reusable_operation_grant() if reuse_operation_grant else None
-                    if lease is None:
-                        inherited = _ACTIVE_WRITE_FENCE.get()
-                        # A narrowed command whose own grant was lost during unguarded
-                        # preparation is fenced, whether this replica or only the
-                        # coordinator has noticed; it never commits under a new grant.
-                        held = inherited[1] if inherited is not None and inherited[0] is self else None
-                        if held is not None and self._fencing_token != held:
-                            self._raise_fenced(held)
-                        try:
-                            lease = self._acquire_writer()
-                        except OpError as error:
-                            if held is not None and error.code == "WRITER_LEASE_REQUIRED":
-                                self.validate_fencing_token(held)
-                            raise
-                        if held is not None and lease.fencing_token != held:
-                            self._raise_fenced(held)
-                    if self.config.enabled:
-                        fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
-                    if self._serves_collection_store and self._collection_store is None:
-                        # Keep this mutation's file classification if a producer attaches during staging.
-                        file_context = _ACTIVE_COLLECTION_FILE_WRITE.set((
-                            self, self._file_store_acquisition, self._file_store_marker,
-                        ))
-                    self._active_mutations += 1
-                    self._last_activity_monotonic = time.monotonic()
-                counted = True
-            try:
-                if (fence_context is not None and self._collection_store is None
-                        and (self._renewer is None or not self._renewer.is_alive())):
-                    # Standalone file mutations lack the server's renewal lifecycle.
-                    # Each guard owns only its captured token, never a replacement grant.
-                    renewal_stop = threading.Event()
-                    renewer = threading.Thread(
-                        target=self._renew_loop,
-                        kwargs={"stop": renewal_stop, "fencing_token": lease.fencing_token},
-                        name="exomem-mutation-lease",
-                        daemon=True,
-                    )
-                    renewer.start()
-                yield
-            finally:
-                if renewal_stop is not None:
-                    renewal_stop.set()
-                    # The renewal needs the manager lock; keep this join outside it.
-                    # Finish in-flight coordinator I/O before ending this guard's ownership.
-                    if renewer is not None and renewer.ident is not None:
-                        renewer.join()
-                if file_context is not None:
-                    _ACTIVE_COLLECTION_FILE_WRITE.reset(file_context)
-                if fence_context is not None:
-                    _ACTIVE_WRITE_FENCE.reset(fence_context)
-                if counted:
+                    self._active_authority_guards += 1
+                    registered = True
+            with self._replica_grant_claim():
+                if self.config.enabled or self._collection_store is not None:
                     with self._lock:
-                        self._active_mutations -= 1
+                        self._require_store_admitted()
+                        lease = self._reusable_operation_grant() if reuse_operation_grant else None
+                        if lease is None:
+                            inherited = _ACTIVE_WRITE_FENCE.get()
+                            # A narrowed command whose own grant was lost during unguarded
+                            # preparation is fenced, whether this replica or only the
+                            # coordinator has noticed; it never commits under a new grant.
+                            held = inherited[1] if inherited is not None and inherited[0] is self else None
+                            if held is not None and self._fencing_token != held:
+                                self._raise_fenced(held)
+                            try:
+                                lease = self._acquire_writer()
+                            except OpError as error:
+                                if held is not None and error.code == "WRITER_LEASE_REQUIRED":
+                                    self.validate_fencing_token(held)
+                                raise
+                            if held is not None and lease.fencing_token != held:
+                                self._raise_fenced(held)
+                        if self.config.enabled:
+                            fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+                        if self._serves_collection_store and self._collection_store is None:
+                            # Keep this mutation's file classification if a producer attaches during staging.
+                            file_context = _ACTIVE_COLLECTION_FILE_WRITE.set((
+                                self, self._file_store_acquisition, self._file_store_marker,
+                            ))
+                        self._active_mutations += 1
                         self._last_activity_monotonic = time.monotonic()
-                        self._store_condition.notify_all()
+                    counted = True
+                try:
+                    if (fence_context is not None and self._collection_store is None
+                            and (self._renewer is None or not self._renewer.is_alive())):
+                        # Standalone file mutations lack the server's renewal lifecycle.
+                        # Each guard owns only its captured token, never a replacement grant.
+                        renewal_stop = threading.Event()
+                        renewer = threading.Thread(
+                            target=self._renew_loop,
+                            kwargs={"stop": renewal_stop, "fencing_token": lease.fencing_token},
+                            name="exomem-mutation-lease",
+                            daemon=True,
+                        )
+                        renewer.start()
+                    yield
+                finally:
+                    if renewal_stop is not None:
+                        renewal_stop.set()
+                        # The renewal needs the manager lock; keep this join outside it.
+                        # Finish in-flight coordinator I/O before ending this guard's ownership.
+                        if renewer is not None and renewer.ident is not None:
+                            renewer.join()
+                    if file_context is not None:
+                        _ACTIVE_COLLECTION_FILE_WRITE.reset(file_context)
+                    if fence_context is not None:
+                        _ACTIVE_WRITE_FENCE.reset(fence_context)
+                    if counted:
+                        with self._lock:
+                            self._active_mutations -= 1
+                            self._last_activity_monotonic = time.monotonic()
+                            self._store_condition.notify_all()
+        finally:
+            if registered:
+                with self._lock:
+                    self._active_authority_guards -= 1
+                    self._store_condition.notify_all()
 
     def invoke(
         self,
@@ -6725,7 +6739,8 @@ class LeaseManager:
                 if (time.monotonic() >= deadline or (cancelled is not None and cancelled())):
                     return False
                 with self._store_condition:
-                    if not self._store_borrowers and not self._active_mutations:
+                    if (not self._store_borrowers and not self._active_mutations
+                            and not self._active_authority_guards):
                         break
                     self._store_condition.wait(min(0.05, max(0, deadline - time.monotonic())))
                 self._renew_collection_store(token, due_only=True)
