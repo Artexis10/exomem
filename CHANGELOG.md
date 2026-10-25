@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.143.0](https://github.com/Artexis10/exomem/compare/v0.142.0...v0.143.0) (2026-10-25)
+
+
+### Features
+
+* **mcp:** expose Records and Planning as single-purpose read and change tools ([#2082](https://github.com/Artexis10/exomem/issues/2082)) ([fb3a394](https://github.com/Artexis10/exomem/commit/fb3a394bb145f193fe8e3918c78b54c53f356c7c))
+
+
+### Bug Fixes
+
+* **activation:** read one lexical checkpoint per request and prove deleted withheld pages ([#2083](https://github.com/Artexis10/exomem/issues/2083)) ([3a3d282](https://github.com/Artexis10/exomem/commit/3a3d28291043a191e605f3939b01ccbeed463de7))
+* **activation:** report a lag on a fault and pin the remaining readers to the reader checkpoint ([#2087](https://github.com/Artexis10/exomem/issues/2087)) ([250c5ca](https://github.com/Artexis10/exomem/commit/250c5cace2d5dedf056b566d09767c5259776bfe))
+* **activation:** report lexical and map coverage relative to the caller's view ([#2079](https://github.com/Artexis10/exomem/issues/2079)) ([356483f](https://github.com/Artexis10/exomem/commit/356483f71eb8f0da87ab61ab6bfae53d7eef4e0c))
+* **membench:** serve the switch eval from fresh, warm state ([#2085](https://github.com/Artexis10/exomem/issues/2085)) ([aac18ae](https://github.com/Artexis10/exomem/commit/aac18aed35a2e6fec77c933f295ee923337ba45d))
+* name the refusing check and keep errno in Cloud export diagnostics ([#2075](https://github.com/Artexis10/exomem/issues/2075)) ([1e75e7d](https://github.com/Artexis10/exomem/commit/1e75e7de60b6e0e989a3218cd98e70673b7f2f99))
+* report a wrong import key as undecryptable however slowly age exits ([#2077](https://github.com/Artexis10/exomem/issues/2077)) ([83c50b8](https://github.com/Artexis10/exomem/commit/83c50b891329d4d18904ecfb74ebe75e3a46a404))
+
+
+### Performance
+
+* **recall:** publish admitted page verdicts for structured filters and the activation carry ([#2076](https://github.com/Artexis10/exomem/issues/2076)) ([abda7bb](https://github.com/Artexis10/exomem/commit/abda7bb1e3f6a6a5d7dd3301bb6b145ebc9b1227))
+
 ## [0.142.0](https://github.com/Artexis10/exomem/compare/v0.141.0...v0.142.0) (2026-10-24)
 
 
