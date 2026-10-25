@@ -29,8 +29,10 @@ from . import (
     source_taxonomy,
 )
 from .vault import (
+    VaultPathError,
     kb_root,
     parse_frontmatter,
+    resolve_under_vault,
     slugify_with_truncation_check,
 )
 
@@ -38,8 +40,8 @@ IMPORTED_FOLDER = source_taxonomy.IMPORTED_PATH_LABEL
 # A text file past this size plans as an artifact: its bytes are kept, but the
 # page never holds them in memory. A resource bound, not a vocabulary.
 INLINE_TEXT_MAX_BYTES = 4 * 1024 * 1024
-# Front matter of an earlier import is read from the head of the page only.
-_INDEX_HEAD_BYTES = 32 * 1024
+# A page's front matter is read in blocks of this size until its closing fence.
+_INDEX_BLOCK_BYTES = 32 * 1024
 _MARKDOWN_SUFFIXES = (".md", ".markdown")
 # A rule may name only a key the registry already holds: these are the closed
 # `Resolution.status` values (see source_taxonomy) that mean it does.
@@ -85,6 +87,46 @@ def _text_field(value: Any) -> str | None:
     return nfc(value) if isinstance(value, str) and value.strip() else None
 
 
+def _leading_frontmatter(page: Path) -> dict[str, Any] | None:
+    """The parsed front matter of a page, however long, or None when it has none.
+
+    The page is read block by block until the closing fence, so a long title or a
+    long alias list cannot hide the provenance that follows it.
+    """
+    with page.open("rb") as stream:
+        data = stream.read(_INDEX_BLOCK_BYTES)
+        if not data.startswith(b"---"):
+            return None
+        while True:
+            frontmatter, _body, raw = parse_frontmatter(data.decode("utf-8", errors="replace"))
+            if raw is not None:
+                return frontmatter
+            more = stream.read(_INDEX_BLOCK_BYTES)
+            if not more:
+                return None
+            data += more
+
+
+def earlier_import_of(
+    planned: Mapping[str, Any], *, collection: str | None, captured: str
+) -> EarlierImport:
+    """The entry the index holds for a Source just written for ``planned``.
+
+    It is what `read_import_index` would read back from that page, so a caller
+    that keeps the index in memory across several commits stays current without
+    walking the Sources tree again.
+    """
+    return EarlierImport(
+        path=planned["target_path"],
+        imported_from=nfc(planned["original_path"]),
+        import_collection=nfc(collection) if collection is not None else None,
+        collection_path=planned["collection_path"] if collection is not None else None,
+        original_sha256=planned["original_sha256"],
+        captured=captured,
+        aliases=tuple(planned.get("aliases") or ()),
+    )
+
+
 def read_import_index(root: Path) -> list[EarlierImport]:
     """Every Source page whose parsed front matter names its original.
 
@@ -102,13 +144,11 @@ def read_import_index(root: Path) -> list[EarlierImport]:
                 continue
             page = Path(dirpath) / name
             try:
-                with page.open("rb") as stream:
-                    head = stream.read(_INDEX_HEAD_BYTES)
+                frontmatter = _leading_frontmatter(page)
             except OSError:
                 continue
-            if not head.startswith(b"---"):
+            if frontmatter is None:
                 continue
-            frontmatter, _body, _raw = parse_frontmatter(head.decode("utf-8", errors="replace"))
             imported_from = _text_field(frontmatter.get("imported_from"))
             if imported_from is None:
                 continue
@@ -157,6 +197,75 @@ def latest_earlier_import(
     if not matches:
         return None
     return max(matches, key=lambda entry: (entry.captured, entry.path))
+
+
+def earlier_with_same_bytes(
+    index: Iterable[EarlierImport],
+    *,
+    collection: str | None,
+    collection_path: str,
+    original_path: str,
+    sha256: str,
+) -> EarlierImport | None:
+    """The earlier Source that already holds these exact bytes of this original, or None.
+
+    The newest import under this collection label decides. When the label has none,
+    an import of the same original path under another label counts: a subfolder
+    imported first, then its parent.
+    """
+    entries = list(index)
+    latest = latest_earlier_import(
+        entries, collection=collection, collection_path=collection_path,
+        original_path=original_path,
+    )
+    if latest is not None:
+        return latest if latest.original_sha256 == sha256 else None
+    twins = [
+        entry for entry in entries
+        if entry.imported_from == nfc(original_path) and entry.original_sha256 == sha256
+    ]
+    return max(twins, key=lambda entry: (entry.captured, entry.path)) if twins else None
+
+
+def root_warnings(
+    index: Iterable[EarlierImport], *, collection: str | None, collection_root: str
+) -> list[dict[str, Any]]:
+    """A warning naming each other root that earlier imports of this collection came from.
+
+    Re-import matches by collection path, so a collection staged somewhere new still
+    finds its earlier Sources. The warning only tells the reader that it did.
+    """
+    if collection is None:
+        return []
+    own = nfc(collection_root).rstrip("/")
+    roots: set[str] = set()
+    for entry in index:
+        if entry.import_collection != nfc(collection) or not (
+            entry.imported_from and entry.collection_path
+        ):
+            continue
+        head = entry.imported_from[: len(entry.imported_from) - len(entry.collection_path)]
+        if not entry.imported_from.endswith(entry.collection_path) or (
+            head and not head.endswith("/")
+        ):
+            continue
+        earlier = head.rstrip("/")
+        if earlier != own:
+            roots.add(earlier)
+    if not roots:
+        return []
+    named = sorted(roots)
+    return [
+        {
+            "code": "EARLIER_IMPORT_FROM_OTHER_ROOT",
+            "reason": (
+                f"earlier imports of collection {nfc(collection)!r} came from "
+                + ", ".join(repr(root) for root in named)
+                + f", not {own!r}; files match by collection path"
+            ),
+            "roots": named,
+        }
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -234,10 +343,11 @@ def normalize_tags(raw: Any) -> tuple[list[str], list[str]]:
     """Front-matter tags as the vault writes them, and those it cannot carry.
 
     The spelling rule is capture's own (`add._clean_tags`). A tag is carried only
-    when it is a string of word characters, `-` and `/`: the shape of a tag, so
-    it survives the inline YAML list unquoted.
+    when the vault's tag grammar (`semantic_units._is_valid_tag`) accepts it, so it
+    survives the inline YAML list unquoted and the vault reads it back.
     """
     from .add import _clean_tags
+    from .semantic_units import _is_valid_tag
 
     kept: list[str] = []
     rejected: list[str] = []
@@ -247,7 +357,7 @@ def normalize_tags(raw: Any) -> tuple[list[str], list[str]]:
             continue
         text = value.strip().removeprefix("#")
         cleaned = _clean_tags([text])
-        if cleaned and all(ch.isalnum() or ch in "-/" for ch in cleaned[0]):
+        if cleaned and _is_valid_tag(cleaned[0]):
             if cleaned[0] not in kept:
                 kept.append(cleaned[0])
         elif text:
@@ -255,17 +365,29 @@ def normalize_tags(raw: Any) -> tuple[list[str], list[str]]:
     return kept, rejected
 
 
-def normalize_aliases(raw: Any) -> list[str]:
+def normalize_aliases(raw: Any) -> tuple[list[str], list[str]]:
+    """Front-matter aliases as the page carries them, and those it cannot carry.
+
+    A non-string or multi-line alias cannot sit in the inline YAML list, so it is
+    reported instead of dropped. An empty alias carries nothing and is not reported.
+    """
     values = _tag_values(raw) if isinstance(raw, str) else raw
+    if values is None:
+        return [], []
     if not isinstance(values, list):
-        return []
-    out: list[str] = []
+        values = [values]
+    kept: list[str] = []
+    rejected: list[str] = []
     for value in values:
-        if isinstance(value, str) and value.strip() and "\n" not in value:
+        if not isinstance(value, str):
+            rejected.append(str(value))
+        elif "\n" in value:
+            rejected.append(value.strip())
+        elif value.strip():
             alias = nfc(value.strip())
-            if alias not in out:
-                out.append(alias)
-    return out
+            if alias not in kept:
+                kept.append(alias)
+    return kept, rejected
 
 
 # --------------------------------------------------------------------------- #
@@ -292,19 +414,44 @@ def decode_text(data: bytes) -> str | None:
 
 def link_references(body: str) -> list[dict[str, Any]]:
     """Wikilinks, embeds and local Markdown links of a body, in source order."""
-    seen: set[tuple[str, str, bool]] = set()
+    seen: set[tuple[str, str, bool, str | None]] = set()
     refs: list[dict[str, Any]] = []
     for wiki in find_results.wikilink_references(body):
-        key = ("wiki", wiki.target, wiki.embed)
+        key = ("wiki", wiki.target, wiki.embed, wiki.fragment)
         if wiki.target and key not in seen:
             seen.add(key)
-            refs.append({"raw": wiki.target, "embed": wiki.embed, "style": "wikilink"})
+            refs.append(
+                {"raw": wiki.target, "embed": wiki.embed, "style": "wikilink",
+                 "fragment": wiki.fragment}
+            )
     for link in markdown_regions.local_links(body):
-        key = ("md", link.target, link.image)
+        key = ("md", link.target, link.image, link.fragment)
         if key not in seen:
             seen.add(key)
-            refs.append({"raw": link.target, "embed": link.image, "style": "markdown"})
+            refs.append(
+                {"raw": link.target, "embed": link.image, "style": "markdown",
+                 "fragment": link.fragment}
+            )
     return refs
+
+
+def resolve_original(root: Path, original_path: str) -> Path | dict[str, Any]:
+    """The path of one original to read, or a refusal ``{"code", "reason"}``.
+
+    Both plan and apply read through this door. A path whose real location is outside
+    the vault is refused as ``INVALID_PATH``, as the stateless copy refuses it. A link
+    is refused even inside the vault: the scan never lists one, so a link here replaced
+    the file after the scan.
+    """
+    try:
+        absolute, _relative = resolve_under_vault(
+            root, original_path, must_exist=True, must_be_file=True
+        )
+    except VaultPathError as error:
+        return {"code": error.code, "reason": error.reason}
+    if absolute.is_symlink():
+        return {"code": "NOT_REGULAR_FILE", "reason": "the original is a link, not a regular file"}
+    return absolute
 
 
 def read_facts(
@@ -318,7 +465,9 @@ def read_facts(
     """
     from .add import AddError, artifact_identity
 
-    path = root / original_path
+    path = resolve_original(root, original_path)
+    if isinstance(path, dict):
+        return path
     try:
         size = path.stat().st_size
     except OSError:
@@ -352,12 +501,14 @@ def read_facts(
 def text_facts(original_path: str, text: str) -> dict[str, Any]:
     """Title, tags, aliases and raw link references of a text original."""
     frontmatter, body, _raw = parse_frontmatter(text)
-    tags, rejected = normalize_tags(frontmatter.get("tags"))
+    tags, rejected_tags = normalize_tags(frontmatter.get("tags"))
+    aliases, rejected_aliases = normalize_aliases(frontmatter.get("aliases"))
     return {
         "title": title_from_text(original_path, text),
         "tags": tags,
-        "rejected_tags": rejected,
-        "aliases": normalize_aliases(frontmatter.get("aliases")),
+        "rejected_tags": rejected_tags,
+        "aliases": aliases,
+        "rejected_aliases": rejected_aliases,
         "_refs": link_references(body),
     }
 
@@ -397,22 +548,26 @@ def plan_item(
     else:
         item.update(
             title=Path(original_path).stem or original_path,
-            tags=[], rejected_tags=[], aliases=[], _refs=[],
+            tags=[], rejected_tags=[], aliases=[], rejected_aliases=[], _refs=[],
         )
 
-    earlier = latest_earlier_import(
+    earlier = earlier_with_same_bytes(
         index, collection=collection, collection_path=item["collection_path"],
-        original_path=original_path,
+        original_path=original_path, sha256=item["original_sha256"],
     )
-    if earlier is not None and earlier.original_sha256 == item["original_sha256"]:
+    if earlier is not None:
         item["action"] = "already-imported"
         item["target_path"] = earlier.path
         item["target_ref"] = context_refs.source_ref(earlier.path)
         item["existing_ref"] = item["target_ref"]
         item["artifact_path"] = artifact_of(root, earlier.path)
         return item, text
-    if earlier is not None:
-        item["previous_import"] = context_refs.source_ref(earlier.path)
+    changed = latest_earlier_import(
+        index, collection=collection, collection_path=item["collection_path"],
+        original_path=original_path,
+    )
+    if changed is not None:
+        item["previous_import"] = context_refs.source_ref(changed.path)
 
     folder = _folder_for(root, classification, taxonomy)
     if isinstance(folder, str):
@@ -424,7 +579,7 @@ def plan_item(
         from .preserve import _sanitize_filename
 
         suffix = Path(_sanitize_filename(Path(original_path).name) or "").suffix
-        if suffix == ".md":
+        if suffix.lower() == ".md":
             # An artifact is a `.md` file only when its bytes are not UTF-8 text, and the
             # graph reads every `.md` under the knowledge base as strict UTF-8.
             # Storing the bytes under `.bin` keeps them out of the graph input set.
@@ -532,12 +687,13 @@ def resolve_links(
             if cp is None:
                 unresolved.append({"raw": ref["raw"], "embed": ref["embed"], "reason": reason})
             elif cp != item["collection_path"]:
-                resolved.append(
-                    {
-                        "raw": ref["raw"], "embed": ref["embed"], "via": via,
-                        "target_path": resolver.pages[cp]["target_path"],
-                    }
-                )
+                link = {
+                    "raw": ref["raw"], "embed": ref["embed"], "via": via,
+                    "target_path": resolver.pages[cp]["target_path"],
+                }
+                if ref.get("fragment"):
+                    link["fragment"] = ref["fragment"]
+                resolved.append(link)
         item["links"] = {"resolved": resolved, "unresolved": unresolved}
 
 
@@ -597,6 +753,8 @@ __all__ = [
     "item_digest",
     "artifact_of",
     "decode_text",
+    "earlier_import_of",
+    "earlier_with_same_bytes",
     "item_frontmatter",
     "latest_earlier_import",
     "normalize_aliases",

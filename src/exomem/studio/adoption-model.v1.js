@@ -315,3 +315,36 @@ export function junkCount(scanSummary, junkRowCount = 0) {
   }
   return Number(junkRowCount) || 0;
 }
+
+// The run document inside a mutation's full-detail terminal. It sits at
+// `diagnostics`, and one level down at `diagnostics.leaf_result` when derived
+// custody wraps it (a call that imported a media file).
+export function runOfTerminal(result) {
+  const diagnostics = result && result.diagnostics;
+  if (!diagnostics || typeof diagnostics !== "object") return null;
+  const inner = diagnostics.leaf_result;
+  return inner && typeof inner === "object" ? inner : diagnostics;
+}
+
+// `plan` and `apply` stop at the server's request budget and answer with a
+// `continuation`. Repeat the call with it until none comes back, so a large
+// collection is never left half-planned or half-applied. `send` takes a request
+// body and resolves to the run document; `onProgress` sees each partial one.
+export async function driveContinuations(send, body, onProgress = () => {}) {
+  let run = await send(body);
+  while (run && run.continuation) {
+    onProgress(run);
+    run = await send({...body, continuation: run.continuation});
+  }
+  return run;
+}
+
+// "N of M files done" from the engine's `progress` block (plan and apply both
+// report `total` and `remaining`); empty when the run carries none.
+export function progressLine(run) {
+  const progress = run && run.progress;
+  if (!progress || typeof progress.total !== "number" || typeof progress.remaining !== "number") {
+    return "";
+  }
+  return `${progress.total - progress.remaining} of ${progress.total} files done…`;
+}

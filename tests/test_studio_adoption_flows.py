@@ -31,12 +31,15 @@ portability to worktrees where Lane A itself is not yet merged).
 from __future__ import annotations
 
 import importlib.util
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands, find, server
+from exomem import commands, find, request_budget, server
 
 pytestmark = pytest.mark.skipif(
     not hasattr(commands, "op_adoption_studio"),
@@ -71,7 +74,8 @@ def _ok(client: TestClient, command: str, body: dict) -> dict:
     assert payload["success"] is True, payload
     data = payload["data"]
     diagnostics = data.get("diagnostics", data)
-    # An imported media artifact adds derived custody around the run document.
+    # Mirrors the client's `runOfTerminal`: a call that imported a media artifact
+    # nests the run document one level down, under derived custody.
     return diagnostics.get("leaf_result", diagnostics)
 
 
@@ -460,3 +464,85 @@ def test_proposals_arrive_reject_removes_approve_writes_log_and_drift_leaves_fil
     assert drift_response.status_code == 409, drift_response.text
     assert drift_response.json()["error"]["code"] == "REVIEW_ITEM_CHANGED"
     assert _snapshot(vault) == before
+
+
+_STUDIO_ASSETS = Path(__file__).resolve().parents[1] / "src" / "exomem" / "studio"
+
+# Runs the Studio client's own helpers (`runOfTerminal`, `driveContinuations`) against the
+# real REST endpoint. The Python side answers each request line the client writes.
+_CLIENT_SCRIPT = """
+import {driveContinuations, runOfTerminal} from "%(model)s";
+import {createInterface} from "node:readline";
+
+const lines = createInterface({input: process.stdin})[Symbol.asyncIterator]();
+async function send(body) {
+  process.stdout.write(JSON.stringify({...body, response_detail: "full"}) + "\\n");
+  const {value} = await lines.next();
+  return runOfTerminal(JSON.parse(value));
+}
+const started = await send({action: "start", path: "Old Notes"});
+const runId = started.run_id;
+await send({action: "select", run_id: runId, include: ["Old Notes"], exclude: [], overrides: [], include_junk: false});
+const planned = await driveContinuations(send, {action: "plan", run_id: runId});
+const applied = await driveContinuations(send, {action: "apply", run_id: runId, plan_id: planned.plan.plan_id});
+process.stdout.write(JSON.stringify({final: applied}) + "\\n");
+process.exit(0);
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is needed to run the Studio client")
+def test_studio_client_plans_and_applies_a_collection_across_budget_stops_with_an_imported_artifact(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tiny request budget stops plan and the first apply after one unit of work.
+
+    The client must carry on from each `continuation` until the run is applied, and
+    must still read the run when the call that imports the media file wraps it in
+    derived custody (only a call with room to finish its media fan-out does). A client
+    that drops either leaves the run half-done in the UI.
+    """
+    source_root = _seed_import_folder(vault)
+    _write(source_root, "c.md", "# C\n\nThird imported note.\n")
+    find.clear_cache()
+    client = _client(vault, monkeypatch)
+
+    script = _CLIENT_SCRIPT % {"model": (_STUDIO_ASSETS / "adoption-model.v1.js").as_uri()}
+    node = subprocess.Popen(
+        ["node", "--input-type=module", "--eval", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    calls: list[dict] = []
+    final = None
+    try:
+        for line in node.stdout:
+            message = json.loads(line)
+            if "final" in message:
+                final = message["final"]
+                break
+            calls.append(message)
+            if message["action"] == "apply" and message.get("continuation"):
+                monkeypatch.delenv(request_budget.BUDGET_ENV_VAR, raising=False)
+            else:
+                monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "1")
+            request_budget.reset_resolution_cache()
+            reply = _post(client, "adoption_studio", message)
+            # The client's `command()` hands its caller the payload's `data`.
+            node.stdin.write(json.dumps(reply["data"]) + "\n")
+            node.stdin.flush()
+    finally:
+        node.kill()
+        node.wait()
+        request_budget.reset_resolution_cache()
+
+    plan_calls = [c for c in calls if c["action"] == "plan"]
+    apply_calls = [c for c in calls if c["action"] == "apply"]
+    assert len(plan_calls) > 1 and len(apply_calls) > 1
+    assert all(c.get("continuation") for c in plan_calls[1:] + apply_calls[1:])
+    assert final is not None, "the client stopped before the run finished"
+    assert final.get("phase") == "applied"
+    assert final.get("run_id")
+    assert len(final["outcomes"]) == 4
+    assert {o["status"] for o in final["outcomes"].values()} == {"applied"}
+    assert final["outcomes"]["Old Notes/img.png"]["target_path"]

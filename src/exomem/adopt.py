@@ -309,8 +309,9 @@ def _links_section(planned: Mapping[str, Any]) -> list[str]:
     """The generated `## Links` section, which sits outside the verbatim fence.
 
     A wikilink in a Source body becomes a graph edge, so each resolved target is
-    one plain wikilink to that target's frozen Source page. An unresolved target
-    is listed as text: a guessed edge would be worse than a missing one.
+    one plain wikilink to that target's frozen Source page, keeping the fragment
+    the original link named. An unresolved target is listed as text: a guessed
+    edge would be worse than a missing one.
     """
     links = planned.get("links") or {}
     resolved = links.get("resolved") or []
@@ -321,6 +322,11 @@ def _links_section(planned: Mapping[str, Any]) -> list[str]:
     seen: set[str] = set()
     for link in resolved:
         target = adoption_plan.wikilink_for(link["target_path"])
+        fragment = link.get("fragment")
+        # A fragment decoded from a Markdown link may hold the characters that end a
+        # wikilink (the wikilink grammar's own delimiters); such a fragment is dropped.
+        if fragment and not any(ch in fragment for ch in "[]|\r\n"):
+            target = f"{target}#{fragment}"
         if target not in seen:
             seen.add(target)
             lines.append(f"- [[{target}]]")
@@ -604,18 +610,22 @@ def commit_import_items(
     *,
     today: dt.date,
     extra_writes: Sequence[PlannedWrite] = (),
+    source_counts: Mapping[str, int] | None = None,
 ) -> dict:
     """Write every planned import plus the Sources/top indexes and log in ONE batch.
 
     Index counts and the log come from where each item actually lands, so a
     classified item counts under its own kind. ``extra_writes`` ride in the same
     batch (the run object, so outcomes commit with the items they describe).
-    Returns ``{"copied_sources": [...], "warnings": [...]}``.
+    ``source_counts`` is the Sources census before this batch, for a caller that
+    commits many batches and keeps it current from the returned ``source_counts``
+    (the census after this batch); without it the Sources tree is walked.
+    Returns ``{"copied_sources": [...], "warnings": [...], "source_counts": {...}}``.
     """
     if not items:
         if extra_writes:
             batch_atomic_write(list(extra_writes), vault_root=root)
-        return {"copied_sources": [], "warnings": []}
+        return {"copied_sources": [], "warnings": [], "source_counts": source_counts}
 
     from .add import artifact_binary_write
 
@@ -654,7 +664,10 @@ def commit_import_items(
             )
 
         sources_dir = kb / "Sources"
-        post_counts = indexes._count_sources(sources_dir)
+        pre_counts = (
+            indexes._count_sources(sources_dir) if source_counts is None else dict(source_counts)
+        )
+        post_counts = dict(pre_counts)
         folders: list[str] = []
         for row in copied:
             folder = _top_folder(row["source_path"])
@@ -697,6 +710,7 @@ def commit_import_items(
                 root,
                 top_index_text=top_text,
                 pending_paths=[row["source_path"] for row in copied],
+                sources_counts=pre_counts,
             )
             sub_writes = [write for write in sub_writes if write.path != sources_index]
             writes.append(
@@ -738,7 +752,7 @@ def commit_import_items(
     finally:
         for stream in streams:
             stream.close()
-    return {"copied_sources": copied, "warnings": warnings}
+    return {"copied_sources": copied, "warnings": warnings, "source_counts": post_counts}
 
 
 def _copy_as_sources(

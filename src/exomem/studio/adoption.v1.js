@@ -13,6 +13,7 @@ import {ApiError, command} from "/studio/assets/api.v1.js";
 import {
   contractFindingsView,
   countLine,
+  driveContinuations,
   failureGroups,
   folderState,
   initialSelection,
@@ -22,6 +23,8 @@ import {
   phaseScreen,
   planBullets,
   pollDelay,
+  progressLine,
+  runOfTerminal,
   selectionCounts,
   selectionFromRules,
   selectionPayload,
@@ -38,11 +41,17 @@ async function adoptionMutation(body) {
     ...body,
     response_detail: "full",
   });
-  if (!result || typeof result.diagnostics !== "object") {
+  const terminal = runOfTerminal(result);
+  if (!terminal) {
     throw new ApiError("The adoption mutation returned no terminal diagnostics.");
   }
-  return result.diagnostics;
+  return terminal;
 }
+
+// plan and apply are bounded by the server's request budget: they answer with a
+// `continuation` until the work is done, so each runs as a loop of calls.
+const boundedMutation = (body, onProgress) =>
+  driveContinuations(adoptionMutation, body, onProgress);
 
 const adoptionApi = {
   start: (path, {initializeKb = false} = {}) =>
@@ -53,19 +62,26 @@ const adoptionApi = {
   status: (runId) => command("adoption_studio", {action: "status", run_id: runId}),
   select: (runId, payload) =>
     adoptionMutation({action: "select", run_id: runId, ...payload}),
-  plan: (runId) => adoptionMutation({action: "plan", run_id: runId}),
-  apply: (runId, planId) =>
-    adoptionMutation({action: "apply", run_id: runId, plan_id: planId}),
+  plan: (runId, onProgress) => boundedMutation({action: "plan", run_id: runId}, onProgress),
+  // `continuation` resumes a budget-stopped apply that a status read found open.
+  apply: (runId, planId, {continuation = null, onProgress} = {}) =>
+    boundedMutation(
+      {action: "apply", run_id: runId, plan_id: planId, ...(continuation ? {continuation} : {})},
+      onProgress,
+    ),
   // apply always echoes plan_id (even on retry): the engine refuses a
   // mismatched/missing plan_id with PLAN_STALE regardless of retry_failed.
-  retry: (runId, planId, onlyPaths) =>
-    adoptionMutation({
-      action: "apply",
-      run_id: runId,
-      plan_id: planId,
-      retry_failed: true,
-      only_paths: onlyPaths && onlyPaths.length ? onlyPaths : null,
-    }),
+  retry: (runId, planId, onlyPaths, onProgress) =>
+    boundedMutation(
+      {
+        action: "apply",
+        run_id: runId,
+        plan_id: planId,
+        retry_failed: true,
+        only_paths: onlyPaths && onlyPaths.length ? onlyPaths : null,
+      },
+      onProgress,
+    ),
   cancel: (runId, why) =>
     adoptionMutation({action: "cancel", run_id: runId, why: why || null}),
   finish: (runId) => adoptionMutation({action: "finish", run_id: runId}),
@@ -579,7 +595,7 @@ async function enterPreview() {
     // Every adoption_studio action returns the FULL presented run document
     // (uniform shape) — replace `run` wholesale rather than nesting the
     // response under a synthetic key.
-    run = await adoptionApi.plan(run.run_id);
+    run = await adoptionApi.plan(run.run_id, showProgress);
     populatePreview();
   } catch (error) {
     if (isStale(error)) {
@@ -644,7 +660,7 @@ function confirmApply() {
     cancelLabel: "Not yet",
     onConfirm: async () => {
       const planId = plan.plan_id;
-      run = await adoptionApi.apply(run.run_id, planId);
+      run = await adoptionApi.apply(run.run_id, planId, {onProgress: showProgress});
       route = routePatch(route, {astep: "start"});
       writeRoute(route, {replace: true});
       if (isTransientPhase(run.phase)) await refreshStatus();
@@ -779,7 +795,7 @@ async function doRetry(paths) {
   showScreen("applying");
   setStatus("Bringing the rest of your files in…");
   try {
-    run = await adoptionApi.retry(run.run_id, run.plan && run.plan.plan_id, paths);
+    run = await adoptionApi.retry(run.run_id, run.plan && run.plan.plan_id, paths, showProgress);
     if (isTransientPhase(run.phase)) await refreshStatus();
     render();
   } catch (error) {
@@ -1131,6 +1147,19 @@ function pollDelayFor(kind) {
 async function refreshStatus() {
   if (!run || !run.run_id) return;
   run = await adoptionApi.status(run.run_id);
+  // A budget-stopped apply that nobody is driving (the page was reloaded)
+  // reports its open cursor; carry on from it rather than polling forever.
+  if (run.phase === "applying" && run.continuation && !run.interrupted && run.plan) {
+    run = await adoptionApi.apply(run.run_id, run.plan.plan_id, {
+      continuation: run.continuation,
+      onProgress: showProgress,
+    });
+  }
+}
+
+function showProgress(partial) {
+  const line = progressLine(partial);
+  if (line) setStatus(line);
 }
 
 // --- Event wiring (once) ---------------------------------------------------- //

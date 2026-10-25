@@ -28,6 +28,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -56,6 +57,12 @@ APPLY_CHUNK_BUDGET_SHARE = 0.1
 # artifact for its extraction request (both pessimistic starts).
 INITIAL_ITEM_SECONDS = 0.5
 INITIAL_EXTRACTION_SECONDS = 1.0
+# ... and per MiB of original bytes (read, hashed, copied, hashed again): pessimistic,
+# about 20 MiB/s, so one huge file is never started on the strength of small notes.
+INITIAL_SECONDS_PER_MIB = 0.05
+# A chunk teaches the per-MiB rate only when its items average at least this many
+# MiB; lighter chunks teach the per-item rate, which a huge file would otherwise inflate.
+BYTE_RATE_MIN_ITEM_MIB = 1.0
 # Work a call owes after its loop, inside the same MCP call, which the loop cannot
 # time. Media sidecars are indexed by a fan-out deferred until the mutation's
 # terminal is persisted (a fast-acknowledgement session moves it behind the reply
@@ -86,7 +93,7 @@ _RECALL_SAMPLE = 10
 
 _REASONS = {
     "NOT_IN_INVENTORY": "path is not among the scanned adoption candidates",
-    "UNSUPPORTED_IMPORT_TYPE": "adoption imports text/markdown-like files only",
+    "UNSUPPORTED_IMPORT_TYPE": "the scan did not mark this file importable",
     "ALREADY_GOVERNED": f"path is already inside {kb_dirname()}/",
     "TOO_LARGE": "file is larger than the artifact ceiling",
     "NOT_REGULAR_FILE": "only regular files import; links and special files do not",
@@ -1047,7 +1054,9 @@ def plan(
             "collection": collection["label"],
             "items": items,
             "skipped": skipped,
-            "warnings": [],
+            "warnings": adoption_plan.root_warnings(
+                index, collection=collection["label"], collection_root=collection["root"]
+            ),
             "total_bytes": adoption_plan.plan_total_bytes(items),
         }
         run["plan_draft"] = None
@@ -1092,7 +1101,9 @@ def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None,
     """The original's text (None for an artifact), or a failed outcome when it drifted."""
     from .add import AddError, artifact_identity
 
-    path = root / planned["original_path"]
+    path = adoption_plan.resolve_original(root, planned["original_path"])
+    if isinstance(path, dict):
+        return None, _failed(path["code"], path["reason"])
     try:
         if planned["form"] == "text":
             data = path.read_bytes()
@@ -1128,13 +1139,10 @@ def _original_unchanged(root: Path, planned: dict) -> bool:
 def _earlier_with_same_bytes(
     index: list[adoption_plan.EarlierImport], label: str | None, planned: dict
 ) -> adoption_plan.EarlierImport | None:
-    earlier = adoption_plan.latest_earlier_import(
+    return adoption_plan.earlier_with_same_bytes(
         index, collection=label, collection_path=planned["collection_path"],
-        original_path=planned["original_path"],
+        original_path=planned["original_path"], sha256=planned["original_sha256"],
     )
-    if earlier is not None and earlier.original_sha256 == planned["original_sha256"]:
-        return earlier
-    return None
 
 
 class _ApplyPacer:
@@ -1142,10 +1150,11 @@ class _ApplyPacer:
 
     A call never starts a chunk whose predicted cost does not fit in the time left
     before the delivery reserve, after the fan-out the call already owes past the
-    loop. Costs are those this call has measured, not a past call's, and each
-    rate is the dearest seen so far: chunk cost swings several-fold with media
-    artifacts and a contended index, so the last chunk is a poor guide to the next.
-    A slow stretch shrinks the rest of this call's chunks and nothing after it.
+    loop. A chunk costs its items, its bytes and its media requests. Costs are those
+    this call has measured, not a past call's, and each rate is the dearest seen so
+    far: chunk cost swings several-fold with media artifacts and a contended index,
+    so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
+    of this call's chunks and nothing after it.
     """
 
     def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
@@ -1153,6 +1162,7 @@ class _ApplyPacer:
 
         self._budget = budget
         self._item_seconds: float | None = None
+        self._mib_seconds: float | None = None
         self._extraction_seconds: float | None = None
         self._deferred_artifacts = 0
         self._started_items = 0
@@ -1179,13 +1189,18 @@ class _ApplyPacer:
             and media_processing.classify_media(planned["artifact_path"]) is not None
         )
 
+    @staticmethod
+    def _mib(chunk: list[dict]) -> float:
+        return sum(planned["original_bytes"] for planned in chunk) / (1024 * 1024)
+
     def _cost(self, chunk: list[dict]) -> float:
         item = INITIAL_ITEM_SECONDS if self._item_seconds is None else self._item_seconds
+        per_mib = INITIAL_SECONDS_PER_MIB if self._mib_seconds is None else self._mib_seconds
         extraction = (
             INITIAL_EXTRACTION_SECONDS if self._extraction_seconds is None
             else self._extraction_seconds
         )
-        return len(chunk) * item + self._media(chunk) * extraction
+        return len(chunk) * item + self._mib(chunk) * per_mib + self._media(chunk) * extraction
 
     def _room(self, chunk: list[dict]) -> float:
         """Seconds the chunk may take: what is left, less the reserve and the call's debts."""
@@ -1209,7 +1224,11 @@ class _ApplyPacer:
         """Learn from a finished chunk: `extractions` are its media requests' seconds."""
         self._started_items += len(chunk)
         committing = max(elapsed - sum(extractions), 0.0)
-        self._item_seconds = self._tracked(self._item_seconds, committing / len(chunk))
+        mib = self._mib(chunk)
+        if mib >= BYTE_RATE_MIN_ITEM_MIB * len(chunk):
+            self._mib_seconds = self._tracked(self._mib_seconds, committing / mib)
+        else:
+            self._item_seconds = self._tracked(self._item_seconds, committing / len(chunk))
         if extractions:
             self._extraction_seconds = self._tracked(
                 self._extraction_seconds, sum(extractions) / len(extractions)
@@ -1257,10 +1276,23 @@ def _request_extraction(root: Path, planned: dict, budget: request_budget.Reques
     return time.monotonic() - started
 
 
+@dataclass
+class _CallReads:
+    """What one `apply` call reads from the vault once and keeps current across its chunks.
+
+    Walking every Source for each chunk made a re-run cost grow with the whole vault.
+    Both start empty and fill on first use; a batch that raised drops them, because
+    what it left on disk is then unknown.
+    """
+
+    index: list[adoption_plan.EarlierImport] | None = None
+    source_counts: dict[str, int] | None = None
+
+
 def _commit_chunk(
     root: Path, store: AdoptionRunStore, run: dict,
     survivors: list[tuple[dict, adopt_module.ImportItem]], *,
-    run_date: dt.date, label: str | None,
+    run_date: dt.date, label: str | None, reads: _CallReads,
 ) -> list[dict]:
     """Commit one chunk's pages, artifacts, indexes, log and the run object in one batch.
 
@@ -1272,15 +1304,16 @@ def _commit_chunk(
     for planned, _item in survivors:
         outcomes[planned["original_path"]] = _applied(planned)
     try:
-        adopt_module.commit_import_items(
+        committed = adopt_module.commit_import_items(
             root, [item for _planned, item in survivors], today=run_date,
-            extra_writes=[store.planned_write(run)],
+            extra_writes=[store.planned_write(run)], source_counts=reads.source_counts,
         )
     except Exception as error:  # noqa: BLE001 - a rolled-back batch is a retryable outcome
-        index = adoption_plan.read_import_index(root)
+        reads.source_counts = None
+        reads.index = adoption_plan.read_import_index(root)
         landed: list[dict] = []
         for planned, _item in survivors:
-            earlier = _earlier_with_same_bytes(index, label, planned)
+            earlier = _earlier_with_same_bytes(reads.index, label, planned)
             if earlier is not None:
                 outcomes[planned["original_path"]] = _already_applied(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path),
@@ -1290,19 +1323,22 @@ def _commit_chunk(
             else:
                 outcomes[planned["original_path"]] = _failed("BATCH_ROLLED_BACK", str(error))
         return landed
+    reads.source_counts = committed["source_counts"]
     return [planned for planned, _item in survivors]
 
 
 def _apply_chunk(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], *,
     run_date: dt.date, ceiling: int, budget: request_budget.RequestBudget, stats: Counter,
-    written: list[str],
+    written: list[str], reads: _CallReads,
 ) -> list[float]:
     """Apply one chunk; returns the seconds each media extraction request took."""
     plan = run["plan"]
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
-    index = adoption_plan.read_import_index(root)
+    if reads.index is None:
+        reads.index = adoption_plan.read_import_index(root)
+    index = reads.index
     settled: list[dict] = []
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     for planned in chunk:
@@ -1342,7 +1378,14 @@ def _apply_chunk(
         )
     landed: list[dict] = []
     if survivors:
-        landed = _commit_chunk(root, store, run, survivors, run_date=run_date, label=label)
+        landed = _commit_chunk(
+            root, store, run, survivors, run_date=run_date, label=label, reads=reads
+        )
+        for planned in landed:
+            if outcomes[planned["original_path"]]["status"] == "applied":
+                reads.index.append(
+                    adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
+                )
     for planned in [*settled, *landed]:
         _record_unchanged(root, planned, outcomes[planned["original_path"]], stats)
     extractions: list[float] = []
@@ -1472,6 +1515,7 @@ def apply(
             run["inflight"] = True
 
         pacer = _ApplyPacer(root, budget)
+        reads = _CallReads()
         stopped = False
         chunks = 0
         while pending:
@@ -1482,7 +1526,7 @@ def apply(
             started = time.monotonic()
             extractions = _apply_chunk(
                 root, store, run, chunk, run_date=run_date, ceiling=ceiling,
-                budget=budget, stats=stats, written=written,
+                budget=budget, stats=stats, written=written, reads=reads,
             )
             pacer.record(chunk, time.monotonic() - started, extractions)
             pending = pending[len(chunk):]
@@ -1603,8 +1647,11 @@ def _applied_items(run: dict) -> list[tuple[dict, dict]]:
 
 
 def _recall_check(root: Path, run: dict) -> dict:
+    # A text note names itself in a question; a media file's title is its file name.
     applied = sorted(
-        _applied_items(run), key=lambda pair: pair[0].get("original_bytes", 0), reverse=True
+        _applied_items(run),
+        key=lambda pair: (pair[0].get("form") == "text", pair[0].get("original_bytes", 0)),
+        reverse=True,
     )
     if applied:
         item, outcome = applied[0]

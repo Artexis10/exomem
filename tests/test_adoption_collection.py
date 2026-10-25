@@ -10,7 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from exomem import adoption_run, epistemic_graph, find, media_jobs, request_budget, source_taxonomy
+from exomem import (
+    adoption_plan,
+    adoption_run,
+    epistemic_graph,
+    find,
+    indexes,
+    media_jobs,
+    request_budget,
+    source_taxonomy,
+)
 from exomem.vault import parse_frontmatter
 
 TODAY = dt.date(2026, 7, 14)
@@ -440,3 +449,246 @@ def test_default_detail_result_carries_what_a_caller_needs_to_continue(
     applied = call({"action": "apply", "run_id": run_id, "plan_id": planned["plan_id"]})
     assert applied["phase"] == "applying"
     assert applied["continuation"]
+
+
+# --- originals stay inside the vault ------------------------------------------------
+def test_a_file_swapped_for_a_link_out_of_the_vault_is_refused_at_plan_time(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("text that lives outside the vault", encoding="utf-8")
+    vault = _vault(
+        tmp_path, {"Coll/victim.txt": "# Victim\n\nin the vault\n", "Coll/ok.md": "# Ok\n\nfine\n"}
+    )
+    run_id = adoption_run.start(vault, path="Coll", today=TODAY)["run_id"]
+    adoption_run.select(vault, run_id=run_id, include=["Coll"])
+    (vault / "Coll/victim.txt").unlink()
+    (vault / "Coll/victim.txt").symlink_to(outside)
+
+    planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
+    final, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert {s["path"]: s["code"] for s in planned["plan"]["skipped"]} == {
+        "Coll/victim.txt": "INVALID_PATH"
+    }
+    assert final["phase"] == "applied"
+    assert not any(
+        "outside the vault" in page.read_text(encoding="utf-8")
+        for page in (vault / SOURCES).rglob("*.md")
+    )
+
+
+def test_a_file_swapped_for_a_link_after_the_plan_fails_at_apply_without_importing_the_target(
+    tmp_path: Path,
+) -> None:
+    content = "# Victim\n\nthe same bytes on both sides\n"
+    outside = tmp_path / "outside.txt"
+    outside.write_text(content, encoding="utf-8")
+    vault = _vault(tmp_path, {"Coll/victim.txt": content})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    (vault / "Coll/victim.txt").unlink()
+    (vault / "Coll/victim.txt").symlink_to(outside)
+
+    final, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    outcome = final["outcomes"]["Coll/victim.txt"]
+    assert outcome["status"] == "failed"
+    assert outcome["code"] == "INVALID_PATH"
+    assert list((vault / SOURCES).rglob("*victim*")) == []
+
+
+# --- plan-layer rules -----------------------------------------------------------
+def test_a_non_utf8_note_with_an_upper_case_suffix_is_kept_as_a_bin_artifact(tmp_path: Path) -> None:
+    data = "# Café\n\nnaïve\n".encode("latin-1")
+    vault = _vault(tmp_path, {"Coll/OLD.MD": data})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    outcome = applied["outcomes"]["Coll/OLD.MD"]
+    assert outcome["status"] == "applied"
+    assert outcome["artifact_path"].endswith(".bin")
+    assert (vault / outcome["artifact_path"]).read_bytes() == data
+
+
+def test_a_link_fragment_is_dropped_for_resolution_and_kept_in_the_rendered_link(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(
+        tmp_path,
+        {
+            "Coll/source.md": "# Source\n\nSee [[target#Setup]] and [guide](target.md#install).\n",
+            "Coll/target.md": "# Target\n",
+        },
+    )
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    target = applied["outcomes"]["Coll/target.md"]["target_path"]
+
+    page = (vault / applied["outcomes"]["Coll/source.md"]["target_path"]).read_text(encoding="utf-8")
+    links = page.split("## Links\n\n", 1)[1].split("\n\n", 1)[0].splitlines()
+
+    stem = target[: -len(".md")]
+    assert links == [f"- [[{stem}#Setup]]", f"- [[{stem}#install]]"]
+
+
+@pytest.mark.parametrize(("aliases", "kept_aliases"), [("[Fine, 42]", ["Fine"]), ("42", [])])
+def test_aliases_and_tags_the_page_cannot_carry_are_reported_on_the_plan_item(
+    tmp_path: Path, aliases: str, kept_aliases: list[str]
+) -> None:
+    vault = _vault(
+        tmp_path,
+        {
+            "Coll/note.md": (
+                f"---\naliases: {aliases}\ntags: [good, 'dir/', 'a//b']\n---\n# Note\n"
+            )
+        },
+    )
+    _run_id, planned = _import(vault, path="Coll", include=["Coll"])
+
+    item = planned["plan"]["items"][0]
+
+    assert (item["aliases"], item["rejected_aliases"]) == (kept_aliases, ["42"])
+    assert (item["tags"], item["rejected_tags"]) == (["good"], ["dir/", "a//b"])
+
+
+def test_importing_a_subfolder_then_its_parent_does_not_duplicate_the_subfolder_notes(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(
+        tmp_path, {"Coll/sub/x.md": "# X\n\nin the subfolder\n", "Coll/y.md": "# Y\n\nat the top\n"}
+    )
+    run_id, planned = _import(vault, path="Coll/sub", include=["Coll/sub"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    items = {item["original_path"]: item["action"] for item in planned["plan"]["items"]}
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert items == {"Coll/sub/x.md": "already-imported", "Coll/y.md": "copy-as-source"}
+    assert applied["outcomes"]["Coll/sub/x.md"]["status"] == "already-applied"
+    assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 2
+
+
+def test_a_page_whose_front_matter_is_longer_than_the_index_head_still_counts_as_an_import(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path, {"Coll/long.md": f"# {'A very long title ' * 3000}\n\nbody\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    _run_id, replanned = _import(vault, path="Coll", include=["Coll"])
+
+    assert [item["action"] for item in replanned["plan"]["items"]] == ["already-imported"]
+
+
+def test_a_plan_names_the_other_root_that_earlier_imports_of_the_collection_came_from(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(
+        tmp_path,
+        {"_Imports/first/Coll/a.md": "# A\n", "_Imports/second/Coll/a.md": "# A\n"},
+    )
+    run_id, planned = _import(vault, path="_Imports/first", include=["_Imports/first"])
+    assert planned["plan"]["warnings"] == []
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    _run_id, replanned = _import(vault, path="_Imports/second", include=["_Imports/second"])
+
+    [warning] = replanned["plan"]["warnings"]
+    assert warning["code"] == "EARLIER_IMPORT_FROM_OTHER_ROOT"
+    assert warning["roots"] == ["_Imports/first/Coll"]
+
+
+def test_the_recall_question_asks_about_the_largest_text_note_not_a_larger_media_file(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(
+        tmp_path,
+        {
+            "Coll/scan.pdf": b"%PDF-1.4\n" + b"x" * 5000 + b"\n%%EOF\n",
+            "Coll/roadmap.md": "# Roadmap\n\ntext\n",
+        },
+    )
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert finished["finish"]["first_question"] == 'What do my notes say about "Roadmap"?'
+
+
+def test_an_apply_call_reads_the_sources_tree_once_however_many_chunks_it_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each chunk re-walking every Source made a re-run cost grow with the whole vault."""
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 2)
+    files = {f"Coll/note-{n}.md": f"# Note {n}\n\ntext {n}\n" for n in range(5)}
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    walks = {"index": 0, "counts": 0}
+    real_index, real_counts = adoption_plan.read_import_index, indexes._count_sources
+
+    def counting_index(*args, **kwargs):
+        walks["index"] += 1
+        return real_index(*args, **kwargs)
+
+    def counting_counts(*args, **kwargs):
+        walks["counts"] += 1
+        return real_counts(*args, **kwargs)
+
+    monkeypatch.setattr(adoption_plan, "read_import_index", counting_index)
+    monkeypatch.setattr(indexes, "_count_sources", counting_counts)
+
+    applied = adoption_run.apply(
+        vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY
+    )
+
+    assert applied["phase"] == "applied"
+    assert walks == {"index": 1, "counts": 1}
+    sources_index = (vault / SOURCES / "index.md").read_text(encoding="utf-8")
+    assert "copied legacy-vault material with provenance (5)" in sources_index
+
+
+def test_a_call_leaves_a_byte_heavy_artifact_to_the_next_call_when_it_does_not_fit_in_the_time_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cost grows with bytes as well as items: small notes must not license a huge file."""
+    clock = {"now": 1000.0}
+    fake_time = types.SimpleNamespace(monotonic=lambda: clock["now"])
+    monkeypatch.setattr(adoption_run, "time", fake_time)
+    monkeypatch.setattr(request_budget, "time", fake_time)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 2.0)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "12")
+    request_budget.reset_resolution_cache()
+    # The start a call assumes for a file it has not yet timed: dear, like a slow disk.
+    monkeypatch.setattr(adoption_run, "INITIAL_SECONDS_PER_MIB", 6.0)
+    real_apply_chunk = adoption_run._apply_chunk
+
+    def timed_chunk(*args, **kwargs):
+        result = real_apply_chunk(*args, **kwargs)
+        chunk = args[3]
+        megabytes = sum(planned["original_bytes"] for planned in chunk) / 2**20
+        clock["now"] += 0.1 * len(chunk) + 4.85 * megabytes  # the big file takes 9.7 s
+        return result
+
+    monkeypatch.setattr(adoption_run, "_apply_chunk", timed_chunk)
+    files: dict[str, str | bytes] = {f"Coll/a-note-{n}.md": f"# Note {n}\n" for n in range(6)}
+    files["Coll/z-archive.zip"] = b"\0" * (2 * 2**20)
+    vault = _vault(tmp_path, files)
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    plan_id = planned["plan"]["plan_id"]
+
+    elapsed: list[float] = []
+    last: dict = {}
+    while not elapsed or last.get("continuation"):
+        began = clock["now"]
+        last = adoption_run.apply(
+            vault, run_id=run_id, plan_id=plan_id, continuation=last.get("continuation"),
+            today=TODAY,
+        )
+        elapsed.append(clock["now"] - began)
+
+    assert max(elapsed) <= 12.0 - 2.0
+    assert last["phase"] == "applied"
+    assert (vault / last["outcomes"]["Coll/z-archive.zip"]["artifact_path"]).stat().st_size == 2 * 2**20
