@@ -153,6 +153,20 @@ def test_a_lag_history_cannot_bridge_is_reported_to_the_restricted_reader(served
     assert context_pack.INBOUND_INCOMPLETE_TRUNCATION in _pack_truncation(served, restricted=True)[1]
 
 
+def test_a_fault_reading_the_lag_reports_it_in_the_inbound_field(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry fault is a lag nobody can rule out, not a failed read of the page."""
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nRewritten. See [[coverage-anchor]].\n")
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("registry delta unreadable")
+
+    monkeypatch.setattr(freshness, "delta_since", unreadable)
+
+    assert _links(served, restricted=True)["inbound"] is None
+
+
 def test_a_lag_longer_than_the_bound_is_reported_without_a_decision(
     served: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -611,6 +625,24 @@ def test_a_lag_with_no_remembered_stamp_is_reported_to_the_restricted_reader(
     working_set_runtime._STAMP_CHECKPOINTS.clear()
 
     assert _activate(activation.vault)["generation"]["index_stale"] is True
+
+
+def test_a_fault_reading_the_lag_is_reported_to_the_restricted_reader_not_raised(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decision only quiets a flag; a registry fault must not fail the tool call."""
+    _activate(activation.vault)
+    _write_hidden_hub(activation.vault, "Second.")
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("registry delta unreadable")
+
+    monkeypatch.setattr(freshness, "recall_delta_since", unreadable)
+
+    served = _activate(activation.vault)
+
+    assert served["abstained"] is False
+    assert served["generation"]["index_stale"] is True
 
 
 def test_a_withheld_publication_during_the_request_does_not_withdraw_the_packet(

@@ -11,17 +11,42 @@ vault-wide flag.
 
 from __future__ import annotations
 
+import functools
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from . import freshness
 
+log = logging.getLogger(__name__)
+
+_Lag = Callable[..., frozenset[str] | None]
+
 #: The most changed paths one request decides. Above it the lag is reported, so
 #: a request's work follows the lag and never the vault. PROVISIONAL: a lag this
 #: long is a burst that the publisher is already folding, and its reading is
 #: stale for a caller who may see any of it; re-measure, don't hand-tune.
 MAX_DECIDED_PATHS = 16
+
+
+def _fault_reports_the_lag(decide: _Lag) -> _Lag:
+    """A fault in a lag decision is a lag the caller cannot rule out, so it reports it.
+
+    The decision exists to quiet a flag, never to gate the response: raising out
+    of it would turn a registry fault into a failed tool call, and the
+    conservative answer (`None`) is the one an undecidable path already gets.
+    """
+
+    @functools.wraps(decide)
+    def guarded(*args: Any, **kwargs: Any) -> frozenset[str] | None:
+        try:
+            return decide(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - a lag that cannot be decided is reported, as in `withheld_lag`
+            log.debug("lag undecidable; reporting it", exc_info=True)
+            return None
+
+    return guarded
 
 
 def only_withheld(
@@ -59,6 +84,26 @@ def only_withheld(
     )
 
 
+def consumer_lag_only_withheld(
+    vault_root: Path,
+    checkpoint: freshness.FreshnessCheckpoint,
+    visible: Callable[[str], bool],
+    *,
+    pending: bool = False,
+) -> bool:
+    """`only_withheld` for a structure that trails the vault consumer registry's `checkpoint`.
+
+    The delta is read here, so that a fault reading it reports the lag as well.
+    """
+    try:
+        delta = freshness.delta_since(vault_root, "vault", checkpoint)
+    except Exception:  # noqa: BLE001 - a lag that cannot be read is reported, as in `withheld_lag`
+        log.debug("lag undecidable; reporting it", exc_info=True)
+        return False
+    return only_withheld(vault_root, delta, visible, pending=pending)
+
+
+@_fault_reports_the_lag
 def withheld_lag(
     vault_root: Path,
     delta: Any,
@@ -127,6 +172,7 @@ def recall_lag_only_withheld(
     return recall_withheld_lag(vault_root, scope, built, visible) is not None
 
 
+@_fault_reports_the_lag
 def recall_withheld_lag(
     vault_root: Path,
     scope: str,

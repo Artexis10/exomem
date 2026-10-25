@@ -7496,9 +7496,7 @@ def borrow_query_resolver(
         if (
             checkpoint is not None
             and cached[0] == checkpoint.triple
-            and view_lag.only_withheld(
-                root, freshness.delta_since(root, "vault", checkpoint), visible
-            )
+            and view_lag.consumer_lag_only_withheld(root, checkpoint, visible)
         ):
             return cached[1]
     _schedule_query_resolver_rebuild(root)

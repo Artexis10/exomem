@@ -7204,11 +7204,8 @@ def cached_inbound_wikilinks(
             and not freshness.external_pending(vault_root)
         ):
             return True
-        return visible is not None and view_lag.only_withheld(
-            vault_root,
-            freshness.delta_since(vault_root, "vault", checkpoint),
-            visible,
-            pending=True,
+        return visible is not None and view_lag.consumer_lag_only_withheld(
+            vault_root, checkpoint, visible, pending=True
         )
 
     if not current():
