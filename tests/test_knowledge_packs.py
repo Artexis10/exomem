@@ -54,7 +54,9 @@ def _definition(pack_id: str) -> dict:
     ],
     ids=["cites-an-undefined-reference", "a-shape-cannot-spell-the-reference"],
 )
-def test_a_pack_reference_that_some_surface_cannot_spell_fails_validation(references, cite, code) -> None:
+def test_a_pack_reference_that_some_surface_cannot_spell_fails_validation(
+    references, cite, code
+) -> None:
     """Rendering would raise on the surface that serves it, so the definition fails at load."""
     raw = _definition("personal-records")
     raw["references"] = {**raw["references"], **references}
