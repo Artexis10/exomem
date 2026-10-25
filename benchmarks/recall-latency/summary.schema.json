@@ -1,0 +1,794 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "mode": {
+      "enum": [
+        "paired",
+        "absolute",
+        "live"
+      ]
+    },
+    "state": {
+      "enum": [
+        "passed",
+        "failed",
+        "refused",
+        "not measured"
+      ]
+    },
+    "contract_revision": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.:-]*$",
+      "maxLength": 100
+    },
+    "tag": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "accept_record": {
+      "enum": [
+        "absent",
+        "expired",
+        "current"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "source_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/environment"
+        },
+        "head": {
+          "$ref": "#/$defs/environment"
+        }
+      },
+      "required": []
+    },
+    "unmeasured": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_.:-]*$",
+        "maxLength": 100
+      }
+    },
+    "series": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "principal": {
+                "enum": [
+                  "owner",
+                  "admitted"
+                ]
+              },
+              "series": {
+                "type": "string",
+                "enum": [
+                  "hybrid",
+                  "keyword",
+                  "filtered_hybrid",
+                  "temporal",
+                  "mixed",
+                  "unit"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "accepted",
+                  "insufficient samples"
+                ]
+              },
+              "cases": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "gating": {
+                "type": "boolean"
+              },
+              "ratio": {
+                "type": "number",
+                "minimum": 0
+              },
+              "lower": {
+                "type": "number",
+                "minimum": 0
+              },
+              "upper": {
+                "type": "number",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "unknown_samples": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "stages": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.:-]*$",
+                  "maxLength": 100
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "measured",
+                        "insufficient samples",
+                        "not comparable"
+                      ]
+                    },
+                    "cases": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "ratio": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "lower": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "upper": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "base_cpu_p95_ms": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "base_critical_path_share": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "head_cpu_p95_ms": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "head_critical_path_share": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "base_critical_path_samples": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "head_critical_path_samples": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "cases"
+                  ]
+                }
+              },
+              "base_p50_ms": {
+                "$ref": "#/$defs/measurement"
+              },
+              "base_p95_ms": {
+                "$ref": "#/$defs/measurement"
+              },
+              "base_load_mean": {
+                "$ref": "#/$defs/measurement"
+              },
+              "base_load_max": {
+                "$ref": "#/$defs/measurement"
+              },
+              "head_p50_ms": {
+                "$ref": "#/$defs/measurement"
+              },
+              "head_p95_ms": {
+                "$ref": "#/$defs/measurement"
+              },
+              "head_load_mean": {
+                "$ref": "#/$defs/measurement"
+              },
+              "head_load_max": {
+                "$ref": "#/$defs/measurement"
+              },
+              "warming": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "principal",
+              "series",
+              "state",
+              "cases",
+              "gating",
+              "unknown_samples",
+              "stages"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "principal": {
+                "enum": [
+                  "owner",
+                  "admitted"
+                ]
+              },
+              "series": {
+                "type": "string",
+                "enum": [
+                  "hybrid",
+                  "keyword",
+                  "filtered_hybrid",
+                  "temporal",
+                  "mixed",
+                  "unit"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "refused",
+                  "not measured"
+                ]
+              },
+              "samples": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "warming": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unknown_samples": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unknown_contention": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "contended": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "p50_ms": {
+                "$ref": "#/$defs/measurement"
+              },
+              "p95_ms": {
+                "$ref": "#/$defs/measurement"
+              },
+              "p95_including_contention_ms": {
+                "$ref": "#/$defs/measurement"
+              },
+              "load_mean": {
+                "type": "number",
+                "minimum": 0
+              },
+              "load_max": {
+                "type": "number",
+                "minimum": 0
+              },
+              "ceiling_bar": {
+                "enum": [
+                  "governed-keyword",
+                  "governed-hybrid"
+                ]
+              },
+              "p95_target_bar": {
+                "enum": [
+                  "governed-keyword-p95-target",
+                  "governed-hybrid-p95-target"
+                ]
+              },
+              "p50_target_bar": {
+                "const": "governed-p50-target"
+              },
+              "encode_floor": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "measured",
+                      "not measured"
+                    ]
+                  },
+                  "p95_ms": {
+                    "$ref": "#/$defs/measurement"
+                  },
+                  "budget_ms": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "samples": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "source": {
+                    "enum": [
+                      "retained-reference-series",
+                      null
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "p95_ms",
+                  "budget_ms",
+                  "samples",
+                  "source"
+                ]
+              },
+              "stages": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "passed",
+                        "failed",
+                        "insufficient samples",
+                        "not run",
+                        "unbudgeted"
+                      ]
+                    },
+                    "samples": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "p95_ms": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "cpu_p95_ms": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "budget_ms": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "twice_budget_applied": {
+                      "type": "boolean"
+                    },
+                    "critical_path_share": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "p50_ms": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "cpu_p50_ms": {
+                      "$ref": "#/$defs/measurement"
+                    },
+                    "critical_path_samples": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "target_met": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "samples",
+                    "p95_ms",
+                    "cpu_p95_ms",
+                    "budget_ms",
+                    "twice_budget_applied",
+                    "critical_path_share",
+                    "p50_ms",
+                    "cpu_p50_ms",
+                    "critical_path_samples",
+                    "target_met"
+                  ]
+                }
+              },
+              "ceiling_met": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "p50_target_met": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "p95_target_met": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "principal",
+              "series",
+              "state",
+              "samples",
+              "warming",
+              "unknown_samples",
+              "unknown_contention",
+              "contended",
+              "p50_ms",
+              "p95_ms",
+              "p95_including_contention_ms",
+              "load_mean",
+              "load_max",
+              "ceiling_bar",
+              "p95_target_bar",
+              "p50_target_bar",
+              "encode_floor",
+              "stages",
+              "ceiling_met",
+              "p50_target_met",
+              "p95_target_met"
+            ]
+          }
+        ]
+      }
+    },
+    "samples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "case": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.:-]*$",
+            "maxLength": 100
+          },
+          "series": {
+            "type": "string",
+            "enum": [
+              "hybrid",
+              "keyword",
+              "filtered_hybrid",
+              "temporal",
+              "mixed",
+              "unit"
+            ]
+          },
+          "principal": {
+            "enum": [
+              "owner",
+              "admitted"
+            ]
+          },
+          "arm": {
+            "enum": [
+              "base",
+              "head"
+            ]
+          },
+          "repeat": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "load": {
+            "type": "number",
+            "minimum": 0
+          },
+          "elapsed_ms": {
+            "$ref": "#/$defs/measurement"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "warming",
+              "unknown",
+              "empty"
+            ]
+          },
+          "cpu_ms": {
+            "$ref": "#/$defs/measurement"
+          },
+          "cpu_source": {
+            "enum": [
+              "process_time_ns",
+              "unknown"
+            ]
+          },
+          "runqueue_ms": {
+            "$ref": "#/$defs/measurement"
+          },
+          "unattributed_ms": {
+            "$ref": "#/$defs/measurement"
+          },
+          "overlap_cpu_ms": {
+            "$ref": "#/$defs/measurement"
+          },
+          "unattributed_cpu_ms": {
+            "$ref": "#/$defs/measurement"
+          },
+          "unbudgeted": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.:-]*$",
+              "maxLength": 100
+            }
+          },
+          "critical_path": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.:-]*$",
+              "maxLength": 100
+            }
+          },
+          "stages": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_.:-]*$",
+              "maxLength": 100
+            },
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ms": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "cpu_ms": {
+                  "$ref": "#/$defs/measurement"
+                }
+              },
+              "required": [
+                "ms",
+                "cpu_ms"
+              ]
+            }
+          },
+          "read_error": {
+            "enum": [
+              "served-http-error",
+              "served-network-error",
+              "served-timeout",
+              "served-invalid-response",
+              "served-read-refused",
+              "served-call-aborted"
+            ]
+          }
+        },
+        "required": [
+          "case",
+          "series",
+          "principal",
+          "arm",
+          "repeat",
+          "load",
+          "elapsed_ms",
+          "state",
+          "cpu_ms",
+          "cpu_source",
+          "runqueue_ms",
+          "unattributed_ms",
+          "overlap_cpu_ms",
+          "unattributed_cpu_ms",
+          "unbudgeted",
+          "critical_path",
+          "stages"
+        ]
+      }
+    },
+    "load": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "first": {
+          "type": "number",
+          "minimum": 0
+        },
+        "final": {
+          "type": "number",
+          "minimum": 0
+        },
+        "waited_seconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "first",
+        "final",
+        "waited_seconds"
+      ]
+    },
+    "nonce_strategy": {
+      "const": "trailing-whitespace"
+    },
+    "corpus": {
+      "$ref": "#/$defs/live_corpus"
+    }
+  },
+  "required": [
+    "schema_version",
+    "mode",
+    "state",
+    "contract_revision",
+    "series",
+    "samples"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "live_corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "served-state-read-only-sql"
+        },
+        "bucket_width": {
+          "const": 500
+        },
+        "sqlite_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "pages": {
+          "type": "integer",
+          "minimum": 0,
+          "multipleOf": 500
+        },
+        "chunks": {
+          "type": "integer",
+          "minimum": 0,
+          "multipleOf": 500
+        },
+        "units": {
+          "type": "integer",
+          "minimum": 0,
+          "multipleOf": 500
+        }
+      },
+      "required": [
+        "source",
+        "bucket_width",
+        "sqlite_version",
+        "pages",
+        "chunks",
+        "units"
+      ]
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "corpus": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "chunks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "units": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unit_pages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "vector_units": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "spot_checks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "median_page_bytes": {
+              "type": "number",
+              "minimum": 0
+            },
+            "vocabulary_terms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wikilinks_min": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wikilinks_max": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "transcript_pages": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "pages",
+            "chunks",
+            "units",
+            "unit_pages",
+            "vector_units",
+            "spot_checks",
+            "median_page_bytes",
+            "vocabulary_terms",
+            "wikilinks_min",
+            "wikilinks_max",
+            "transcript_pages"
+          ]
+        },
+        "encoder_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "encoder_identity": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "sqlite_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "python_version": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "cpus": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "corpus",
+        "encoder_digest",
+        "encoder_identity",
+        "sqlite_version",
+        "python_version",
+        "cpus"
+      ]
+    },
+    "measurement": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    }
+  }
+}

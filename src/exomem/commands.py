@@ -80,6 +80,7 @@ from . import find as find_module
 from . import (
     find_types,
     note_types,
+    operation_entries,
     query_log,
     retrieval_models,
     semantic_census,
@@ -103,13 +104,13 @@ from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
-from . import operation_entries
 from . import overview as overview_module
 from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import readiness as readiness_module
+from . import recall_timing as recall_timing_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
@@ -6453,45 +6454,47 @@ def op_ask_memory(
         explain: Add retrieval-plan and ranking evidence.
         purpose: Declared purpose; governance may widen or narrow visibility.
     """
-    # Reuse request-local placement and policy work; terminal egress opens fresh scopes.
-    with state_paths_module.resolution_scope():
-        result = op_find(
-            vault_root,
-            query=query,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-            categories=categories,
-            kinds=kinds,
-            source_kinds=source_kinds,
-            domains=domains,
-            relations=relations,
-            relation_of=relation_of,
-            relation_direction=relation_direction,
-            filters=filters,
-            result_level=result_level,
-            limit=limit,
-            continuation=continuation,
-            scope=scope,
-            mode=mode,
-            graph=graph,
-            rerank=rerank,
-            rerank_max_candidates=rerank_max_candidates,
-            prefer_compiled=prefer_compiled,
-            prefer_active=prefer_active,
-            prefer_used=prefer_used,
-            widen_outside_kb=widen_outside_kb,
-            pack=deep,
-            graph_enrich=graph_enrich,
-            detail=detail,
-            include_timings=include_timings,
-            explain=explain,
-            purpose=purpose,
-        )
-        return _with_due_state(vault_root, result, purpose=purpose)
+    with recall_timing_module.measure_recall(include_timings) as trace:
+        # Reuse request-local placement and policy work; terminal egress opens fresh scopes.
+        with state_paths_module.resolution_scope():
+            result = op_find(
+                vault_root,
+                query=query,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+                categories=categories,
+                kinds=kinds,
+                source_kinds=source_kinds,
+                domains=domains,
+                relations=relations,
+                relation_of=relation_of,
+                relation_direction=relation_direction,
+                filters=filters,
+                result_level=result_level,
+                limit=limit,
+                continuation=continuation,
+                scope=scope,
+                mode=mode,
+                graph=graph,
+                rerank=rerank,
+                rerank_max_candidates=rerank_max_candidates,
+                prefer_compiled=prefer_compiled,
+                prefer_active=prefer_active,
+                prefer_used=prefer_used,
+                widen_outside_kb=widen_outside_kb,
+                pack=deep,
+                graph_enrich=graph_enrich,
+                detail=detail,
+                include_timings=include_timings,
+                explain=explain,
+                purpose=purpose,
+            )
+            result = _with_due_state(vault_root, result, purpose=purpose)
+    return recall_timing_module.completed(result, trace)
 
 
 def _with_due_state(

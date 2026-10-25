@@ -8115,14 +8115,20 @@ def evict_resolver_caches(vault_root: Path) -> int:
     return removed
 
 
+def reset_result_cache() -> int:
+    """Clear completed answers and checkpoints, retaining every substrate cache."""
+    with _FIND_CACHE_LOCK:
+        count = len(_FIND_CACHE)
+        _FIND_CACHE.clear()
+        _FIND_CACHE_CHECKPOINTS.clear()
+    return count
+
+
 def reset_page_and_result_caches() -> dict[str, int]:
     """Narrow latency-harness reset: keep resolver/freshness/catalog state warm."""
     page_entries = len(_CACHE.entries)
     _CACHE.clear()
-    with _FIND_CACHE_LOCK:
-        hot_entries = len(_FIND_CACHE)
-        _FIND_CACHE.clear()
-        _FIND_CACHE_CHECKPOINTS.clear()
+    hot_entries = reset_result_cache()
     return {"pages": page_entries, "hot_find": hot_entries}
 
 

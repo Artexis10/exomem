@@ -1,10 +1,8 @@
-"""Read-path observations using the current governed recall bars.
+"""Whole-call governed recall evidence and a same-runner release comparison.
 
-The packaged contract supplies ceilings, diagnostic targets and the reference
-premise. This runner still lacks the complete reference mix, principal proof,
-stage unions and live run-queue attribution required by acceptance task 6.1.
-Its reports therefore say not measured for full acceptance. Response inner
-timings remain identified as read-path diagnostics, never public dispatch.
+The packaged contract supplies bars and interval ownership. Reference inputs
+and evidence schemas live beside the accept record. Legacy observation flags
+remain available and continue to identify their narrower boundary.
 """
 
 from __future__ import annotations
@@ -17,6 +15,8 @@ import statistics
 import sys
 import time
 import uuid
+from collections import defaultdict
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -28,14 +28,25 @@ SRC = ROOT / "src"
 _bootstrap = argparse.ArgumentParser(add_help=False)
 _bootstrap.add_argument("--package-mode", choices=("installed", "source"))
 _bootstrap.add_argument("--mcp-url")
+_bootstrap.add_argument("--worker-source", type=Path)
+_bootstrap.add_argument("--worker-cpus")
 _boot_args = _bootstrap.parse_known_args()[0]
-if (_boot_args.package_mode or ("installed" if _boot_args.mcp_url else "source")) == "source" and str(SRC) not in sys.path:
+if _boot_args.worker_source:
+    # Pin before importing application modules or any native encoder dependency.
+    os.sched_setaffinity(0, set(json.loads(_boot_args.worker_cpus)))
+    sys.path.insert(0, str(_boot_args.worker_source / "src"))
+elif (_boot_args.package_mode or ("installed" if _boot_args.mcp_url else "source")) == "source" and str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
 from exomem.request_latency_contract import load_contract  # noqa: E402
 
 CONTRACT = load_contract()
+if _boot_args.worker_source:
+    # Both arms read head's canonical bars; the tag supplies product code only.
+    CONTRACT = type(CONTRACT).model_validate_json(
+        (SRC / "request_latency_contract.json").read_text()
+    )
 HYBRID_BAR = CONTRACT.bar("governed-hybrid")
 KEYWORD_BAR = CONTRACT.bar("governed-keyword")
 HYBRID_P95_MS = HYBRID_BAR.threshold_ms
@@ -612,6 +623,14 @@ def check(report: dict[str, Any]) -> None:
 # --- Transports -------------------------------------------------------------
 
 
+class ServedReadFailure(SystemExit):
+    """Keep legacy CLI exits while supplying content-free evidence codes."""
+
+    def __init__(self, reason: str, message: str, *, refused: bool = False):
+        super().__init__(message)
+        self.reason, self.refused = reason, refused
+
+
 class ServedTransport:
     """The live cell, over the REST facade.
 
@@ -634,6 +653,7 @@ class ServedTransport:
         self.pages: int | None = None
 
     def _post(self, payload: dict[str, Any], *, command: str = "ask_memory") -> dict[str, Any]:
+        from http.client import HTTPException
         from urllib.error import HTTPError, URLError
         from urllib.request import Request, urlopen
 
@@ -649,15 +669,24 @@ class ServedTransport:
         try:
             with urlopen(request, timeout=self._timeout) as response:  # noqa: S310
                 body = json.loads(response.read())
-        except (HTTPError, URLError, TimeoutError) as error:
+        except (HTTPError, URLError, HTTPException, OSError) as error:
             # The class only. A transport error's message can carry the URL,
             # and the URL carries the key in no case here, but a header echo in
             # a future urllib would.
-            raise SystemExit(
-                f"recall latency gate failed: served call failed ({type(error).__name__})"
+            reason = ("served-http-error" if isinstance(error, HTTPError) else
+                      "served-timeout" if isinstance(error, TimeoutError) else "served-network-error")
+            raise ServedReadFailure(
+                reason, f"recall latency gate failed: served call failed ({type(error).__name__})"
             ) from error
+        except ValueError as error:
+            raise ServedReadFailure("served-invalid-response", "recall latency gate failed: invalid response") from error
+        if not isinstance(body, dict):
+            raise ServedReadFailure("served-invalid-response", "recall latency gate failed: invalid response")
         if not body.get("success"):
-            raise SystemExit("recall latency gate failed: the cell refused the read")
+            raise ServedReadFailure("served-read-refused", "recall latency gate failed: the cell refused the read",
+                                    refused=True)
+        if body.get("data") is not None and not isinstance(body["data"], dict):
+            raise ServedReadFailure("served-invalid-response", "recall latency gate failed: invalid response")
         return body.get("data") or {}
 
     def measure_corpus(self) -> int | None:
@@ -830,6 +859,765 @@ def _sample_from_envelope(data: Any) -> Sample:
 # --- Read-only MCP canary ----------------------------------------------------
 
 
+# --- Reference measurement and same-runner comparison ------------------------
+
+BENCHMARK = ROOT / "benchmarks/recall-latency"
+REFERENCE = CONTRACT.references[HYBRID_BAR.reference]
+PAIRING = REFERENCE["paired"]
+
+
+class MeasurementRefused(ValueError):
+    """A closed instrument failure code, safe to include in public evidence."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def validate_document(document: dict, schema: str, *, directory: Path = BENCHMARK,
+                      definition: str | None = None) -> None:
+    """Validate stored evidence using the project's maintained JSON Schema engine."""
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    shape = json.loads((directory / schema).read_text())
+    if definition is not None:
+        shape = shape["$defs"][definition]
+    validator = Draft202012Validator(shape, format_checker=FormatChecker())
+    validator.validate(document)
+    if definition is None and schema == "summary.schema.json":
+        if any(sample["repeat"] >= PAIRING["repeats"] for sample in document["samples"]):
+            raise MeasurementRefused("sample-repeat-outside-contract")
+
+
+def paired_statistic(ratios: list[float]) -> dict[str, Any]:
+    """Student-t interval over independent cases' log median ratios."""
+    if any(isinstance(value, bool) or not math.isfinite(value) or value <= 0 for value in ratios):
+        raise ValueError("invalid-paired-ratio")
+    if len(ratios) < PAIRING["minimum_cases"]:
+        return {"state": "insufficient samples", "cases": len(ratios)}
+    from scipy.stats import t
+
+    logs = [math.log(value) for value in ratios]
+    mean = statistics.fmean(logs)
+    half = float(t.ppf((1 + PAIRING["confidence"]) / 2, len(logs) - 1)) * (
+        statistics.stdev(logs) / math.sqrt(len(logs))
+    )
+    return {"state": "measured", "cases": len(ratios), "ratio": math.exp(mean),
+            "lower": math.exp(mean - half), "upper": math.exp(mean + half)}
+
+
+def read_accept(tag: str, path: Path = BENCHMARK / "accept.json") -> tuple[dict | None, str]:
+    if not path.exists():
+        return None, "absent"
+    document = json.loads(path.read_text())
+    validate_document(document, "accept.schema.json")
+    names = [row["name"] for row in document["series"]]
+    if len(set(names)) != len(names) or any(
+        row["maximum_ratio"] < PAIRING["margin"] or
+        not math.isfinite(row["maximum_ratio"] / PAIRING["accept_rounding"]) or
+        not math.isclose(row["maximum_ratio"] / PAIRING["accept_rounding"],
+                         round(row["maximum_ratio"] / PAIRING["accept_rounding"]))
+        for row in document["series"]
+    ):
+        raise MeasurementRefused("accept-record-series-or-rounding-invalid")
+    if document["tag"] != tag:
+        return None, "expired"
+    return document, "current"
+
+
+def compare_pairs(samples: list[dict], *, tag: str, accept: dict | None = None) -> list[dict]:
+    """Compare closed samples; one broken repeat invalidates its whole series."""
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for sample in samples:
+        grouped[sample["principal"], sample["series"]].append(sample)
+    reports = []
+    for (principal_name, series_name), series_samples in sorted(grouped.items()):
+        cases: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+        warming = sum(sample.get("state") == "warming" for sample in series_samples)
+        broken = warming > MAX_WARMING_SAMPLES
+        for sample in series_samples:
+            cases[sample["case"]][sample["arm"]].append(sample)
+            value = sample.get("elapsed_ms")
+            if (sample.get("state") != "warming" and
+                (sample.get("state") != "ok" or isinstance(value, bool)
+                or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0)):
+                broken = True
+        ratios, stage_ratios = [], defaultdict(list)
+        base_stages, head_stages = set(), set()
+        for arms in cases.values():
+            if set(arms) != {"base", "head"} or any(
+                len(rows) != PAIRING["repeats"]
+                or {row["repeat"] for row in rows} != set(range(PAIRING["repeats"]))
+                for rows in arms.values()
+            ):
+                broken = True
+                continue
+            if any(row.get("state") != "ok" or not _positive(row.get("elapsed_ms"))
+                   for rows in arms.values() for row in rows):
+                continue
+            ratios.append(statistics.median(row["elapsed_ms"] for row in arms["head"]) /
+                          statistics.median(row["elapsed_ms"] for row in arms["base"]))
+            base_stages.update(key for row in arms["base"] for key in row["stages"])
+            head_stages.update(key for row in arms["head"] for key in row["stages"])
+            for stage in base_stages | head_stages:
+                stage_values = {
+                    arm: [row["stages"].get(stage, {}).get("ms") for row in rows]
+                    for arm, rows in arms.items()
+                }
+                if all(_positive(value) for values in stage_values.values() for value in values):
+                    stage_ratios[stage].append(
+                        statistics.median(stage_values["head"]) /
+                        statistics.median(stage_values["base"])
+                    )
+        report = {"principal": principal_name, "series": series_name,
+                  **paired_statistic(ratios), "gating": principal_name == "owner"}
+        report["state"] = "failed" if broken else (
+            "insufficient samples" if "lower" not in report else
+            "failed" if report["lower"] > PAIRING["margin"] else "passed"
+        )
+        if report["state"] == "failed" and not broken and accept and accept["tag"] == tag:
+            allowance = next((item for item in accept["series"] if item["name"] == series_name), None)
+            if allowance and report["lower"] <= allowance["maximum_ratio"]:
+                report.update(state="accepted", reason=accept["reason"])
+        report["unknown_samples"] = sum(
+            row.get("state") != "warming" and
+            (row.get("state") != "ok" or not _positive(row.get("elapsed_ms")))
+            for row in series_samples
+        )
+        report["warming"] = warming
+        for arm in ("base", "head"):
+            arm_samples = [row for row in series_samples if row["arm"] == arm]
+            elapsed = [row["elapsed_ms"] for row in arm_samples
+                       if row.get("state") == "ok" and _positive(row.get("elapsed_ms"))]
+            loads = [row["load"] for row in arm_samples if isinstance(row.get("load"), (int, float))]
+            report[arm + "_p50_ms"] = _percentile(elapsed, 0.5)
+            report[arm + "_p95_ms"] = _percentile(elapsed, 0.95)
+            report[arm + "_load_mean"] = statistics.fmean(loads) if loads else None
+            report[arm + "_load_max"] = max(loads) if loads else None
+        report["stages"] = {}
+        for stage in sorted(set(REFERENCE["stage_rows"]) | base_stages | head_stages):
+            comparison = ({"state": "not comparable", "cases": 0}
+                          if stage not in base_stages or stage not in head_stages else
+                          paired_statistic(stage_ratios[stage]))
+            for arm in ("base", "head"):
+                arm_samples = [row for row in series_samples if row["arm"] == arm]
+                cpu = [row["stages"].get(stage, {}).get("cpu_ms") for row in arm_samples]
+                cpu = [value for value in cpu if isinstance(value, (int, float)) and math.isfinite(value)]
+                comparison[arm + "_cpu_p95_ms"] = _percentile(cpu, 0.95)
+                paths = [row["critical_path"] for row in arm_samples if row.get("critical_path") is not None]
+                comparison[arm + "_critical_path_samples"] = len(paths)
+                comparison[arm + "_critical_path_share"] = (
+                    sum(stage in path for path in paths) / len(paths) if paths else None)
+            report["stages"][stage] = comparison
+        reports.append(report)
+    return reports
+
+
+def _positive(value: Any) -> bool:
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and value > 0)
+
+
+def summarize_absolute(samples: list[dict], *, environment: dict, profile: dict,
+                       live: bool = False) -> tuple[str, list[dict]]:
+    """Keep live contention separate from reference process costs."""
+    summaries = []
+    for principal_name, series_name in sorted({(s["principal"], s["series"]) for s in samples}):
+        selected = [s for s in samples if (s["principal"], s["series"]) == (principal_name, series_name)]
+        known = [s for s in selected if s["state"] == "ok" and _positive(s.get("elapsed_ms"))]
+        contended = [s for s in known if live and s.get("runqueue_ms") is not None
+                     and s["runqueue_ms"] > max(5.0, 0.1 * s["elapsed_ms"])]
+        retained = [s for s in known if s not in contended]
+        warming = sum(s["state"] == "warming" for s in selected)
+        unknown = len(selected) - len(known) - warming
+        unknown_contention = sum(s.get("runqueue_ms") is None for s in known) if live else 0
+        refused = (bool(unknown_contention) or
+                   len(contended) > len(selected) * REFERENCE["max_contended_fraction"])
+        bar = KEYWORD_BAR if series_name == "keyword" else HYBRID_BAR
+        target = CONTRACT.bar("governed-keyword-p95-target" if series_name == "keyword"
+                              else "governed-hybrid-p95-target")
+        values = [s["elapsed_ms"] for s in retained]
+        p50, p95 = _percentile(values, 0.5), _percentile(values, 0.95)
+        state = ("refused" if refused else "failed" if unknown
+                 or warming > MAX_WARMING_SAMPLES or len(values) < bar.min_samples
+                 else "passed" if p95 <= bar.threshold_ms else "failed")
+        stages = {}
+        observed_rows = {row for sample in retained for row in sample["stages"]}
+        paths = [s["critical_path"] for s in retained if s.get("critical_path") is not None]
+        policy = REFERENCE["stage_diagnostics"]
+        for row in sorted(set(REFERENCE["stage_rows"]) | observed_rows):
+            observations = [s["stages"][row] for s in retained if row in s["stages"]]
+            wall = [value["ms"] for value in observations]
+            cpu = [value["cpu_ms"] for value in observations if value["cpu_ms"] is not None]
+            budget = CONTRACT.bar(row) if row in REFERENCE["stage_rows"] else None
+            sufficient = len(wall) >= (budget.min_samples if budget else REFERENCE["stage_min"])
+            stage_p95 = _percentile(wall, 0.95)
+            # Target-only rows and the multiplier are fixed by the contract.
+            calibrated = budget is not None and row not in policy["target_only"]
+            stages[row] = {"state": "not run" if not wall else
+                           "insufficient samples" if not sufficient else
+                           "unbudgeted" if budget is None else
+                           "failed" if calibrated and stage_p95 > policy["twice_budget_multiplier"] * budget.threshold_ms
+                           else "passed",
+                           "samples": len(wall), "p50_ms": _percentile(wall, 0.5), "p95_ms": stage_p95,
+                           "cpu_p50_ms": _percentile(cpu, 0.5), "cpu_p95_ms": _percentile(cpu, 0.95),
+                           "budget_ms": budget.threshold_ms if budget else None,
+                           "target_met": stage_p95 <= budget.threshold_ms if budget and sufficient else None,
+                           "twice_budget_applied": calibrated and sufficient,
+                           "critical_path_samples": len(paths),
+                           "critical_path_share": (sum(row in path for path in paths) / len(paths) if paths else None)}
+        floor_bar = CONTRACT.bar(policy["floor_bar"])
+        encode = stages[policy["floor_bar"]]
+        eligible_floor = (not live and not refused and environment["sqlite_version"] in profile["sqlite_versions"]
+                          and len(environment.get("cpus", [])) == REFERENCE["reference_cpus"]
+                          and encode["samples"] >= floor_bar.min_samples
+                          and encode["p95_ms"] > floor_bar.threshold_ms)
+        floor = {"state": "measured" if eligible_floor else "not measured",
+                 "p95_ms": encode["p95_ms"] if eligible_floor else None,
+                 "budget_ms": floor_bar.threshold_ms, "samples": encode["samples"],
+                 "source": "retained-reference-series" if eligible_floor else None}
+        loads = [s["load"] for s in selected]
+        summary = {"principal": principal_name, "series": series_name,
+                   "state": state, "samples": len(retained), "warming": warming,
+                   "unknown_samples": unknown, "unknown_contention": unknown_contention,
+                   "contended": len(contended), "p50_ms": p50, "p95_ms": p95,
+                   "p95_including_contention_ms": _percentile([s["elapsed_ms"] for s in known], 0.95),
+                   "load_mean": statistics.fmean(loads), "load_max": max(loads),
+                   "ceiling_bar": bar.id, "p95_target_bar": target.id,
+                   "p50_target_bar": "governed-p50-target",
+                   "p50_target_met": p50 <= HYBRID_P50_MS if p50 is not None and not refused else None,
+                   "p95_target_met": p95 <= target.threshold_ms if p95 is not None and not refused else None,
+                   "ceiling_met": p95 <= bar.threshold_ms if p95 is not None and not refused else None,
+                   "encode_floor": floor, "stages": stages}
+        if refused:
+            summary.update(p50_ms=None, p95_ms=None)
+        summaries.append(summary)
+    owner_states = [row["state"] for row in summaries if row["principal"] == "owner"]
+    if environment["sqlite_version"] not in profile["sqlite_versions"]:
+        for row in summaries:
+            row.update(state="not measured", ceiling_met=None)
+        return "not measured", summaries
+    return ("refused" if "refused" in owner_states else
+            "failed" if "failed" in owner_states or not owner_states else "passed"), summaries
+
+
+def absolute_cli(output: Path, *, quiescence_bound: float) -> int:
+    """Record absolute evidence; its state never controls the command's exit code."""
+    import tempfile
+
+    report = {"schema_version": 1, "mode": "absolute", "state": "not measured",
+              "contract_revision": CONTRACT.revision, "series": [], "samples": []}
+    worker = None
+    try:
+        profile = json.loads((BENCHMARK / "profile.json").read_text())
+        cases, digest = reference_cases(profile)
+        first, final, waited = await_quiescence(
+            one_minute_load, bound_seconds=quiescence_bound, sleep=time.sleep,
+        )
+        report["load"] = {"first": first, "final": final, "waited_seconds": waited}
+        if final > MAX_LOAD_AVERAGE:
+            report.update(state="refused", reason="load-above-reference")
+        else:
+            with tempfile.TemporaryDirectory(prefix="exomem-recall-latency-") as temporary:
+                scratch = Path(temporary)
+                cpus = sorted(os.sched_getaffinity(0))[:REFERENCE["reference_cpus"]]
+                if len(cpus) != REFERENCE["reference_cpus"]:
+                    raise ValueError("two-cpu-reference-unavailable")
+                worker = _Worker(ROOT, scratch / "vault", scratch / "state", cpus, profile)
+                try:
+                    for principal_name in ("owner", "admitted"):
+                        # First calls are excluded as warm-up, with real query encodes.
+                        for case in {c["series"]: c for c in reversed(cases)}.values():
+                            worker.exchange({**case, "principal": principal_name,
+                                             "rows": REFERENCE["stage_rows"]})
+                        for case in cases:
+                            sample = worker.exchange({**case, "principal": principal_name,
+                                                      "rows": REFERENCE["stage_rows"]})
+                            report["samples"].append({"case": case["id"], "series": case["series"],
+                                "principal": principal_name, "arm": "head", "repeat": 0,
+                                "load": one_minute_load(), **sample})
+                    report["environment"] = {"head": worker.environment}
+                    report["source_digest"] = digest
+                    report["unmeasured"] = profile["unmeasured"]
+                    report["state"], report["series"] = summarize_absolute(
+                        report["samples"], environment=worker.environment, profile=profile,
+                    )
+                finally:
+                    worker.close()
+                    worker = None
+    except (ValueError, OSError) as error:
+        report.update(state="not measured",
+                      reason=error.code if isinstance(error, MeasurementRefused) else type(error).__name__)
+    finally:
+        if worker is not None:
+            worker.close()
+    validate_document(report, "summary.schema.json")
+    output.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    print(json.dumps({"state": report["state"], "artifact": output.name}))
+    return 0
+
+
+def reference_cases(profile: dict, directory: Path = BENCHMARK) -> tuple[list[dict], str]:
+    from synth_vault import reference_source
+
+    try:
+        _, digest = reference_source(profile, directory)
+    except ValueError as error:
+        raise MeasurementRefused("reference-prose-unavailable") from error
+    specifications = json.loads((directory / profile["case_file"]).read_text())
+    cases = []
+    for specification in specifications:
+        cases.append({"id": specification["id"], "series": specification["series"],
+                      "query": specification["query"], "arguments": specification["arguments"]})
+    for series in {case["series"] for case in cases}:
+        selected = [case for case in cases if case["series"] == series]
+        if len(selected) < REFERENCE["queries_min"]:
+            raise ValueError("reference-case-count-below-profile")
+        lengths = [len(case["query"].split()) for case in selected]
+        # These word bands are the measurement contract's closed sampling bins.
+        if ([sum(1 <= n <= 3 for n in lengths), sum(4 <= n <= 9 for n in lengths),
+             sum(15 <= n <= 40 for n in lengths)] != [10, 20, 10]):
+            raise ValueError("reference-query-bands-invalid")
+    return cases, digest
+
+
+def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict) -> dict:
+    """Count actual stored rows and check deterministic samples against source truth."""
+    import hashlib
+    import sqlite3
+    import string
+
+    import numpy as np
+    from synth_vault import reference_source
+
+    from exomem import find_results, lexstore, vault
+
+    with sqlite3.connect(lexstore.lexical_path(vault_root)) as conn:
+        pages = conn.execute("SELECT count(*) FROM pages WHERE in_kb=1 AND is_nav=0").fetchone()[0]
+        units, unit_pages = conn.execute(
+            "SELECT count(*), count(DISTINCT parent_path) FROM semantic_units WHERE in_kb=1"
+        ).fetchone()
+        for rel in (rels[0], rels[len(rels) // 2], rels[-1]):
+            digest = conn.execute("SELECT content_hash FROM pages WHERE path=?", (rel,)).fetchone()
+            if digest is None or digest[0] != hashlib.sha256((vault_root / rel).read_bytes()).hexdigest():
+                raise ValueError("stored-page-source-mismatch")
+    with sqlite3.connect(index.path) as conn:
+        chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        vector_units = conn.execute("SELECT count(*) FROM semantic_unit_vectors").fetchone()[0]
+        for blob, in conn.execute("SELECT vector FROM chunks ORDER BY file_path, chunk_idx LIMIT 3"):
+            vector = np.frombuffer(blob, dtype=np.float32)
+            if not np.isfinite(vector).all() or not np.isclose(np.linalg.norm(vector), 1.0):
+                raise ValueError("stored-vector-invalid")
+    source_words, _digest = reference_source(profile, BENCHMARK)
+    source_terms = {word.strip(string.punctuation).casefold() for word in source_words}
+    sizes, links, transcript_sizes = [], [], []
+    terms: set[str] = set()
+    for rel in rels:
+        raw = (vault_root / rel).read_bytes()
+        sizes.append(len(raw))
+        frontmatter, body = vault.parse_frontmatter(raw.decode("utf-8"))
+        links.append(len(find_results.wikilink_targets(body)))
+        terms.update(word.strip(string.punctuation).casefold() for word in body.split())
+        if frontmatter.get("media_type"):
+            transcript_sizes.append(len(raw))
+    vocabulary = len((terms & source_terms) - {""})
+    median = statistics.median(sizes)
+    if (pages < REFERENCE["pages_min"] or chunks < REFERENCE["chunks_min"]
+        or units < REFERENCE["units_min"] or unit_pages < pages * profile["unit_page_fraction"]
+        or vector_units < units or vocabulary < profile["vocabulary_min"]
+        or min(links) < profile["links_min"] or max(links) > profile["links_max"]
+        or len(transcript_sizes) < pages * profile["transcript_fraction"]
+        or any(not profile["transcript_bytes"][0] <= size <= profile["transcript_bytes"][1]
+               for size in transcript_sizes)
+        or not profile["median_page_bytes"][0] <= median <= profile["median_page_bytes"][1]):
+        raise ValueError("stored-corpus-below-reference-profile")
+    return {"pages": pages, "chunks": chunks, "units": units, "unit_pages": unit_pages,
+            "vector_units": vector_units, "median_page_bytes": median, "spot_checks": 6,
+            "vocabulary_terms": vocabulary, "wikilinks_min": min(links), "wikilinks_max": max(links),
+            "transcript_pages": len(transcript_sizes)}
+
+
+def _prepare_worker(vault_root: Path, startup: dict) -> dict:
+    import hashlib
+    import sqlite3
+
+    import numpy as np
+    from managed_recall import enter_managed_recall
+    from synth_vault import gen_reference_vault, reference_source
+
+    from exomem import embeddings, freshness, recall_space
+    from exomem.governance import principal
+
+    profile = startup["profile"]
+    words, _digest = reference_source(profile, BENCHMARK)
+    model = embeddings.get_model()
+    artifact = getattr(model, "profile", None)
+    if artifact is None or not artifact.artifact_digest:
+        raise ValueError("served-encoder-artifact-unknown")
+    probe = embeddings.embed_texts(["reference encoder warmup"], is_query=True)
+    identity = recall_space.current_identity(int(probe.shape[1]))
+    if identity.fingerprint != artifact.fingerprint():
+        raise ValueError("resident-encoder-identity-mismatch")
+    with principal.library_scope():
+        manifest = vault_root / "reference-corpus.json"
+        if manifest.exists():
+            rels = json.loads(manifest.read_text())
+        else:
+            rels = gen_reference_vault(vault_root, profile, words)
+            manifest.write_text(json.dumps(rels))
+        original = embeddings.embed_texts
+
+        def seeded(texts, *, is_query=False):
+            if is_query:
+                raise ValueError("query-encoder-substituted-during-build")
+            vectors = []
+            for text in texts:
+                seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "little")
+                vector = np.random.default_rng(seed).standard_normal(identity.dim).astype(np.float32)
+                vectors.append(vector / np.linalg.norm(vector))
+            return np.asarray(vectors, dtype=np.float32).reshape((-1, identity.dim))
+
+        try:
+            embeddings.embed_texts = seeded
+            index = embeddings.get_embedding_index(vault_root)
+            index.rebuild_all()
+        finally:
+            embeddings.embed_texts = original
+        if index.identity != identity:
+            raise ValueError("seeded-index-identity-mismatch")
+        from exomem import lexstore
+
+        lexstore.ensure_fresh(vault_root)
+        corpus = _stored_corpus(vault_root, index, rels, profile)
+        for scope in ("vault", "kb"):
+            freshness.seed(vault_root, scope, (
+                (str(vault_root / rel), freshness.stat_signature(vault_root / rel)) for rel in rels
+            ))
+        enter_managed_recall(vault_root, full_startup=True)
+    return {"corpus": corpus, "encoder_digest": artifact.artifact_digest,
+            "encoder_identity": artifact.fingerprint(), "sqlite_version": sqlite3.sqlite_version,
+            "python_version": sys.version.split()[0], "cpus": sorted(os.sched_getaffinity(0))}
+
+
+def _failed_stage(result: Any, collectors=()) -> bool:
+    """Read the producers' explicit degraded and stage error fields."""
+    stages = (result.get("timings") or {}).get("stages", {}) if isinstance(result, dict) else {}
+    return bool(isinstance(result, dict) and result.get("degraded")) or any(
+        stage.get("error") for stage in stages.values()
+    ) or any(stage.get("error") for collector in collectors for stage in collector.stages.values())
+
+
+def _worker_sample(vault_root: Path, request: dict) -> dict:
+    from recall_latency_adapter import clear_results, instrument
+
+    from exomem import commands
+    from exomem.governance import principal
+
+    clear_results()
+    caller = (principal.owner_principal(surface="library") if request["principal"] == "owner"
+              else principal.RequestPrincipal(audience_id="benchmark-admitted", surface="mcp"))
+    with principal.request_scope(caller), principal.invocation_scope():
+        with instrument() as (trace, collectors):
+            started = time.perf_counter_ns()
+            result = commands.op_ask_memory(
+                vault_root, query=request["query"], include_timings=True,
+                limit=DEFAULT_LIMIT, rerank=False, **request["arguments"],
+            )
+            elapsed_ms = (time.perf_counter_ns() - started) / 1e6
+    accounting = trace.result(request["rows"])
+    hits = result.get("hits", []) if isinstance(result, dict) else result
+    failed_stage = _failed_stage(result, collectors)
+    state = ("unknown" if failed_stage else
+             "warming" if isinstance(result, dict) and "warming" in result else
+             "unknown" if not collectors or not trace.intervals else
+             "empty" if not isinstance(hits, list) or not hits else "ok")
+    return {"elapsed_ms": elapsed_ms, "state": state, **{
+        key: value for key, value in accounting.items() if key != "total_ms"
+    }}
+
+
+def worker_main(vault_root: Path) -> int:
+    """Persistent JSON-lines worker; never emit product output or raw exceptions."""
+    try:
+        startup = json.loads(sys.stdin.readline())
+        with redirect_stdout(sys.stderr):
+            environment = _prepare_worker(vault_root, startup)
+        print(json.dumps({"state": "ready", "environment": environment}), flush=True)
+        for line in sys.stdin:
+            request = json.loads(line)
+            if request.get("stop"):
+                break
+            with redirect_stdout(sys.stderr):
+                sample = _worker_sample(vault_root, request)
+            print(json.dumps(sample, allow_nan=False), flush=True)
+    except Exception as error:  # noqa: BLE001 - raw errors can contain corpus content.
+        print(json.dumps({"state": "worker-error", "error_class": type(error).__name__}), flush=True)
+        return 1
+    finally:
+        from exomem import readiness
+
+        readiness.unmanage_runtime()
+    return 0
+
+
+class _Worker:
+    """One owned child; suspend its idle native pool outside the timed call."""
+
+    def __init__(self, source: Path, vault: Path, state: Path, cpus: list[int], profile: dict):
+        import subprocess
+
+        # Only declared cache and resource settings cross into disposable workers.
+        environment = {key: os.environ[key] for key in profile["worker_environment"] if key in os.environ}
+        environment.update(EXOMEM_STATE_ROOT=str(state), EXOMEM_VAULT_PATH=str(vault),
+                           EXOMEM_EMBED_BACKEND="onnx", EXOMEM_DISABLE_RANKING="1",
+                           EXOMEM_DISABLE_CLIP="1", EXOMEM_DISABLE_MEDIA_EXTRACTION="1")
+        environment.pop("EXOMEM_DISABLE_EMBEDDINGS", None)
+        environment.pop("KB_MCP_DISABLE_EMBEDDINGS", None)
+        self.process = subprocess.Popen(
+            [sys.executable, "-u", str(Path(__file__).resolve()), "--worker-source", str(source),
+             "--worker-cpus", json.dumps(cpus), "--worker-vault", str(vault)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=environment, text=True,
+        )
+        self.paused = False
+        try:
+            self.environment = self.exchange({"profile": profile})["environment"]
+        except BaseException:
+            self.close()
+            raise
+        self.pause()
+
+    def exchange(self, request: dict) -> dict:
+        self.resume()
+        self.process.stdin.write(json.dumps(request) + "\n")
+        self.process.stdin.flush()
+        line = self.process.stdout.readline()
+        if not line:
+            raise ValueError("benchmark-worker-ended")
+        response = json.loads(line)
+        if response.get("state") == "worker-error":
+            raise ValueError("benchmark-worker-failed-" + response["error_class"])
+        return response
+
+    def pause(self) -> None:
+        import signal
+
+        if not self.paused and self.process.poll() is None:
+            self.process.send_signal(signal.SIGSTOP)
+            # waitpid confirms the stop before the other arm starts its timer.
+            os.waitpid(self.process.pid, os.WUNTRACED)
+            self.paused = True
+
+    def resume(self) -> None:
+        import signal
+
+        if self.paused:
+            self.process.send_signal(signal.SIGCONT)
+            self.paused = False
+
+    def close(self) -> None:
+        import subprocess
+
+        self.resume()
+        if self.process.poll() is None:
+            self.process.terminate()
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self.process.stdin.close()
+        self.process.stdout.close()
+
+
+def paired_run(*, base: Path, tag: str, scratch: Path, profile: dict,
+               cases: list[dict], accept_path: Path = BENCHMARK / "accept.json") -> dict:
+    if not hasattr(os, "sched_getaffinity") or len(os.sched_getaffinity(0)) < REFERENCE["reference_cpus"]:
+        raise ValueError("two-cpu-reference-unavailable")
+    cpus = sorted(os.sched_getaffinity(0))[:REFERENCE["reference_cpus"]]
+    workers: dict[str, _Worker] = {}
+    samples = []
+    try:
+        # Head generates the corpus once from its registry; base reads those bytes.
+        for arm, source in (("head", ROOT), ("base", base)):
+            workers[arm] = _Worker(source, scratch / "vault", scratch / arm, cpus, profile)
+        environments = {arm: worker.environment for arm, worker in workers.items()}
+        if environments["head"]["sqlite_version"] not in profile["sqlite_versions"]:
+            raise MeasurementRefused("reference-sqlite-unsupported")
+        if (environments["base"]["encoder_digest"] != environments["head"]["encoder_digest"]
+            or environments["base"]["encoder_identity"] != environments["head"]["encoder_identity"]
+            or environments["base"]["corpus"] != environments["head"]["corpus"]
+            or environments["base"]["sqlite_version"] != environments["head"]["sqlite_version"]):
+            raise ValueError("paired-reference-inputs-differ")
+        # One warm-up per series and principal, with the real encoder restored.
+        first_cases = {case["series"]: case for case in reversed(cases)}
+        for worker in workers.values():
+            try:
+                for principal_name in ("owner", "admitted"):
+                    for case in first_cases.values():
+                        worker.exchange({**case, "principal": principal_name,
+                                         "rows": REFERENCE["stage_rows"]})
+            finally:
+                worker.pause()
+        for case_index, case in enumerate(cases):
+            order = ("base", "head") if case_index % 2 == 0 else ("head", "base")
+            for principal_name in ("owner", "admitted"):
+                for repeat in range(PAIRING["repeats"]):
+                    for arm in order:
+                        worker = workers[arm]
+                        try:
+                            measured = worker.exchange({**case, "principal": principal_name,
+                                                        "rows": REFERENCE["stage_rows"]})
+                        finally:
+                            worker.pause()
+                        samples.append({"case": case["id"], "series": case["series"],
+                                        "principal": principal_name, "arm": arm, "repeat": repeat,
+                                        "load": one_minute_load(), **measured})
+        accept, accept_state = read_accept(tag, accept_path)
+        reports = compare_pairs(samples, tag=tag, accept=accept)
+        return {"schema_version": 1, "mode": "paired", "tag": tag,
+                "state": "failed" if any(row["gating"] and row["state"] not in ("passed", "accepted")
+                                         for row in reports) else "passed",
+                "contract_revision": CONTRACT.revision, "accept_record": accept_state,
+                "source_digest": profile["source"]["sha256"], "environment": environments,
+                "unmeasured": profile["unmeasured"], "series": reports, "samples": samples}
+    finally:
+        for worker in workers.values():
+            worker.close()
+
+
+def corpus_snapshot(vault_root: Path) -> dict:
+    """Read actual served-state row counts without loading an encoder or matrix."""
+    import sqlite3
+
+    from exomem import index_paths, lexstore
+
+    with sqlite3.connect(lexstore.lexical_path(vault_root).as_uri() + "?mode=ro", uri=True) as conn:
+        pages = conn.execute("SELECT count(*) FROM pages WHERE in_kb=1 AND is_nav=0").fetchone()[0]
+        units = conn.execute("SELECT count(*) FROM semantic_units WHERE in_kb=1").fetchone()[0]
+    with sqlite3.connect(index_paths.sidecar_path(vault_root).as_uri() + "?mode=ro", uri=True) as conn:
+        chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+    return {"source": "served-state-read-only-sql", "bucket_width": 500,
+            "pages": pages // 500 * 500, "chunks": chunks // 500 * 500,
+            "units": units // 500 * 500, "sqlite_version": sqlite3.sqlite_version}
+
+
+def live_cli(transport: ServedTransport, *, cases_path: Path, corpus_path: Path | None,
+             output: Path, quiescence_bound: float) -> int:
+    """Measure private live queries; only generated case codes leave this process."""
+    profile = json.loads((BENCHMARK / "profile.json").read_text())
+    cases = json.loads(cases_path.read_text())
+    expected = {row["series"] for row in json.loads((BENCHMARK / profile["case_file"]).read_text())}
+    if {case["series"] for case in cases} != expected:
+        raise ValueError("live-series-incomplete")
+    if any(sum(case["series"] == series for case in cases) < REFERENCE["queries_min"]
+           for series in expected):
+        raise ValueError("live-cases-insufficient")
+    report = {"schema_version": 1, "mode": "live", "state": "not measured",
+              "contract_revision": CONTRACT.revision, "series": [], "samples": [],
+              "nonce_strategy": "trailing-whitespace"}
+    first, final, waited = await_quiescence(
+        one_minute_load, bound_seconds=quiescence_bound, sleep=time.sleep,
+    )
+    report["load"] = {"first": first, "final": final, "waited_seconds": waited}
+    if final > MAX_LOAD_AVERAGE:
+        report.update(state="refused", reason="load-above-reference")
+    else:
+        nonce = run_nonce()
+        versions: set[str] = set()
+        read_failure: ServedReadFailure | None = None
+        for index, case in enumerate(cases):
+            arguments = {**case.get("arguments", {}), "query": case["query"] + _whitespace_nonce(nonce, index),
+                         "include_timings": True, "scope": "kb", "limit": DEFAULT_LIMIT}
+            try:
+                envelope = transport._post(arguments)
+            except SystemExit as error:
+                read_failure = (error if isinstance(error, ServedReadFailure) else
+                                ServedReadFailure("served-call-aborted", "served call aborted"))
+                envelope = {}
+            timing = envelope.get("timings") or {}
+            if timing.get("sqlite_version"):
+                versions.add(timing["sqlite_version"])
+            sample = {"case": f"case-{index:04d}", "series": case["series"], "principal": "owner",
+                      "arm": "head", "repeat": 0, "load": one_minute_load(),
+                      "elapsed_ms": timing.get("total_ms"),
+                      "state": "unknown" if _failed_stage(envelope) or read_failure else
+                      "warming" if "warming" in envelope else
+                      "ok" if _positive(timing.get("total_ms")) and timing.get("stage_rows") else "unknown",
+                      "cpu_ms": timing.get("cpu_ms"), "cpu_source": timing.get("cpu_source", "unknown"),
+                      "runqueue_ms": timing.get("runqueue_ms"),
+                      "unattributed_ms": timing.get("unattributed_ms"),
+                      "overlap_cpu_ms": timing.get("overlap_cpu_ms"),
+                      "unattributed_cpu_ms": timing.get("unattributed_cpu_ms"),
+                      "unbudgeted": timing.get("unbudgeted", []),
+                      "critical_path": timing.get("critical_path"), "stages": timing.get("stage_rows", {})}
+            if read_failure:
+                sample["read_error"] = read_failure.reason
+            report["samples"].append(sample)
+            if read_failure:
+                break
+        if corpus_path:
+            corpus = json.loads(corpus_path.read_text())
+            validate_document(corpus, "summary.schema.json", definition="live_corpus")
+            report["corpus"] = corpus
+            # The summary records unknown when served diagnostics cannot bind SQLite.
+            environment = {"sqlite_version": next(iter(versions)) if len(versions) == 1 else "unknown"}
+            report["state"], report["series"] = summarize_absolute(
+                report["samples"], environment=environment, profile=profile, live=True,
+            )
+            if (corpus["pages"] < REFERENCE["pages_min"] or corpus["chunks"] < REFERENCE["chunks_min"]
+                or corpus["units"] < REFERENCE["units_min"]):
+                report.update(state="not measured", reason="live-corpus-below-reference")
+                for row in report["series"]:
+                    row.update(state="not measured", ceiling_met=None)
+        else:
+            report["reason"] = "live-corpus-unverified"
+        if read_failure:
+            report.update(state="refused" if read_failure.refused else "failed", reason=read_failure.reason)
+    validate_document(report, "summary.schema.json")
+    output.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    print(json.dumps({"state": report["state"], "artifact": output.name}))
+    return 0
+
+
+def paired_cli(output: Path) -> int:
+    """Resolve the most recent release tag and measure both arms on this runner."""
+    import subprocess
+    import tempfile
+
+    from jsonschema.exceptions import ValidationError
+
+    report: dict = {"schema_version": 1, "mode": "paired", "state": "refused",
+                    "contract_revision": CONTRACT.revision, "series": [], "samples": []}
+    try:
+        profile = json.loads((BENCHMARK / "profile.json").read_text())
+        cases, digest = reference_cases(profile)
+        tag = subprocess.check_output(
+            ["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"], text=True,
+            cwd=ROOT, stderr=subprocess.DEVNULL,
+        ).strip()
+        if not tag or tag.startswith("-"):
+            raise ValueError("latest-release-tag-unavailable")
+        with tempfile.TemporaryDirectory(prefix="exomem-recall-latency-") as temporary:
+            scratch = Path(temporary)
+            base = scratch / "base"
+            base.mkdir()
+            archive = scratch / "release.tar"
+            with archive.open("wb") as stream:
+                subprocess.run(["git", "archive", tag], cwd=ROOT, stdout=stream, check=True)
+            # Git owns this archive; the checkout contains no external tar input.
+            subprocess.run(["tar", "-xf", str(archive), "-C", str(base)], check=True)
+            report = paired_run(base=base, tag=tag, scratch=scratch, profile=profile, cases=cases)
+            report["source_digest"] = digest
+    except (ValueError, OSError, subprocess.SubprocessError, ValidationError) as error:
+        # Closed local error codes; never print arbitrary subprocess output.
+        report["reason"] = error.code if isinstance(error, MeasurementRefused) else type(error).__name__
+    validate_document(report, "summary.schema.json")
+    output.write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    print(json.dumps({"state": report["state"], "artifact": output.name}))
+    return int(report["state"] != "passed")
+
+
 # --- Entry point ------------------------------------------------------------
 
 
@@ -838,6 +1626,17 @@ def main(argv: list[str] | None = None) -> int:
         description="Measure governed recall against the fixed latency ceilings."
     )
     source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--reference", action="store_true", help="record the absolute reference series")
+    source.add_argument("--encoder-cache-key", action="store_true", help=argparse.SUPPRESS)
+    source.add_argument("--validate-summary", type=Path, help="validate a content-free stored summary")
+    source.add_argument("--paired", action="store_true", help="compare with the latest release")
+    source.add_argument("--worker-source", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-cpus", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-vault", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--live-cases", type=Path, help="private live case file; never copied to evidence")
+    parser.add_argument("--live-corpus", type=Path, help="counts measured on the served host")
+    parser.add_argument("--corpus-counts", action="store_true", help="read content-free corpus counts")
+    parser.add_argument("--output", type=Path, default=Path("recall-latency-summary.json"))
     source.add_argument(
         "--served-url", help="base URL of a served cell, e.g. http://127.0.0.1:8765"
     )
@@ -859,6 +1658,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.worker_source:
+        return worker_main(args.worker_vault)
+    if args.corpus_counts:
+        if not args.vault:
+            parser.error("--corpus-counts requires --vault on the served host")
+        args.output.write_text(json.dumps(corpus_snapshot(args.vault), indent=2) + "\n")
+        return 0
+    if args.validate_summary:
+        validate_document(json.loads(args.validate_summary.read_text()), "summary.schema.json")
+        return 0
+    if args.encoder_cache_key:
+        from exomem import embedding_backend, embeddings
+
+        print("digest=" + embedding_backend.served_artifact(embeddings.MODEL_NAME).digest)
+        return 0
+    if args.paired:
+        return paired_cli(args.output)
+    if args.reference:
+        return absolute_cli(args.output, quiescence_bound=args.quiescence_bound)
     if args.mcp_url:
         return run_cli(args)
 
@@ -871,6 +1689,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         transport: Any = ServedTransport(args.served_url, key)
         transport.pages = transport.measure_corpus()
+        if args.live_cases:
+            return live_cli(transport, cases_path=args.live_cases, corpus_path=args.live_corpus,
+                            output=args.output, quiescence_bound=args.quiescence_bound)
     else:
         transport = VaultTransport(args.vault)
         transport.warm()

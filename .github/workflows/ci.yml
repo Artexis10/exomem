@@ -596,13 +596,18 @@ jobs:
     runs-on: ubuntu-24.04
     # Green CI took 9m38s; one case allows 15m. Let the remaining suite report
     # its result after that case while keeping every latency assertion unchanged.
-    timeout-minutes: 30
+    timeout-minutes: &recall-latency-timeout 30
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
     steps:
+      - name: Record retrieval workload start
+        if: ${{ matrix.shard == 1 }}
+        run: date +%s > "$RUNNER_TEMP/recall-latency-job-start"
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -635,6 +640,48 @@ jobs:
         with:
           name: test-durations-latency-shard-${{ matrix.shard }}
           path: *duration-snapshot-path
+      # Only shard 1 owns the paired benchmark after its model-free tests.
+      # Dependency resolution starts after its model-free pytest process exits.
+      - name: Resolve the served encoder digest
+        if: ${{ matrix.shard == 1 }}
+        id: recall-encoder
+        env:
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py --encoder-cache-key >> "$GITHUB_OUTPUT"
+      - name: Cache the served encoder by digest
+        if: ${{ matrix.shard == 1 }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: recall-encoder-${{ runner.os }}-${{ steps.recall-encoder.outputs.digest }}
+      - name: Verify the latency instrument
+        if: ${{ matrix.shard == 1 }}
+        env:
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python -m pytest tests/test_recall_latency_gate.py tests/test_recall_timing.py -q
+      - name: Compare governed recall with the latest release
+        if: ${{ matrix.shard == 1 }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UV_PYTHON: /usr/bin/python3
+          UV_PYTHON_DOWNLOADS: never
+        run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py --paired --output recall-latency-paired.json
+      - name: Record elapsed retrieval workload
+        if: ${{ always() && matrix.shard == 1 }}
+        env:
+          JOB_TIMEOUT_MINUTES: *recall-latency-timeout
+        run: python3 -c 'import json,os,pathlib,time; start=int((pathlib.Path(os.environ["RUNNER_TEMP"])/"recall-latency-job-start").read_text()); pathlib.Path("recall-latency-job-elapsed.json").write_text(json.dumps({"boundary":"first-step-to-pre-upload-timer","elapsed_seconds":time.time()-start,"job_budget_seconds":60*int(os.environ["JOB_TIMEOUT_MINUTES"])}))'
+      - name: Upload paired recall evidence
+        if: ${{ always() && matrix.shard == 1 }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: recall-latency-paired
+          path: |
+            recall-latency-paired.json
+            recall-latency-job-elapsed.json
+          if-no-files-found: warn
 
   governance-projection-wire:
     name: governance projected wire characterization (${{ matrix.route }})

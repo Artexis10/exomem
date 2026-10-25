@@ -1,0 +1,504 @@
+{
+  "repository": "python/cpython",
+  "tag": "v3.13.0",
+  "commit": "60403a5409ff2c3f3b07dd2ca91a7a3e096839c7",
+  "source_files": [
+    {
+      "path": "Doc/library/functions.rst",
+      "git_blob": "8d023ebf48a3d53bd4d77b2112f9655816cd4ce2",
+      "bytes": 94875,
+      "sha256": "88e8415ec08dad5a20354ab5a024a950c0b35b9f49ca86865ccebc69bc64881e",
+      "paragraphs_kept": 14
+    },
+    {
+      "path": "Doc/library/os.rst",
+      "git_blob": "b93e01e99869c95fb9dae51fd1befee492cec256",
+      "bytes": 202419,
+      "sha256": "c4a4a02e0c37b60cebe1f21aabb1a3ba576d27277342822412492b1ebac3749f",
+      "paragraphs_kept": 30
+    },
+    {
+      "path": "Doc/library/typing.rst",
+      "git_blob": "40df38c5503696aa61f4af1d464e025c455c0ee0",
+      "bytes": 131336,
+      "sha256": "50501a38524f1095732f96201aa958eaa40faacd6b7950350a2185b42f0af9d9",
+      "paragraphs_kept": 63
+    },
+    {
+      "path": "Doc/reference/datamodel.rst",
+      "git_blob": "57d9b286c6c554f6fb1761f90ee5c89886ffa90c",
+      "bytes": 139694,
+      "sha256": "317f55cb42f9cfd798d6f5ddbb956bfac4847e7f749a47842b45f3635e2657d5",
+      "paragraphs_kept": 75
+    },
+    {
+      "path": "Doc/library/logging.rst",
+      "git_blob": "8ab107d2a33e44a659d1757f8729adb5e87b5d1b",
+      "bytes": 72826,
+      "sha256": "98ddcad24e955f94b18c06a5970a8efa27a87f9caf8c84b61e87ae7b9256523a",
+      "paragraphs_kept": 25
+    },
+    {
+      "path": "Doc/library/pathlib.rst",
+      "git_blob": "ee8a9086d5eaa1362ff2acd4348869ad596f69bf",
+      "bytes": 61084,
+      "sha256": "c1d6793810ecd9a20d75030ce5489cd94151a1b71063b3052e4ae529351eda4c",
+      "paragraphs_kept": 25
+    },
+    {
+      "path": "Doc/library/ssl.rst",
+      "git_blob": "b7fb1fc07d199f47cc743eceb53571a64a1ea9ea",
+      "bytes": 108035,
+      "sha256": "d96277407c364e6300c7f11941da9d9e912cb992e8e8e77687397c00bec1bf55",
+      "paragraphs_kept": 28
+    },
+    {
+      "path": "Doc/library/time.rst",
+      "git_blob": "a0bf13fc0a357705b3737889de4c12404e7b3187",
+      "bytes": 39231,
+      "sha256": "eb6e909634b0d8d83cb94cf8cbcf4cbc97b2f54f00755a2e78eb5338aa3221a1",
+      "paragraphs_kept": 9
+    },
+    {
+      "path": "Doc/howto/functional.rst",
+      "git_blob": "1f0608fb0fc53f02fd8c267f3ca87c14c3a7a803",
+      "bytes": 49510,
+      "sha256": "305cd09fcfb7da6b0b4a1ed4a66a9085eb7a6677a57a3ea0c9dfe3c896795115",
+      "paragraphs_kept": 94
+    },
+    {
+      "path": "Doc/howto/regex.rst",
+      "git_blob": "5e2f9a9d1837fe03c5f6cb973ae23f3352e26575",
+      "bytes": 62724,
+      "sha256": "69fd30034444ac74f456b3e9c14e852b6f127f08c9620bf703915450457c729b",
+      "paragraphs_kept": 97
+    },
+    {
+      "path": "Doc/howto/unicode.rst",
+      "git_blob": "254fe7293553535e1a963a7bb2825d39fc462067",
+      "bytes": 31886,
+      "sha256": "c5cf5081618e2b06a519d2ede00fb52a53922c5a8d636c4be337810fed2bd17c",
+      "paragraphs_kept": 65
+    },
+    {
+      "path": "Doc/howto/logging.rst",
+      "git_blob": "3182d5664ab6ec1d48b4742933b30e1a5f679316",
+      "bytes": 50342,
+      "sha256": "7259bee51523be4fb21db259425b9766b8fbc05a4e24b8e9475a604eb5759b00",
+      "paragraphs_kept": 54
+    },
+    {
+      "path": "Doc/tutorial/controlflow.rst",
+      "git_blob": "fd765e58ff2485ec0b2c2d79372a2f92984d05ab",
+      "bytes": 40760,
+      "sha256": "e5da06f2db7559a6539f9a8f48f3ceaa4395f82800160f48f8c4208f4be57c27",
+      "paragraphs_kept": 80
+    },
+    {
+      "path": "Doc/tutorial/inputoutput.rst",
+      "git_blob": "2e6fd419b2110692758a0a013c4ebfb3fb52143c",
+      "bytes": 20596,
+      "sha256": "13e550fdc65948d88196eda0985221df240a1dce40dc456e858ef3a55611a606",
+      "paragraphs_kept": 25
+    },
+    {
+      "path": "Doc/faq/design.rst",
+      "git_blob": "e2710fab9cf800205f51229b4f1accac667550ac",
+      "bytes": 34130,
+      "sha256": "06cb81395caf69521b8acb85772a488849fbb5162f4b0138bcfbdb4c1e5edaa2",
+      "paragraphs_kept": 75
+    },
+    {
+      "path": "Doc/faq/programming.rst",
+      "git_blob": "fa7b22bde1dc6f46a113a018669a0b98bbaad3b9",
+      "bytes": 79204,
+      "sha256": "70085e4199348a5d5a8e6a633d3c4269bb44b09fa2c35785000df2b4f4d55b42",
+      "paragraphs_kept": 177
+    },
+    {
+      "path": "Doc/faq/extending.rst",
+      "git_blob": "3147fda7c3712493c96dad3c4183af17c3419bc4",
+      "bytes": 10795,
+      "sha256": "19abebb50105d8876035e6c272f1749ae850b12e08cc9c661f534c4673f759ea",
+      "paragraphs_kept": 16
+    },
+    {
+      "path": "Doc/faq/general.rst",
+      "git_blob": "2a55f6b6fb6181173dcae13e983b0e7e5590c59a",
+      "bytes": 20122,
+      "sha256": "cdeae72603b6dfbe6221bb852ccd6c7a70838e42dd5a0447096a897c909df61d",
+      "paragraphs_kept": 61
+    },
+    {
+      "path": "Doc/faq/library.rst",
+      "git_blob": "522923572bfbbf8165c4e93a7b8cf7d6189ad71e",
+      "bytes": 30725,
+      "sha256": "fe417617fd50a4942e6e55316677f99ed570a1cd03edddcf816ce57d8bee41f0",
+      "paragraphs_kept": 44
+    },
+    {
+      "path": "Doc/faq/windows.rst",
+      "git_blob": "c0c92fdbbc84d129a83bddd7feeb95dcf1cd0e4d",
+      "bytes": 12413,
+      "sha256": "fc614953032cd7f2e31ba19a63a8a012dcc034e56aa5b93fb866eb70c7e24d7d",
+      "paragraphs_kept": 26
+    },
+    {
+      "path": "Doc/howto/annotations.rst",
+      "git_blob": "174078b84aa5a832fcd8bdbd8b583bfd86ba3d50",
+      "bytes": 9367,
+      "sha256": "91e743fbeb3f978015c2bf67af5118a141b86eb8f0f9eacf363f40d376fb9f47",
+      "paragraphs_kept": 18
+    },
+    {
+      "path": "Doc/howto/argparse.rst",
+      "git_blob": "30d9ac700376e60c667b99fc7a9cf2f59dde5537",
+      "bytes": 26164,
+      "sha256": "b961e5773d40f6643588c62a8cbb767faae24896ffb23e778123bc3a25e8d3a4",
+      "paragraphs_kept": 42
+    },
+    {
+      "path": "Doc/howto/curses.rst",
+      "git_blob": "f9ad81e38f8dc3d4eb512e4d94c08f45dd4110a7",
+      "bytes": 25209,
+      "sha256": "57e21a41116b4f52ee0105ecd05e63d690981852ed11d9d5c960f495b6fcaf03",
+      "paragraphs_kept": 25
+    },
+    {
+      "path": "Doc/howto/descriptor.rst",
+      "git_blob": "c60cd63822904459972ef4d5620c6ddd3bc07fd4",
+      "bytes": 54784,
+      "sha256": "d66320932ec074ff5772ecc4dc0489c036b3b43e274eecf5b6a3218e2402256a",
+      "paragraphs_kept": 69
+    },
+    {
+      "path": "Doc/howto/enum.rst",
+      "git_blob": "66929b4104d8de40d5a8a47b40b8a0b3f0e15040",
+      "bytes": 46544,
+      "sha256": "fcc202c95986f999d9c4be8d92c2d401482b030631f2229756524f8f29583f17",
+      "paragraphs_kept": 65
+    },
+    {
+      "path": "Doc/howto/free-threading-extensions.rst",
+      "git_blob": "6abe93d71ad529f09b0b1516f530ed27cda3e50d",
+      "bytes": 11015,
+      "sha256": "106772971754b49dadf0010d3e3b8d9bb189ea1f7fec2018827c3e5426bcc66e",
+      "paragraphs_kept": 15
+    },
+    {
+      "path": "Doc/howto/free-threading-python.rst",
+      "git_blob": "b21e3287ecaa3f58b397af2e08de4f1f59e00790",
+      "bytes": 6435,
+      "sha256": "e434670a7f36d8c3f28a8b69551bdded96f330bd66c6d43f90ecfb2887c26f8a",
+      "paragraphs_kept": 11
+    },
+    {
+      "path": "Doc/howto/gdb_helpers.rst",
+      "git_blob": "53bbf7ddaa2ab96ccfbe48ec5c2cd5a34e5ec283",
+      "bytes": 23648,
+      "sha256": "8d1093fe0402e287000815594feff95d1d63b2ca38b6873af634f2b07ed64ef0",
+      "paragraphs_kept": 40
+    },
+    {
+      "path": "Doc/howto/instrumentation.rst",
+      "git_blob": "6e03ef20a21fa3fd08839e6a511e92f9be9aa565",
+      "bytes": 14968,
+      "sha256": "3e6c91a9bff1b53ec380208c8c51894849fcd3cbb6eacebce54c280c3f892ac0",
+      "paragraphs_kept": 16
+    },
+    {
+      "path": "Doc/howto/ipaddress.rst",
+      "git_blob": "e852db98156facc8c80540bf12afba237cfdd28f",
+      "bytes": 11731,
+      "sha256": "b709a6233364441fd0a651f32e26bb148b303db9706012aa2c2a43aeda6f5b12",
+      "paragraphs_kept": 17
+    },
+    {
+      "path": "Doc/howto/isolating-extensions.rst",
+      "git_blob": "a636e06bda834410e5d0c3e07f1c0b466cda830c",
+      "bytes": 22390,
+      "sha256": "0367b682e79b7ce898591855687fb35b691ceca13574d6dc2c9867d3e34fb097",
+      "paragraphs_kept": 52
+    },
+    {
+      "path": "Doc/howto/logging-cookbook.rst",
+      "git_blob": "96768ec4ae31f14eaea89e66b6b808c84616a2ad",
+      "bytes": 162825,
+      "sha256": "958090f2c9a9ce8c9fc3a4937024f00e4abf61b7a5df10f8bed9f95f47f5aa65",
+      "paragraphs_kept": 127
+    },
+    {
+      "path": "Doc/howto/mro.rst",
+      "git_blob": "46db516e16dae4f2eae308797d3409d07200dfbe",
+      "bytes": 22984,
+      "sha256": "19db9dd23633e0ec4626e87ad1d9d8566d93a1572be7ba9ccebed3d569948f47",
+      "paragraphs_kept": 70
+    },
+    {
+      "path": "Doc/howto/perf_profiling.rst",
+      "git_blob": "06459d1b2229648589d63c540259f84a35e7016f",
+      "bytes": 12621,
+      "sha256": "9c927c018a73daf08c92e5c462273f0a50cee367446978ad69a4d763a87ad5cd",
+      "paragraphs_kept": 16
+    },
+    {
+      "path": "Doc/howto/sockets.rst",
+      "git_blob": "0bbf97da39768d085a1d7d7e242d767e271345ac",
+      "bytes": 18795,
+      "sha256": "e9f69766062b95b2f0d842e9a8f46d7c18bb867de6c422576e3e21d6cce8b4a9",
+      "paragraphs_kept": 41
+    },
+    {
+      "path": "Doc/howto/sorting.rst",
+      "git_blob": "b98f91e023bdfc7a06540a0f7fb8ce361748e2e5",
+      "bytes": 12749,
+      "sha256": "c0e38a56c301e6968f5630a01e27048f07ca1288ffec45d37e6335fd909d2e4d",
+      "paragraphs_kept": 25
+    },
+    {
+      "path": "Doc/howto/timerfd.rst",
+      "git_blob": "b5fc06ae8c681071a6f849259df887b5f9db35fe",
+      "bytes": 8705,
+      "sha256": "ee5c776f84b793e90c33de3e7774ec5a20e52b9ccd4ee2adcdd8b74f1cfc3ade",
+      "paragraphs_kept": 2
+    },
+    {
+      "path": "Doc/howto/urllib2.rst",
+      "git_blob": "33a2a7ea89ea07a0b7d30c67920a85094b89e171",
+      "bytes": 24700,
+      "sha256": "3623450637a44259c0f708970a7930c0ac5d1564be67b323e0fb54ea6c370530",
+      "paragraphs_kept": 41
+    },
+    {
+      "path": "Doc/tutorial/appendix.rst",
+      "git_blob": "da664f2f360ff1bf62814968462445fd183be57a",
+      "bytes": 5675,
+      "sha256": "a932d7c8e7a180520ff7a83a12195be9d48cef684baf95045dd263d3f2e1fb0c",
+      "paragraphs_kept": 4
+    },
+    {
+      "path": "Doc/tutorial/appetite.rst",
+      "git_blob": "3fa68097ee3665bd11039dfa2186a3bc330cdefc",
+      "bytes": 4507,
+      "sha256": "c5766ddd864601b50b54a1882f2fbec67945d421339ddea67cd545d3b0ffad55",
+      "paragraphs_kept": 14
+    },
+    {
+      "path": "Doc/tutorial/classes.rst",
+      "git_blob": "492568961d8a513d25b03b0312606e825b3ba370",
+      "bytes": 37042,
+      "sha256": "fd28b82a81acda33c4997dc931ab63d5a4fea4ef65d820b579dcf2d4bf7304a4",
+      "paragraphs_kept": 55
+    },
+    {
+      "path": "Doc/tutorial/datastructures.rst",
+      "git_blob": "73f17adeea72decc1f8167bcd37b842b7e9dc80b",
+      "bytes": 24846,
+      "sha256": "3c2b7a87519b3e7b1513f5fbb12c9d37ba715c402a6bf032f1b584d555eb979b",
+      "paragraphs_kept": 34
+    },
+    {
+      "path": "Doc/tutorial/errors.rst",
+      "git_blob": "24fa01428fd0c081581fe4e0164229edc1446deb",
+      "bytes": 24234,
+      "sha256": "c1d8deb184bce4aa005a03407d62312a774e38dd62ba73802e5e8ace030ae34e",
+      "paragraphs_kept": 20
+    },
+    {
+      "path": "Doc/tutorial/floatingpoint.rst",
+      "git_blob": "dfe2d1d3a8378fa9dd44423b9d4f3c3d5d2732d5",
+      "bytes": 13025,
+      "sha256": "8e648340d27e4ad469e40a53f8b47389d8490a7b10ea828f0bc76186c3863a55",
+      "paragraphs_kept": 31
+    },
+    {
+      "path": "Doc/tutorial/interpreter.rst",
+      "git_blob": "299b6c2777adc0e33cca0eab06365a43d5b3eedd",
+      "bytes": 6514,
+      "sha256": "8f8d649e94b4058e2485a625cd43c0b3edfeb3c4c69e0c674dded783cd241698",
+      "paragraphs_kept": 7
+    },
+    {
+      "path": "Doc/tutorial/introduction.rst",
+      "git_blob": "054bac59c955d5a960cfffbf5046749c63059be2",
+      "bytes": 18984,
+      "sha256": "63064d9dbec912a6d0e89089b16544e5488fbdc06293be4fa8df3c64d37739f0",
+      "paragraphs_kept": 40
+    },
+    {
+      "path": "Doc/tutorial/modules.rst",
+      "git_blob": "0316239e776a95b08d39adbcc89741f43d44b098",
+      "bytes": 25513,
+      "sha256": "b391a3d94b7dd61785cb7749ba36837735404693eed3172248f5be2101eda16b",
+      "paragraphs_kept": 34
+    },
+    {
+      "path": "Doc/tutorial/stdlib.rst",
+      "git_blob": "e96e34319250118379429335a9cfe5a46c033a56",
+      "bytes": 11436,
+      "sha256": "f0f425a1346f45d5510b531295ac54c5f3c46e560712a51df7e7fafa833d0947",
+      "paragraphs_kept": 9
+    },
+    {
+      "path": "Doc/tutorial/stdlib2.rst",
+      "git_blob": "4f460b8e6ec45bd195396cb2eff0d45cea389d63",
+      "bytes": 15197,
+      "sha256": "b38c38bd657b4f74b3a1d4168cd93dbbc233a78c9d8d4971cbfbec4a2143e183",
+      "paragraphs_kept": 12
+    },
+    {
+      "path": "Doc/tutorial/venv.rst",
+      "git_blob": "91e4ce18acef1dd8c390aedd41829ded0205a21e",
+      "bytes": 7416,
+      "sha256": "f9dac36833979e1e2885ea9bdb1975548b6ff6fca7f57bb3ba6a77810c93d7ac",
+      "paragraphs_kept": 13
+    },
+    {
+      "path": "Doc/glossary.rst",
+      "git_blob": "17461e23e715570d4a9b3e624fc2f999e4ad3d24",
+      "bytes": 60797,
+      "sha256": "039b27486e78ad35733d69286549180a3230d4394c2014a181b23a2da84eba78",
+      "paragraphs_kept": 0
+    },
+    {
+      "path": "Doc/reference/compound_stmts.rst",
+      "git_blob": "c7e43ef773907ac9ec881850b622d83682c8b71e",
+      "bytes": 67213,
+      "sha256": "242f3ffab48980608aeb4b7f3e0dbfffae0b961a10bca4a3b61054dc1ed55958",
+      "paragraphs_kept": 102
+    },
+    {
+      "path": "Doc/reference/executionmodel.rst",
+      "git_blob": "c6d98fc2e7013d262f99a19235c7218e4bee75d0",
+      "bytes": 15812,
+      "sha256": "381e2e44956fa8ea37870eaeb6be9311494ab841a6695ba18c606f93db3071de",
+      "paragraphs_kept": 12
+    },
+    {
+      "path": "Doc/reference/expressions.rst",
+      "git_blob": "ab72ad49d041e14e1e7bb51f4b351b14f48e05cf",
+      "bytes": 84094,
+      "sha256": "54c52094a98bfee541f2759c721453b32288a83e0d7e428a65b12d909f5e1eb5",
+      "paragraphs_kept": 115
+    },
+    {
+      "path": "Doc/reference/import.rst",
+      "git_blob": "19b8aa05072c733ff18e8e62caea7500355df744",
+      "bytes": 47748,
+      "sha256": "7b56e4995232f00ebe12bdc9c802a0056bdc94b1a68880481195173199672eca",
+      "paragraphs_kept": 43
+    },
+    {
+      "path": "Doc/reference/introduction.rst",
+      "git_blob": "b7b70e6be5a5b7ba6e65205e5fcd1567fdaa4c3c",
+      "bytes": 6326,
+      "sha256": "41aa1f7bcef53ac043e336112a6bb44ec17e99aa1bb77dbb0830a946965f9295",
+      "paragraphs_kept": 14
+    },
+    {
+      "path": "Doc/reference/lexical_analysis.rst",
+      "git_blob": "c2f5f145bb22b29809fc37b7898fae5db4ee1cf1",
+      "bytes": 39823,
+      "sha256": "5312e2326ed7875ace9f28fa55770b1dde727330e3856fb9b75965bf554b6228",
+      "paragraphs_kept": 72
+    },
+    {
+      "path": "Doc/reference/simple_stmts.rst",
+      "git_blob": "618664b23f06806b92db420525d415fefcb3fbda",
+      "bytes": 41455,
+      "sha256": "b5d34dc8eea6f0a7b4d46d897519624b48216d064770c6a78ca85ce707659214",
+      "paragraphs_kept": 48
+    }
+  ],
+  "extraction": {
+    "parser": "docutils",
+    "version": "0.21.2",
+    "api": "docutils.core.publish_doctree",
+    "settings": {
+      "report_level": 5,
+      "halt_level": 6,
+      "file_insertion_enabled": false,
+      "raw_enabled": false
+    },
+    "recipe": "For each source file in order, retain paragraph nodes with at least eight whitespace-separated words. Exclude paragraphs with problematic descendants or system_message, table, literal_block or raw ancestors. Join astext whitespace within each paragraph. Omit the paragraphs identified by source path, line and text hash below. Join paragraphs with two linefeeds; append one final linefeed.",
+    "script_sha256": "87bb6b1e8cae4859d8f7ec3f074fe33708cb0551013a43290fd2bae0786708f6",
+    "privacy_validator_sha256": "4e1a536499f88ec5b641fe3fb13b6fab68eca4fceaff8856940e319463386b1e",
+    "omitted_paragraphs": [
+      {
+        "path": "Doc/faq/windows.rst",
+        "line": 116,
+        "sha256": "6e2879b6f6673f56367f38413a5d1c056ff4a32d157ae75bc36d38277fba4dd8",
+        "rules": [
+          "absolute_local_path"
+        ]
+      },
+      {
+        "path": "Doc/howto/unicode.rst",
+        "line": 165,
+        "sha256": "106c228a4176b9c6c534f59104156dcb3aea5e2da7d30a848373a29db193c849",
+        "rules": [
+          "publication-privacy"
+        ]
+      },
+      {
+        "path": "Doc/howto/unicode.rst",
+        "line": 760,
+        "sha256": "333ed5f7718844a661702a5abea91b757647472491acd52b56dbe6fa20a8d1aa",
+        "rules": [
+          "publication-privacy"
+        ]
+      },
+      {
+        "path": "Doc/faq/extending.rst",
+        "line": 44,
+        "sha256": "4761e78d49ed6e7302cfac6e865d4115b556ba248dcaf617ffd6b09bb1fa6cc8",
+        "rules": [
+          "publication-privacy"
+        ]
+      },
+      {
+        "path": "Doc/faq/library.rst",
+        "line": 422,
+        "sha256": "b7a2266a9ebd8d189903e545ca913a85954981b5f282b4a564b4a1690cf763de",
+        "rules": [
+          "publication-privacy"
+        ]
+      },
+      {
+        "path": "Doc/tutorial/venv.rst",
+        "line": 178,
+        "sha256": "3ec257ee49cffc2d2d5d56dd6f24f461f36374979d914d5cc95eed57f2a72d65",
+        "rules": [
+          "publication-privacy"
+        ]
+      },
+      {
+        "path": "Doc/tutorial/venv.rst",
+        "line": 190,
+        "sha256": "26e06cfb02e34e1fe3c99cc33e5565f0c0e967ccfc978cec64422cb3b61455d6",
+        "rules": [
+          "publication-privacy"
+        ]
+      },
+      {
+        "path": "Doc/reference/introduction.rst",
+        "line": 60,
+        "sha256": "d68da0ccd2e1bee2bfa0bc4c6a8e708183e13b33ace521158a4fab1212503319",
+        "rules": [
+          "publication-privacy"
+        ]
+      }
+    ]
+  },
+  "license": "Python Software Foundation License Version 2",
+  "license_file": "LICENSE.cpython.txt",
+  "license_sha256": "78b12c3a81360b357002334f0e70ea0e92eebf7a9b358805c03c48484945f3bb",
+  "sha256": "0f01fb7e459706e507443fda1015f84b56ee18b4e84a470e5349821011410c77",
+  "bytes": 478350,
+  "paragraphs": 2454,
+  "words": 78842,
+  "vocabulary_terms": 6250,
+  "alphabetic_terms": 4944,
+  "measured": "static input preflight only; no corpus, index or model build",
+  "changes": "Extracted parsed prose paragraphs and omitted parser diagnostics, tables, unresolved markup, short fragments and the recorded paragraphs for publication privacy. No retained prose was rewritten."
+}

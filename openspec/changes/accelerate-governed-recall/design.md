@@ -759,6 +759,25 @@ absolute threshold.
   result or box load moves it.
 - *Order.* Each case runs in both arms back to back, three times per arm, and
   the arm that goes first alternates between cases.
+- *Measurement adapter.* Both arms use the same benchmark-owned wrappers
+  around the actual timing constructor and span boundaries. The wrappers
+  preserve class identity and run the original bodies. They retain private,
+  transient intervals for stage unions and CPU accounting, including the
+  existing due-state call spans. They change no authority, admission,
+  selection, egress or returned fields. Restricted public diagnostics stay
+  suppressed; the operator-owned synthetic harness reads its own collectors.
+- *Call boundary.* Each worker measures the whole `op_ask_memory` call with
+  its own wall clock. The retrieval envelope snapshots before logging and
+  due-state work, so that snapshot cannot supply the verdict's elapsed time.
+- *Worker isolation.* The harness pauses only its inactive benchmark child,
+  outside sample timers, on the same CPU pair. It resumes the child for its
+  next sample and during cleanup. Each active arm retains its own native
+  thread policy, including any spin cost. Alternating order alone would not
+  remove interference from a resident inactive encoder pool.
+- *Legacy cache reset.* The adapter clears only the arm's result and
+  checkpoint maps under their existing lock. It never calls a legacy helper
+  that also clears parsed pages. This operation keeps the same reference
+  workload when the latest tag predates the result-only helper.
 - *Statistic.* Per case, the ratio of head's median elapsed time to the
   pairing base's. Per series, the geometric mean of those ratios with its 95%
   confidence interval, a t-interval on the log ratios.
@@ -1016,25 +1035,40 @@ it, and the timing table keeps one row per stage:
   `unattributed_ms` is `total_ms` less the union of the root-level intervals.
 - *Waiting on another branch.* The unit lanes' `vector.wait` interval is
   excluded from the unit-lane row, because time blocked on another branch's
-  result is not the stage's own. It is not reported as unbudgeted either: the
-  encode row already counts the time it waits on.
+  result is not the stage's own. It is not reported as unbudgeted work.
+  The waiting thread can resume after encoding ends, so the encode interval
+  does not necessarily cover the entire wait.
 - *Critical path.* Each request records its critical path: the stages that
-  ran one after another, plus the branch that ended last. Each row reports
-  the share of the series' requests in which its stage lay on the critical
-  path. A stage off the critical path still answers to its budget, because
-  its branch becomes the critical one when it overruns the other.
+  ran one after another, plus the branch that ended last. Explicit fork/join
+  contexts record each branch's complete lifetime, including gaps between
+  named stages. Structural contexts own no wall time, CPU or budget.
+  A selected branch contributes all its rows; tied branches both contribute.
+  Serial setup and response work remain on the path even when their thread
+  also ran the other branch. Thread identity and overlap windows alone do
+  not establish branch identity. Missing execution structure reports an
+  unknown path; the current serial producer declares its execution model.
+  Each row reports its path share over known samples and that sample count.
+  Unknown paths never become zero membership. A stage off the path still
+  answers to its budget, because its branch can become the longer one.
 - *CPU time.* The request's *overlap* is the time during which spans on two or
   more threads are open. A row's `cpu_ms` is the process CPU over the parts of
   its intervals outside the overlap, as decision 11 uses it. The process CPU
   over the overlap is reported once per request as `overlap_cpu_ms`, and no
-  row counts it. The process CPU over the part of `total_ms` that no
-  root-level interval covers is reported as `unattributed_cpu_ms`. No CPU is
-  split between threads: the pools that the encoder and NumPy drive run
-  native threads that no span opens, so an attribution per thread would be a
-  guess.
-- *CPU source.* The CPU fields read `/proc/self/task`, only while timing
-  diagnostics are on. On a platform without it, every CPU field reads
-  unknown, never 0, and the wall-time verdicts stand.
+  row counts it. Every remaining process CPU delta goes to its effective
+  row or `unattributed_cpu_ms`, including excluded waits inside a raw
+  container. The sum of row CPU, overlap CPU and unattributed CPU equals
+  request CPU. Raw interval coverage still defines `unattributed_ms`, so
+  that wall value can be zero while unattributed CPU is positive.
+  Structural fork/join contexts do not count as open work spans.
+  No CPU is split between threads: the encoder and NumPy pools run native
+  threads that no span opens, so that attribution would be a guess.
+- *CPU source.* CPU snapshots use `time.process_time_ns()`, the process-wide
+  user and system CPU clock that the call-span instrumentation already uses.
+  Sampling occurs at serialized interval boundaries while diagnostics are on.
+  The supported Linux profile also requires `/proc/self/task` for run-queue
+  diagnostics. Without that facility or the clock, CPU fields read unknown,
+  never 0, and the wall-time verdicts stand. Run-queue delay still comes from
+  the request thread's `schedstat`; it is a separate measured quantity.
 
 ## Risks / Trade-offs
 

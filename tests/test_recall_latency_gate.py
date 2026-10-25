@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from http.client import IncompleteRead
 from pathlib import Path
 
 import pytest
@@ -875,3 +876,343 @@ def _report(
             ),
         },
     }
+
+
+# The paired instrument uses independent cases, never repeat-level pseudo-cases.
+def _paired_samples(scale: float = 1.0, *, series: str = "hybrid") -> list[dict]:
+    return [
+        {"case": f"case-{case:02d}", "series": series, "principal": "owner",
+         "arm": arm, "repeat": repeat, "state": "ok",
+         "elapsed_ms": (100 + case) * (scale if arm == "head" else 1),
+         "stages": {"governed-stage-vector.embed": {"ms": 30 * (scale if arm == "head" else 1)}}}
+        for case in range(40) for repeat in range(3) for arm in ("base", "head")
+    ]
+
+
+def _accept_record(series: str = "hybrid", maximum: float = 1.35) -> dict:
+    return {"tag": "v1.0.0", "series": [{"name": series, "maximum_ratio": maximum}],
+            "full_ci_run": "https://github.com/example/project/actions/runs/123",
+            "reason": "A reviewed correctness repair adds work.",
+            "pull_request": "https://github.com/example/project/pull/456"}
+
+
+def test_self_pairs_pass_and_repeats_do_not_inflate_the_case_count() -> None:
+    pytest.importorskip("scipy")
+    report, = gate.compare_pairs(_paired_samples(), tag="v1.0.0")
+    assert report["state"] == "passed"
+    assert report["cases"] == 40
+    assert report["ratio"] == report["lower"] == report["upper"] == 1.0
+
+
+@pytest.mark.parametrize("allowance,expected", [
+    (None, "failed"), (_accept_record(), "accepted"),
+    (_accept_record("keyword"), "failed"), (_accept_record(maximum=1.20), "failed"),
+    ({**_accept_record(), "tag": "v0.9.0"}, "failed"),
+])
+def test_a_thirty_percent_slowdown_needs_the_current_series_allowance(allowance, expected) -> None:
+    pytest.importorskip("scipy")
+    report, = gate.compare_pairs(_paired_samples(1.3), tag="v1.0.0", accept=allowance)
+    assert report["state"] == expected
+    assert report["ratio"] == pytest.approx(1.3)
+
+
+@pytest.mark.parametrize("damage", ["missing-repeat", "missing-arm", "nan", "unknown"])
+def test_a_broken_sample_cannot_be_averaged_into_a_passing_pair(damage: str) -> None:
+    pytest.importorskip("scipy")
+    samples = _paired_samples()
+    if damage == "missing-repeat":
+        samples.pop()
+    elif damage == "missing-arm":
+        samples = [row for row in samples if not (row["case"] == "case-00" and row["arm"] == "base")]
+    elif damage == "nan":
+        samples[0]["elapsed_ms"] = float("nan")
+    else:
+        samples[0]["state"] = "unknown"
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    assert report["state"] == "failed"
+
+
+def test_a_missing_tag_stage_is_not_comparable_and_stages_never_gate() -> None:
+    pytest.importorskip("scipy")
+    samples = _paired_samples()
+    for row in samples:
+        row["stages"] = ({"governed-stage-parent_hints": {"ms": 200.0}}
+                         if row["arm"] == "head" else {})
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    assert report["state"] == "passed"
+    assert report["stages"]["governed-stage-parent_hints"]["state"] == "not comparable"
+
+
+def test_three_repeats_of_nineteen_cases_stay_insufficient() -> None:
+    samples = [row for row in _paired_samples() if int(row["case"].split("-")[1]) < 19]
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    assert report["state"] == "insufficient samples"
+    assert report["cases"] == 19
+
+
+@pytest.mark.parametrize("warming,expected", [(1, "passed"), (2, "failed")])
+def test_paired_warming_is_excluded_and_keeps_the_contract_bound(warming, expected) -> None:
+    pytest.importorskip("scipy")
+    samples = _paired_samples()
+    for row in samples[:warming]:
+        row["state"] = "warming"
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    assert report["state"] == expected
+    assert report["warming"] == warming
+    assert report["unknown_samples"] == 0
+    assert report["cases"] == 39
+
+
+def test_expired_accept_record_is_visible_and_has_no_allowance(tmp_path: Path) -> None:
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps(_accept_record()))
+    allowance, state = gate.read_accept("v1.0.1", path)
+    assert allowance is None and state == "expired"
+
+
+def test_accept_record_shape_and_rounding_cannot_silently_widen_it(tmp_path: Path) -> None:
+    from jsonschema import ValidationError
+
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps({**_accept_record(), "dispatch_waiver": True}))
+    with pytest.raises(ValidationError):
+        gate.read_accept("v1.0.0", path)
+    path.write_text(json.dumps(_accept_record(maximum=1.31)))
+    with pytest.raises(ValueError, match="rounding"):
+        gate.read_accept("v1.0.0", path)
+
+
+def test_accept_margin_resolves_from_the_canonical_contract(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(gate, "PAIRING", {**gate.PAIRING, "margin": 1.5})
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps(_accept_record(maximum=1.35)))
+    with pytest.raises(gate.MeasurementRefused):
+        gate.read_accept("v1.0.0", path)
+
+
+@pytest.mark.parametrize("maximum", [float("inf"), float("nan"), 1e308])
+def test_accept_ratios_must_support_finite_contract_rounding(tmp_path: Path, maximum) -> None:
+    path = tmp_path / "accept.json"
+    path.write_text(json.dumps(_accept_record(maximum=maximum)))
+    with pytest.raises(gate.MeasurementRefused):
+        gate.read_accept("v1.0.0", path)
+
+
+def _absolute_samples(*, delay: float | None = 0.0) -> list[dict]:
+    return [{"principal": "owner", "series": "hybrid", "state": "ok", "elapsed_ms": 90.0,
+             "runqueue_ms": delay, "stages": {}, "critical_path": [], "load": 1.0}
+            for _ in range(40)]
+
+
+def test_sqlite_outside_the_reference_cannot_receive_a_ceiling_verdict() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    state, summaries = gate.summarize_absolute(_absolute_samples(),
+        environment={"sqlite_version": "3.53.0"}, profile=profile)
+    assert state == "not measured"
+    assert summaries[0]["ceiling_met"] is None
+
+
+def test_reference_run_keeps_its_own_pool_contention_and_live_run_discloses_exclusions() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    samples = _absolute_samples()
+    samples[0].update(elapsed_ms=800.0, runqueue_ms=100.0)
+    _, reference = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile)
+    _, live = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile, live=True)
+    assert reference[0]["contended"] == 0
+    assert reference[0]["samples"] == 40
+    assert live[0]["contended"] == 1
+    assert live[0]["samples"] == 39
+    assert live[0]["p95_including_contention_ms"] >= live[0]["p95_ms"]
+
+
+def test_more_than_ten_percent_live_contention_refuses_ceiling_comparisons() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    samples = _absolute_samples()
+    for sample in samples[:5]:
+        sample["runqueue_ms"] = 20.0
+    state, summaries = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile, live=True)
+    assert state == "refused"
+    assert summaries[0]["p95_ms"] is None
+    assert summaries[0]["ceiling_met"] is None
+
+
+def test_unknown_live_runqueue_is_visible_and_cannot_claim_uncontended() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    state, summaries = gate.summarize_absolute(_absolute_samples(delay=None),
+        environment={"sqlite_version": "3.45.1"}, profile=profile, live=True)
+    assert state == "refused"
+    assert summaries[0]["unknown_contention"] == 40
+    assert summaries[0]["ceiling_met"] is summaries[0]["p95_ms"] is None
+
+
+def test_hydration_tail_and_unbudgeted_work_reach_the_stage_report() -> None:
+    from exomem.recall_timing import Interval, Trace
+
+    trace = Trace(known_serial=True)
+    trace.started, trace.ended = 0, 44_000_000
+    trace.edges = [(n * 1_000_000, n * 1_000_000) for n in (0, 1, 21, 41, 44)]
+    trace.intervals = [Interval(name, 1, None, start * 1_000_000, end * 1_000_000)
+                       for name, start, end in (("filter_hits", 0, 1), ("release_gate", 1, 21),
+                                                ("serialize", 21, 41), ("matched_units", 41, 44))]
+    accounting = trace.result(gate.REFERENCE["stage_rows"])
+    samples = [{**sample, "stages": accounting["stages"]} for sample in _absolute_samples()]
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    state, summaries = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile)
+    assert state == "passed"
+    hydration = summaries[0]["stages"]["governed-stage-hydration"]
+    assert hydration["p95_ms"] == 41.0 and hydration["state"] == "failed"
+    unbudgeted = summaries[0]["stages"]["unbudgeted:matched_units"]
+    assert unbudgeted["state"] == "unbudgeted"
+    assert unbudgeted["p50_ms"] == unbudgeted["p95_ms"] == 3.0
+    assert unbudgeted["budget_ms"] is None
+
+
+def test_encode_floor_is_measured_without_applying_the_twice_budget_rule() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    samples = _absolute_samples()
+    for sample in samples:
+        sample["stages"] = {name: {"ms": duration, "cpu_ms": duration} for name, duration in
+                            (("governed-stage-vector.embed", 100.0),
+                             ("governed-stage-bm25", 20.0), ("governed-stage-keyword", 20.0))}
+    state, summaries = gate.summarize_absolute(samples,
+        environment={"sqlite_version": "3.45.1", "cpus": [0, 1]}, profile=profile)
+    assert state == "passed"
+    for row in samples[0]["stages"]:
+        assert summaries[0]["stages"][row]["state"] == "passed"
+        assert summaries[0]["stages"][row]["target_met"] is False
+        assert summaries[0]["stages"][row]["twice_budget_applied"] is False
+    assert summaries[0]["encode_floor"] == {
+        "state": "measured", "p95_ms": 100.0, "budget_ms": 40.0,
+        "samples": 40, "source": "retained-reference-series"}
+    _, live = gate.summarize_absolute(samples,
+        environment={"sqlite_version": "3.45.1", "cpus": [0, 1]}, profile=profile, live=True)
+    assert live[0]["encode_floor"]["state"] == "not measured"
+    assert live[0]["encode_floor"]["p95_ms"] is None
+
+
+def test_unknown_paths_do_not_dilute_the_known_path_share() -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    samples = _absolute_samples()
+    for index, sample in enumerate(samples):
+        sample["stages"] = {"governed-stage-graph": {"ms": 2.0, "cpu_ms": 1.0}}
+        sample["critical_path"] = ["governed-stage-graph"] if index == 0 else None
+    _, summaries = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile)
+    graph = summaries[0]["stages"]["governed-stage-graph"]
+    assert graph["critical_path_share"] == 1.0 and graph["critical_path_samples"] == 1
+    samples[0]["critical_path"] = None
+    _, summaries = gate.summarize_absolute(samples, environment={"sqlite_version": "3.45.1"}, profile=profile)
+    assert summaries[0]["stages"]["governed-stage-graph"]["critical_path_share"] is None
+
+
+def test_paired_path_shares_also_exclude_unknown_paths() -> None:
+    samples = [row for row in _paired_samples() if row["case"] == "case-00"]
+    for sample in samples:
+        sample["critical_path"] = (["governed-stage-vector.embed"]
+                                   if sample["arm"] == "head" and sample["repeat"] == 0 else None)
+    report, = gate.compare_pairs(samples, tag="v1.0.0")
+    encode = report["stages"]["governed-stage-vector.embed"]
+    assert encode["head_critical_path_samples"] == 1 and encode["head_critical_path_share"] == 1.0
+    assert encode["base_critical_path_samples"] == 0 and encode["base_critical_path_share"] is None
+
+
+def test_repeat_validation_uses_the_canonical_contract(monkeypatch) -> None:
+    monkeypatch.setattr(gate, "PAIRING", {**gate.PAIRING, "repeats": 5})
+    sample = {"case": "case-00", "series": "hybrid", "principal": "owner", "arm": "head",
+              "repeat": 4, "load": 1.0, "elapsed_ms": None, "state": "unknown", "cpu_ms": None,
+              "cpu_source": "unknown", "runqueue_ms": None, "unattributed_ms": None,
+              "overlap_cpu_ms": None, "unattributed_cpu_ms": None, "unbudgeted": [],
+              "critical_path": None, "stages": {}}
+    report = {"schema_version": 1, "mode": "paired", "state": "failed",
+              "contract_revision": gate.CONTRACT.revision, "series": [], "samples": [sample]}
+    gate.validate_document(report, "summary.schema.json")
+    sample["repeat"] = 5
+    with pytest.raises(gate.MeasurementRefused, match="repeat-outside-contract"):
+        gate.validate_document(report, "summary.schema.json")
+
+
+def _live_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    cases = [{"series": series, "query": "neutral query"}
+             for series in {row["series"] for row in json.loads((gate.BENCHMARK / "cases.json").read_text())}
+             for _ in range(gate.REFERENCE["queries_min"])]
+    cases_path, corpus_path = tmp_path / "cases.json", tmp_path / "corpus.json"
+    cases_path.write_text(json.dumps(cases))
+    corpus_path.write_text(json.dumps({"source": "served-state-read-only-sql", "bucket_width": 500,
+        "sqlite_version": "3.45.1", "pages": gate.REFERENCE["pages_min"],
+        "chunks": gate.REFERENCE["chunks_min"], "units": gate.REFERENCE["units_min"]}))
+    return cases_path, corpus_path
+
+
+@pytest.mark.parametrize("damage", ["degraded", "stage-error"])
+def test_live_keyword_fallback_cannot_certify_a_failed_encoder(tmp_path: Path, monkeypatch, damage) -> None:
+    cases, corpus = _live_inputs(tmp_path)
+    monkeypatch.setattr(gate, "one_minute_load", lambda: 1.0)
+    timing = {"total_ms": 10.0, "runqueue_ms": 0.0, "sqlite_version": "3.45.1",
+              "stage_rows": {"governed-stage-keyword": {"ms": 5.0, "cpu_ms": None}},
+              "stages": {"vector": {"error": "ImportError"}} if damage == "stage-error" else {}}
+    envelope = {"hits": [{"title": "private result"}], "timings": timing}
+    if damage == "degraded":
+        envelope["degraded"] = ["vector"]
+    transport = gate.ServedTransport("https://example.invalid", "private credential")
+    monkeypatch.setattr(transport, "_post", lambda arguments: envelope)
+    output = tmp_path / "summary.json"
+    assert gate.live_cli(transport, cases_path=cases, corpus_path=corpus, output=output, quiescence_bound=0) == 0
+    report = json.loads(output.read_text())
+    assert report["state"] == "failed"
+    assert all(row["unknown_samples"] == gate.REFERENCE["queries_min"] for row in report["series"])
+    assert all(sample["state"] == "unknown" for sample in report["samples"])
+    assert "private" not in output.read_text() and "ImportError" not in output.read_text()
+
+
+@pytest.mark.parametrize("failure, expected, reason", [
+    (None, "refused", "served-read-refused"),
+    (TimeoutError("private URL and credential"), "failed", "served-timeout"),
+    (IncompleteRead(b"private response body", 100), "failed", "served-network-error"),
+    (ConnectionResetError("private URL and credential"), "failed", "served-network-error"),
+])
+def test_live_transport_failures_write_valid_content_free_attempts(
+    tmp_path: Path, monkeypatch, failure, expected, reason,
+) -> None:
+    import io
+    import urllib.request
+
+    cases, corpus = _live_inputs(tmp_path)
+    monkeypatch.setattr(gate, "one_minute_load", lambda: 1.0)
+    class Response(io.BytesIO):
+        def read(self, *args, **kwargs):
+            if failure is not None:
+                raise failure
+            return super().read(*args, **kwargs)
+
+    def response(*args, **kwargs):
+        return Response(json.dumps({"success": False, "error": "private refusal"}).encode())
+    monkeypatch.setattr(urllib.request, "urlopen", response)
+    output = tmp_path / "summary.json"
+    transport = gate.ServedTransport("https://example.invalid", "private credential")
+    assert gate.live_cli(transport, cases_path=cases, corpus_path=corpus, output=output, quiescence_bound=0) == 0
+    report = json.loads(output.read_text())
+    gate.validate_document(report, "summary.schema.json")
+    assert report["state"] == expected
+    assert len(report["samples"]) == 1
+    sample, = report["samples"]
+    assert sample["state"] == "unknown" and sample["elapsed_ms"] is None
+    assert sample["read_error"] == reason
+    assert "private" not in output.read_text() and "https://" not in output.read_text()
+
+
+def test_content_free_summary_schema_rejects_raw_queries_and_paths() -> None:
+    from jsonschema import ValidationError
+
+    report = {"schema_version": 1, "mode": "live", "state": "not measured",
+              "contract_revision": gate.CONTRACT.revision, "series": [], "samples": []}
+    gate.validate_document(report, "summary.schema.json")
+    for key in ("query", "path", "title", "excerpt", "credential"):
+        with pytest.raises(ValidationError):
+            gate.validate_document({**report, key: "private text"}, "summary.schema.json")
+
+
+def test_missing_prose_refuses_before_a_worker_or_encoder_starts(tmp_path: Path, monkeypatch) -> None:
+    profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+    profile["source"]["sha256"] = None
+    (tmp_path / "profile.json").write_text(json.dumps(profile))
+    with pytest.raises(gate.MeasurementRefused, match="reference-prose"):
+        gate.reference_cases(profile, tmp_path)

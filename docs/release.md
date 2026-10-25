@@ -104,6 +104,32 @@ Then confirm `/health/ready` reports `status: ready` with `cutover.standby` fals
 The budgets and the full sequence are in
 [managed-service-upgrades.md](managed-service-upgrades.md#the-standby-sequence).
 
+Record warm recall latency after readiness. This records the live state and
+does not gate the release. Keep live queries outside the repository.
+The [latency reference](../benchmarks/recall-latency/README.md) defines the case
+file, count source, contention rule and content-free summary schema.
+
+1. Prepare a private live case file with forty queries for each declared series; the file stays on the served host.
+2. Run the gate's `--corpus-counts` mode against the served vault; it writes actual counts in buckets of 500.
+3. Run `--served-url` with `--live-cases`, `--live-corpus` and `--output`; the summary records passed, failed, refused or not measured.
+4. Run `--validate-summary` against the summary; validation rejects content fields before publication.
+5. Upload the summary as `recall-latency-live-cell-YYYYMMDDTHHMMSSZ.json`; the latest attempt supplies the release's live state.
+6. If the state failed or refused, open an issue naming the release, series and failed stage rows; follow-up blocks nothing.
+
+Use the release's existing upload path, with `TAG` and `RECALL_SUMMARY` set to
+the release tag and the validated summary file:
+
+```bash
+gh release upload "$TAG" "$RECALL_SUMMARY"
+```
+
+A release without an attached live summary remains not measured. Preserve a
+refused attempt beside a later repeat. Never publish the live case file.
+
+After a new tag, compare `benchmarks/recall-latency/accept.json` with that tag.
+If the record names an older tag, remove it in a pull request unless the next
+accept record replaces it first. An expired record excuses no paired regression.
+
 ### Semantic-authoring migration note
 
 This release tightens new in-process writes of active compiled notes. New active

@@ -206,6 +206,11 @@ tui = [
 ]
 
 [dependency-groups]
+# Full-CI latency statistics and the served CPU encoder; lean PR jobs omit these.
+recall-benchmark = [
+    "scipy>=1.17,<2",
+    "exomem[embeddings-onnx]",
+]
 dev = [
     "pytest>=8.0",
     "pytest-split>=0.11,<1",

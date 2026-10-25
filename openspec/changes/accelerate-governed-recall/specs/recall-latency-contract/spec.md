@@ -27,7 +27,7 @@ contract, not calibrated from any runner, and a gate MUST NOT loosen them. The
 empty-query browse is outside these ceilings and targets.
 
 The measured principal SHALL be the vault owner, identified through the
-product's owner-authority path with nothing patched. An admitted non-owner
+product's owner-authority path without changes to that path. An admitted non-owner
 principal SHALL run the same series, reported separately. That series becomes
 gating once admission no longer sizes the candidate pool.
 
@@ -126,8 +126,9 @@ runs, inside `semantic_units` included, so that no other row absorbs it. While
 the branches run at the same time, the time that `semantic_units` blocks until
 the encode on the other thread produces the query vector SHALL be spanned as
 `vector.wait`. No row counts `vector.wait`, and it is not reported as
-unbudgeted: time blocked on another branch's result is not the stage's own,
-and the encode row already counts the time it waits on. A span
+unbudgeted: time blocked on another branch's result is not the stage's own.
+The waiting thread may resume after encoding ends; an encode interval need
+not cover the entire wait. A span
 key that no row counts, by name or as a descendant, SHALL be reported as
 "unbudgeted" with its own p50 and p95, net of any descendant interval that a
 row names, so time cannot hide in an unlisted key. Examples are `outside_kb`,
@@ -138,19 +139,35 @@ excluded from that stage's percentiles.
 Spans on different threads can overlap. A row's wall time SHALL be the union
 of the intervals it counts, so overlap neither shortens nor lengthens it. Each
 request SHALL record its critical path: the stages that ran one after another,
-plus the concurrent branch that ended last. A gate SHALL report, for each row,
+plus the concurrent branch that ended last. Explicit fork/join contexts SHALL
+record branch lifetimes, including gaps between named stages. These structural
+contexts SHALL own no wall time, CPU or budget. All rows in the branch that
+ends last belong to the path; tied branches both contribute. Serial setup and
+response work remain on the path even when their thread also ran a branch.
+Thread identity and overlap windows alone SHALL NOT establish branch identity.
+The serial producer SHALL declare its execution model. Missing execution
+structure SHALL produce an unknown path, never an inferred path.
+A gate SHALL report, for each row,
 the p50 and p95 of its wall time and of its CPU time (`cpu_ms`) beside its
 budget, and the share of the series' requests in which the stage lay on the
-critical path. A stage off the critical path still answers to its budget.
+critical path. The share SHALL use only requests with known paths and SHALL
+report their count. Unknown paths SHALL NOT become zero membership.
+A stage off the critical path still answers to its budget.
 
 A request's overlap is the time during which spans on two or more threads are
 open. A row's `cpu_ms` SHALL count the process CPU over the parts of its
 intervals outside the overlap only. The request SHALL report the process CPU
-over the overlap once, as `overlap_cpu_ms`, and the process CPU over the part
-of `total_ms` that no root-level interval covers as `unattributed_cpu_ms`. No
-CPU figure SHALL be attributed per thread. The CPU fields read
-`/proc/self/task`. On a platform without it, every CPU field SHALL read
-unknown, never 0, and an unknown CPU field does not fail a series.
+over the overlap once, as `overlap_cpu_ms`. Every remaining process CPU delta
+SHALL enter its effective row or `unattributed_cpu_ms`, including intervals
+excluded from row ownership. Row CPU plus overlap CPU plus unattributed CPU
+SHALL equal request CPU. Raw interval coverage still defines `unattributed_ms`;
+that wall value may be zero while unattributed CPU is positive. Structural
+fork/join contexts SHALL NOT count as open work spans.
+No CPU figure SHALL be attributed per thread. The CPU fields SHALL use the
+process-wide CPU clock, `time.process_time_ns()`, while timing diagnostics are
+on. The supported Linux profile also requires `/proc/self/task` for run-queue
+diagnostics. On a platform without that facility or the CPU clock, every CPU
+field SHALL read unknown, never 0. An unknown CPU field does not fail a series.
 
 A row's result SHALL need at least 20 samples that ran the stage. With fewer,
 the gate reports the row as "insufficient samples", never as a pass or a fail.
@@ -222,6 +239,27 @@ them. A budget changes only through this requirement.
 - **WHEN** a gate runs on a platform without `/proc/self/task`
 - **THEN** every `cpu_ms`, `overlap_cpu_ms` and `unattributed_cpu_ms` field reads unknown, never 0
 - **AND** the wall-time verdicts of the series stand
+
+#### Scenario: An excluded wait cannot lose process CPU
+
+- **WHEN** a unit stage covers 100 ms and an excluded wait covers its first 40 ms
+- **AND** the request consumes 80 ms of CPU, including 20 ms during that wait, without cross-thread overlap
+- **THEN** the row reports 60 ms of CPU and the request reports 20 ms of unattributed CPU
+- **AND** the CPU buckets sum to the request's 80 ms even though raw wall coverage is complete
+
+#### Scenario: A branch gap does not remove its earlier stages
+
+- **WHEN** one branch encodes from 0 to 40 ms and searches from 46 to 50 ms
+- **AND** the other branch ends at 45 ms
+- **THEN** the explicit branch envelope selects encode and dense search for the path
+- **AND** stages in the other branch do not enter the path merely because their intervals overlap
+
+#### Scenario: Shared setup and response work remain on the path
+
+- **WHEN** the request thread runs setup, one branch, and response work after the join
+- **AND** the worker branch ends last
+- **THEN** the path includes setup, every row in the worker branch, and response work
+- **AND** missing branch envelopes produce an unknown path with a visible known-sample count
 
 #### Scenario: A stage off the critical path still answers to its budget
 
@@ -436,8 +474,18 @@ gate warm search latency with the served query encoder. It SHALL compare head
 with the pairing base: the most recent release tag. That base is code only. It
 moves when a release is tagged, and no vault data, live-cell result or box load
 moves it. Both arms run in a process restricted to two CPUs, on the same
-runner, the same reference corpus and the same cases, back to back. The job
-SHALL compute each case's paired ratio of head to the pairing base. It SHALL
+runner, the same reference corpus and the same cases, back to back.
+
+Both arms SHALL use the same private measurement adapter. It observes the
+actual collectors and span boundaries while their original bodies run. It
+SHALL NOT change principal authority, admission, selection, egress or returned
+fields. Internal timings for an admitted series SHALL remain private to the
+operator-owned harness; public timing suppression still applies. Each worker
+SHALL measure the entire `ask_memory` call, including response work after the
+retrieval timing snapshot. Only the active benchmark worker SHALL run during
+a sample, so the inactive arm's native pools cannot consume its CPUs.
+
+The job SHALL compute each case's paired ratio of head to the pairing base. It SHALL
 fail a series only when the lower bound of the 95% confidence interval of those
 ratios is above 1.10, that is, head at least 10% slower than the pairing base.
 A comparison SHALL need at least 20 paired cases; with fewer, it reports

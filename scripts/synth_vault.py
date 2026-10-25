@@ -144,3 +144,104 @@ def gen_entity_overlay(root: Path, n_entities: int, seed: int = 17) -> list[str]
         )
         rels.append(rel)
     return rels
+
+
+def reference_source(profile: dict, directory: Path) -> tuple[list[str], str]:
+    """Require approved public prose bytes; never replace them with a word bank."""
+    import hashlib
+    import string
+
+    source = profile["source"]
+    path = directory / source["path"]
+    if not source.get("sha256") or not path.is_file():
+        raise ValueError("missing-approved-prose-fixture")
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != source["sha256"]:
+        raise ValueError("prose-fixture-digest-mismatch")
+    words = raw.decode("utf-8").split()
+    terms = {word.strip(string.punctuation).casefold() for word in words}
+    terms.discard("")
+    if len(terms) < profile["vocabulary_min"]:
+        raise ValueError("prose-fixture-vocabulary-below-profile")
+    return words, digest
+
+
+def gen_reference_vault(root: Path, profile: dict, words: list[str]) -> list[str]:
+    """Generate the latency profile from public prose and current registries.
+
+    Existing dense fixture APIs keep their original bytes. This reference uses
+    registry roles and folders; no copied note or category vocabulary lives here.
+    """
+    import json
+
+    from exomem import note_types, semantic_language_registry
+    from exomem.vocabulary import load
+
+    types = [
+        entry for entry in load(note_types.SPEC, root).active
+        if entry.attributes.get("role") == "compiled" and entry.attributes.get("folder")
+    ]
+    categories = tuple(semantic_language_registry.core_registry().core_categories)
+    if not types or not categories:
+        raise ValueError("reference-registry-unavailable")
+    rng = random.Random(profile["seed"])
+    rels = [
+        f"Knowledge Base/{types[i % len(types)].attributes['folder']}/sample-{i:05d}.md"
+        for i in range(profile["pages"])
+    ]
+
+    def passage(offset: int, count: int) -> str:
+        return " ".join(words[(offset + j) % len(words)] for j in range(count))
+
+    for index, rel in enumerate(rels):
+        paragraphs = [
+            passage(index * 37 + paragraph * 53, profile["paragraph_words"])
+            for paragraph in range(profile["paragraphs"])
+        ]
+        if index % round(1 / profile["unit_page_fraction"]) == 0:
+            paragraphs.extend(
+                f"- [{categories[j % len(categories)]}] {passage(index * 37 + j * 97, 18)}"
+                for j in range(profile["units_per_page"])
+            )
+        targets = rng.sample(rels, rng.randint(profile["links_min"], profile["links_max"]))
+        paragraphs.append("\n".join(f"- [[{target[:-3]}]]" for target in targets))
+        frontmatter = (
+            "---\n"
+            f"type: {types[index % len(types)].key}\n"
+            f"title: Sample {index:05d}\n"
+            "projects: [reference]\n"
+            f"updated: 2026-02-{index % 28 + 1:02d}\n"
+            "---\n\n"
+        )
+        target = (
+            profile["transcript_target_bytes"]
+            if index % round(1 / profile["transcript_fraction"]) == 0
+            else profile["page_target_bytes"]
+        )
+        if target == profile["transcript_target_bytes"]:
+            frontmatter = frontmatter.replace("---\n\n", "media_type: audio\n---\n\n")
+        content = frontmatter + "\n\n".join(paragraphs) + "\n"
+        step = 0
+        while len(content.encode("utf-8")) < target:
+            content += "\n" + passage(index * 37 + 313 + step * 53, 20) + "\n"
+            step += 1
+        destination = root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+
+    # This policy fixture is generated only in disposable benchmark vaults.
+    governance = root / "Knowledge Base/_Governance"
+    scope_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    for kind, name, document in (
+        ("scopes", "reference", {"governance_version": 1, "id": scope_id,
+         "name": "Reference", "paths": [f"{entry.attributes['folder']}/**" for entry in types]}),
+        ("rules", "reference", {"governance_version": 1,
+         "id": "01ARZ3NDEKTSV4RRFFQ69G5FB0", "scope_ids": [scope_id],
+         "audience": "benchmark-admitted", "ceiling": 3}),
+    ):
+        path = governance / kind / f"{name}.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # JSON is a YAML subset; use its maintained serializer for fixture syntax.
+        path.write_text(json.dumps(document), encoding="utf-8")
+    return rels

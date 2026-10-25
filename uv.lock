@@ -742,6 +742,10 @@ dev = [
     { name = "tiktoken" },
     { name = "tokenizers" },
 ]
+recall-benchmark = [
+    { name = "exomem", extra = ["embeddings-onnx"] },
+    { name = "scipy" },
+]
 tui-dev = [
     { name = "pytest-textual-snapshot" },
 ]
@@ -812,6 +816,10 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.6" },
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "tokenizers", specifier = ">=0.20" },
+]
+recall-benchmark = [
+    { name = "exomem", extras = ["embeddings-onnx"] },
+    { name = "scipy", specifier = ">=1.17,<2" },
 ]
 tui-dev = [{ name = "pytest-textual-snapshot", specifier = ">=1.0" }]
 
