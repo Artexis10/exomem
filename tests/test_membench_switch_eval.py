@@ -1781,7 +1781,7 @@ def seed_build_round(tmp_path: Path) -> tuple[Layout, Layout, Path]:
         "state_digest": state.tree_digest(baseline / "state"),
         "vault_digest": state.tree_digest(baseline / "vault"),
         "vault_signature_digest": state.signature_digest(baseline / "vault"),
-        "build": {"vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}},
+        "build": {"vectors": {"state": "current"}},
         "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
         "cpu_threads": 6, "resumed": True,
         "vector_build": {"run": str(tmp_path / "first-round"), "cpu_threads": 6, "resumed": True},
@@ -2381,4 +2381,6 @@ def test_a_state_built_before_the_serving_stamps_is_refused_for_reuse() -> None:
         "vault_signature_digest": "fixture",
     }
     with pytest.raises(state.StateError, match="stamped serving freshness"):
-        state._require_build_proof(record)
+        state._require_serving_proof(record)
+    # A seed donor is rebuilt and stamped anew, so only the build proof applies to it.
+    state._require_build_proof(record)

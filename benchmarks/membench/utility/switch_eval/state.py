@@ -987,7 +987,7 @@ def build_tree(
     profile = profile_settings(spec.profile)
     if (target / "state.json").exists():
         record = json.loads((target / "state.json").read_text(encoding="utf-8"))
-        _require_build_proof(record)
+        _require_serving_proof(record)
         if record["snapshot_digest"] != snapshot_digest or record["profile"] != profile:
             raise StateError(
                 f"tree {tree}: snapshot or retrieval profile changed; build a fresh run"
@@ -1167,7 +1167,7 @@ def build_arm(
     target = layout.arm_tree(spec.arm_id, tree)
     if (target / "state.json").exists():
         record = json.loads((target / "state.json").read_text(encoding="utf-8"))
-        _require_build_proof(record)
+        _require_serving_proof(record)
         return record
     shared = build_tree(
         layout,
@@ -1207,13 +1207,18 @@ def load_arm_state(layout: Layout, arm: str, tree: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
+def _require_serving_proof(record: Mapping) -> None:
+    """A state that serves sessions must carry the serving stamps; a seed donor need not, it is rebuilt."""
+    _require_build_proof(record)
+    if not record.get("build", {}).get("serving_freshness", {}).get("key_sha256"):
+        # Amendment 10: a state built before the stamps serves every map and packet as stale.
+        raise StateError("arm state lacks stamped serving freshness; rebuild the state")
+
+
 def _require_build_proof(record: Mapping) -> None:
     # Old snapshots lack the startup proofs required before any arm can use them.
     if record.get("build", {}).get("vectors", {}).get("state") != "current":
         raise StateError("arm state lacks completed vector publication; build a fresh run")
-    if not record.get("build", {}).get("serving_freshness", {}).get("key_sha256"):
-        # Amendment 10: a state built before the stamps serves every map and packet as stale.
-        raise StateError("arm state lacks stamped serving freshness; rebuild the state")
     if (
         not record.get("quiescence", {}).get("content_unchanged")
         or not record.get("quiescence", {}).get("signatures_unchanged")
@@ -1314,7 +1319,7 @@ def prepare_session_slot(layout: Layout, arm: str, tree: str, session: str = "un
     record = load_arm_state(layout, arm, tree)
     if record is None:
         raise StateError(f"arm {arm} tree {tree} has no built state; run the state stage first")
-    _require_build_proof(record)
+    _require_serving_proof(record)
     return _prepare_session_slot(layout, arm, tree, session, record)
 
 
