@@ -6478,6 +6478,42 @@ def yaml_scalar(value: Any) -> str:
 _yaml_scalar = yaml_scalar
 
 
+def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
+    """Return the scanner protocol's "dir", "md", or None for one entry."""
+    try:
+        relative = child.relative_to(vault_root).as_posix()
+    except ValueError:
+        return None
+    if reserved_paths.classify_logical(relative).blocked:
+        return None
+    try:
+        info = child.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or _is_reparse(info):
+        return None
+    if stat.S_ISDIR(info.st_mode):
+        return None if in_excluded_scan_dir(relative) else "dir"
+    # Markdown extensions and Obsidian sync-conflict names are scanner protocol.
+    if (
+        stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1
+        and child.suffix.lower() == ".md"
+        and ".sync-conflict-" not in child.name
+    ):
+        return "md"
+    return None
+
+
+def walk_vault_md_admits(
+    vault_root: Path, path: Path, listings: dict[Path, frozenset[str] | None]
+) -> bool:
+    """Match the full-vault scan by listing only the candidate's ancestry."""
+    from .find_corpus import walk_entry_admits
+
+    return walk_entry_admits(vault_root, path, listings, _walk_vault_md_entry)
+
+
 def walk_vault_md(vault_root: Path):
     """Yield every .md path under vault_root, skipping config/cruft dirs.
 
@@ -6495,28 +6531,10 @@ def walk_vault_md(vault_root: Path):
             return
         for child in children:
             foreground_priority.check_cancelled()
-            try:
-                relative = child.relative_to(vault_root).as_posix()
-            except ValueError:
-                continue
-            if reserved_paths.classify_logical(relative).blocked:
-                continue
-            try:
-                info = child.lstat()
-            except OSError:
-                continue
-            if stat.S_ISLNK(info.st_mode) or _is_reparse(info):
-                continue
-            if stat.S_ISDIR(info.st_mode):
-                if in_excluded_scan_dir(relative):
-                    continue
+            kind = _walk_vault_md_entry(vault_root, child)
+            if kind == "dir":
                 yield from walk(child)
-            elif (
-                stat.S_ISREG(info.st_mode)
-                and info.st_nlink == 1
-                and child.suffix.lower() == ".md"
-                and ".sync-conflict-" not in child.name
-            ):
+            elif kind == "md":
                 # Skip Obsidian sync-conflict duplicates — they aren't real
                 # notes; indexing/scanning them pollutes search and wikilink
                 # resolution.
@@ -7577,6 +7595,8 @@ def normalize_wikilink(
     vault_root: Path,
     *,
     resolver: WikilinkResolver | None = None,
+    targeted_namespace_contains: Callable[[str], bool] | None = None,
+    resolver_factory: Callable[[], WikilinkResolver] | None = None,
     strict: bool = False,
     visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, str | None]:
@@ -7597,10 +7617,10 @@ def normalize_wikilink(
 
     `visible` (see `writer_link_visibility`) restricts every match to the
     pages it admits; `None` matches over every page.
-    """
-    if resolver is None:
-        resolver = WikilinkResolver(vault_root)
 
+    `targeted_namespace_contains` answers exact resolver keys for explicit
+    paths. Bare names use `resolver` or lazily call `resolver_factory`.
+    """
     def _seen(no_ext: str) -> bool:
         return visible is None or visible(f"{no_ext}.md")
 
@@ -7630,16 +7650,24 @@ def normalize_wikilink(
         canonical = cleaned if cleaned.startswith(kb_prefix()) else kb_prefix() + cleaned
         return canonical + anchor, None
 
+    # Explicit paths need namespace membership only; bare names need the full
+    # stem/title index and retain its ambiguity rules.
+    targeted = targeted_namespace_contains is not None and "/" in cleaned
+    if not targeted and resolver is None:
+        resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
+    contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__
+
     # 1. Full vault-rooted (with or without explicit Knowledge Base/ prefix).
-    if cleaned in resolver.full_paths and _seen(cleaned):
+    if contains(cleaned) and _seen(cleaned):
         return cleaned + anchor, None
     if not cleaned.startswith(kb_prefix()):
         candidate = kb_prefix() + cleaned
-        if candidate in resolver.full_paths and _seen(candidate):
+        if contains(candidate) and _seen(candidate):
             return candidate + anchor, None
 
     # 2. KB-stripped match (target looks like KB-relative).
-    if cleaned in resolver.kb_stripped and _seen(kb_prefix() + cleaned):
+    kb_match = contains(kb_prefix() + cleaned) if targeted else cleaned in resolver.kb_stripped
+    if kb_match and _seen(kb_prefix() + cleaned):
         return kb_prefix() + cleaned + anchor, None
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.

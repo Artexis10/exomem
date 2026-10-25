@@ -64,6 +64,103 @@ def _contend_once(monkeypatch: pytest.MonkeyPatch, store) -> None:
     monkeypatch.setattr(store, "_publication_lock", publication_lock)
 
 
+@contextmanager
+def _held_by_another_thread(lock):
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with lock:
+            held.set()
+            assert release.wait(20), "the test did not release the contended lock"
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(20), "the test did not acquire the contended lock"
+        yield
+    finally:
+        release.set()
+        holder.join(20)
+        assert not holder.is_alive(), "the lock holder outlived the test"
+
+
+@pytest.mark.parametrize("lag_only", [False, True], ids=["deferred-paths", "lag-only"])
+@pytest.mark.parametrize("busy_lock", ["publication", "reserved-identity"])
+def test_busy_repair_keeps_claims_until_pending_recovery_can_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    live_catalogue, lag_only: bool, busy_lock: str,
+) -> None:
+    """A still-busy barrier must preserve updates, deletions, and unavailable admission."""
+    from exomem import readiness, reserved_paths, writer_lease
+
+    store, changed, removed = live_catalogue
+    key = tmp_path.resolve()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    monkeypatch.setattr(lexstore, "_PUBLICATION_TIMEOUT_FOREGROUND", 0.01)
+    monkeypatch.setattr(lexstore, "_PUBLICATION_TIMEOUT_BACKGROUND", 0.03)
+    if busy_lock == "publication":
+        lock = store._publication_lock()
+    else:
+        monkeypatch.setattr(writer_lease.active_manager(), "_mutation_timeout_seconds", 0.03)
+        lock = reserved_paths._identity_coordination_scope(tmp_path)
+    caplog.set_level(logging.INFO, logger="exomem.lexstore")
+    changed.write_text("# After\n\nafterchange\n", encoding="utf-8")
+    removed.unlink()
+    freshness.on_files_changed(tmp_path, changed=[changed], deleted=[removed])
+    rebuilds = []
+
+    def rebuild():
+        rebuilds.append(True)
+        return False
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    readiness.reset()
+    readiness.mark_ready("retrieval_catalog")
+    try:
+        with _held_by_another_thread(lock):
+            if lag_only:
+                # The lag proof consumes both kinds of pending work together.
+                with lexstore._REPAIRS_LOCK:
+                    lexstore._DEFERRED_UPSERTS[key] = {changed, removed}
+                if busy_lock == "publication":
+                    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+                else:
+                    lexstore._schedule_runtime_catalog_repair(tmp_path, lag_only=True)
+            elif busy_lock == "publication":
+                assert store.apply_watcher_batch(
+                    [changed], [removed.relative_to(tmp_path).as_posix()]
+                ) is False
+            else:
+                lexstore._schedule_runtime_catalog_repair(tmp_path, deferred_paths=[changed, removed])
+            assert _wait_for_flight_end(tmp_path)
+            code = "VAULT_LOCK_TIMEOUT" if busy_lock == "publication" else "MUTATION_BUSY"
+            assert any(code in message for message in caplog.messages)
+            assert rebuilds == [], "lock contention escalated to a full rebuild"
+            with lexstore._REPAIRS_LOCK:
+                assert lexstore._DEFERRED_UPSERTS.get(key) == {changed, removed}
+                assert (key in lexstore._FULL_REBUILD_REQUESTED) is lag_only
+                assert (key in lexstore._LAG_ONLY_REBUILDS) is lag_only
+                assert key not in lexstore._FULL_REBUILDS_IN_FLIGHT
+            assert not readiness.is_ready("retrieval_catalog")
+            if busy_lock == "publication":
+                assert lexstore.runtime_retrieval_catalog_proof(
+                    tmp_path, require_live_projection=True, schedule_repair=False
+                ) is None
+
+        assert lexstore.retry_pending_repair(key) is True
+        assert _wait_for_flight_end(tmp_path)
+        assert rebuilds == []
+        assert readiness.is_ready("retrieval_catalog")
+        assert lexstore.runtime_retrieval_catalog_proof(
+            tmp_path, require_live_projection=True, schedule_repair=False
+        ) is not None
+        assert lexstore.search_bm25(tmp_path, "afterchange", k=3, scope="kb")
+        assert lexstore.search_bm25(tmp_path, "beforeremoval", k=3, scope="kb") == []
+    finally:
+        readiness.reset()
+
+
 def test_contended_watcher_retries_changed_and_deleted_rows_without_rebuilding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
 ) -> None:
@@ -311,6 +408,49 @@ def test_a_catch_up_read_failure_that_is_not_source_movement_still_rebuilds(
     assert failed
     assert rebuilds == [True]
     assert any("catch-up declined (replay_failed)" in message for message in caplog.messages)
+    assert lexstore.search_bm25(tmp_path, "afterchange", k=3, scope="kb")
+
+
+@pytest.mark.parametrize(
+    "code", ["VAULT_LOCK_NESTED", "VAULT_LOCK_IO", "MUTATION_LOCK_UNAVAILABLE"]
+)
+def test_a_catch_up_lock_failure_that_is_not_contention_still_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue, code: str
+) -> None:
+    """An unsafe lock or unavailable coordinator keeps the existing full-repair fallback."""
+    from exomem.cli_ops import OpError
+    from exomem.vault import VaultLockError
+
+    store, changed, _removed = live_catalogue
+    changed.write_text("# After\n\nafterchange\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    real_lock = store._publication_lock
+    failed = False
+
+    @contextmanager
+    def fail_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            error_type = OpError if code == "MUTATION_LOCK_UNAVAILABLE" else VaultLockError
+            raise error_type(code, "injected lock failure")
+        with real_lock(*args, **kwargs):
+            yield
+
+    rebuilds = []
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(store, "_publication_lock", fail_once)
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert failed
+    assert rebuilds == [True]
     assert lexstore.search_bm25(tmp_path, "afterchange", k=3, scope="kb")
 
 
@@ -911,6 +1051,32 @@ def test_a_rebuild_requested_during_a_targeted_retry_is_not_dropped(
 
     assert store.retried == [[page]]
     assert store.rebuilds == 1, "the rebuild queued mid-flight was dropped"
+
+
+def test_a_full_request_queued_during_contended_catch_up_keeps_its_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A current checkpoint cannot cancel a genuine full request queued during a busy replay."""
+    from exomem.vault import VaultLockTimeout
+
+    class _ContendingStore(_FakeStore):
+        def catch_up_lagging_delta(self) -> bool:
+            lexstore._schedule_repair(tmp_path)
+            raise VaultLockTimeout("VAULT_LOCK_TIMEOUT", "publication is busy")
+
+    store = _ContendingStore()
+    _install(monkeypatch, store)
+    key = tmp_path.resolve()
+    lexstore._schedule_repair(tmp_path, lag_only=True)
+    assert _wait_for_flight_end(tmp_path)
+    assert store.rebuilds == 0
+    with lexstore._REPAIRS_LOCK:
+        assert key in lexstore._FULL_REBUILD_REQUESTED
+        assert key not in lexstore._LAG_ONLY_REBUILDS
+
+    assert lexstore.retry_pending_repair(key) is True
+    assert _wait_for_flight_end(tmp_path)
+    assert store.rebuilds == 1
 
 
 def test_paths_deferred_during_a_flight_are_still_retried(
