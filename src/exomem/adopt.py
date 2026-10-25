@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,8 +20,10 @@ from typing import Any
 from . import (
     adoption_plan,
     context_refs,
+    held_fs,
     indexes,
     knowledge_packs,
+    reserved_paths,
     semantic_census,
     source_taxonomy,
 )
@@ -463,7 +466,6 @@ def _resolve_selected_text_file(root: Path, raw: str) -> tuple[Path, str] | dict
 class ImportArtifact:
     """The original bytes an artifact Source keeps, and where they are published."""
 
-    source: Path  # the untouched original
     target: Path  # absolute destination beside the page
     digest: str
     size: int
@@ -502,7 +504,6 @@ def import_item(
     if planned["form"] == "artifact":
         content = render_artifact_source(planned, date_iso=date_iso, collection=collection)
         artifact = ImportArtifact(
-            source=root / planned["original_path"],
             target=root / planned["artifact_path"],
             digest=planned["original_sha256"],
             size=planned["original_bytes"],
@@ -627,15 +628,28 @@ def commit_import_items(
             batch_atomic_write(list(extra_writes), vault_root=root)
         return {"copied_sources": [], "warnings": [], "source_counts": source_counts}
 
-    from .add import artifact_binary_write
+    from .add import AddError, artifact_binary_write, artifact_identity
 
     kb = kb_root(root)
     date_iso = today.isoformat()
     writes: list[PlannedWrite] = []
     copied: list[dict] = []
-    streams = []
-    try:
+    held_sources: list[reserved_paths.GenericBinarySource] = []
+    with ExitStack() as originals:
         for item in items:
+            source = originals.enter_context(
+                reserved_paths.open_generic_binary(root, item.original_path, physical=True)
+            )
+            held_sources.append(source)
+            if source.version.size != item.bytes:
+                raise AdoptError("SOURCE_CHANGED", "the original changed before import")
+            if item.artifact is None:
+                try:
+                    digest, size = artifact_identity(source.stream, ceiling=item.bytes)
+                except AddError as error:
+                    raise AdoptError("SOURCE_CHANGED", "the original changed before import") from error
+                if digest != item.sha256 or size != item.bytes:
+                    raise AdoptError("SOURCE_CHANGED", "the original changed before import")
             writes.append(
                 PlannedWrite(
                     path=item.target, content=item.content,
@@ -643,11 +657,10 @@ def commit_import_items(
                 )
             )
             if item.artifact is not None:
-                binary, stream = artifact_binary_write(
-                    item.artifact.source, item.artifact.target,
+                binary, _stream = artifact_binary_write(
+                    source.stream, item.artifact.target,
                     item.artifact.digest, item.artifact.size,
                 )
-                streams.append(stream)
                 writes.append(binary)
             copied.append(
                 {
@@ -748,10 +761,14 @@ def commit_import_items(
             warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
         writes.extend(extra_writes)
-        batch_atomic_write(writes, vault_root=root)
-    finally:
-        for stream in streams:
-            stream.close()
+
+        def require_sources_current() -> None:
+            for source in held_sources:
+                source.require_current()
+
+        batch_atomic_write(
+            writes, vault_root=root, _validate_prepared_bindings=require_sources_current
+        )
     return {"copied_sources": copied, "warnings": warnings, "source_counts": post_counts}
 
 
@@ -772,7 +789,10 @@ def _copy_as_sources(
     if not items:
         return {"copied_sources": [], "skipped": skipped, "warnings": ["no importable files copied"]}
 
-    result = commit_import_items(root, items, today=today)
+    try:
+        result = commit_import_items(root, items, today=today)
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        raise AdoptError(**adoption_plan.source_failure(error)) from error
     return {
         "copied_sources": result["copied_sources"],
         "skipped": skipped,

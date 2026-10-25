@@ -5,20 +5,27 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import itertools
+import os
 import types
 from pathlib import Path
 
 import pytest
 
 from exomem import (
+    adopt,
     adoption_plan,
     adoption_run,
     epistemic_graph,
     find,
+    held_fs,
     indexes,
     media_jobs,
     request_budget,
+    reserved_paths,
     source_taxonomy,
+)
+from exomem import (
+    vault as vault_module,
 )
 from exomem.vault import parse_frontmatter
 
@@ -497,6 +504,169 @@ def test_a_file_swapped_for_a_link_after_the_plan_fails_at_apply_without_importi
     assert list((vault / SOURCES).rglob("*victim*")) == []
 
 
+def test_planning_refuses_an_ancestor_exchanged_after_source_acquisition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/parent/child/note.md": "# Original\n"})
+    outside = tmp_path / "outside"
+    (outside / "child").mkdir(parents=True)
+    (outside / "child/note.md").write_text("# Outside\n", encoding="utf-8")
+    run_id = adoption_run.start(vault, path="Coll", today=TODAY)["run_id"]
+    adoption_run.select(vault, run_id=run_id, include=["Coll"])
+    with held_fs.acquire(vault).require() as filesystem:
+        filesystem_type = type(filesystem)
+    real_file = filesystem_type.file
+    exchanged = False
+
+    def exchange_after_acquisition(self, parent, leaf, **kwargs):
+        nonlocal exchanged
+        result = real_file(self, parent, leaf, **kwargs)
+        if leaf == "note.md" and result.ok and not exchanged:
+            exchanged = True
+            (vault / "Coll/parent").rename(vault / "Coll/retired")
+            (vault / "Coll/parent").symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(filesystem_type, "file", exchange_after_acquisition)
+
+    planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
+
+    assert planned["plan"]["items"] == []
+    assert planned["plan"]["skipped"][0]["code"] in {"INVALID_PATH", "SOURCE_CHANGED"}
+    assert exchanged
+
+
+@pytest.mark.parametrize("form", ["text", "artifact"])
+@pytest.mark.parametrize("exchange_at", ["before_publication", "after_publication"])
+def test_import_rolls_back_when_original_custody_changes_during_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, form: str, exchange_at: str
+) -> None:
+    relative = "Coll/note.md" if form == "text" else "Coll/archive.bin"
+    data = "# Original\n" if form == "text" else b"\0original binary\xff"
+    vault = _vault(tmp_path, {relative: data})
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside bytes must not be imported")
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    target = planned["plan"]["items"][0]["target_path"]
+    exchanged = False
+
+    def exchange():
+        nonlocal exchanged
+        exchanged = True
+        (vault / relative).unlink()
+        (vault / relative).symlink_to(outside)
+
+    real_batch = adopt.batch_atomic_write
+    if exchange_at == "before_publication":
+        def exchange_before_batch(*args, **kwargs):
+            exchange()
+            return real_batch(*args, **kwargs)
+
+        monkeypatch.setattr(adopt, "batch_atomic_write", exchange_before_batch)
+    else:
+        def exchange_after_page(path):
+            if path == vault / target:
+                exchange()
+
+        monkeypatch.setattr(vault_module, "_after_batch_destination_published", exchange_after_page)
+
+    with pytest.raises(adoption_run.AdoptionRunError) as caught:
+        _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert caught.value.code == "ADOPTION_SOURCE_CHANGED"
+    assert exchanged
+    assert not (vault / target).exists()
+    artifact = planned["plan"]["items"][0].get("artifact_path")
+    assert not artifact or not (vault / artifact).exists()
+
+
+def test_import_preserves_text_and_artifact_with_physical_nfd_names(tmp_path: Path) -> None:
+    text_path = "Coll/cafe\u0301/note.md"
+    artifact_path = "Coll/media\u0301.bin"
+    binary = b"\0original\xff"
+    vault = _vault(tmp_path, {text_path: "# Original\n", artifact_path: binary})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert applied["phase"] == "applied"
+    assert applied["outcomes"][text_path]["original_unchanged"] is True
+    assert (vault / applied["outcomes"][artifact_path]["artifact_path"]).read_bytes() == binary
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses literal colon file names")
+def test_import_acquires_literal_colon_parents_and_leaf(tmp_path: Path) -> None:
+    original = "Coll/Parent: Stage/Child: Notes/entry: Index.md"
+    vault = _vault(tmp_path, {original: "# Literal entry\n"})
+
+    applied = adopt.adopt(vault, mode="copy-as-sources", selected_paths=[original], today=TODAY)
+
+    [copied] = applied["copy"]["copied_sources"]
+    page = (vault / copied["source_path"]).read_text(encoding="utf-8")
+    assert parse_frontmatter(page)[0]["imported_from"] == original
+    assert (vault / original).read_text(encoding="utf-8") == "# Literal entry\n"
+
+
+def test_a_colon_selector_without_a_literal_entry_cannot_authorize_source_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/note.md": "# Ordinary file\n"})
+    with held_fs.acquire(vault).require() as filesystem:
+        filesystem_type = type(filesystem)
+    real_file = filesystem_type.file
+
+    def selector_file(self, parent, leaf, **kwargs):
+        return real_file(self, parent, "note.md" if leaf == "note:stream.md" else leaf, **kwargs)
+
+    monkeypatch.setattr(filesystem_type, "file", selector_file)
+
+    result = adoption_plan.read_facts(
+        vault, "Coll/note:stream.md", ceiling=4096, text_hint=True
+    )
+
+    assert result["code"] == "INVALID_PATH"
+    assert reserved_paths.classify_logical("Coll/note:stream.md").disposition is (
+        reserved_paths.PathDisposition.INVALID
+    )
+    with pytest.raises(reserved_paths.ReservedPathLeafError):
+        reserved_paths.read_generic_bytes(vault, "Coll/note:stream.md", physical=True)
+
+
+def test_physical_colon_source_names_do_not_bypass_reserved_classification(tmp_path: Path) -> None:
+    vault = _vault(tmp_path, {})
+
+    result = adoption_plan.read_facts(
+        vault, "Knowledge Base/_governance/policy: draft.md", ceiling=4096, text_hint=True
+    )
+
+    assert result["code"] == "RESERVED_PATH"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses literal colon file names")
+def test_retained_colon_source_rechecks_its_literal_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path, {"Coll/note: draft.md": "# Original\n"})
+    with held_fs.acquire(vault).require() as filesystem:
+        filesystem_type = type(filesystem)
+    real_children = filesystem_type.children
+
+    def missing_entry(self, parent, **kwargs):
+        result = real_children(self, parent, **kwargs)
+        if result.ok:
+            return held_fs.HeldResult(value=tuple(
+                row for row in result.require() if row.relative_path != "note: draft.md"
+            ))
+        return result
+
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as caught:
+        with reserved_paths.open_generic_binary(vault, "Coll/note: draft.md", physical=True) as source:
+            monkeypatch.setattr(filesystem_type, "children", missing_entry)
+            source.require_current()
+
+    assert caught.value.code == "UNSAFE_PATH"
+
+
 # --- plan-layer rules -----------------------------------------------------------
 def test_a_non_utf8_note_with_an_upper_case_suffix_is_kept_as_a_bin_artifact(tmp_path: Path) -> None:
     data = "# Café\n\nnaïve\n".encode("latin-1")
@@ -532,15 +702,23 @@ def test_a_link_fragment_is_dropped_for_resolution_and_kept_in_the_rendered_link
     assert links == [f"- [[{stem}#Setup]]", f"- [[{stem}#install]]"]
 
 
-@pytest.mark.parametrize(("aliases", "kept_aliases"), [("[Fine, 42]", ["Fine"]), ("42", [])])
+@pytest.mark.parametrize(
+    ("aliases", "kept_aliases", "tags", "kept_tags", "rejected_tags"),
+    [
+        ("[Fine, 42]", ["Fine"], "[good, 'dir/', 'a//b']", ["good"], ["dir/", "a//b"]),
+        ("42", [], "[good, 'dir/', 'a//b']", ["good"], ["dir/", "a//b"]),
+        ("[Fine, 42]", ["Fine"], "42", [], ["42"]),
+    ],
+)
 def test_aliases_and_tags_the_page_cannot_carry_are_reported_on_the_plan_item(
-    tmp_path: Path, aliases: str, kept_aliases: list[str]
+    tmp_path: Path, aliases: str, kept_aliases: list[str], tags: str,
+    kept_tags: list[str], rejected_tags: list[str],
 ) -> None:
     vault = _vault(
         tmp_path,
         {
             "Coll/note.md": (
-                f"---\naliases: {aliases}\ntags: [good, 'dir/', 'a//b']\n---\n# Note\n"
+                f"---\naliases: {aliases}\ntags: {tags}\n---\n# Note\n"
             )
         },
     )
@@ -549,7 +727,7 @@ def test_aliases_and_tags_the_page_cannot_carry_are_reported_on_the_plan_item(
     item = planned["plan"]["items"][0]
 
     assert (item["aliases"], item["rejected_aliases"]) == (kept_aliases, ["42"])
-    assert (item["tags"], item["rejected_tags"]) == (["good"], ["dir/", "a//b"])
+    assert (item["tags"], item["rejected_tags"]) == (kept_tags, rejected_tags)
 
 
 def test_importing_a_subfolder_then_its_parent_does_not_duplicate_the_subfolder_notes(
@@ -580,6 +758,52 @@ def test_a_page_whose_front_matter_is_longer_than_the_index_head_still_counts_as
     _run_id, replanned = _import(vault, path="Coll", include=["Coll"])
 
     assert [item["action"] for item in replanned["plan"]["items"]] == ["already-imported"]
+
+
+def test_a_removed_import_cannot_be_reported_as_already_applied(tmp_path: Path) -> None:
+    vault = _vault(tmp_path, {"Coll/a.md": "# A\n\noriginal\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    first, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    target = first["outcomes"]["Coll/a.md"]["target_path"]
+    (vault / target).unlink()
+
+    final, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    outcome = final["outcomes"]["Coll/a.md"]
+    assert outcome["status"] == "failed"
+    assert outcome["code"] == "PLAN_STALE"
+    assert "re-plan" in outcome["reason"]
+    assert not (vault / target).exists()
+
+
+def test_a_removed_artifact_cannot_be_reported_as_already_applied(tmp_path: Path) -> None:
+    vault = _vault(tmp_path, {"Coll/archive.bin": b"\0original binary\xff"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    first, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    outcome = first["outcomes"]["Coll/archive.bin"]
+    (vault / outcome["artifact_path"]).unlink()
+
+    final, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert (vault / outcome["target_path"]).exists()
+    assert final["outcomes"]["Coll/archive.bin"]["status"] == "failed"
+    assert final["outcomes"]["Coll/archive.bin"]["code"] == "PLAN_STALE"
+
+
+def test_a_changed_original_cannot_be_reported_as_already_applied(tmp_path: Path) -> None:
+    vault = _vault(tmp_path, {"Coll/a.md": "# A\n\noriginal\n"})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    (vault / "Coll/a.md").write_text("# A\n\nchanged\n", encoding="utf-8")
+
+    with pytest.raises(adoption_run.AdoptionRunError) as caught:
+        _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert caught.value.code == "ADOPTION_SOURCE_CHANGED"
+    assert adoption_run.status(vault, run_id=run_id)["outcomes"] == {}
 
 
 def test_a_plan_names_the_other_root_that_earlier_imports_of_the_collection_came_from(

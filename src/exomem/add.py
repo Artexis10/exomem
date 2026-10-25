@@ -14,6 +14,7 @@ On schema-rejection: return a structured error, do not touch disk.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import logging
@@ -200,15 +201,17 @@ def _describe_artifact(filename: str, digest: str, size: int) -> str:
     )
 
 
-def artifact_identity(path: Path, *, ceiling: int | None = None) -> tuple[str, int]:
-    """SHA-256 and byte count of a staged file, read in chunks.
+def artifact_identity(path: Path | IO[bytes], *, ceiling: int | None = None) -> tuple[str, int]:
+    """SHA-256 and byte count of a staged file or caller-owned stream, read in chunks.
 
     With a `ceiling` the read stops, and `AddError` `TOO_LARGE` is raised, once
     the file passes it: the bound holds even for a file that grew after a stat.
     """
     digest = hashlib.sha256()
     size = 0
-    with path.open("rb") as stream:
+    owned = path.open("rb") if isinstance(path, Path) else contextlib.nullcontext(path)
+    with owned as stream:
+        stream.seek(0)
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
             size += len(chunk)
@@ -222,7 +225,7 @@ def artifact_identity(path: Path, *, ceiling: int | None = None) -> tuple[str, i
 
 
 def artifact_binary_write(
-    staged_path: Path, artifact_path: Path, digest: str, size: int
+    staged_path: Path | IO[bytes], artifact_path: Path, digest: str, size: int
 ) -> tuple[PlannedWrite, IO[bytes]]:
     """The create-only write that publishes staged bytes at `artifact_path`.
 
@@ -230,8 +233,10 @@ def artifact_binary_write(
     adoption alike. The stream is the caller's to close once the batch ends. The
     batch checks the bytes against `digest` and `size`, so a file that changed
     after the identity read fails the whole batch instead of publishing.
+    A supplied stream remains caller-owned; a Path opens a stream for the caller.
     """
-    stream = staged_path.open("rb")
+    stream = staged_path.open("rb") if isinstance(staged_path, Path) else staged_path
+    stream.seek(0)
     return (
         PlannedWrite(
             path=artifact_path,

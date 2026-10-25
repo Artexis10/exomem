@@ -43,6 +43,8 @@ Why: one artifact layout, one sidecar format, one extraction path. Alternatives 
 - Pointing the Source at the original in place. The original can change or vanish, and Sources are immutable.
 - Calling `add.add` as is. It cannot place, label or bound an import.
 
+Original reads retain the existing no-follow file custody through hashing and streaming. They use the physical spelling that the inventory found. Apply validates the current source binding before publication and at the batch's rollback-capable completion point. A path check followed by a separate open cannot establish custody.
+
 ### D2. Exact capture, and structure kept outside the fence
 
 The text Source keeps the original text verbatim in its fence. The renderer emits the opening fence, a newline, the content unchanged, a newline and the closing fence. It removes no trailing whitespace. Reading back everything between the opening fence line and the final newline before the closing fence yields the content. Its UTF-8 encoding hashes to `original_sha256`.
@@ -95,9 +97,9 @@ A call that stops early returns `progress` and a server-issued `continuation`. T
 `plan_id` hashes the complete planned actions: destinations, classification, provenance fields, the rendered link projection, and each original's hash.
 
 In `apply`:
-- Text items in a call commit in one `batch_atomic_write`, together with their outcomes in `run.json`.
-- Each artifact commits through the D1 seam, and then its outcome is written.
-- After a crash between those two writes, the D4 identity check on resume finds the committed Source and records `already-applied`.
+- Each chunk commits its text pages, streamed artifacts, indexes, log and outcomes in one `batch_atomic_write`.
+- Artifact writes use the D1 seam shared with capture. Extraction requests follow the commit.
+- After a crash with uncertain commit state, the D4 identity check records committed items as `already-applied`.
 - A batch exception whose commit state is unknown is resolved the same way on the next call.
 - A frozen destination that another writer occupied since `plan` fails with `TARGET_OCCUPIED`. It never moves, because links point at it.
 
@@ -105,7 +107,7 @@ The phase becomes `applied` only when every planned item has an outcome. `status
 
 ### D6. Honest coverage on finish
 
-`finish` keeps `recall_check` and `first_question`, and checks `recall_check` against the exact target path. It adds `coverage`:
+`finish` keeps `recall_check` and `first_question`, and checks `recall_check` against the exact target path. It prefers the largest imported text item, falling back to the largest artifact when no text item exists. It adds `coverage`:
 - outcomes counted by status and code;
 - skipped hidden folders and junk counted by reason, with file counts;
 - media states for artifact items: done, pending, engine disabled, failed, or unknown;
@@ -129,6 +131,7 @@ The skill stays generic. The `adoption_studio` description names notes, document
 
 ## Risks / Trade-offs
 
+- **Existing scan limit.** Studio's overview can hide a subtree reached through colon-bearing names. Stateless import keeps literal POSIX names; this batch does not relax public path filtering.
 - **Disk.** Attachments are stored twice until the original is removed. The plan reports total bytes before `apply`. On Cloud, the staged folder is discarded after the import.
 - **Basename ambiguity.** Two notes with one name leave links to that name unresolved. A guess would create a wrong edge.
 - **Seam refactor.** Moving the artifact commit out of `add.add` touches capture. The existing capture tests must pass unchanged.

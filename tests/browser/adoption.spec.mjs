@@ -14,18 +14,21 @@ const INVENTORY = [
   {path: "projects/beta.txt", eligible: true, junk: false},
   {path: "projects/deep/gamma.md", eligible: true, junk: false},
   {path: "old notes/meeting.md", eligible: true, junk: false},
-  {path: "photos/pic.png", eligible: false, junk: false},
+  {path: "photos/pic.png", eligible: false, junk: false, reason: "TOO_LARGE"},
   {path: "old notes/conflict copy.md", eligible: false, junk: true},
 ];
 
 const PLAN = {
   plan_id: "plan-1",
-  totals: {copy: 4, skip_unsupported: 1, skip_junk: 1},
   items: [
-    {original_path: "projects/alpha.md", title: "Alpha plan"},
-    {original_path: "projects/beta.txt", title: "Beta risks"},
-    {original_path: "projects/deep/gamma.md", title: "Gamma"},
-    {original_path: "old notes/meeting.md", title: "Meeting"},
+    {original_path: "projects/alpha.md", title: "Alpha plan", action: "copy-as-source"},
+    {original_path: "projects/beta.txt", title: "Beta risks", action: "copy-as-source"},
+    {original_path: "projects/deep/gamma.md", title: "Gamma", action: "copy-as-source"},
+    {original_path: "old notes/meeting.md", title: "Meeting", action: "copy-as-source"},
+  ],
+  skipped: [
+    {path: "photos/pic.png", code: "TOO_LARGE", reason: "file is larger than the artifact ceiling"},
+    {path: "old notes/conflict copy.md", code: "JUNK", reason: "empty file or sync-conflict copy"},
   ],
 };
 
@@ -93,7 +96,7 @@ async function mockApi(page, calls, handlers) {
         body: JSON.stringify({success: false, error: {code: "UNMOCKED", message: `No mock for ${key}`}})});
       return;
     }
-    const result = typeof handler === "function" ? handler(body) : handler;
+    const result = typeof handler === "function" ? await handler(body) : handler;
     if (result && result.__error) {
       const {status = 409, code, message} = result.__error;
       await route.fulfill({status, contentType: "application/json",
@@ -133,15 +136,25 @@ const applyCalls = (calls) =>
 test("deterministic happy path with guarantee badge and write gated on the dialog", async ({page}) => {
   const calls = [];
   let run = makeRun("selecting");
+  let releaseApply;
+  const continuedApply = new Promise((resolve) => { releaseApply = resolve; });
   await connectAdopt(page, calls, {
     review_memory: emptyInbox(),
     "adoption_studio:start": () => run,
     "adoption_studio:status": () => run,
     "adoption_studio:select": () => ({...run, selected_count: 4, selectable_count: 4}),
     "adoption_studio:plan": () => (run = makeRun("planned", {plan: PLAN})),
-    "adoption_studio:apply": () => (run = makeRun("applied", {
-      plan: PLAN, outcomes: APPLIED_OUTCOMES, verified_unchanged: 4, verified_total: 4, handoff: HANDOFF,
-    })),
+    "adoption_studio:apply": async (body) => {
+      if (!body.continuation) {
+        return (run = makeRun("applying", {
+          plan: PLAN, continuation: "apply-next", progress: {total: 4, remaining: 3},
+        }));
+      }
+      await continuedApply;
+      return (run = makeRun("applied", {
+        plan: PLAN, outcomes: APPLIED_OUTCOMES, verified_unchanged: 4, verified_total: 4, handoff: HANDOFF,
+      }));
+    },
     ask_memory: {hits: [{title: "Alpha plan", path: "in/alpha.md", excerpt: "Ship the alpha."}]},
   });
 
@@ -153,18 +166,22 @@ test("deterministic happy path with guarantee badge and write gated on the dialo
   // Step 2: findings.
   await expect(page.getByRole("heading", {name: "Here's what we found"})).toBeVisible();
   await expect(page.locator("#adopt-tiles")).toContainText("6");
+  await expect(page.locator("#adopt-nontext")).toContainText("Processing may continue after copying.");
   await expect(page.getByText("Your folder looks like it includes: Projects")).toBeVisible();
   await expect(guarantee(page)).toBeVisible();
   await page.getByRole("button", {name: "Choose what to bring in"}).click();
 
   // Step 3: choose — folders default ON, junk default OFF.
   await expect(page.getByRole("heading", {name: "Choose what to bring in"})).toBeVisible();
-  await expect(page.locator("#adopt-status")).toHaveText("4 of 4 text notes selected · junk skipped");
+  await expect(page.locator("#adopt-status")).toHaveText("4 of 4 files selected · junk skipped");
+  await page.locator("#adopt-choose-tree li", {hasText: "photos"}).getByRole("button", {name: "see files"}).click();
+  await expect(page.locator("#adopt-files-panel")).toContainText("cannot be copied: too large");
   await expect(guarantee(page)).toBeVisible();
   await page.getByRole("button", {name: "Show me exactly what will happen"}).click();
 
   // Step 4: preview — exact plan, and still zero write-class calls.
   await expect(page.locator("#adopt-contract")).toContainText("Exomem will COPY 4 files");
+  await expect(page.locator("#adopt-plan-bullets")).toContainText("4 files will be copied in");
   await expect(page.getByText("0 files will be changed, moved, or deleted — always")).toBeVisible();
   await expect(guarantee(page)).toBeVisible();
   expect(applyCalls(calls)).toHaveLength(0);
@@ -174,8 +191,18 @@ test("deterministic happy path with guarantee badge and write gated on the dialo
   await expect(page.getByRole("dialog")).toContainText("Copy 4 files into Exomem?");
   expect(applyCalls(calls)).toHaveLength(0);
   await page.getByRole("button", {name: "Yes, copy them in"}).click();
+  try {
+    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(page.getByRole("heading", {name: "Bringing your files in…"})).toBeVisible();
+    await expect(page.locator("#adopt-status")).toHaveText("1 of 4 files done…");
+    await expect.poll(() => applyCalls(calls).length).toBe(2);
+    expect(applyCalls(calls)[1].body.continuation).toBe("apply-next");
+    expect(applyCalls(calls)[1].body.plan_id).toBe("plan-1");
+  } finally {
+    releaseApply();
+  }
   await expect(page.getByRole("heading", {name: "All set — 4 files are in ✓"})).toBeVisible();
-  expect(applyCalls(calls)).toHaveLength(1);
+  expect(applyCalls(calls)).toHaveLength(2);
   expect(applyCalls(calls)[0].body.plan_id).toBe("plan-1");
   await expect(page.getByText("We double-checked your originals: 4 of 4 are byte-for-byte unchanged (checksums match).")).toBeVisible();
   await expect(guarantee(page)).toBeVisible();
@@ -192,6 +219,61 @@ test("deterministic happy path with guarantee badge and write gated on the dialo
   expect(calls.some((c) => ["triage_memory", "review_item_context"].includes(c.name))).toBeFalsy();
   expect(calls.some((c) => c.name === "adoption_studio"
     && ["work-item", "propose", "apply-proposal", "finish"].includes(c.body.action))).toBeFalsy();
+});
+
+for (const failure of [
+  {code: "PLAN_STALE", message: "The plan changed.", selector: "#adopt-stale-text"},
+  {code: "WRITE_DENIED", message: "The file is read-only.", selector: "#adopt-error"},
+]) {
+  test(`apply ${failure.code} remains visible after confirmation closes`, async ({page}) => {
+    const calls = [];
+    const run = makeRun("planned", {plan: PLAN});
+    await connectAdopt(page, calls, {
+      review_memory: emptyInbox(),
+      "adoption_studio:status": () => run,
+      "adoption_studio:apply": () => ({__error: failure}),
+    }, {query: "?view=adopt&run=adr-test-1&astep=preview"});
+
+    await page.getByRole("button", {name: "Bring these files in"}).click();
+    expect(applyCalls(calls)).toHaveLength(0);
+    await page.getByRole("button", {name: "Yes, copy them in"}).click();
+
+    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(page.locator(failure.selector)).toContainText(failure.message);
+    await expect(page.getByRole("heading", {name: "Exactly what will happen"})).toBeVisible();
+    expect(applyCalls(calls)[0].body.plan_id).toBe("plan-1");
+  });
+}
+
+test("resumed preview preserves folder classification in the selection request", async ({page}) => {
+  const calls = [];
+  const rule = {path: "projects", source_kind: "book", domain: "media"};
+  const run = makeRun("selecting", {
+    selection: {rules: {include: [rule, "old notes"], exclude: [], overrides: [], include_junk: false}},
+  });
+  const plan = {...PLAN,
+    items: PLAN.items.map((item, index) => index < 2 ? {...item, action: "already-imported"} : item),
+    skipped: [...PLAN.skipped,
+      {path: "projects/deep/gamma.md", code: "SLUG_TRUNCATED", reason: "Title was shortened."}],
+  };
+  await connectAdopt(page, calls, {
+    review_memory: emptyInbox(),
+    "adoption_studio:status": () => run,
+    "adoption_studio:select": () => run,
+    "adoption_studio:plan": () => makeRun("planned", {plan}),
+  }, {query: "?view=adopt&run=adr-test-1&astep=choose"});
+
+  await page.getByRole("button", {name: "Show me exactly what will happen"}).click();
+
+  await expect(page.getByRole("heading", {name: "Exactly what will happen"})).toBeVisible();
+  await expect(page.locator("#adopt-contract")).toContainText("Exomem will COPY 2 files");
+  await expect(page.locator("#adopt-plan-bullets")).toContainText("2 files are already in Exomem; no copy is needed");
+  await expect(page.locator("#adopt-plan-bullets")).toContainText("2 other files will be skipped");
+  await expect(page.locator("#adopt-plan-bullets")).toContainText("file is larger than the artifact ceiling");
+  const selected = calls.find((call) => call.body.action === "select");
+  expect(selected.body.include).toContainEqual(rule);
+  expect(selected.body.include).not.toContain("[object Object]");
+  expect(applyCalls(calls)).toHaveLength(0);
 });
 
 test("stale plan shows the honest banner and re-check preserves the selection", async ({page}) => {
@@ -213,7 +295,7 @@ test("stale plan shows the honest banner and re-check preserves the selection", 
   await page.getByRole("button", {name: "Look through my files"}).click();
   await page.getByRole("button", {name: "Choose what to bring in"}).click();
   await page.locator("#adopt-folder-projects").uncheck();
-  await expect(page.locator("#adopt-status")).toHaveText("1 of 4 text notes selected · junk skipped");
+  await expect(page.locator("#adopt-status")).toHaveText("1 of 4 files selected · junk skipped");
   await page.getByRole("button", {name: "Show me exactly what will happen"}).click();
 
   // The banner carries the server's own reason — no fabricated counts.
@@ -228,7 +310,7 @@ test("stale plan shows the honest banner and re-check preserves the selection", 
   await page.getByRole("button", {name: "Re-check my folder"}).click();
   await expect(page.getByRole("heading", {name: "Choose what to bring in"})).toBeVisible();
   await expect(page.locator("#adopt-folder-projects")).not.toBeChecked();
-  await expect(page.locator("#adopt-status")).toHaveText("1 of 4 text notes selected · junk skipped");
+  await expect(page.locator("#adopt-status")).toHaveText("1 of 4 files selected · junk skipped");
   expect(applyCalls(calls)).toHaveLength(0);
 });
 
@@ -485,10 +567,10 @@ test("390×844 viewport with keyboard-only folder and file selection", async ({p
   // re-acquires focus (Tab) before toggling again — modeled by the re-focus.
   await page.locator("#adopt-folder-projects").focus();
   await page.keyboard.press("Space");
-  await expect(page.locator("#adopt-status")).toHaveText("1 of 4 text notes selected · junk skipped");
+  await expect(page.locator("#adopt-status")).toHaveText("1 of 4 files selected · junk skipped");
   await page.locator("#adopt-folder-projects").focus();
   await page.keyboard.press("Space");
-  await expect(page.locator("#adopt-status")).toHaveText("4 of 4 text notes selected · junk skipped");
+  await expect(page.locator("#adopt-status")).toHaveText("4 of 4 files selected · junk skipped");
 
   // Roving tabindex skips disabled (non-importable) boxes: arrowing from the
   // only enabled "old notes" file must not dead-end on the disabled junk row.
@@ -506,7 +588,7 @@ test("390×844 viewport with keyboard-only folder and file selection", async ({p
   await page.keyboard.press("ArrowUp");
   await expect(fileBoxes.first()).toBeFocused();
   await page.keyboard.press("Space");
-  await expect(page.locator("#adopt-status")).toHaveText("3 of 4 text notes selected · junk skipped");
+  await expect(page.locator("#adopt-status")).toHaveText("3 of 4 files selected · junk skipped");
 
   // The preview step still fits and gates apply behind the dialog confirm.
   await page.getByRole("button", {name: "Show me exactly what will happen"}).click();

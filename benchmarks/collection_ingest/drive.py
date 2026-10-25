@@ -4,7 +4,7 @@
 The journey is: start -> select -> plan -> apply (while work remains) -> finish, then a
 second pass of the same five steps on the unchanged collection to measure duplicates.
 Everything runs against a disposable vault and state root under ``--workdir``; the
-collection is placed in the vault by hard link (or copy), so the originals under
+collection is copied into the vault, so the originals under
 ``--collection`` are never opened for writing.
 
     python drive.py --collection C --workdir W --profile personal --python PY --log OUT.json
@@ -48,15 +48,13 @@ PROFILE_ENV = {"personal": {}, "cloud-like": {"EXOMEM_MEDIA_ENGINES": "documents
 
 
 def place_collection(source: Path, target: Path) -> int:
-    """Link (or copy) every collection file into the vault; return the file count."""
+    """Copy every fixture file as an ordinary file; return the file count."""
     count = 0
     for src in sorted(p for p in source.rglob("*") if p.is_file() or p.is_symlink()):
         dst = target / src.relative_to(source)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(src, dst)
-        except OSError:
-            shutil.copy2(src, dst)
+        # Generic vault reads reject hardlink aliases, so the fixture needs its own files.
+        shutil.copy2(src, dst)
         count += 1
     return count
 

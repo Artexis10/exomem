@@ -25,14 +25,14 @@ from . import (
     access,
     context_refs,
     find_results,
+    held_fs,
     markdown_regions,
+    reserved_paths,
     source_taxonomy,
 )
 from .vault import (
-    VaultPathError,
     kb_root,
     parse_frontmatter,
-    resolve_under_vault,
     slugify_with_truncation_check,
 )
 
@@ -87,13 +87,16 @@ def _text_field(value: Any) -> str | None:
     return nfc(value) if isinstance(value, str) and value.strip() else None
 
 
-def _leading_frontmatter(page: Path) -> dict[str, Any] | None:
+def _leading_frontmatter(root: Path, page: Path) -> dict[str, Any] | None:
     """The parsed front matter of a page, however long, or None when it has none.
 
     The page is read block by block until the closing fence, so a long title or a
     long alias list cannot hide the provenance that follows it.
     """
-    with page.open("rb") as stream:
+    with reserved_paths.open_generic_binary(
+        root, page.relative_to(root).as_posix(), physical=True
+    ) as source:
+        stream = source.stream
         data = stream.read(_INDEX_BLOCK_BYTES)
         if not data.startswith(b"---"):
             return None
@@ -144,8 +147,8 @@ def read_import_index(root: Path) -> list[EarlierImport]:
                 continue
             page = Path(dirpath) / name
             try:
-                frontmatter = _leading_frontmatter(page)
-            except OSError:
+                frontmatter = _leading_frontmatter(root, page)
+            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
                 continue
             if frontmatter is None:
                 continue
@@ -334,9 +337,11 @@ def _folder_for(root: Path, classification: Mapping[str, Any] | None,
 # tags
 # --------------------------------------------------------------------------- #
 def _tag_values(raw: Any) -> list[Any]:
+    if raw is None:
+        return []
     if isinstance(raw, str):
         return [part for part in raw.split(",")]
-    return list(raw) if isinstance(raw, list) else []
+    return list(raw) if isinstance(raw, list) else [raw]
 
 
 def normalize_tags(raw: Any) -> tuple[list[str], list[str]]:
@@ -371,11 +376,7 @@ def normalize_aliases(raw: Any) -> tuple[list[str], list[str]]:
     A non-string or multi-line alias cannot sit in the inline YAML list, so it is
     reported instead of dropped. An empty alias carries nothing and is not reported.
     """
-    values = _tag_values(raw) if isinstance(raw, str) else raw
-    if values is None:
-        return [], []
-    if not isinstance(values, list):
-        values = [values]
+    values = _tag_values(raw)
     kept: list[str] = []
     rejected: list[str] = []
     for value in values:
@@ -435,23 +436,21 @@ def link_references(body: str) -> list[dict[str, Any]]:
     return refs
 
 
-def resolve_original(root: Path, original_path: str) -> Path | dict[str, Any]:
-    """The path of one original to read, or a refusal ``{"code", "reason"}``.
-
-    Both plan and apply read through this door. A path whose real location is outside
-    the vault is refused as ``INVALID_PATH``, as the stateless copy refuses it. A link
-    is refused even inside the vault: the scan never lists one, so a link here replaced
-    the file after the scan.
-    """
-    try:
-        absolute, _relative = resolve_under_vault(
-            root, original_path, must_exist=True, must_be_file=True
-        )
-    except VaultPathError as error:
-        return {"code": error.code, "reason": error.reason}
-    if absolute.is_symlink():
-        return {"code": "NOT_REGULAR_FILE", "reason": "the original is a link, not a regular file"}
-    return absolute
+def source_failure(error: Exception) -> dict[str, str]:
+    """Map the held-filesystem error protocol without exposing host paths."""
+    code = getattr(error, "code", "IO_REFUSED")
+    if isinstance(error, FileNotFoundError):
+        code = "MISSING"
+    # These are the held substrate's closed refusal codes, not a content vocabulary.
+    mapped = {
+        "MISSING": ("NOT_FOUND", "the original is missing"),
+        "UNSAFE_PATH": ("INVALID_PATH", "the original has an unsafe path"),
+        "CROSS_DEVICE": ("INVALID_PATH", "the original crosses a filesystem boundary"),
+        "RESERVED_PATH": ("RESERVED_PATH", "the original is reserved or has multiple names"),
+        "IDENTITY_CHANGED": ("SOURCE_CHANGED", "the original changed during import"),
+        "PATH_GUARD_CONTENT": ("SOURCE_CHANGED", "the original bytes changed before publication"),
+    }.get(code, (code, "the original could not be read safely"))
+    return {"code": mapped[0], "reason": mapped[1]}
 
 
 def read_facts(
@@ -465,30 +464,24 @@ def read_facts(
     """
     from .add import AddError, artifact_identity
 
-    path = resolve_original(root, original_path)
-    if isinstance(path, dict):
-        return path
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return {"code": "NOT_FOUND", "reason": "original missing at plan time"}
-    if size > ceiling:
-        return {"code": "TOO_LARGE", "reason": f"original exceeds the {ceiling:,} byte artifact ceiling"}
     text: str | None = None
-    if text_hint and size <= INLINE_TEXT_MAX_BYTES:
-        try:
-            data = path.read_bytes()
-        except OSError:
-            return {"code": "NOT_FOUND", "reason": "original unreadable at plan time"}
-        text = decode_text(data)
-        digest, length = hashlib.sha256(data).hexdigest(), len(data)
-    else:
-        try:
-            digest, length = artifact_identity(path, ceiling=ceiling)
-        except AddError as error:
-            return {"code": error.code, "reason": error.reason}
-        except OSError:
-            return {"code": "NOT_FOUND", "reason": "original unreadable at plan time"}
+    try:
+        with reserved_paths.open_generic_binary(root, original_path, physical=True) as source:
+            size = source.version.size
+            if size > ceiling:
+                return {"code": "TOO_LARGE", "reason": f"original exceeds the {ceiling:,} byte artifact ceiling"}
+            if text_hint and size <= INLINE_TEXT_MAX_BYTES:
+                data = source.stream.read(INLINE_TEXT_MAX_BYTES + 1)
+                if len(data) != size:
+                    return {"code": "SOURCE_CHANGED", "reason": "the original changed during import"}
+                text = decode_text(data)
+                digest, length = hashlib.sha256(data).hexdigest(), len(data)
+            else:
+                digest, length = artifact_identity(source.stream, ceiling=ceiling)
+    except AddError as error:
+        return {"code": error.code, "reason": error.reason}
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        return source_failure(error)
     facts: dict[str, Any] = {
         "original_path": original_path,
         "original_sha256": digest,
@@ -599,7 +592,13 @@ def plan_item(
 def artifact_of(root: Path, page_path: str) -> str | None:
     """The artifact beside an earlier Source page, when there is one."""
     candidate = page_path[: -len(".md")]
-    return candidate if candidate != page_path and (root / candidate).is_file() else None
+    if candidate != page_path:
+        try:
+            reserved_paths.inspect_generic_file(root, candidate, physical=True)
+        except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+            return None
+        return candidate
+    return None
 
 
 # --------------------------------------------------------------------------- #

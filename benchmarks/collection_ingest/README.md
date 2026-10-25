@@ -67,7 +67,7 @@ the unchanged collection. Then a bounded wait for media extraction (`process_med
   their default.
 - A refusal that carries `retry_after_ms` is repeated after that wait. The log records each wait.
 
-The collection is placed in the disposable vault by hard link, so the originals stay unchanged.
+The driver copies the collection into the disposable vault as ordinary files, because generic reads reject hardlink aliases. The fixture originals stay unchanged.
 `exomem init` scaffolds the Knowledge Base first, because the server will not start on a bare folder.
 
 ## Metrics

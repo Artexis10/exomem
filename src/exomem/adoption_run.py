@@ -33,7 +33,15 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from . import adopt as adopt_module
-from . import adoption_plan, context_refs, knowledge_packs, request_budget, source_taxonomy
+from . import (
+    adoption_plan,
+    context_refs,
+    held_fs,
+    knowledge_packs,
+    request_budget,
+    reserved_paths,
+    source_taxonomy,
+)
 from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .kbdir import kb_dirname
@@ -1099,28 +1107,16 @@ def _applied(planned: dict) -> dict:
 
 def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None, dict | None]:
     """The original's text (None for an artifact), or a failed outcome when it drifted."""
-    from .add import AddError, artifact_identity
-
-    path = adoption_plan.resolve_original(root, planned["original_path"])
-    if isinstance(path, dict):
-        return None, _failed(path["code"], path["reason"])
-    try:
-        if planned["form"] == "text":
-            data = path.read_bytes()
-            digest, length = hashlib.sha256(data).hexdigest(), len(data)
-            text = adoption_plan.decode_text(data)
-        else:
-            digest, length = artifact_identity(path, ceiling=ceiling)
-            text = None
-    except FileNotFoundError:
-        return None, _failed("NOT_FOUND", "original missing at apply time")
-    except AddError as error:
-        return None, _failed("SOURCE_CHANGED", error.reason)
-    except OSError as error:
-        return None, _failed("NOT_FOUND", f"original unreadable at apply time: {error}")
+    read = adoption_plan.read_facts(
+        root, planned["original_path"], ceiling=ceiling, text_hint=planned["form"] == "text"
+    )
+    if isinstance(read, dict):
+        code = "SOURCE_CHANGED" if read["code"] == "TOO_LARGE" else read["code"]
+        return None, _failed(code, read["reason"])
+    facts, text = read
     if (
-        digest != planned["original_sha256"]
-        or length != planned["original_bytes"]
+        facts["original_sha256"] != planned["original_sha256"]
+        or facts["original_bytes"] != planned["original_bytes"]
         or (planned["form"] == "text" and text is None)
     ):
         return None, _failed("SOURCE_CHANGED", "sha256 mismatch at apply time")
@@ -1129,20 +1125,23 @@ def _read_original(root: Path, planned: dict, ceiling: int) -> tuple[str | None,
 
 def _original_unchanged(root: Path, planned: dict) -> bool:
     """Re-hash one original: the honest after-the-fact check that it was never touched."""
-    try:
-        with (root / planned["original_path"]).open("rb") as stream:
-            return hashlib.file_digest(stream, "sha256").hexdigest() == planned["original_sha256"]
-    except OSError:
-        return False
+    read = adoption_plan.read_facts(
+        root, planned["original_path"], ceiling=planned["original_bytes"], text_hint=False
+    )
+    return not isinstance(read, dict) and read[0]["original_sha256"] == planned["original_sha256"]
 
 
 def _earlier_with_same_bytes(
-    index: list[adoption_plan.EarlierImport], label: str | None, planned: dict
+    root: Path, index: list[adoption_plan.EarlierImport], label: str | None, planned: dict
 ) -> adoption_plan.EarlierImport | None:
-    return adoption_plan.earlier_with_same_bytes(
+    earlier = adoption_plan.earlier_with_same_bytes(
         index, collection=label, collection_path=planned["collection_path"],
         original_path=planned["original_path"], sha256=planned["original_sha256"],
     )
+    if earlier is not None and planned["form"] == "artifact":
+        if adoption_plan.artifact_of(root, earlier.path) is None:
+            return None
+    return earlier
 
 
 class _ApplyPacer:
@@ -1313,7 +1312,7 @@ def _commit_chunk(
         reads.index = adoption_plan.read_import_index(root)
         landed: list[dict] = []
         for planned, _item in survivors:
-            earlier = _earlier_with_same_bytes(reads.index, label, planned)
+            earlier = _earlier_with_same_bytes(root, reads.index, label, planned)
             if earlier is not None:
                 outcomes[planned["original_path"]] = _already_applied(
                     earlier.path, adoption_plan.artifact_of(root, earlier.path),
@@ -1321,7 +1320,15 @@ def _commit_chunk(
                 )
                 landed.append(planned)
             else:
-                outcomes[planned["original_path"]] = _failed("BATCH_ROLLED_BACK", str(error))
+                if isinstance(error, adopt_module.AdoptError):
+                    failure = {"code": error.code, "reason": error.reason}
+                elif isinstance(
+                    error, (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
+                ) or getattr(error, "code", None) == "PATH_GUARD_CONTENT":
+                    failure = adoption_plan.source_failure(error)
+                else:
+                    failure = {"code": "BATCH_ROLLED_BACK", "reason": str(error)}
+                outcomes[planned["original_path"]] = _failed(**failure)
         return landed
     reads.source_counts = committed["source_counts"]
     return [planned for planned, _item in survivors]
@@ -1343,17 +1350,23 @@ def _apply_chunk(
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     for planned in chunk:
         path = planned["original_path"]
+        text, failure = _read_original(root, planned, ceiling)
+        if failure is not None:
+            outcomes[path] = failure
+            continue
         if planned["action"] == "already-imported":
+            frozen = [entry for entry in index if entry.path == planned["target_path"]]
+            if _earlier_with_same_bytes(root, frozen, label, planned) is None:
+                outcomes[path] = _failed(
+                    "PLAN_STALE", "the earlier Source or artifact is missing or changed; re-plan this import"
+                )
+                continue
             outcomes[path] = _already_applied(
                 planned["target_path"], planned.get("artifact_path"), planned["original_sha256"]
             )
             settled.append(planned)
             continue
-        text, failure = _read_original(root, planned, ceiling)
-        if failure is not None:
-            outcomes[path] = failure
-            continue
-        earlier = _earlier_with_same_bytes(index, label, planned)
+        earlier = _earlier_with_same_bytes(root, index, label, planned)
         if earlier is not None:
             outcomes[path] = _already_applied(
                 earlier.path, adoption_plan.artifact_of(root, earlier.path),
@@ -1711,8 +1724,9 @@ def _extraction_states(root: Path, run: dict, budget: request_budget.RequestBudg
         return {"unknown": len(media)}
     for artifact, media_type in media:
         try:
-            page = root / f"{artifact}.md"
-            content = page.read_text(encoding="utf-8")
+            page = f"{artifact}.md"
+            with reserved_paths.open_generic_binary(root, page, physical=True) as source:
+                content = source.stream.read().decode("utf-8")
             job = jobs.get_by_binary(root / artifact)
             if (
                 job is None and media_engines.stage_enabled(media_type)
@@ -1725,7 +1739,8 @@ def _extraction_states(root: Path, run: dict, budget: request_budget.RequestBudg
                         commit_guard=contextlib.nullcontext, defer_fanout_to_terminal=True,
                     )
                     job = jobs.get_by_binary(root / artifact)
-                    content = page.read_text(encoding="utf-8")
+                    with reserved_paths.open_generic_binary(root, page, physical=True) as source:
+                        content = source.stream.read().decode("utf-8")
             counts[_extraction_state(content, media_type, job)] += 1
         except Exception:  # noqa: BLE001 - one unreadable page is one unknown
             counts["unknown"] += 1

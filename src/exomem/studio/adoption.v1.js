@@ -418,7 +418,7 @@ function populateFindings() {
   replaceChildren(byId("adopt-folder-list"), folders.map((folder) => {
     const li = el("li");
     li.append(el("strong", folder.path));
-    li.append(el("span", ` ${folder.files} files · ${folder.notes} notes`, "fine-print"));
+    li.append(el("span", ` ${folder.files} files · ${folder.notes} can be selected`, "fine-print"));
     return li;
   }));
 
@@ -433,7 +433,7 @@ function populateFindings() {
   const nonText = byId("adopt-nontext");
   if (nonText) {
     nonText.textContent = totals.binary
-      ? `Photos, PDFs and other non-text files: ${totals.binary} — Exomem can see them, but this brings in text notes only. They stay put; you can add them later.`
+      ? `Photos, PDFs and other files: ${totals.binary}. Select eligible files to keep copies in Exomem. Processing may continue after copying.`
       : "";
     nonText.hidden = !totals.binary;
   }
@@ -476,7 +476,7 @@ function populateChoose() {
 function renderChooseStatus() {
   const counts = selectionCounts(inventoryRows(), selection);
   setStatus(
-    `${counts.selectedNotes} of ${counts.selectableNotes} text notes selected · `
+    `${counts.selectedNotes} of ${counts.selectableNotes} files selected · `
     + (selection.includeJunk ? `${counts.junkIncluded} junk included` : "junk skipped"),
   );
 }
@@ -498,7 +498,7 @@ function renderFolderRow(folder) {
   const label = el("label", "");
   label.htmlFor = checkbox.id;
   label.append(el("strong", folder.path));
-  label.append(el("span", ` ${folder.notes} notes`, "fine-print"));
+  label.append(el("span", ` ${folder.notes} files can be selected`, "fine-print"));
   li.append(checkbox, label);
   const seeFiles = el("button", "see files", "link-button");
   seeFiles.type = "button";
@@ -538,7 +538,10 @@ function renderFilesPanel() {
       renderChooseStatus();
       populateChoose();
     });
-    const label = el("label", row.eligible ? row.path : `${row.path} — can't be copied yet (not a text file)`);
+    const reason = row.reason
+      ? String(row.reason).toLowerCase().replaceAll("_", " ")
+      : "the scan did not mark this file importable";
+    const label = el("label", row.eligible ? row.path : `${row.path} — cannot be copied: ${reason}`);
     li.append(checkbox, label);
     return list.append(li);
   });
@@ -579,7 +582,7 @@ async function persistSelection() {
   const payload = selectionPayload(selection, selectionRoots());
   const result = await adoptionApi.select(run.run_id, payload);
   if (result && typeof result.selected_count === "number") {
-    setStatus(`${result.selected_count} of ${result.selectable_count} text notes selected · junk ${selection.includeJunk ? "included" : "skipped"}`);
+    setStatus(`${result.selected_count} of ${result.selectable_count} files selected · junk ${selection.includeJunk ? "included" : "skipped"}`);
   }
   return result;
 }
@@ -616,14 +619,17 @@ function populatePreview() {
   const banner = byId("adopt-stale");
   if (banner) banner.hidden = true;
   const plan = (run && run.plan) || {};
-  const totals = plan.totals || derivedPlanTotals(plan);
+  const totals = derivedPlanTotals(plan);
   const contract = byId("adopt-contract");
   if (contract) {
     contract.textContent = `Exomem will COPY ${totals.copy || 0} files into its own library. `
       + "Copies, never moves: every original stays exactly where it is.";
   }
   const {bullets} = planBullets(totals);
-  replaceChildren(byId("adopt-plan-bullets"), bullets.map((text) => el("li", text)));
+  replaceChildren(byId("adopt-plan-bullets"), [
+    ...bullets.map((text) => el("li", text)),
+    ...totals.skipped.map((item) => el("li", `${item.path}: ${item.reason || item.code}`)),
+  ]);
 
   const items = plan.items || [];
   const details = byId("adopt-plan-files");
@@ -632,7 +638,8 @@ function populatePreview() {
     const list = el("ul", "", "file-table");
     items.slice(0, 200).forEach((item) => {
       const li = el("li");
-      li.append(el("span", `${item.original_path}  →  copied in as "${item.title || item.target_name || ""}"`));
+      const action = item.action === "already-imported" ? "already in Exomem as" : "copied in as";
+      li.append(el("span", `${item.original_path}  →  ${action} "${item.title || item.target_name || ""}"`));
       li.append(el("span", "We record where it came from and a checksum, so you can verify your original any time.", "fine-print"));
       list.append(li);
     });
@@ -641,17 +648,21 @@ function populatePreview() {
 }
 
 function derivedPlanTotals(plan) {
-  const skipped = plan.skipped || [];
+  const items = plan.items || [];
+  const plannedPaths = new Set(items.map((item) => item.original_path));
+  const skipped = (plan.skipped || []).filter((item) => !plannedPaths.has(item.path));
   return {
-    copy: (plan.items || []).length,
+    copy: items.filter((item) => item.action === "copy-as-source").length,
+    existing: items.filter((item) => item.action === "already-imported").length,
     skip_unsupported: skipped.filter((s) => s.code === "UNSUPPORTED_IMPORT_TYPE").length,
     skip_junk: skipped.filter((s) => s.code !== "UNSUPPORTED_IMPORT_TYPE").length,
+    skipped,
   };
 }
 
 function confirmApply() {
   const plan = (run && run.plan) || {};
-  const totals = plan.totals || derivedPlanTotals(plan);
+  const totals = derivedPlanTotals(plan);
   openConfirm({
     kicker: "YOU STAY IN CONTROL",
     title: `Copy ${totals.copy || 0} files into Exomem?`,
@@ -660,11 +671,21 @@ function confirmApply() {
     cancelLabel: "Not yet",
     onConfirm: async () => {
       const planId = plan.plan_id;
-      run = await adoptionApi.apply(run.run_id, planId, {onProgress: showProgress});
-      route = routePatch(route, {astep: "start"});
-      writeRoute(route, {replace: true});
-      if (isTransientPhase(run.phase)) await refreshStatus();
-      render();
+      dialog().close();
+      clearAdoptError();
+      showScreen("applying");
+      setStatus("Bringing your files in…");
+      try {
+        run = await adoptionApi.apply(run.run_id, planId, {onProgress: showProgress});
+        route = routePatch(route, {astep: "start"});
+        writeRoute(route, {replace: true});
+        if (isTransientPhase(run.phase)) await refreshStatus();
+        render();
+      } catch (error) {
+        showScreen("preview");
+        if (isStale(error)) showStaleBanner(error);
+        else showAdoptError(error);
+      }
     },
   });
 }
