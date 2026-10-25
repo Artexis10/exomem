@@ -7204,6 +7204,7 @@ def cached_inbound_wikilinks(
             and not freshness.external_pending(vault_root)
         ):
             return True
+        # No deleted-page proof: the verdict store is stamped by another checkpoint than this index.
         return visible is not None and view_lag.consumer_lag_only_withheld(
             vault_root, checkpoint, visible, pending=True
         )

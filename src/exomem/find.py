@@ -7496,6 +7496,7 @@ def borrow_query_resolver(
         if (
             checkpoint is not None
             and cached[0] == checkpoint.triple
+            # No deleted-page proof: the verdict store is stamped by another checkpoint than this resolver.
             and view_lag.consumer_lag_only_withheld(root, checkpoint, visible)
         ):
             return cached[1]
