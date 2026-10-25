@@ -7030,6 +7030,9 @@ class LeaseManager:
                             break
                         self._store_condition.wait(min(0.05, max(0, deadline - time.monotonic())))
                 self._stop.set()
+                # No grant or preview handoff remains, so shutdown needs no shared state.
+                if self._fencing_token is None and not handoff:
+                    return
             # Borrowers may need a command claim to finish; drain them before exclusion.
             with self._replica_grant_claim(exclusive=True) as available:
                 if not available:

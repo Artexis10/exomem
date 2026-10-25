@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import multiprocessing
+import shutil
 import time
 import traceback
 from contextlib import redirect_stdout
@@ -77,6 +78,24 @@ def test_a_preview_borrower_can_finish_its_command_while_close_drains(
                 with manager.writer_authority_guard():
                     manager.validate_fencing_token(token)
             closing.result(timeout=3)
+    assert store.status("main")["holder"] is None
+
+
+def test_repeated_file_writer_close_needs_no_retired_runtime_state(tmp_path: Path) -> None:
+    store = SQLiteLeaseStore(tmp_path / "coordinator.sqlite")
+    config = writer_lease.LeaseConfig(
+        url="https://lease.example", vault_id="main", replica_id="local-replica",
+        state_dir=tmp_path / "lease",
+    )
+    manager = writer_lease.LeaseManager(config, client=StoreClient(store, "local-replica"))
+    manager.ensure_writer()
+    manager.close()
+    manager.idempotency._owner_lock_handle.close()
+    shutil.rmtree(config.state_dir)
+
+    manager.close()
+
+    assert not config.state_dir.exists()
     assert store.status("main")["holder"] is None
 
 
