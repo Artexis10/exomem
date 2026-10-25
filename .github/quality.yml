@@ -191,6 +191,7 @@ semgrep:
   paths: ["src/exomem"]
 
 test_jobs:
+  - "structural recall (system SQLite)"
   - "serial timing checks (py3.13)"
   - "core tests (py3.13, shard 1/12)"
   - "core tests (py3.13, shard 2/12)"

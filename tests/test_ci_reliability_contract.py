@@ -47,6 +47,7 @@ NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
 RELEASE_PR_SKIPPED_JOBS = {
     "timing-tests",
     "core-tests",
+    "recall-structural-reference",
     "harness-tests",
     "windows-held-filesystem",
     "tui",
@@ -520,6 +521,25 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     assert "tests/test_latency_gate.py -q" in jobs["retrieval-latency"]["steps"][-1]["run"]
     semantic_command = jobs["semantic-write-latency"]["steps"][-1]["run"]
     assert "scripts/semantic_write_latency.py --check" in semantic_command
+
+
+def test_structural_recall_runs_on_the_pr_runtime_and_reference_sqlite() -> None:
+    """A newer planner must not hide corpus scans on the shipped reference SQLite."""
+    workflow = _workflow()
+    job = workflow["jobs"]["recall-structural-reference"]
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["timeout-minutes"] == 15
+    assert job["env"]["UV_NO_MANAGED_PYTHON"] == "true"
+    assert job["env"]["UV_PYTHON_DOWNLOADS"] == "never"
+    verify = next(step for step in job["steps"]
+                  if step.get("name") == "Verify reference interpreter and SQLite")
+    assert verify["run"].count('assert sqlite3.sqlite_version == "3.45.1"') == 2
+    run = next(step for step in job["steps"] if step.get("name") == "Run structural recall gate")
+    assert "--python /usr/bin/python3.12" in run["run"]
+    assert "tests/test_ranking_catalogue_metadata.py::test_public_recall_work_does_not_scale_with_unrelated_pages" in run["run"]
+    assert run["if"] == "steps.scope.outputs.docs_only != 'true'"
+    assert "recall-structural-reference" in workflow["jobs"]["gate"]["needs"]
+    assert "tests/test_ranking_catalogue_metadata.py" not in _harness_modules_from_file()
 
 
 def test_governance_wire_characterization_runs_every_registered_route() -> None:
