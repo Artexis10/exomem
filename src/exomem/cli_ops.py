@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 # A leaf-contract error string is "CODE: human reason …" (uppercase code prefix).
 _CODE_PREFIX = re.compile(r"^([A-Z][A-Z0-9_]+):\s*(.*)$", re.DOTALL)
 
+# This closed envelope code is shared by rendering validation and client accounting.
+INVALID_OPERATION_ARGUMENTS = "INVALID_OPERATION_ARGUMENTS"
+
 RELATION_REVIEW_STABLE_ID_REMEDIATION = (
     'For reviewed-none, preview maintain_memory(mode="backfill-ids"). '
     "Resolve reported identity issues before confirmation for CLI backfill of "

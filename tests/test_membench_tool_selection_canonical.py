@@ -414,6 +414,7 @@ def test_adoption_plan_scores_independent_items_and_detects_original_changes_and
     original = root / next(iter(case.params["fixture"]["originals"]))
     original.write_bytes(original.read_bytes() + b"\n")
     assert not score_session(case, session(before, read_end_state(root)), [], product_resolver()).success
+
     with request_scope(owner_principal(surface="mcp")):
         status = commands.op_adoption_studio(root, action="status", run_id=run_id)
     recorder.write("call", name="adoption_studio", ordinal=3, arguments={"action": "status", "run_id": run_id},
@@ -425,3 +426,205 @@ def test_adoption_plan_scores_independent_items_and_detects_original_changes_and
     with request_scope(owner_principal(surface="mcp")):
         commands.op_adoption_studio(root, action="start", path=case.params["fixture"]["source_root"])
     assert not score_session(case, session(before, read_end_state(root)), [], product_resolver()).success
+
+
+def test_real_dispatcher_read_audit_and_checkpoint_are_separate_from_plan_and_privileged_changes(tmp_path):
+    import asyncio
+    import base64
+    import datetime as dt
+    import subprocess
+    import sys
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from membench.utility.switch_eval.state import mcp_server_entry
+
+    case = source_case("r2-d10")
+    case = replace(case, params={**case.params, "fixture": {
+        **case.params["fixture"], "case_date": dt.date.today().isoformat(),
+    }})
+    run = tmp_path / "run"
+    spec = arm_spec("grouped", ("*",))
+    seed_case(run, case, parent_env=dict(os.environ), spec=spec)
+    slot = Slot(run / "slot")
+    source = run / "seeded" / case.case_id
+    shutil.copytree(source / "vault", slot.vault)
+    shutil.copytree(source / "state", slot.state)
+    for path in (slot.runtime, slot.cwd, slot.hook_home):
+        path.mkdir(parents=True, exist_ok=True)
+    env = seeding_env(dict(os.environ), slot, spec)
+    env["EXOMEM_MCP_TOOL_SHAPE"] = "grouped"
+    slot.turn_file.write_text("0")
+    # Persist an existing synthetic credential sample, so this boundary proof survives unrelated URI repairs.
+    injected = subprocess.run([sys.executable, "-c", """
+from pathlib import Path
+from exomem.governance import scrubber
+from exomem.adoption_run import AdoptionRunStore
+import os
+owner = AdoptionRunStore(Path(os.environ['EXOMEM_VAULT_PATH']))
+run = owner.load(owner.list_runs()[0]['run_id'])
+run['errors'] = [{'reason': scrubber.CREDENTIAL_PATTERNS[0].samples[0]}]
+owner.save(run)
+"""], env=env, capture_output=True, text=True, timeout=20)
+    assert injected.returncode == 0, injected.stderr
+    admitted = snapshot_slot(slot, env, tmp_path / "fixture.json")
+    from membench.utility.tool_selection.vault import adoption_runs
+
+    run_id = next(iter(adoption_runs(admitted).values()))["run_id"]
+    log = slot.runtime / "tap.jsonl"
+    entry = mcp_server_entry(slot, spec, log=log, server_stderr=slot.runtime / "server.stderr", warm_search=True, budget=8)
+    args = ["-m", "membench.utility.tool_selection.recorder", *entry["args"][1:]]
+
+    async def workflow():
+        parameters = StdioServerParameters(command=entry["command"], args=args, env=env)
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write, read_timeout_seconds=45) as client:
+                await client.initialize()
+                await client.list_tools()
+                await client.call_tool("adoption_studio", {"action": "status"})
+                await client.call_tool("adoption_studio", {"action": "status", "run_id": run_id})
+                await client.call_tool("adoption_studio", {"action": "plan", "run_id": run_id})
+
+    # Keep the derived owner's connection open so shutdown deterministically leaves a WAL to checkpoint.
+    index_owner = subprocess.Popen([sys.executable, "-c", """
+from pathlib import Path
+from exomem.working_set_index import WorkingSetIndex
+import os, sys
+owner = WorkingSetIndex(Path(os.environ['EXOMEM_VAULT_PATH']))
+try:
+    assert owner.readable()
+    print('ready', flush=True)
+    sys.stdin.read()
+finally:
+    owner.close()
+"""], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert index_owner.stdout.readline().strip() == "ready"
+        asyncio.run(workflow())
+    finally:
+        try:
+            _, owner_error = index_owner.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            index_owner.kill()
+            index_owner.communicate()
+            raise
+    assert index_owner.returncode == 0, owner_error
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    ready = next(event for event in events if event["event"] == "ready_finished")
+    assert ready["outcome"] == "ready"
+    before = ready["canonical_state"]
+    after = snapshot_slot(slot, env, tmp_path / "after-shutdown.json")
+    result = score_session(case, session(before, after), compact_calls(events), product_resolver())
+    assert result.success, result.reasons
+    assert result.read_audit_receipts == result.committed_effects == 1
+    assert result.unexpected_mutations == 0
+    assert after["governance"]["records"][0]["event_type"] == "credential_block"
+    from exomem import working_set_index
+
+    index = working_set_index.sidecar_path(slot.vault).name
+    assert index + "-wal" in before["evidence"]["machine"]
+    assert before["evidence"]["machine"][index + "-wal"]["bytes"] > 0
+    assert index + "-wal" not in after["evidence"]["machine"]
+    assert index not in after["machine"] and index in after["evidence"]["machine"]
+
+    changed = subprocess.run([sys.executable, "-c", """
+from pathlib import Path
+from exomem.governance import store
+import os
+connection = store.open_connection(Path(os.environ['EXOMEM_VAULT_PATH']))
+connection.execute('INSERT INTO compiled_policy (fingerprint, snapshot, compiled_at) VALUES (?, ?, ?)', ('fixture-policy', '{}', 1))
+connection.commit()
+connection.close()
+"""], env=env, capture_output=True, text=True, timeout=20)
+    assert changed.returncode == 0, changed.stderr
+    altered = snapshot_slot(slot, env, tmp_path / "policy-row.json")
+    rejected = score_session(case, session(after, altered), [], product_resolver())
+    assert rejected.scored and not rejected.success and rejected.unexpected_mutations == 1
+
+    event_path = next(iter(after["governance"]["event_paths"]))
+    original = base64.b64decode(after["evidence"]["files"][event_path]["base64"])
+    target = slot.vault / event_path
+    target.write_bytes(original.replace(b'"credential_block"', b'"not-an-event"'))
+    broken = snapshot_slot(slot, env, tmp_path / "altered-prior-receipt.json")
+    assert broken["unknown"] and not score_session(case, session(after, broken), [], product_resolver()).scored
+    target.unlink()
+    missing = snapshot_slot(slot, env, tmp_path / "deleted-prior-receipt.json")
+    assert missing["unknown"] and not score_session(case, session(after, missing), [], product_resolver()).scored
+    target.write_bytes(original)
+    changed = subprocess.run([sys.executable, "-c", """
+from pathlib import Path
+from exomem.governance import store
+import os, sqlite3
+connection = sqlite3.connect(store.sidecar_path(Path(os.environ['EXOMEM_VAULT_PATH'])))
+connection.execute('PRAGMA user_version=99')
+connection.close()
+"""], env=env, capture_output=True, text=True, timeout=20)
+    assert changed.returncode == 0, changed.stderr
+    unsupported = snapshot_slot(slot, env, tmp_path / "unsupported-governance-schema.json")
+    assert unsupported["unknown"] and not score_session(case, session(after, unsupported), [], product_resolver()).scored
+
+
+def test_nested_operation_argument_envelope_refusal_is_counted_without_serving_a_write():
+    from exomem.cli_ops import INVALID_OPERATION_ARGUMENTS, envelope
+
+    case = source_case("r2-d06")
+    state = {"collections": {}, "files": {}, "unknown": []}
+    calls = compact_calls([{"event": "call", "name": "change_files", "ordinal": 1,
+                            "arguments": {"operation": {"kind": "append"}, "validate_only": True},
+                            "outcome": "served", "result": {"structuredContent": envelope(
+                                False, error={"code": INVALID_OPERATION_ARGUMENTS, "message": "invalid arguments"},
+                            )}}])
+    result = score_session(case, {**session(state, state), "arm": "nested"}, calls, product_resolver())
+    assert result.argument_refusals == 1
+    assert result.write_calls_served == result.committed_effects == 0
+
+
+@pytest.mark.parametrize("shape", ["relabeled-v3", "missing-v4-table", "extended-v4", "valid-v4"])
+def test_governance_projection_rejects_false_v4_authority_and_retains_real_authorization_rows(tmp_path, shape):
+    import base64
+
+    from membench.utility.tool_selection.vault import governance_facts
+    from test_governance_store_v4 import _insert_legacy_authority, _seed
+
+    from exomem.governance import schema_v4, store
+    from exomem.init import init_vault
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    init_vault(vault)
+    connection = store.open_connection(vault)
+    try:
+        if shape == "relabeled-v3":
+            connection.execute("PRAGMA user_version=4")
+        else:
+            _insert_legacy_authority(connection)
+            schema_v4.migrate_v3_connection(connection, _seed())
+            connection.execute(
+                "INSERT INTO governance_authorization_sessions "
+                "(session_id, locator_digest, verifier, verifier_key_id, credential_generation, "
+                "principal_id, issuer_family, cell_id, logical_vault_id, keyring_id, status, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("fixture-session", b"l" * 32, b"v" * 32, "fixture-key", 1, "fixture-principal", "rest-oauth",
+                 "fixture-cell", "logical-vault-7", "fixture-keyring", "active", 1, 2),
+            )
+            if shape == "missing-v4-table":
+                connection.execute("DROP TABLE governance_authorization_sessions")
+            elif shape == "extended-v4":
+                connection.execute("CREATE TABLE unexpected_authority (value TEXT)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    facts = governance_facts(vault)
+
+    if shape == "valid-v4":
+        assert facts["status"] == "known"
+        assert facts["tables"]["governance_authorization_sessions"][0]["session_id"] == "fixture-session"
+        assert facts["tables"]["governance_authorization_sessions"][0]["verifier"] == {
+            "blob_base64": base64.b64encode(b"v" * 32).decode("ascii"),
+        }
+        archived = next(row for row in facts["tables"]["governance_legacy_authority"]
+                        if row["source_table"] == "governance_session_grants")
+        assert json.loads(base64.b64decode(archived["row_json"]["blob_base64"]))["grant_id"] == "grant-v3"
+    else:
+        assert facts["status"] == "unreadable"

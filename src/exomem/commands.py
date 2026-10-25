@@ -7811,13 +7811,8 @@ def op_edit_memory(
     Source edits validate the final sources against authorized Source/Evidence;
     unrelated edits leave legacy citations alone.
 
-    `RELATION_DISPOSITION_STALE`/`_MISSING`: repeat the identical operation with
-    `validate_only=true`, then commit unchanged with
-    `transition_token=<returned transition_token>`,
-    `relation_disposition="reviewed_none"`,
-    `relation_review_hash=<returned relation_review_hash>` (not the page
-    content hash) and a `relation_review_reason`. Or author a relation in the body:
-    `## Relations` then `- supports [[Knowledge Base/Notes/Research/example-target]]`;
+    Author typed relations under `## Relations`, for example
+    `- supports [[Knowledge Base/Notes/Research/example-target]]`.
     Dataview `supports:: [[...]]` is not supported relation syntax.
     See references/writing.md.
 
@@ -7921,8 +7916,10 @@ def op_observe_memory(
             refuted. Empty string clears it on update.
         check_by: Rich-only ISO revisit date. Empty string clears it on update.
         id: Unique anchor within the parent; derived on add if omitted.
-        unit_ref: Exact unit reference for update/remove.
+        unit_ref: Exact unit reference for update/remove or previewing an existing unit.
+            Without it, validate previews an addition.
         expected_fingerprint: Current unit fingerprint; required for update/remove.
+            Echo it when previewing an existing unit.
         expected_hash: Current parent-page content hash; required for update/remove.
         transition_token: From validate.
         relation_disposition: Semantic review disposition (existing page).
@@ -13564,9 +13561,9 @@ def _renderings_for(name: str) -> tuple[operation_entries.Rendering, ...]:
 
 
 def _refuse_rendered_arguments(name: str, detail: str):
-    from .cli_ops import OpError
+    from .cli_ops import INVALID_OPERATION_ARGUMENTS, OpError
 
-    raise OpError("INVALID_OPERATION_ARGUMENTS", detail)
+    raise OpError(INVALID_OPERATION_ARGUMENTS, detail)
 
 
 def _validate_rendered_arguments(name: str, action: object, arguments: Mapping[str, Any]):

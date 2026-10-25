@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from exomem.cli_ops import INVALID_OPERATION_ARGUMENTS
 from membench.utility.switch_eval.tap import tool_payloads
 
 from .cases import Case
@@ -37,7 +38,7 @@ ARGUMENT_REFUSALS = frozenset({
     "INVALID_RECORD_ARGUMENTS", "INVALID_PLAN_ARGUMENTS", "INVALID_PREFERENCE_ARGUMENTS",
     "INVALID_REVIEW_ARGUMENTS", "INVALID_REVIEW_CONTEXT_ARGUMENTS", "INVALID_SCHEMA_ARGUMENT",
     "INVALID_SCHEMA_OPERATION", "INVALID_SCHEMA_SUBJECT", "INVALID_OBSERVE_OPERATION",
-    "INVALID_FILE_OPERATION",
+    "INVALID_FILE_OPERATION", INVALID_OPERATION_ARGUMENTS,
 })
 
 #: Outcomes whose end state is scorable: the session ran and the agent acted
@@ -194,6 +195,94 @@ def state_changed(before: Mapping, after: Mapping) -> bool:
 
 def canonical_data(state: Mapping) -> dict:
     return {name: value for name, value in state.items() if name not in ("evidence", "unknown")}
+
+
+def _read_audit_ids(previous: Mapping, current: Mapping, call: Mapping, resolved) -> set[tuple]:
+    """Match one verified observational receipt to this served read and its source-defined scrubber marker."""
+    from exomem.governance.principal import OWNER_AUDIENCE
+    from exomem.governance.scrubber import NOTICE
+
+    if call["outcome"] != "served" or resolved.read_only is not True:
+        return set()
+    prior = previous.get("governance", {}).get("records", [])
+    actual = current.get("governance", {}).get("records", [])
+    if any(record not in actual for record in prior):
+        return set()
+    added = [record for record in actual if record not in prior]
+    if len(added) != 1:
+        return set()
+    record = added[0]
+    result = call.get("result") or {}
+    response = result.get("structuredContent", result)
+    # NOTICE is the scrubber's wire intervention marker, not a judgement about returned prose.
+    if (record.get("event_type") != "credential_block" or record.get("phase") != "recorded"
+            or record.get("durable") is not False or record.get("command") != resolved.command
+            or record.get("principal") != OWNER_AUDIENCE or record.get("audience") != OWNER_AUDIENCE
+            or NOTICE not in json.dumps(response, ensure_ascii=False)):
+        return set()
+    return {(record["instance_id"], record["seq"], record["hash"])}
+
+
+def _quality_state(state: Mapping, baseline: Mapping, allowed_read_audit: set[tuple]) -> Mapping:
+    """Separate only matched, append-only read audit from data effects; retain the raw snapshot unchanged."""
+    from exomem.governance import receipts, store
+
+    prior, actual = baseline.get("governance", {}), state.get("governance", {})
+    if actual.get("status") != "known" or not allowed_read_audit:
+        return state
+    old_records, new_records = prior.get("records", []), actual.get("records", [])
+    if any(record not in new_records for record in old_records):
+        return state
+    additions = [record for record in new_records if record not in old_records]
+    if not additions or any((record["instance_id"], record["seq"], record["hash"]) not in allowed_read_audit
+                            for record in additions):
+        return state
+    old_tables, new_tables = prior.get("tables", {}), actual["tables"]
+    # These three tables are the receipt owner's bookkeeping schema; all authorization/lifecycle rows stay visible.
+    bookkeeping = {"meta", "receipt_instance", "receipts_head"}
+    if any(old_tables.get(table, []) != new_tables.get(table, [])
+           for table in (set(old_tables) | set(new_tables)) - bookkeeping):
+        return state
+    if prior.get("status") == "known":
+        if prior["schema_version"] != actual["schema_version"] or prior["schema"] != actual["schema"]:
+            return state
+        if old_tables.get("meta", []) != new_tables.get("meta", []):
+            return state
+    else:
+        # A first read receipt may initialize only the source-validated v3 store, never a v4 migration.
+        if actual["schema_version"] != store.SCHEMA_USER_VERSION:
+            return state
+        meta = new_tables.get("meta", [])
+        if (len(meta) != 1 or set(meta[0]) != {"key", "value"}
+                or meta[0]["key"] != "instance" or type(meta[0]["value"]) is not int):
+            return state
+    instance = additions[-1]["instance_id"]
+    old_instance = old_tables.get("receipt_instance", [])
+    if new_tables.get("receipt_instance") != (old_instance or [{"singleton": 1, "instance_id": instance}]):
+        return state
+    heads = {row["instance_id"]: dict(row) for row in old_tables.get("receipts_head", [])}
+    for record in additions:
+        identity = record["instance_id"]
+        head = heads.setdefault(identity, {"instance_id": identity, "durable_seq": 0,
+                                          "durable_hash": receipts.GENESIS_HASH, "path": "", "byte_offset": 0})
+        head.update(observed_seq=record["seq"], observed_hash=record["hash"])
+    if heads != {row["instance_id"]: row for row in new_tables.get("receipts_head", [])}:
+        return state
+    files = dict(state["files"])
+    for path, records in actual["event_paths"].items():
+        if records == prior.get("event_paths", {}).get(path):
+            continue
+        previous = baseline.get("evidence", {}).get("files", {}).get(path, {})
+        current = state.get("evidence", {}).get("files", {}).get(path, {})
+        if "base64" not in current or not base64.b64decode(current["base64"]).startswith(
+            base64.b64decode(previous.get("base64", ""))
+        ):
+            return state
+        if path in baseline["files"]:
+            files[path] = baseline["files"][path]
+        else:
+            files.pop(path, None)
+    return {**state, "files": files, "governance": prior}
 
 
 def _source(state: Mapping, path: str) -> str:
@@ -397,7 +486,7 @@ def _canonical_checks(key: Key, before: Mapping, after: Mapping, *, final: bool)
         reasons.append(f"authored file {path} changed outside the request")
     if (set(before.get("empty_directories", [])) - allowed_empty) != (set(after.get("empty_directories", [])) - allowed_empty):
         reasons.append("empty directories changed outside the request")
-    for domain in ("media", "machine", "registry_paths", "other_preferences"):
+    for domain in ("media", "machine", "registry_paths", "other_preferences", "governance"):
         if before.get(domain) != after.get(domain):
             reasons.append(f"{domain} changed outside the request")
     for subject in set(before.get("registry_history", {})) | set(after.get("registry_history", {})):
@@ -515,6 +604,7 @@ class CaseResult:
     committed_effects: int = 0
     unexpected_mutations: int = 0
     effect_unknown_calls: int = 0
+    read_audit_receipts: int = 0
     calls: int = 0
     unresolved_calls: int = 0
     argument_refusals: int = 0
@@ -553,6 +643,8 @@ def score_session(
     result.calls = len(calls)
     before = facts.get("end_state_before") or {}
     previous = before
+    previous_raw = before
+    allowed_read_audit: set[tuple] = set()
     for call in calls:
         resolved = resolve_call(resolver, str(call["name"]), call.get("arguments"), session["arm"])
         served = call["outcome"] == "served"
@@ -566,7 +658,12 @@ def score_session(
                         for name, value in op.constraints.items()) for op in key.target_ops)
         ):
             result.first_correct_ordinal = int(call["ordinal"])
-        snapshot = call.get("canonical_state")
+        raw_snapshot = call.get("canonical_state")
+        snapshot = raw_snapshot
+        if snapshot is not None:
+            allowed_read_audit.update(_read_audit_ids(previous_raw, snapshot, call, resolved))
+            result.read_audit_receipts = len(allowed_read_audit)
+            snapshot = _quality_state(snapshot, before, allowed_read_audit)
         known_state = snapshot is not None and not snapshot.get("unknown") and not previous.get("unknown")
         changed = known_state and state_changed(previous, snapshot)
         terminals = call.get("terminals") or []
@@ -591,6 +688,7 @@ def score_session(
             if snapshot.get("unknown"):
                 result.effect_unknown_calls += 1
             previous = snapshot
+            previous_raw = raw_snapshot
         if refused_arguments:
             result.argument_refusals += 1
     if key.kind == READ:
@@ -599,7 +697,8 @@ def score_session(
         result.reasons.append(f"session outcome {outcome}")
         return result
 
-    before, after = facts["end_state_before"], facts["end_state_after"]
+    before = facts["end_state_before"]
+    after = _quality_state(facts["end_state_after"], before, allowed_read_audit)
     result.state_changed = None if before.get("unknown") or after.get("unknown") else state_changed(before, after)
     if key.kind == READ and result.state_changed is True:
         result.wrong_write = True

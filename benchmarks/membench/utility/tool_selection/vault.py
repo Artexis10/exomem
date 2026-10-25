@@ -247,6 +247,48 @@ def _media_rows(vault: Path) -> dict:
         return {"status": "unreadable", "error": type(error).__name__}
 
 
+def governance_facts(vault: Path) -> dict:
+    """Read authorization rows and verified receipt chains without creating or migrating state."""
+    from exomem.governance import receipts, schema_v4, store
+
+    result = {"status": "absent", "schema_version": None, "schema": [], "tables": {},
+              "records": [], "event_paths": {}}
+    connection = None
+    try:
+        if store.sidecar_path(vault).exists():
+            connection, version = store._open_existing_read_connection(vault)
+            schema = schema_v4._complete_schema_signature(connection)
+            if version == store.SCHEMA_USER_VERSION:
+                schema_v4.require_exact_v3_connection(connection)
+            else:
+                schema_v4.require_exact_v4_connection(connection)
+            tables = {}
+            for (table,) in connection.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
+                quoted = '"' + table.replace('"', '""') + '"'
+                cursor = connection.execute(f"SELECT * FROM {quoted}")
+                columns = [column[0] for column in cursor.description]
+                rows = [{name: {"blob_base64": base64.b64encode(value).decode("ascii")}
+                         if isinstance(value, bytes) else value for name, value in zip(columns, row, strict=True)}
+                        for row in cursor]
+                tables[table] = sorted(rows, key=_canonical)
+            result.update(status="known", schema_version=version, schema=[list(row) for row in schema], tables=tables)
+        verified = receipts.verify_chain(vault)
+        if not verified["valid"]:
+            return {**result, "status": "unreadable", "issues": verified["issues"]}
+        records = receipts.event_records(vault)
+        paths = {}
+        for record in records:
+            path = receipts._month_path(vault, record["instance_id"], record["timestamp"]).relative_to(vault).as_posix()
+            paths.setdefault(path, []).append(record)
+        result.update(records=records, event_paths=paths)
+        return result
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
+        return {**result, "status": "unreadable", "error": type(error).__name__}
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def read_end_state(vault: Path) -> dict:
     """Canonical authored facts plus raw custody evidence, read without a server or index writes."""
 
@@ -311,11 +353,15 @@ def read_end_state(vault: Path) -> dict:
     owner_preference = preferences._preference_path(vault, OWNER_AUDIENCE)
     preference_root = owner_preference.parent
     review_path = review_state.state_path(vault)
+    from exomem.governance.store import sidecar_path as governance_path
     from exomem.media_jobs import job_store_path, worker_lock_path
     from exomem.working_set_heat import sidecar_path as heat_path
+    from exomem.working_set_index import sidecar_path as activation_path
 
     # SQLite's closed family suffixes come from the owner's shared path contract.
     heat_files = {Path(str(heat_path(vault)) + suffix) for suffix in reserved_paths._SQLITE_SUFFIXES}
+    activation_files = {Path(str(activation_path(vault)) + suffix) for suffix in reserved_paths._SQLITE_SUFFIXES}
+    governance_files = {Path(str(governance_path(vault)) + suffix) for suffix in reserved_paths._SQLITE_SUFFIXES}
     media_files = {Path(str(job_store_path(vault)) + suffix) for suffix in reserved_paths._SQLITE_SUFFIXES}
     other_preferences = {}
 
@@ -323,7 +369,8 @@ def read_end_state(vault: Path) -> dict:
         if path.is_dir():
             continue
         relative = path.relative_to(state).as_posix()
-        if (derived(f"Knowledge Base/{relative}") or path in heat_files or path in media_files
+        if (derived(f"Knowledge Base/{relative}") or path in heat_files or path in activation_files
+                or path in governance_files or path in media_files
                 or path == worker_lock_path(vault) or path == preference_root / ".lock"):
             # Rebuildable metadata can change concurrently; its raw evidence is separate from authored-state admission.
             _file_fact(path, relative, evidence["machine"], evidence["unavailable"], opaque=True)
@@ -370,8 +417,12 @@ def read_end_state(vault: Path) -> dict:
     media = _media_rows(vault)
     if media["status"] == "unreadable":
         unknown.append({"domain": "media", **media})
+    governance = governance_facts(vault)
+    if governance["status"] == "unreadable":
+        unknown.append({"domain": "governance", **governance})
     return {"collections": collections, "files": files, "empty_directories": directories,
             "preferences": preference, "review": review, "media": media, "machine": machine,
             "registry_paths": registry_paths, "registry_history": histories,
             "other_preferences": other_preferences,
+            "governance": governance,
             "evidence": evidence, "unknown": unknown}

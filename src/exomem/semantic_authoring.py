@@ -27,6 +27,18 @@ STATUS_CLASSIFICATION_RULE = (
     "Admitted unknown labels are live with review debt; unavailable classification refuses only dependent operations."
 )
 
+# This explains the existing preview boundary; it grants no authority to save a review or content.
+EXISTING_VALIDATION_GUIDANCE = (
+    "Existing-page validation evaluates the proposed result without saving content or review state. "
+    "A validation request includes this nonpersisting assessment. "
+    "If relation review is required, inspect the current page and candidate evidence. "
+    'When no truthful relation applies, repeat the same validation with relation_disposition="reviewed_none" '
+    "and a bounded evidence-based relation_review_reason. Never infer that outcome from missing edges. "
+    "Preserve existing typed relations and metadata. "
+    "If evidence is insufficient or a material factual, meaning or edge choice remains unresolved, report that condition. "
+    "Commit requires separate write authority and the returned guards."
+)
+
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
@@ -482,6 +494,7 @@ def bootstrap_projection(
     (role and domain) examples.
     """
     projection = contract.as_dict()
+    projection["validation_review"] = EXISTING_VALIDATION_GUIDANCE
     from . import capabilities
 
     projection["minimum_semantic_unit"]["status_registry"] = capabilities.active_call_route(
@@ -521,8 +534,8 @@ def render_tool_guidance(
 ) -> str:
     """Render the bounded tool-specific rule from the canonical contract fields.
 
-    Every fact here comes from the contract, so a normative change moves this
-    text and the identity marker together. Prose that only elaborates a rule
+    Normative facts come from the contract; validation guidance clarifies its
+    existing review boundary. Prose that only elaborates a rule
     (form preference, boundary and vocabulary notes, the empty-body finding)
     lives in the full bootstrap projection, not in every authoring tool.
     """
@@ -546,6 +559,7 @@ def render_tool_guidance(
             minimum["rule"],
             minimum["final_unit_rule"],
             rich["correction_rule"],
+            EXISTING_VALIDATION_GUIDANCE if not whole_page else "",
             f"Compact: `{compact['canonical_section']}` then `{compact['syntax']}`; "
             f"one {compact['category']['vocabulary']} category. "
             f"Rich: `{rich['heading_syntax']}`.",
@@ -713,6 +727,7 @@ def render_concise(
         f"{findings['missing_semantic_unit']['compact_remediation']}\n"
         f"- Rich remediation: {findings['missing_semantic_unit']['rich_remediation']}\n"
         f"- {minimum['independence_rule']}\n"
+        f"- Validation review: {EXISTING_VALIDATION_GUIDANCE}\n"
         f"- Portable categories: {portable['short_selection_rule']} "
         f"{portable['open']} {portable_rules} Core keys are {portable_keys}. "
         f"Core aliases are {portable_aliases}. Role example: "
