@@ -9,7 +9,7 @@
 // overrides, include_junk} against the depth-capped tree (design.md Decision 3).
 
 export function initialSelection(_tree, _junk) {
-  return {folders: {}, files: {}, includeJunk: false};
+  return {folders: {}, files: {}, includeRules: Object.create(null), includeJunk: false};
 }
 
 function underFolder(path, folder) {
@@ -95,9 +95,16 @@ export function selectionPayload(sel, roots = []) {
   }
   // Engine overrides are add-only: an OFF file override is a file-path exclude.
   const overrides = [];
-  for (const [key, value] of Object.entries(sel.files)) (value ? overrides : exclude).push(key);
+  for (const [key, value] of Object.entries(sel.files)) {
+    if (!value) exclude.push(key);
+    else if (!sel.includeRules?.[key]) overrides.push(key);
+  }
+  // Classification stays with its include path while membership is toggled.
+  for (const path of Object.keys(sel.includeRules || {})) {
+    if (effectiveFileOn(sel, path) && !include.includes(path)) include.push(path);
+  }
   return {
-    include: include.sort(),
+    include: include.sort().map((path) => sel.includeRules?.[path] || path),
     exclude: exclude.sort(),
     overrides: overrides.sort(),
     include_junk: !!sel.includeJunk,
@@ -110,8 +117,10 @@ export function selectionPayload(sel, roots = []) {
 export function selectionFromRules(rules, inventoryPaths) {
   if (!rules) return null;
   const files = new Set(inventoryPaths || []);
-  const sel = {folders: {}, files: {}, includeJunk: !!rules.include_junk};
-  for (const p of rules.include || []) {
+  const sel = {...initialSelection(), includeJunk: !!rules.include_junk};
+  for (const rule of rules.include || []) {
+    const p = typeof rule === "string" ? rule : rule.path;
+    if (typeof rule === "object") sel.includeRules[p] = {...rule};
     if (files.has(p)) sel.files[p] = true;
     else sel.folders[p] = true;
   }
@@ -125,16 +134,18 @@ export function selectionFromRules(rules, inventoryPaths) {
 
 export function planBullets(totals) {
   const copy = Number((totals && totals.copy) || 0);
+  const existing = Number((totals && totals.existing) || 0);
   const unsupported = Number((totals && totals.skip_unsupported) || 0);
   const junk = Number((totals && totals.skip_junk) || 0);
-  const total = copy + unsupported + junk;
+  const total = copy + existing + unsupported + junk;
   const bullets = [
-    `${copy} text notes will be copied in`,
-    `${unsupported} photos & other files stay put (not copied — not supported yet)`,
-    `${junk} junk files will be skipped`,
+    `${copy} files will be copied in`,
+    `${existing} files are already in Exomem; no copy is needed`,
+    `${unsupported} files cannot be copied in this plan`,
+    `${junk} other files will be skipped`,
     "0 files will be changed, moved, or deleted — always",
   ];
-  return {bullets, total, copy, unsupported, junk};
+  return {bullets, total, copy, existing, unsupported, junk};
 }
 
 export function countLine(shown, total, omitted = 0) {
@@ -314,4 +325,37 @@ export function junkCount(scanSummary, junkRowCount = 0) {
     return Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
   }
   return Number(junkRowCount) || 0;
+}
+
+// The run document inside a mutation's full-detail terminal. It sits at
+// `diagnostics`, and one level down at `diagnostics.leaf_result` when derived
+// custody wraps it (a call that imported a media file).
+export function runOfTerminal(result) {
+  const diagnostics = result && result.diagnostics;
+  if (!diagnostics || typeof diagnostics !== "object") return null;
+  const inner = diagnostics.leaf_result;
+  return inner && typeof inner === "object" ? inner : diagnostics;
+}
+
+// `plan` and `apply` stop at the server's request budget and answer with a
+// `continuation`. Repeat the call with it until none comes back, so a large
+// collection is never left half-planned or half-applied. `send` takes a request
+// body and resolves to the run document; `onProgress` sees each partial one.
+export async function driveContinuations(send, body, onProgress = () => {}) {
+  let run = await send(body);
+  while (run && run.continuation) {
+    onProgress(run);
+    run = await send({...body, continuation: run.continuation});
+  }
+  return run;
+}
+
+// "N of M files done" from the engine's `progress` block (plan and apply both
+// report `total` and `remaining`); empty when the run carries none.
+export function progressLine(run) {
+  const progress = run && run.progress;
+  if (!progress || typeof progress.total !== "number" || typeof progress.remaining !== "number") {
+    return "";
+  }
+  return `${progress.total - progress.remaining} of ${progress.total} files done…`;
 }

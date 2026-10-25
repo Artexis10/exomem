@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .find_types import ParsedPage, RankingPage
@@ -191,6 +192,40 @@ def wikilink_targets(body: str) -> tuple[str, ...]:
     from .vault import find_body_wikilinks
 
     return tuple(match.group(0)[2:-2].split("|", 1)[0].strip() for match in find_body_wikilinks(body))
+
+
+@dataclass(frozen=True, slots=True)
+class WikilinkReference:
+    """One body wikilink: the page or file it names, plus how it was written."""
+
+    target: str  # the name or path, without a heading fragment
+    fragment: str | None  # text after `#`, e.g. a heading
+    alias: str | None  # display text after `|`
+    embed: bool  # written `![[...]]`
+
+
+def wikilink_references(body: str) -> tuple[WikilinkReference, ...]:
+    """The same wikilinks as `wikilink_targets`, with alias, embed flag and fragment.
+
+    One grammar serves both: `find_body_wikilinks` owns the pattern and the code
+    masking, so this reads the embed marker from the original text at the match
+    offset and splits the matched text, with no second pattern.
+    """
+    from .vault import find_body_wikilinks
+
+    references: list[WikilinkReference] = []
+    for match in find_body_wikilinks(body):
+        name, _bar, alias = match.group(0)[2:-2].partition("|")
+        target, _hash, fragment = name.partition("#")
+        references.append(
+            WikilinkReference(
+                target=target.strip(),
+                fragment=fragment.strip() or None,
+                alias=alias.strip() or None,
+                embed=match.start() > 0 and body[match.start() - 1] == "!",
+            )
+        )
+    return tuple(references)
 
 
 def make_excerpt(page: ParsedPage, query_norm: str) -> str | None:

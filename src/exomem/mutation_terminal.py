@@ -1931,6 +1931,20 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
                 if key in leaf
             }
         )
+    elif (
+        isinstance(leaf, Mapping)
+        and isinstance(leaf.get("run_id"), str)
+        and str(leaf["run_id"]).startswith("adr-")
+    ):
+        # An Adoption Studio call: the caller carries on with the run id, the plan id
+        # and the continuation cursor, so these must survive the compact view.
+        compact.update(
+            {key: leaf[key] for key in ("run_id", "run_ref", "phase", "continuation", "progress")
+             if key in leaf}
+        )
+        plan = leaf.get("plan")
+        if isinstance(plan, Mapping) and isinstance(plan.get("plan_id"), str):
+            compact["plan_id"] = plan["plan_id"]
     artifact_receipt = _artifact_receipt_projection(leaf)
     compact.update(artifact_receipt)
     if isinstance(leaf, Mapping) and isinstance(leaf.get("source"), Mapping):

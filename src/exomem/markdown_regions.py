@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from bisect import bisect_right
 from dataclasses import dataclass
+from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
 from markdown_it.parser_inline import ParserInline
@@ -225,3 +226,52 @@ def scan_markdown(text: str) -> MarkdownRegions:
     if "<!--" not in text:
         return MarkdownRegions(code)
     return MarkdownRegions(code, _comments(text, code))
+
+
+@dataclass(frozen=True, slots=True)
+class LocalLink:
+    """A CommonMark link or image whose destination is a file path, not a URL."""
+
+    target: str  # percent-decoded path, without the `#fragment`
+    fragment: str | None
+    image: bool  # written `![...](...)`
+
+
+# One plain parser for link destinations. The region parser above is customised
+# to locate code at exact offsets and is not reused, so a link parse never pays
+# for that bookkeeping.
+_LINK_PARSER = MarkdownIt("commonmark")
+
+
+def local_links(text: str) -> tuple[LocalLink, ...]:
+    """Links and images in `text` that name a local file, in source order.
+
+    markdown-it owns what is a link, so code spans, reference definitions and
+    escapes follow CommonMark. A destination with a URL scheme or a network
+    location, and a bare `#fragment`, is not a file and is left out.
+    """
+    links: list[LocalLink] = []
+
+    def visit(tokens) -> None:  # noqa: ANN001
+        for token in tokens:
+            if token.type == "link_open":
+                destination = token.attrGet("href")
+            elif token.type == "image":
+                destination = token.attrGet("src")
+            else:
+                destination = None
+            if isinstance(destination, str) and destination:
+                parts = urlsplit(destination)
+                if not parts.scheme and not parts.netloc and parts.path:
+                    links.append(
+                        LocalLink(
+                            target=unquote(parts.path),
+                            fragment=unquote(parts.fragment) or None,
+                            image=token.type == "image",
+                        )
+                    )
+            if token.children:
+                visit(token.children)
+
+    visit(_LINK_PARSER.parse(text))
+    return tuple(links)

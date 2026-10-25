@@ -36,7 +36,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # for the `grouped` shape. A grouped surface still fits well inside the budget. Then by 375 for
 # the guidance the four tools carry over from the grouped descriptions (help pointer, originals,
 # propose-before-create, stale rereads).
-TOTAL_BUDGET = 102_630
+# Then by 450 for adoption_studio's collection, continuation and per-folder include rules.
+TOTAL_BUDGET = 103_080
 
 #: Per-tool ceilings in bytes. The ceilings of the tools a surface lists stay within TOTAL_BUDGET.
 # Registry selector enums (close-mcp-tool-selectors) raise six selector tools' ceilings.
@@ -53,7 +54,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "schema_memory": 4200,
     "observe_memory": 4400,
     "maintain_memory": 3725,
-    "adoption_studio": 3325,
+    "adoption_studio": 3775,
     "capture_source": 3325,
     "review_memory": 3475,
     "recall_context": 2950,

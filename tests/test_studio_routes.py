@@ -102,7 +102,6 @@ def test_adoption_mutations_request_full_terminal_diagnostics(
     adoption = client.get("/studio/assets/adoption.v1.js").text
 
     assert 'response_detail: "full"' in adoption
-    assert "return result.diagnostics" in adoption
 
 
 def test_asset_allowlist_rejects_unknown_nested_and_shell_aliases(

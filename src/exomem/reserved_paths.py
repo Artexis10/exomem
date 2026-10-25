@@ -7,6 +7,7 @@ substitute for the held-handle operation that consumes the target.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -23,6 +24,7 @@ from dataclasses import replace as dataclass_replace
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
+from typing import IO
 
 from . import call_spans, held_fs, request_budget
 from .cli_ops import OpError
@@ -185,6 +187,18 @@ class GenericFileSnapshot:
     data: bytes
     identity: held_fs.StableIdentity
     mtime: float
+
+
+@dataclass(frozen=True, slots=True)
+class GenericBinarySource:
+    """A binary stream whose root, parent and file remain held by its context."""
+
+    stream: IO[bytes]
+    version: held_fs.FileVersion
+    _check: Callable[[], None]
+
+    def require_current(self) -> None:
+        self._check()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1109,6 +1123,49 @@ def _leaf_spelling(value: object, *, physical: bool = False) -> tuple[str, str]:
     return parent, leaf
 
 
+def _source_leaf_spelling(value: object, *, physical: bool) -> tuple[str, str]:
+    """Parse observed source names; their caller must witness literal colon entries."""
+    if not physical:
+        return _leaf_spelling(value)
+    parts = _normalized_parts(value, allow_colon=True)
+    classified = parts if isinstance(parts, PathClassification) else _classify_parts(parts)
+    if classified.disposition is PathDisposition.RESERVED:
+        raise ReservedPathLeafError("RESERVED_PATH")
+    if classified.disposition is PathDisposition.INVALID:
+        raise ReservedPathLeafError("UNSAFE_PATH")
+    assert isinstance(value, (str, os.PathLike))
+    relative = os.fspath(value).replace("\\", "/")
+    parent, separator, leaf = relative.rpartition("/")
+    return (parent, leaf) if separator else (".", relative)
+
+
+def _require_literal_source_entries(
+    filesystem: held_fs.HeldFilesystem, parent_path: str, leaf: str,
+    parent: held_fs.HeldDirectory, file: held_fs.HeldFile,
+) -> None:
+    """A colon may name a source only when an exact entry names its held identity."""
+    ancestors = () if parent_path == "." else tuple(parent_path.split("/"))
+    for index, component in enumerate((*ancestors, leaf)):
+        if ":" not in unicodedata.normalize("NFKC", component):
+            continue
+        container_path = "/".join(ancestors[:index]) or "."
+        with filesystem.parent(container_path).require() as container:
+            entries = filesystem.children(
+                container, name_filter=lambda name, expected=component: name == expected
+            ).require()
+            if len(entries) != 1:
+                raise ReservedPathLeafError("UNSAFE_PATH")
+            if index == len(ancestors):
+                identity = file.identity
+            elif index == len(ancestors) - 1:
+                identity = parent.identity
+            else:
+                with filesystem.parent("/".join(ancestors[: index + 1])).require() as ancestor:
+                    identity = ancestor.identity
+            if _identity_key(entries[0].identity) != _identity_key(identity):
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+
+
 def _physical_leaf_candidates(
     filesystem: held_fs.HeldFilesystem,
     parent: held_fs.HeldDirectory,
@@ -1323,11 +1380,11 @@ def _digest_descriptor(file, *, deadline: float | None, max_bytes: int | None) -
 
 
 @contextmanager
-def _generic_copy_source(vault_root: Path, value: object):
+def _generic_copy_source(vault_root: Path, value: object, *, physical: bool = False):
     # Private-identity inventory needs only a short acquisition scope, including Windows short-name checks.
     with _generic_identity_catalogue_scope(vault_root, value) as identities:
         pass
-    parent_path, leaf = _leaf_spelling(value)
+    parent_path, leaf = _source_leaf_spelling(value, physical=physical)
     with held_fs.acquire(Path(vault_root)).require() as filesystem:
         with filesystem.parent(parent_path).require() as parent:
             _refuse_private_identity(parent.identity, identities)
@@ -1335,6 +1392,8 @@ def _generic_copy_source(vault_root: Path, value: object):
                 _require_current_generic_directory(filesystem, parent)
                 if identities.descriptor_for(file.identity) is not None or file.identity.link_count != 1:
                     raise ReservedPathLeafError("RESERVED_PATH")
+                if physical:
+                    _require_literal_source_entries(filesystem, parent_path, leaf, parent, file)
                 yield filesystem, parent, leaf, file
                 _require_current_generic_directory(filesystem, parent)
                 with _generic_identity_catalogue_scope(vault_root, value) as current_identities:
@@ -1343,6 +1402,49 @@ def _generic_copy_source(vault_root: Path, value: object):
                     with filesystem.file(parent, leaf).require() as current:
                         if current.identity != file.identity:
                             raise ReservedPathLeafError("IO_REFUSED")
+
+
+@contextmanager
+def open_generic_binary(vault_root: Path, value: object, *, physical: bool = False):
+    """Retain one ordinary source and recheck its rooted name before releasing bytes.
+
+    Content comes only from the retained file. Reacquisition checks metadata, so
+    an exchanged ancestor cannot redirect a later read to another file.
+    """
+    try:
+        with _generic_copy_source(vault_root, value, physical=physical) as (
+            filesystem, parent, leaf, file
+        ):
+            version = file.version()
+            parent_path, _leaf = _source_leaf_spelling(value, physical=physical)
+
+            def require_current() -> None:
+                if file.version() != version:
+                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+                with _generic_identity_catalogue_scope(vault_root, value) as identities:
+                    _refuse_private_identity(file.identity, identities)
+                    with filesystem.parent(parent_path).require() as current_parent:
+                        _refuse_private_identity(current_parent.identity, identities)
+                        if _identity_key(current_parent.identity) != _identity_key(parent.identity):
+                            raise ReservedPathLeafError("IDENTITY_CHANGED")
+                        with filesystem.file(current_parent, leaf).require() as current:
+                            _refuse_private_identity(current.identity, identities)
+                            if physical:
+                                _require_literal_source_entries(
+                                    filesystem, parent_path, leaf, current_parent, current
+                                )
+                            if current.version() != version:
+                                raise ReservedPathLeafError("IDENTITY_CHANGED")
+
+            require_current()
+            with os.fdopen(os.dup(file.descriptor), "rb") as stream:
+                yield GenericBinarySource(stream, version, require_current)
+                require_current()
+    except held_fs.HeldFsError as error:
+        raise ReservedPathLeafError(error.code) from error
+    except OSError as error:
+        code = "IDENTITY_CHANGED" if error.errno == errno.ESTALE else "IO_REFUSED"
+        raise ReservedPathLeafError(code) from error
 
 
 @contextmanager
@@ -2276,7 +2378,9 @@ def _invalid(reason: str) -> PathClassification:
     return PathClassification(PathDisposition.INVALID, reason=reason)
 
 
-def _normalized_parts(value: object) -> tuple[str, ...] | PathClassification:
+def _normalized_parts(
+    value: object, *, allow_colon: bool = False
+) -> tuple[str, ...] | PathClassification:
     if not isinstance(value, (str, os.PathLike)):
         return _invalid("path is not textual")
     raw = os.fspath(value)
@@ -2293,7 +2397,7 @@ def _normalized_parts(value: object) -> tuple[str, ...] | PathClassification:
     parts = tuple(text.split("/"))
     if any(part in {"", ".", ".."} for part in parts):
         return _invalid("dot or empty components are forbidden")
-    if any(":" in part for part in parts):
+    if not allow_colon and any(":" in part for part in parts):
         return _invalid("alternate stream or URI spelling is forbidden")
     if any(part.endswith((".", " ")) for part in parts):
         return _invalid("platform-aliased components are forbidden")
@@ -2310,6 +2414,10 @@ def classify_logical(value: object) -> PathClassification:
     parts = _normalized_parts(value)
     if isinstance(parts, PathClassification):
         return parts
+    return _classify_parts(parts)
+
+
+def _classify_parts(parts: tuple[str, ...]) -> PathClassification:
     canonical = kb_dirname() if not parts else f"{kb_dirname()}/{'/'.join(parts)}"
     replica = _DESCRIPTOR_BY_ID["collection-replica"]
     if replica.matches(parts):

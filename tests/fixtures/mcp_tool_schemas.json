@@ -80,7 +80,7 @@
     }
   },
   "adoption_studio": {
-    "description": "Review and import existing material in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nsave run state or material. Plan previews exact imports; apply commits that plan or refuses.\n\nstart scans; select chooses files; plan previews; apply atomically copies\ninto Sources; cancel closes pre-apply; finish proves recall. Then work-item\nreads context, propose submits proposals, apply-proposal approves one.\nDetails: references/operations.md.",
+    "description": "Review and import an existing collection of notes, documents, images, audio and video in a resumable run.\n\nNever rewrite, move or delete originals. Status/work-item read; other actions\nsave run state or material. Plan previews exact imports; apply commits that plan or refuses.\n\nstart scans; select chooses files; plan previews; apply copies each file\ninto Sources; cancel closes pre-apply; finish proves recall and reports\ncoverage. Repeat plan or apply with a returned `continuation`. Then\nwork-item reads context, propose submits proposals, apply-proposal\napproves one. Details: references/operations.md.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -119,12 +119,26 @@
           "description": "For `start`, bootstrap a missing Knowledge Base (otherwise KB_NOT_INITIALIZED).",
           "type": "boolean"
         },
+        "collection": {
+          "type": "string",
+          "description": "For `start`, a name kept across re-imports."
+        },
         "include": {
           "items": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            ]
           },
           "type": "array",
-          "description": "For `select`, paths whose eligible files are selected."
+          "description": "For `select`, paths whose files are selected, or {path, source_kind, domain} to file a folder under registered keys."
         },
         "exclude": {
           "items": {
@@ -148,6 +162,10 @@
         "plan_id": {
           "type": "string",
           "description": "For `apply`, from `plan`/`status`; a mismatch or changed selection refuses with PLAN_STALE."
+        },
+        "continuation": {
+          "type": "string",
+          "description": "For `plan` and `apply`, from the previous result."
         },
         "retry_failed": {
           "default": false,
