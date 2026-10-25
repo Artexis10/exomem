@@ -126,6 +126,10 @@ class Rendering:
         """The selector values this tool carries, in table order."""
         return tuple(dict.fromkeys(variant.action for variant in self.variants))
 
+    def take_tool_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Remove and return this tool's own arguments, which sit beside `operation` on the wire."""
+        return {key: arguments.pop(key) for key in self.tool_arguments if key in arguments}
+
     def arguments_for(self, entry: OperationEntry) -> dict[str, object]:
         """The grouped-command arguments that select this variant, and nothing else."""
         arguments: dict[str, object] = {self.selector: entry.action}
@@ -522,7 +526,7 @@ def spell_call(
         if rendering.variant_for(kind, fields) is None:
             continue
         # The tool's own arguments sit beside `operation`, where the server reads them.
-        tool_arguments = {key: fields.pop(key) for key in rendering.tool_arguments if key in fields}
+        tool_arguments = rendering.take_tool_arguments(fields)
         return rendering.name, {"operation": {"kind": kind, **fields}, **tool_arguments}
     raise ValueError(f"no rendering of {command} carries {selector}={kind!r}")
 
@@ -602,7 +606,7 @@ def unspell_call(
             if rendering.name != tool:
                 continue
             body = dict(arguments)
-            tool_arguments = {key: body.pop(key) for key in rendering.tool_arguments if key in body}
+            tool_arguments = rendering.take_tool_arguments(body)
             parsed = split_operation(body)
             if parsed is None:
                 return None

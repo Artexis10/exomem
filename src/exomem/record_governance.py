@@ -19,6 +19,7 @@ from . import (
     collection_claims,
     memory_refs,
     mutation_terminal,
+    query_compat,
     query_data,
     record_formats,
     state_paths,
@@ -95,23 +96,8 @@ _INSPECTION_VIEW_QUERY_KEYS = frozenset(
     }
 )
 _INSPECTION_VIEW_FILTER_KEYS = frozenset({"column", "op", "value"})
-_INSPECTION_VIEW_OPS = frozenset(
-    {
-        "eq",
-        "ne",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "contains",
-        "icontains",
-        "startswith",
-        "in",
-        "nin",
-        "exists",
-        "missing",
-    }
-)
+# The query grammar's closed operator set.
+_INSPECTION_VIEW_OPS = query_compat.OPS
 _INSPECTION_INVALID = object()
 
 
@@ -2065,23 +2051,8 @@ _SYSTEM_FIELDS = frozenset(
         "child_index",
     }
 )
-_QUERY_OPS = frozenset(
-    {
-        "eq",
-        "ne",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "contains",
-        "icontains",
-        "startswith",
-        "in",
-        "nin",
-        "exists",
-        "missing",
-    }
-)
+# The query grammar's closed operator set.
+_QUERY_OPS = query_compat.OPS
 _MAX_QUERY_DEPTH = 8
 _MAX_QUERY_NODES = 4_096
 
