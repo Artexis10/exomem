@@ -431,7 +431,7 @@ def build_state(vault: Path) -> dict:
     }
     context_catalogue = ContextCatalogue(vault)
     catalogue = context_catalogue.rebuild()
-    freshness = stamp_serving_freshness(vault, context_catalogue)
+    serving_freshness = stamp_serving_freshness(vault, context_catalogue)
     result = {
         "vault_digest": final_content,
         "product_source": product_source_identity(),
@@ -443,7 +443,7 @@ def build_state(vault: Path) -> dict:
             key: value for key, value in catalogue.items() if isinstance(value, (int, str))
         },
         "owner_coverage": context_catalogue.owner_coverage(),
-        "serving_freshness": freshness,
+        "serving_freshness": serving_freshness,
     }
     if (
         tree_digest(vault) != final_content
@@ -466,8 +466,6 @@ def stamp_serving_freshness(vault: Path, context_catalogue) -> dict:
 
     # The same key and serialisation that op_activate_context passes to the sidecars.
     key = working_set_runtime._key_text(find.FreshnessSnapshot(vault).projection_key("kb"))
-    if not key:
-        raise StateError("no serving freshness key for the built vault")
     index = working_set_index.WorkingSetIndex(vault)
     try:
         # The index first: the catalogue mirrors the index token that it reads when it updates.
@@ -1213,6 +1211,9 @@ def _require_build_proof(record: Mapping) -> None:
     # Old snapshots lack the startup proofs required before any arm can use them.
     if record.get("build", {}).get("vectors", {}).get("state") != "current":
         raise StateError("arm state lacks completed vector publication; build a fresh run")
+    if not record.get("build", {}).get("serving_freshness", {}).get("key_sha256"):
+        # Amendment 10: a state built before the stamps serves every map and packet as stale.
+        raise StateError("arm state lacks stamped serving freshness; rebuild the state")
     if (
         not record.get("quiescence", {}).get("content_unchanged")
         or not record.get("quiescence", {}).get("signatures_unchanged")

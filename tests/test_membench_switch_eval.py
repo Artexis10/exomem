@@ -123,7 +123,7 @@ for line in sys.stdin:
                       "error": {"code": "RETRIEVAL_INDEX_WARMING"}}}}
         elif "--warming-once" in sys.argv and probes == 2:
             result = {"structuredContent": {"result": {"hits": [],
-                      "warming": {"components": ["embeddings", "recall_projection"], "since_s": None}}}}
+                      "warming": {"components": ["embeddings"], "since_s": None}}}}
         else:
             result = {"structuredContent": {"result": {"hits": [],
                       "warming": {"components": ["graph", "pending_visibility"], "since_s": None}}}}
@@ -1134,7 +1134,7 @@ def built_slot_tree(tmp_path: Path) -> Layout:
     (arm / "state" / "index.sqlite").write_bytes(b"machine state")
     (arm / "state.json").write_text(json.dumps({
         "vault_digest": tree_digest(shared / "vault"), "state_digest": tree_digest(arm / "state"),
-        "build": {"vectors": {"state": "current"}},
+        "build": {"vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}},
         "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
         "vault_signature_digest": signature_digest(shared / "vault"),
     }))
@@ -1380,7 +1380,7 @@ def test_a_startup_write_refuses_the_build_instead_of_blessing_it(tmp_path: Path
         (layout.slot / "state").mkdir()
         (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
         return subprocess.CompletedProcess(args[0], 0, json.dumps({
-            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+            "vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
         }), "")
 
     monkeypatch.setattr(state, "mcp_server_entry", stand_in_entry)
@@ -1408,7 +1408,7 @@ def test_an_interrupted_build_retries_without_nesting_state(tmp_path: Path, monk
         (layout.slot / "state").mkdir()
         (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
         return subprocess.CompletedProcess(args[0], 0, json.dumps({
-            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+            "vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
         }), "")
 
     def proof(slot, *args, **kwargs):
@@ -1543,7 +1543,7 @@ def test_a_governed_session_read_is_filed_and_the_next_session_starts(tmp_path: 
     baseline = {"digest": state.tree_digest(shared), "signatures": state.signature_manifest(shared)}
     (layout.arm_tree("P", "snapshot") / "state.json").write_text(json.dumps({
         "vault_digest": baseline["digest"], "state_digest": state.tree_digest(machine_state),
-        "build": {"vectors": {"state": "current"}},
+        "build": {"vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}},
         "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
         "vault_signature_digest": state.signature_digest(shared),
     }))
@@ -1647,7 +1647,7 @@ def test_state_cpu_threads_reach_only_the_builder(
     def built(*args, **kwargs):
         (layout.slot / "state").mkdir()
         (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
-        code = f"import json, os; print(json.dumps({{'vectors': {{'state': 'current'}}, 'vault_digest': {state.tree_digest(layout.slot / 'vault')!r}, 'cpu_threads': os.environ.get({CPU_THREADS_ENV!r})}}))"
+        code = f"import json, os; print(json.dumps({{'vectors': {{'state': 'current'}}, 'serving_freshness': {{'key_sha256': 'fixture'}}, 'vault_digest': {state.tree_digest(layout.slot / 'vault')!r}, 'cpu_threads': os.environ.get({CPU_THREADS_ENV!r})}}))"
         result = real_run(
             [sys.executable, "-c", code],
             env=kwargs["env"],
@@ -1717,7 +1717,7 @@ def test_an_interrupted_arm_copy_retries_from_the_shared_baseline(
         (layout.slot / "state" / "index.sqlite").write_bytes(b"built state")
         return subprocess.CompletedProcess(
             args[0], 0, json.dumps({
-                "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+                "vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
             }), ""
         )
 
@@ -1781,7 +1781,7 @@ def seed_build_round(tmp_path: Path) -> tuple[Layout, Layout, Path]:
         "state_digest": state.tree_digest(baseline / "state"),
         "vault_digest": state.tree_digest(baseline / "vault"),
         "vault_signature_digest": state.signature_digest(baseline / "vault"),
-        "build": {"vectors": {"state": "current"}},
+        "build": {"vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}},
         "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
         "cpu_threads": 6, "resumed": True,
         "vector_build": {"run": str(tmp_path / "first-round"), "cpu_threads": 6, "resumed": True},
@@ -1822,7 +1822,7 @@ def test_seeded_state_republishes_and_captures_each_arm_with_original_vector_pro
         (state_dir / "lexical.sqlite").write_bytes(b"current lexical schema")
         builds.append(kwargs["env"][CPU_THREADS_ENV])
         return subprocess.CompletedProcess(args[0], 0, json.dumps({
-            "vectors": {"state": "current", "chunks_processed": 0},
+            "vectors": {"state": "current", "chunks_processed": 0}, "serving_freshness": {"key_sha256": "fixture"},
             "vault_digest": state.tree_digest(layout.slot / "vault"),
             "owner_coverage": {"available": False, "reason": "catalogue_unavailable"},
         }), "")
@@ -1882,7 +1882,7 @@ def test_seed_and_score_preserve_unknown_legacy_settings_separately_from_explici
     monkeypatch.setattr(state, "effective_online_cpus", lambda: 2)
     monkeypatch.setattr(state.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
         args[0], 0, json.dumps({
-            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+            "vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
         }), "",
     ))
     monkeypatch.setattr(state, "capture_surface", lambda *args, **kwargs: {})
@@ -1978,7 +1978,7 @@ def test_seed_interruption_returns_custody_and_retries_from_the_retained_donor(
         (layout.slot / "state" / "preparation-write").write_text("discard before retry")
         interrupt("builder")
         return subprocess.CompletedProcess(args[0], 0, json.dumps({
-            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+            "vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
         }), "")
 
     def surface(*args, **kwargs):
@@ -2039,7 +2039,7 @@ def test_seed_preparation_cannot_bless_a_builder_write_to_the_original_vault(
     def built(*args, **kwargs):
         (layout.slot / "vault" / "page.md").write_text("Unexpected builder write.")
         return subprocess.CompletedProcess(args[0], 0, json.dumps({
-            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+            "vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
         }), "")
 
     monkeypatch.setattr(state.subprocess, "run", built)
@@ -2148,7 +2148,7 @@ def test_failed_checkpoint_import_preserves_opaque_inputs_and_earns_new_state_pr
         assert state.tree_digest(layout.slot / "vault") == state.tree_digest(source)
         (machine / "lexical.sqlite").write_bytes(b"fresh publication")
         return subprocess.CompletedProcess(args[0], 0, json.dumps({
-            "vectors": {"state": "current", "coverage": {"reconstructed_parents": 1}},
+            "vectors": {"state": "current", "coverage": {"reconstructed_parents": 1}}, "serving_freshness": {"key_sha256": "fixture"},
             "vault_digest": state.tree_digest(layout.slot / "vault"),
             "product_source": {"source_revision": "current-product"},
         }), "")
@@ -2211,7 +2211,7 @@ def test_interrupted_checkpoint_requires_explicit_retry_before_any_custody_or_cl
         assert not (layout.slot / "state" / "partial").exists()
         assert state.tree_digest(layout.slot / "state") == state.tree_digest(archive.shared_tree("snapshot") / "state")
         return subprocess.CompletedProcess(args[0], 0, json.dumps({
-            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+            "vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
             "product_source": {"source_revision": "fixture"},
         }), "")
 
@@ -2266,7 +2266,7 @@ def test_surface_capture_cannot_bless_a_write_after_final_vector_publication(
     before = state.tree_digest(archive.run)
     monkeypatch.setattr(state.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
         args[0], 0, json.dumps({
-            "vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
+            "vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault"),
             "product_source": {"source_revision": "fixture"},
         }), "",
     ))
@@ -2327,7 +2327,7 @@ def test_parent_requires_the_childs_exact_final_coverage_identity(
     before = state.tree_digest(archive.run)
 
     def built(*args, **kwargs):
-        report = {"vectors": {"state": "current"}, "product_source": {"source_revision": "fixture"}}
+        report = {"vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "product_source": {"source_revision": "fixture"}}
         if handoff == "changed":
             report["vault_digest"] = state.tree_digest(layout.slot / "vault")
             (layout.slot / "vault" / "page.md").write_text("A write after the child proved coverage.")
@@ -2357,7 +2357,7 @@ def test_checkpoint_requires_the_builders_observed_product_source(
     before = state.tree_digest(archive.run)
 
     def built(*args, **kwargs):
-        report = {"vectors": {"state": "current"}, "vault_digest": state.tree_digest(layout.slot / "vault")}
+        report = {"vectors": {"state": "current"}, "serving_freshness": {"key_sha256": "fixture"}, "vault_digest": state.tree_digest(layout.slot / "vault")}
         if observed == "different":
             report["product_source"] = {"source_revision": "observed-child-source"}
         return subprocess.CompletedProcess(args[0], 0, json.dumps(report), "")
@@ -2370,3 +2370,15 @@ def test_checkpoint_requires_the_builders_observed_product_source(
     assert not (layout.shared_tree("snapshot") / "state.json").exists()
     assert not (layout.arm_tree("P", "snapshot") / "state.json").exists()
     assert state.tree_digest(archive.run) == before
+
+
+def test_a_state_built_before_the_serving_stamps_is_refused_for_reuse() -> None:
+    from membench.utility.switch_eval import state
+
+    record = {
+        "build": {"vectors": {"state": "current"}},
+        "quiescence": {"content_unchanged": True, "signatures_unchanged": True},
+        "vault_signature_digest": "fixture",
+    }
+    with pytest.raises(state.StateError, match="stamped serving freshness"):
+        state._require_build_proof(record)
