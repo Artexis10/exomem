@@ -821,8 +821,9 @@ _MAX_FULL_REBUILDS_PER_FLIGHT = 1
 #: thread, which may wait the full 30s, is the proportionate answer.
 _DEFERRED_UPSERTS: dict[Path, set[Path]] = {}
 #: Vaults where a full rebuild is genuinely required -- a failed store, a
-#: sqlite error, a noncurrent schema, a source that moved. These are NOT
-#: contention, and none of them is fixed by re-applying rows.
+#: sqlite error, a noncurrent schema. These are NOT contention, and none of
+#: them is fixed by re-applying rows. A source that moved is not one either:
+#: see `_SourceMoved`.
 _FULL_REBUILD_REQUESTED: set[Path] = set()
 #: The pending full requests whose every cause was a stored checkpoint that
 #: differs from the registry's. Only these may be answered by an exact delta
@@ -2015,16 +2016,17 @@ def _request_full_rebuild(key: Path, *, lag_only: bool = False) -> None:
     _FULL_REBUILD_REQUESTED.add(key)
 
 
-def _keep_claim_for_moving_source(
+def _yield_for_moving_source(
     key: Path, paths: list[Path], error: _SourceMoved, *, lag_only: bool
-) -> bool:
-    """Keep a claim a moving source refused; return whether the flight yields.
+) -> None:
+    """Keep a claim a moving source refused, and end this flight.
 
-    The caller holds `_REPAIRS_LOCK`. Admission stays revoked. The source's own
-    event re-requests the page, and the runtime's catalogue recovery retries a
-    kept claim on its backoff, so yielding loses no repair and cannot spin on
-    an editor that is still saving. Work with another cause that arrived during
-    the attempt keeps this flight, because its caller was told it would.
+    The caller holds `_REPAIRS_LOCK`, outside any full pass. Admission stays
+    revoked. Retrying now would meet the same edit, and any path queued
+    meanwhile shares that transaction, so the flight always yields. The
+    source's own event, the next proof that sees the lag, or the runtime's
+    catalogue recovery backoff starts the next bounded attempt, and runs any
+    work that arrived meanwhile.
     """
     log.info(
         "lexical targeted repair kept paths=%d for a moving source (%s); "
@@ -2032,20 +2034,12 @@ def _keep_claim_for_moving_source(
         len(paths),
         error,
     )
-    other_cause = bool(_DEFERRED_UPSERTS.get(key)) or (
-        key in _FULL_REBUILD_REQUESTED and key not in _LAG_ONLY_REBUILDS
-    )
     if lag_only:
         _request_full_rebuild(key, lag_only=True)
     if paths:
         _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
-    if other_cause:
-        return False
-    _FULL_REBUILDS_IN_FLIGHT.discard(key)
-    _FULL_REBUILD_REOBSERVED.pop(key, None)
     _REPAIRS_IN_FLIGHT.discard(key)
     _set_repair_progress(key, "idle", result="source_changed")
-    return True
 
 
 def _admit_if_current(vault_root: Path) -> bool:
@@ -2236,9 +2230,8 @@ def _schedule_repair(
                         caught_up = _caught_up_without_rebuild(vault_root, store)
                     except _SourceMoved as error:
                         with _REPAIRS_LOCK:
-                            if _keep_claim_for_moving_source(key, paths, error, lag_only=True):
-                                return
-                        continue
+                            _yield_for_moving_source(key, paths, error, lag_only=True)
+                        return
                     if caught_up:
                         # A request arriving meanwhile is level-triggered: the
                         # next iteration consumes it with its own cause.
@@ -2251,9 +2244,8 @@ def _schedule_repair(
                     full_pass = rebuild or not store.retry_deferred_upsert(paths)
                 except _SourceMoved as error:
                     with _REPAIRS_LOCK:
-                        if _keep_claim_for_moving_source(key, paths, error, lag_only=False):
-                            return
-                    continue
+                        _yield_for_moving_source(key, paths, error, lag_only=False)
+                    return
                 if paths and not rebuild:
                     # The deferral above logs "retrying these paths" and, until
                     # now, nothing ever said what became of them. A deferral
