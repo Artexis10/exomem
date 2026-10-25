@@ -41,12 +41,48 @@ jobs:
           import subprocess
           import sys
           import tempfile
+          import textwrap
+          import hashlib
           from pathlib import Path
 
+          script = Path.cwd() / "scripts" / "recall_latency_gate.py"
+          original = script.read_text()
+          overlay = textwrap.dedent(r'''
+          import ast
+
+          class _WarmingSiteOverlay(ast.NodeTransformer):
+              matches = 0
+
+              def visit_FunctionDef(self, node):
+                  if node.name == "worker_main":
+                      for handler in ast.walk(node):
+                          if not isinstance(handler, ast.ExceptHandler):
+                              continue
+                          for statement in handler.body:
+                              if (isinstance(statement, ast.Assign)
+                                  and any(isinstance(target, ast.Name) and target.id == "response" for target in statement.targets)
+                                  and isinstance(statement.value, ast.Dict)):
+                                  # The product constructor validates this public refusal site.
+                                  statement.value.keys.append(ast.Constant("reason"))
+                                  statement.value.values.append(ast.parse(
+                                      "'benchmark-warming-site-' + error.site if getattr(error, 'code', None) == 'RETRIEVAL_INDEX_WARMING' else None", mode="eval"
+                                  ).body)
+                                  self.matches += 1
+                  return node
+
+          _warming_tree = ast.parse(_warming_source, filename=__file__)
+          _warming_transformer = _WarmingSiteOverlay()
+          _warming_tree = _warming_transformer.visit(_warming_tree)
+          assert _warming_transformer.matches == 1
+          exec(compile(ast.fix_missing_locations(_warming_tree), __file__, "exec"), globals())
+          ''')
+          wrapper = "_warming_source = " + repr(original) + "\n" + overlay
+          script.write_text(wrapper)
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           import recall_latency_gate as gate
 
-          report = {"state": "failed", "timings": "not qualified; preparation and warm-up only", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
+          report = {"state": "failed", "timings": "not qualified; preparation and warm-up only", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                    "diagnostic_overlay": "validated-warming-site-only", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
           workers = {}
           try:
               profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
@@ -82,8 +118,10 @@ jobs:
                           try:
                               for principal in ("owner", "admitted"):
                                   for case in first_cases.values():
+                                      report["active_warm_call"] = {"arm": arm, "principal": principal, "case": case["id"]}
                                       result = worker.exchange({**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"]})
                                       report["warm_calls"].append({"arm": arm, "principal": principal, "case": case["id"], "state": result.get("state")})
+                                      report.pop("active_warm_call")
                                       if result.get("state") != "ok":
                                           raise gate.MeasurementRefused("reference-warm-call-not-ok")
                           finally:
