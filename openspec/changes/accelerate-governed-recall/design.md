@@ -749,7 +749,7 @@ threshold, and compares work between two corpus sizes as ratios.
   matched rows are the same at both sizes.
 
 **Paired comparison, full CI.** The `retrieval-latency` job runs on shared
-`ubuntu-latest` runners and feeds `gate` and release evidence, so it applies no
+`ubuntu-24.04` runners and feeds `gate` and release evidence, so it applies no
 absolute threshold.
 
 - *Arms.* Head and the pairing base, installed side by side in one job on one
@@ -757,6 +757,12 @@ absolute threshold.
   pairing base is the most recent release tag. It is code only and moves
   automatically when Release Please tags a release. No vault data, live-cell
   result or box load moves it.
+- *Runtime dependencies.* Each arm uses its own source lock. Head runs in the
+  frozen benchmark environment. The tag gets an isolated runtime environment
+  from its frozen lock, without development groups. The summary records each
+  source lock digest and environment policy. A failed tag installation refuses
+  measurement; it never substitutes head's dependencies. The lock reader ignores
+  historical writer settings without changing the tagged lock.
 - *Order.* Each case runs in both arms back to back, three times per arm, and
   the arm that goes first alternates between cases.
 - *Measurement adapter.* Both arms use the same benchmark-owned wrappers

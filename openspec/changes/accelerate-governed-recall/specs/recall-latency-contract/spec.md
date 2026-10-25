@@ -476,6 +476,12 @@ moves when a release is tagged, and no vault data, live-cell result or box load
 moves it. Both arms run in a process restricted to two CPUs, on the same
 runner, the same reference corpus and the same cases, back to back.
 
+Each arm SHALL load runtime dependencies from its own source lock. The harness
+SHALL install the tag runtime in an isolated environment without resolving or
+changing its lock. The summary SHALL record each source lock digest and
+environment policy. If tag installation fails, the harness SHALL report a
+refused measurement. It SHALL NOT use head's dependencies for the tag.
+
 Both arms SHALL use the same private measurement adapter. It observes the
 actual collectors and span boundaries while their original bodies run. It
 SHALL NOT change principal authority, admission, selection, egress or returned
@@ -531,6 +537,13 @@ Release. A release with no attached summary SHALL show
 - **WHEN** a merged change makes warm hybrid requests slower than the most recent release tag by more than 10%, with 95% confidence over the paired cases
 - **THEN** the next scheduled or dispatched full CI run fails the `retrieval-latency` job and names the series and the stages where the time moved
 - **AND** the release evidence check stays red until a full run passes
+
+#### Scenario: A runtime dependency regression stays visible
+
+- **WHEN** application source is unchanged and a runtime dependency makes warm requests more than 10% slower
+- **THEN** the tag worker uses the dependency versions in its frozen lock
+- **AND** the head worker uses the dependency versions in head's lock
+- **AND** the paired comparison reports the regression instead of sharing head's dependency with both arms
 
 #### Scenario: A deliberate slowdown ships through a reviewed accept record
 
