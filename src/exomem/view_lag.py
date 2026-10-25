@@ -158,19 +158,16 @@ def withheld_lag(
         rel = freshness.registry_rel(vault_root, path)
         # A path that cannot be decided counts as visible: the truthful answer
         # when what the caller could have seen is unknown.
-        try:
-            if rel is None:
-                return None
-            if visible(rel):
-                if path not in deleted:
-                    return None
-                if proven is None:
-                    proven = withheld_before(_rels(vault_root, deleted))
-                if rel not in proven:
-                    return None
-                held.add(rel)
-        except Exception:  # noqa: BLE001 - an undecidable path is counted visible
+        if rel is None:
             return None
+        if visible(rel):
+            if path not in deleted:
+                return None
+            if proven is None:
+                proven = withheld_before(_rels(vault_root, deleted))
+            if rel not in proven:
+                return None
+            held.add(rel)
     return frozenset(held)
 
 

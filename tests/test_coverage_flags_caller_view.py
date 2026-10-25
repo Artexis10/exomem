@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextvars import copy_context
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -565,19 +566,26 @@ def test_the_pages_a_request_proved_withheld_end_with_that_request(
     activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A later reader view on this thread must not reject a page for a request that is over."""
-    pinned: list[frozenset[str]] = []
+    pinned = []
     pin = egress.pin_proven_withheld
-    monkeypatch.setattr(
-        egress, "pin_proven_withheld", lambda paths: pinned.append(paths) or pin(paths)
-    )
+
+    def remember_pin(paths):
+        result = pin(paths)
+        pinned.append((paths, copy_context()))
+        return result
+
+    monkeypatch.setattr(egress, "pin_proven_withheld", remember_pin)
     _activate(activation.vault)
     _delete_as_the_service_does(activation.vault, HIDDEN_HUB)
 
     _activate(activation.vault)
 
-    assert pinned[-1] == frozenset({HIDDEN_HUB})
+    paths, copied = pinned[-1]
+    assert paths == frozenset({HIDDEN_HUB})
     with _caller(True):
         assert egress.visible_page_filter(activation.vault)(HIDDEN_HUB) is True
+    assert copied.run(lambda: egress.visible_page_filter(activation.vault)(HIDDEN_HUB)) is True
+    assert copied.run(pin, paths) is False
 
 
 def test_deleting_a_withheld_page_with_no_held_verdict_is_reported_to_the_restricted_reader(

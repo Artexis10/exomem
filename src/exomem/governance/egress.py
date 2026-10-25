@@ -7497,7 +7497,7 @@ class _ProvenWithheld:
     __slots__ = ("paths",)
 
     def __init__(self) -> None:
-        self.paths: frozenset[str] = frozenset()
+        self.paths: frozenset[str] | None = frozenset()
 
 
 _PROVEN_WITHHELD: ContextVar[_ProvenWithheld | None] = ContextVar(
@@ -7519,17 +7519,20 @@ def proven_withheld_scope() -> Iterator[None]:
     the request: nothing persists across requests, threads or the next request on this thread.
     A thread that copies no context starts with none, as it starts without the request's principal.
     """
-    token = _PROVEN_WITHHELD.set(_ProvenWithheld())
+    held = _ProvenWithheld()
+    token = _PROVEN_WITHHELD.set(held)
     try:
         yield
     finally:
+        # Copied contexts share this holder, so resetting this context's token alone cannot expire it.
+        held.paths = None
         _PROVEN_WITHHELD.reset(token)
 
 
 def pin_proven_withheld(paths: frozenset[str]) -> bool:
     """Add `paths` to the open request's set; False when no scope is open to hold a non-empty set."""
     held = _PROVEN_WITHHELD.get()
-    if held is None:
+    if held is None or held.paths is None:
         return not paths
     held.paths = held.paths | paths
     return True
@@ -7537,7 +7540,7 @@ def pin_proven_withheld(paths: frozenset[str]) -> bool:
 
 def _proven_withheld() -> frozenset[str]:
     held = _PROVEN_WITHHELD.get()
-    return frozenset() if held is None else held.paths
+    return frozenset() if held is None or held.paths is None else held.paths
 
 
 def visible_page_filter(
