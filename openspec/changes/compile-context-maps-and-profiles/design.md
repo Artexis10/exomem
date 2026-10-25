@@ -302,6 +302,15 @@ This protocol is frozen before any held-out generation. A later change is a numb
    - The vault declares no project-key domains, so the map lists recent activity, not topics, for this user. That is the product's behaviour on this vault, and the comparison measures it as it is.
    - This changes preparation and readiness only, never cases, keys, removals, arm budgets or the decision rule.
 
+11. **Amendment 11 (2026-10-25, before any held-out generation).** Replay preparation must preserve usable registry structure and distinguish authored workflow checks:
+   - An excluded registry page follows the registry exception in step 2. The copy builder preserves its schema version, entry keys, routing folders, parent references, direction and status from source. It does not delete the whole overlay. The report records these fields and any parser findings before and after preparation.
+   - Aliases, cue nouns, guidance and descriptions carry meaning. They survive only where the existing provenance rules establish that their text does not descend from a linked write. A revision by an unlinked writer does not establish independent ancestry. Unknown ancestry follows the existing removal rule.
+   - Where a removed entity label normalizes to its key, the copy uses that key as the label. This adds no resolution token. Where removing guidance or a description would leave a required string empty, the copy writes the quoted punctuation marker `"-"`. The marker supplies no lexical guidance. The report distinguishes such markers from authored or derived descriptions. An alias field that the parser requires remains an explicit empty list when no alias survives.
+   - The independent key custodian strikes a case that requires removed registry content, as step 2 already requires. Preparation verifies effective entries and structural fields against source. It records narrative ancestry and markers separately. Restoring an overlay changes the snapshot digest, so state is rebuilt; donor metadata and snapshot checks remain unchanged.
+   - Later ordinary-answer acceptance may use independently keyed, source-derived development questions when an original turn is unavailable. Such cases use `kind: authored_development` and the separate `workflow_dev` split. They are neither sampled ordinary turns nor original-incident replays. The report identifies missing originals, reused source groups and surviving source evidence before generation.
+   - Authored workflow checks use the same arms, actors, budgets and blind judge view. Their case results remain separate from switch rules, power estimates and held-out strata. They cannot establish a default switch. The existing intersection, removal, sweep and source-survival checks apply before their generation.
+   - This clarifies preparation and development acceptance only. It does not change a switch rule, tolerance, held-out case or frozen sampling stratum.
+
 ### Ready before held-out generation
 
 1. `maps` mode built, and pinned to one release or commit for every arm.
