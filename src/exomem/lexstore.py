@@ -3572,6 +3572,7 @@ class EligibilityMetadata:
     ranking: RankingPage | None = None
     occurrences: tuple[tuple[SemanticUnitLexicalHit, Any, Mapping[str, Any], str], ...] = ()
     content_hash: str | None = None
+    selected_parent: Any | None = None
 
 
 def parent_children_result(
@@ -3610,6 +3611,7 @@ def eligibility_metadata_result(
     parents_only: bool = False,
     include_ranking: bool = False,
     include_occurrences: bool = False,
+    include_structure: bool = False,
     recall_checkpoint: Any | None = None,
 ) -> CatalogQueryResult[dict[str, EligibilityMetadata]]:
     """Exact filter views and parent hints from one proven catalogue snapshot.
@@ -3617,6 +3619,7 @@ def eligibility_metadata_result(
     `parents_only` reads no filter view: its rows carry only the parent and
     `updated`, for a caller that decides on parents alone (recall admission).
     `include_ranking` adds snapshot-bound search and interpretation inputs.
+    `include_structure` adds selected structural summaries without occurrence rows.
     `recall_checkpoint` names the published projection to read, as for
     `search_bm25_result`.
     """
@@ -3629,6 +3632,7 @@ def eligibility_metadata_result(
             vault_root, conn, paths, include_units=include_units, parents_only=parents_only,
             include_ranking=include_ranking,
             include_occurrences=include_occurrences,
+            include_structure=include_structure,
         ),
         "lexical eligibility metadata query failed (%s); filter eligibility declines",
         recall_checkpoint=recall_checkpoint,
@@ -3644,16 +3648,18 @@ def _eligibility_metadata_query(
     parents_only: bool = False,
     include_ranking: bool = False,
     include_occurrences: bool = False,
+    include_structure: bool = False,
 ) -> dict[str, EligibilityMetadata]:
     from .vocabulary.registry import RegistryError
 
     view = "NULL" if parents_only else "p.eligibility_view_json"
-    ranking = "p.ranking_json, p.content_hash" if include_ranking else "NULL, NULL"
+    ranking = "p.ranking_json" if include_ranking else "NULL"
+    content_hash = "p.content_hash" if include_ranking or include_occurrences or include_structure else "NULL"
     rows = conn.execute(
         "WITH requested AS (SELECT value AS path FROM json_each(?)), "
         "wanted AS (SELECT path FROM requested UNION "
         "SELECT emitted_parent_path FROM pages WHERE path IN (SELECT path FROM requested)) "
-        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated, {ranking} "
+        f"SELECT p.path, {view}, p.emitted_parent_path, p.updated, {ranking}, {content_hash} "
         "FROM wanted w CROSS JOIN pages p ON p.path = w.path WHERE p.in_vault = 1",
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
@@ -3677,44 +3683,53 @@ def _eligibility_metadata_query(
                 ranking=None if ranking is None else _ranking_metadata(ranking),
                 content_hash=content_hash,
             )
-        if not (include_units or include_occurrences):
+        if not (include_units or include_occurrences or include_structure):
             return result
         # Each page's units as its selected interpretation emits them; a page
         # the caller may not see keeps no units and is never interpreted.
         view = _SelectedUnits(vault_root, conn)
-        unit_rows = conn.execute(
-            f"SELECT {_OCCURRENCE_COLUMNS}, u.verdict, u.check_by_day FROM semantic_units u "
-            "WHERE u.parent_path IN (SELECT value FROM json_each(?)) "
-            "ORDER BY u.parent_path, u.source_order",
-            (json.dumps(sorted(result), ensure_ascii=False),),
-        )
         units: dict[str, list[dict[str, Any]]] = {}
         occurrences: dict[str, list[tuple]] = {}
-        for row, served in view.served(unit_rows):
-            path, verdict, check_by = row[1], row[17], row[18]
-            unit = dict(
-                category=served.category,
-                category_key=row[8],
-                kind=served.kind,
-                tags=json.loads(row[10]),
-                context=row[11],
-                form=row[6],
-                instance=view.instance(str(path)),
+        if include_units or include_occurrences:
+            unit_rows = conn.execute(
+                f"SELECT {_OCCURRENCE_COLUMNS}, u.verdict, u.check_by_day FROM semantic_units u "
+                "WHERE u.parent_path IN (SELECT value FROM json_each(?)) "
+                "ORDER BY u.parent_path, u.source_order",
+                (json.dumps(sorted(result), ensure_ascii=False),),
             )
-            if verdict is not None:
-                unit["verdict"] = verdict
-            if check_by is not None:
-                unit["check_by"] = date.fromisoformat(check_by)
-            units.setdefault(str(path), []).append(unit)
-            if include_occurrences:
-                parent = view.parents.parent(str(path))
-                occurrences.setdefault(str(path), []).append((_unit_hit(row, served, None), parent, unit, str(row[0])))
-        view.require_complete()
+            for row, served in view.served(unit_rows):
+                path, verdict, check_by = row[1], row[17], row[18]
+                unit = dict(
+                    category=served.category,
+                    category_key=row[8],
+                    kind=served.kind,
+                    tags=json.loads(row[10]),
+                    context=row[11],
+                    form=row[6],
+                    instance=view.instance(str(path)),
+                )
+                if verdict is not None:
+                    unit["verdict"] = verdict
+                if check_by is not None:
+                    unit["check_by"] = date.fromisoformat(check_by)
+                units.setdefault(str(path), []).append(unit)
+                if include_occurrences:
+                    parent = view.parents.parent(str(path))
+                    occurrences.setdefault(str(path), []).append((_unit_hit(row, served, None), parent, unit, str(row[0])))
+            view.require_complete()
         from dataclasses import replace
 
-        for path, values in units.items():
+        if include_occurrences or include_structure:
+            # Retain structural bounds even when no occurrence row survives.
+            # Unavailable bounds do not change the existing occurrence coverage outcome.
+            view.parents.prefetch(result)
+        for path in result:
+            parent = view.parents.parent(path) if include_occurrences or include_structure else None
+            if parent is not None and parent.metadata.get("parent_source_hash") != result[path].content_hash:
+                parent = None
             result[path] = replace(
-                result[path], units=tuple(values), occurrences=tuple(occurrences.get(path, ())),
+                result[path], units=tuple(units.get(path, ())),
+                occurrences=tuple(occurrences.get(path, ())), selected_parent=parent,
             )
     except RegistryError:
         # Unavailable definitions are a dependent outcome, not a corrupt snapshot.
