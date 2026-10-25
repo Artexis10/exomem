@@ -3637,6 +3637,7 @@ def guard_working_set(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     intent_resolution: dict[str, Any] | None = None,
+    pinned_withheld: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Apply release decisions to a working-memory packet (design D7).
 
@@ -3659,6 +3660,11 @@ def guard_working_set(
 
     Units are decided by `_unit_verdict`, the rule `classify_units` gives the
     compiler, so a unit the compiler kept is one this guard keeps.
+
+    `pinned_withheld` are the pages a pinned lexical checkpoint holds that this
+    caller's verdict withheld before they left (`FreshnessSnapshot.lexical_withheld`).
+    Only the relisting of carried links reads it: it must reject the pages the
+    compiler's view rejected.
     """
     if release.blocked:
         return None
@@ -3803,7 +3809,8 @@ def guard_working_set(
         from .. import working_set
 
         relisted = working_set.relist_carried_links(
-            vault_root, guarded["anchors"], guarded["units"], purpose=purpose
+            vault_root, guarded["anchors"], guarded["units"], purpose=purpose,
+            withheld=pinned_withheld,
         )
         # A relisted row may be one this packet never named, so nothing above
         # decided it. It is decided here for this caller, like every named path,

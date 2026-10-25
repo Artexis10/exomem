@@ -3662,6 +3662,7 @@ def relist_carried_links(
     units: Sequence[Mapping[str, Any]],
     *,
     purpose: str | None,
+    withheld: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The `carried_link` anchors a carried packet lists when it serves `units`.
 
@@ -3670,7 +3671,13 @@ def relist_carried_links(
     surviving carried pages, so a slot a removed unit filled goes to the next
     person a surviving unit names, exactly as in a packet built without that
     unit. Each entry takes the `origin` of the page it was listed through.
+    `withheld` are the pages the request's pinned lexical checkpoint holds that
+    the caller's verdict withheld (`FreshnessSnapshot.lexical_withheld`): the
+    compiler's view rejected them, so this one does too, even if a row of the
+    working-set index outlives the page.
     """
+    from .governance import egress
+
     carried = [
         str(anchor.get("path") or "")
         for anchor in anchors
@@ -3683,7 +3690,7 @@ def relist_carried_links(
         working_set_index.WorkingSetIndex(vault_root),
         carried,
         units,
-        visible=_reader_view(vault_root, purpose),
+        visible=egress.reader_view(vault_root, purpose=purpose, withheld=withheld),
     )[:room]
     entries = [anchor.as_dict() for anchor in listed]
     _stamp_via_origins([*anchors, *entries], entries)

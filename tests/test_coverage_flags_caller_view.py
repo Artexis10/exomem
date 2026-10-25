@@ -784,6 +784,72 @@ def test_a_withheld_write_leaves_the_restricted_current_state_page_as_it_was(
     assert after == before
 
 
+MARSHAL = "Knowledge Base/Entities/People/Marshal Brannoch.md"
+DISPATCHER = "Knowledge Base/Entities/People/Dispatcher Vellum.md"
+
+
+@pytest.mark.parametrize("withheld_path", [MARSHAL], indirect=True)
+def test_deleting_a_withheld_page_a_carried_unit_names_leaves_the_relisted_links_as_they_were(
+    named: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard relists a carried page's links from the units it keeps.
+
+    Here it removes one unit of the carried page, so it relists. The working-set index
+    still holds the deleted page's row, and a deleted file reads as visible.
+    """
+    vault = named.vault
+    carried = vault / CARRY_PAGE
+    carried.write_text(
+        carried.read_text(encoding="utf-8").replace(
+            "- [finding] A quillon parcel",
+            "- [finding] Marshal Brannoch signs each widening and Dispatcher Vellum files it. ^q-sign\n"
+            "- [finding] A quillon parcel",
+            1,
+        )
+        + "\n## Context\n\n[[Marshal Brannoch]] [[Dispatcher Vellum]]\n",
+        encoding="utf-8",
+    )
+    for rel, title in ((MARSHAL, "Marshal Brannoch"), (DISPATCHER, "Dispatcher Vellum")):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n# {title}\n\n## Summary\n\nWorks the quillon queue.\n",
+            encoding="utf-8",
+        )
+    _seed_live_recall(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
+    # The guard removes a unit the compiler served, as it does when a policy moves between them.
+    guarding: list[bool] = []
+    guard, guarded_unit = egress.guard_working_set, egress._guarded_unit
+
+    def guard_removing_a_unit(*args, **kwargs):
+        guarding.append(True)
+        try:
+            return guard(*args, **kwargs)
+        finally:
+            guarding.clear()
+
+    monkeypatch.setattr(egress, "guard_working_set", guard_removing_a_unit)
+    monkeypatch.setattr(
+        egress,
+        "_guarded_unit",
+        lambda unit, *args: None
+        if guarding and "nine minutes" in str(unit.get("text")) else guarded_unit(unit, *args),
+    )
+
+    before = _activate(vault, turn=CARRY_TURN)
+    listed = [a["path"] for a in before["anchors"] if "carried_link" in a["evidence"]]
+    assert listed == [DISPATCHER], before["anchors"]
+    assert before["units"] and not any("nine minutes" in unit["text"] for unit in before["units"])
+
+    _delete_as_the_service_does(vault, MARSHAL)
+
+    assert _activate(vault, turn=CARRY_TURN) == before
+
+
 # ---- activation map ------------------------------------------------------
 
 
