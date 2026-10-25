@@ -23,7 +23,7 @@
 ## 5. Proof and delivery
 
 - [x] 5.1 Run the benchmark after the change on the same seed and profiles from a clean, committed product tree; record before and after under `docs/benchmarks/`. Verify: every collection item is landed or refused with a code, and a re-run creates no Source.
-- [ ] 5.2 Run the full suite, the privacy gate and `openspec validate --all --strict`; get an independent review; merge.
+- [x] 5.2 Prepare the delivery proof: run the scoped integration checks, privacy gate and strict OpenSpec validation; record the benchmark and independent review findings.
 
 ## Delivery evidence
 
@@ -33,3 +33,6 @@ Independent byte checks cover 1,017 captures and 83 artifacts per profile.
 The 214 scoped integration checks and the two final browser regression cases pass.
 PR #2081 records the independent review, required CI results and actual merge; those records determine delivery completion.
 The post-terminal media fan-out follow-up remains required before a real collection import.
+
+The full corpus runs in required CI. Delivery completes only when those checks succeed, the exact-head independent review approves, and PR #2081 merges.
+These remain delivery requirements; task checkmarks do not replace their receipts.

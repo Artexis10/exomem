@@ -167,7 +167,7 @@ The run SHALL persist phase `applying` before the first item write so a process 
 
 ### Requirement: Cancellation rules preserve applied work
 
-`adoption_studio(action="cancel")` SHALL be allowed from `selecting`, `planned`, `partial`, and `failed`, recording `{at, why}` and setting phase `cancelled`. It SHALL be refused during `applying` with `CANCEL_DURING_APPLY` and after `applied`/`done` with `ALREADY_APPLIED`. Cancellation SHALL never delete applied Sources — governance is append-only and originals were never touched.
+`adoption_studio(action="cancel")` SHALL be allowed from `selecting`, `planned`, `partial`, `failed`, and a budget-stopped `applying` run with an open continuation. It SHALL record `{at, why}` and set phase `cancelled`. It SHALL refuse `applying` without an open continuation with `CANCEL_DURING_APPLY`. It SHALL refuse `applied` and `done` with `ALREADY_APPLIED`. Cancellation SHALL preserve copied Sources and originals.
 
 #### Scenario: Cancel closes a pre-apply run
 
@@ -176,9 +176,15 @@ The run SHALL persist phase `applying` before the first item write so a process 
 
 #### Scenario: Cancel is refused mid-apply and post-apply
 
-- **WHEN** `cancel` is called while the phase is `applying`
+- **WHEN** `cancel` is called while the phase is `applying` without an open continuation
 - **THEN** it is refused with `CANCEL_DURING_APPLY`
 - **AND** calling `cancel` after the phase is `applied` is refused with `ALREADY_APPLIED` and applied Sources survive
+
+#### Scenario: Cancel closes a budget-stopped run
+
+- **WHEN** `cancel` is called after an apply budget stop with an open continuation
+- **THEN** the phase becomes `cancelled` with the recorded reason
+- **AND** copied Sources and every original remain unchanged
 
 ### Requirement: Three-layer staleness detection
 

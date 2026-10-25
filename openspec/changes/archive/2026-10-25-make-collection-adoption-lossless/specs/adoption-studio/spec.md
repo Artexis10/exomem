@@ -173,6 +173,27 @@ Across every action and every failure mode, adoption SHALL never rewrite, move, 
 - **THEN** every original file is byte-identical to its pre-run bytes at every step
 - **AND** no original is moved or deleted by any action
 
+### Requirement: Cancellation rules preserve applied work
+
+`adoption_studio(action="cancel")` SHALL be allowed from `selecting`, `planned`, `partial`, `failed`, and a budget-stopped `applying` run with an open continuation. It SHALL record `{at, why}` and set phase `cancelled`. It SHALL refuse `applying` without an open continuation with `CANCEL_DURING_APPLY`. It SHALL refuse `applied` and `done` with `ALREADY_APPLIED`. Cancellation SHALL preserve copied Sources and originals.
+
+#### Scenario: Cancel closes a pre-apply run
+
+- **WHEN** `cancel` is called on a run in `selecting` or `planned`
+- **THEN** the phase becomes `cancelled` with the recorded reason and no vault Source is created or removed
+
+#### Scenario: Cancel is refused mid-apply and post-apply
+
+- **WHEN** `cancel` is called while the phase is `applying` without an open continuation
+- **THEN** it is refused with `CANCEL_DURING_APPLY`
+- **AND** calling `cancel` after the phase is `applied` is refused with `ALREADY_APPLIED` and applied Sources survive
+
+#### Scenario: Cancel closes a budget-stopped run
+
+- **WHEN** `cancel` is called after an apply budget stop with an open continuation
+- **THEN** the phase becomes `cancelled` with the recorded reason
+- **AND** copied Sources and every original remain unchanged
+
 ## ADDED Requirements
 
 ### Requirement: Cloud staged imports adopt through the local engine

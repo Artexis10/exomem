@@ -24,6 +24,9 @@ It includes 100 Japanese notes and 31 notes with NFD filenames. The generator wr
 
 Both final drive logs record the measured commit and `src_dirty: false`.
 The final runs used CPython 3.14.6 and the frozen dependency lock, without optional media extras.
+Delivery also includes main at `b0d5aecb61e9aa0ec0fca9fd129e91907b30f526`; its changes leave the import modules untouched.
+After integration, ten cold/warm exact-path lookups and two graph-link page checks passed against the stored fixture.
+The fixture results and timings remain bound to the measured commit.
 Each profile used its own disposable vault and state through the public stdio MCP interface.
 Embeddings and CLIP were disabled, and model downloads were offline. The journey made no provider API requests.
 The Cloud-like profile selected `documents,ocr` media engines. Four registered folder rules supplied kind/domain homes.
@@ -123,3 +126,4 @@ These SHA-256 values bind the reported results to those files.
 | `final-cloud-like.drive.json` | `10716d8270ea193812764ed02bf085499b3d107dd29b7c6285ddbb7b2e11d92b` |
 | `final-cloud-like.metrics.json` | `fc3b1b185f536fd36e7f1955538253ecc55f89306d6ec3cf49adae8fc50d9b85` |
 | Paired attachment CSV | `29cd6212096e3393d8f282255d5195e663f45c851aae9525bf61c51918d8ebb2` |
+| `postmerge-read-probes.json` | `09652a25d62f1607d5d18aa1d28e8ce0a24a5ed934a02797ef71f059cc45b7fd` |
