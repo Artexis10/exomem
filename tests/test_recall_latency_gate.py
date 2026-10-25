@@ -1291,6 +1291,44 @@ def test_worker_uses_the_selected_runtime_and_preserves_closed_failures(tmp_path
                      runtime_policy="frozen-tag-runtime")
 
 
+@pytest.mark.skipif(gate.os.name != "posix", reason="The paired runtime uses the Linux reference profile")
+def test_tag_runtime_ignores_the_callers_project_and_operation_settings(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+    import subprocess
+
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("The runtime installation boundary requires uv")
+    base = tmp_path / "tag"
+    base.mkdir()
+    (base / "pyproject.toml").write_text(
+        '[project]\nname = "reference-runtime"\nversion = "0.0.0"\n'
+        'requires-python = ">=3.11"\ndependencies = []\n'
+        '[project.optional-dependencies]\nembeddings-onnx = []\n'
+    )
+    cache = tmp_path / "cache"
+    subprocess.run(
+        [uv, "--no-config", "lock", "--project", str(base), "--offline",
+         "--no-python-downloads", "--python", sys.executable],
+        env={"PATH": gate.os.environ["PATH"], "UV_CACHE_DIR": str(cache)},
+        check=True, capture_output=True, text=True, timeout=20,
+    )
+    before = (base / "uv.lock").read_bytes()
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (caller / "pyproject.toml").write_text((base / "pyproject.toml").read_text())
+    # The caller has no lock and must not replace the archived tag's project.
+    monkeypatch.setenv("UV_PROJECT", str(caller))
+    monkeypatch.setenv("UV_CONFIG_FILE", str(tmp_path / "caller-config.toml"))
+    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+
+    python = gate._prepare_tag_runtime(base, tmp_path / "measurement")
+
+    assert python.is_file()
+    assert (base / "uv.lock").read_bytes() == before
+    assert not (caller / "uv.lock").exists()
+
+
 @pytest.mark.parametrize("changed_lock, reason", [
     (False, "tag-runtime-install-failed"), (True, "tag-runtime-lock-changed"),
 ])

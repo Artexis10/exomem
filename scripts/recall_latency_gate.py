@@ -19,7 +19,7 @@ from collections import defaultdict
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -872,15 +872,10 @@ REFERENCE = CONTRACT.references[HYBRID_BAR.reference]
 PAIRING = REFERENCE["paired"]
 
 
-# These are the closed phases of the benchmark protocol, not application stages.
-MeasurementPhase = Literal["reference-preparation", "release-archive", "tag-runtime-preparation",
-                           "worker-bootstrap", "worker-startup", "worker-request", "paired-measurement"]
-
-
 class MeasurementRefused(ValueError):
-    """A closed instrument failure code, safe to include in public evidence."""
+    """A closed failure code; the summary schema owns phase and policy values."""
 
-    def __init__(self, code: str, *, phase: MeasurementPhase | None = None):
+    def __init__(self, code: str, *, phase: str | None = None):
         super().__init__(code)
         self.code, self.phase = code, phase
 
@@ -1351,7 +1346,7 @@ def _worker_sample(vault_root: Path, request: dict) -> dict:
 
 def worker_main(vault_root: Path) -> int:
     """Persistent JSON-lines worker; never emit product output or raw exceptions."""
-    phase: MeasurementPhase = "worker-startup"
+    phase = "worker-startup"
     preparation_started = False
     try:
         startup = json.loads(sys.stdin.readline())
@@ -1383,7 +1378,7 @@ def worker_main(vault_root: Path) -> int:
     return 0
 
 
-def _runtime_lock_digest(source: Path, *, phase: MeasurementPhase | None = None) -> str:
+def _runtime_lock_digest(source: Path, *, phase: str | None = None) -> str:
     import hashlib
 
     try:
@@ -1406,16 +1401,20 @@ def _prepare_tag_runtime(base: Path, scratch: Path) -> Path:
     """Read the immutable tag lock into one owned environment, outside timers."""
     import subprocess
 
-    phase: MeasurementPhase = "tag-runtime-preparation"
+    phase = "tag-runtime-preparation"
     try:
         digest = _runtime_lock_digest(base)
         runtime = (scratch / "tag-runtime").absolute()
-        environment = dict(os.environ)
+        # UV_ is uv's operation namespace; this fixed recipe retains only its cache location.
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("UV_")}
+        if "UV_CACHE_DIR" in os.environ:
+            environment["UV_CACHE_DIR"] = os.environ["UV_CACHE_DIR"]
         environment.pop("VIRTUAL_ENV", None)
         environment["UV_PROJECT_ENVIRONMENT"] = str(runtime)
         # Frozen reads use the lock's sources; historical writer settings do not apply.
         result = subprocess.run(
-            ["uv", "--no-config", "sync", "--frozen", "--no-default-groups", "--extra", "embeddings-onnx",
+            ["uv", "--no-config", "sync", "--project", str(base.absolute()),
+             "--frozen", "--no-default-groups", "--extra", "embeddings-onnx",
              "--no-python-downloads", "--python", sys.executable], cwd=base, env=environment,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -1436,10 +1435,9 @@ def _prepare_tag_runtime(base: Path, scratch: Path) -> Path:
 class _Worker:
     """One owned child; suspend its idle native pool outside the timed call."""
 
-    # These policies name the benchmark's two fixed launch recipes.
     def __init__(self, source: Path, vault: Path, state: Path, cpus: list[int], profile: dict,
                  *, python: Path | str | None = None, runtime_prefix: Path | None = None,
-                 runtime_policy: Literal["parent-benchmark", "frozen-tag-runtime"] = "parent-benchmark"):
+                 runtime_policy: str = "parent-benchmark"):
         import subprocess
 
         startup = {"profile": profile, "runtime_lock_digest": _runtime_lock_digest(source, phase="worker-startup"),
@@ -1473,7 +1471,7 @@ class _Worker:
             raise
         self.pause()
 
-    def exchange(self, request: dict, *, phase: MeasurementPhase = "worker-request") -> dict:
+    def exchange(self, request: dict, *, phase: str = "worker-request") -> dict:
         self.resume()
         try:
             self.process.stdin.write(json.dumps(request) + "\n")
@@ -1687,7 +1685,7 @@ def paired_cli(output: Path) -> int:
 
     report: dict = {"schema_version": 1, "mode": "paired", "state": "refused",
                     "contract_revision": CONTRACT.revision, "series": [], "samples": []}
-    phase: MeasurementPhase = "reference-preparation"
+    phase = "reference-preparation"
     try:
         profile = json.loads((BENCHMARK / "profile.json").read_text())
         cases, digest = reference_cases(profile)
