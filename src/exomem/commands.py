@@ -6682,6 +6682,8 @@ def op_activate_context(
                         call_spans_module.gc_window(),
                         state_paths_module.resolution_scope(),
                         working_set_runtime_module.defer_index_refreshes(),
+                        # Holds the pages this request proves withheld (`pin_lexical_checkpoint`).
+                        egress_module.proven_withheld_scope(),
                     ):
                         if readiness_module.runtime_managed() and request_budget_module.current() is None:
                             bound_token = request_budget_module.set_current(
@@ -7286,8 +7288,6 @@ def _op_activate_context_body(
     try:
         with find_types.timing_span(timings, "working_set.guard"):
             guard_arguments: dict[str, Any] = {"purpose": purpose}
-            if snapshot is not None:
-                guard_arguments["pinned_withheld"] = snapshot.lexical_withheld("kb")
             if intent_resolution is not None:
                 guard_arguments["intent_resolution"] = intent_resolution
             guarded = egress_module.guard_working_set(

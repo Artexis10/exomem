@@ -1102,8 +1102,10 @@ def pin_lexical_checkpoint(
 
     A deleted page that the catalogue still holds is withheld from this
     reader only where its own earlier verdict proves it (`view_lag.withheld_lag`).
-    The snapshot records those pages so the request's reader view rejects them:
-    no lane may rank a row on text the reader was never shown.
+    The request's `egress.proven_withheld_scope` records those pages, so every
+    reader view built after this rejects them: no lane may rank a row on text
+    the reader was never shown. A request with no scope to hold a non-empty set
+    keeps its own checkpoint.
 
     The repair of the lag is requested when the request ends
     (`defer_index_refreshes`), because a catalogue that converged mid-request
@@ -1114,6 +1116,7 @@ def pin_lexical_checkpoint(
     if visible is None:
         return request
     from . import lexstore
+    from .governance import egress
 
     try:
         published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
@@ -1126,9 +1129,9 @@ def pin_lexical_checkpoint(
     except Exception:  # noqa: BLE001 - a lag that cannot be decided counts as visible, as in `only_withheld`
         log.debug("lexical lag undecidable; serving the request checkpoint", exc_info=True)
         return request
-    if held is None:
+    if held is None or not egress.pin_proven_withheld(held):
         return request
-    snapshot.pin_lexical_checkpoint("kb", published, held)
+    snapshot.pin_lexical_checkpoint("kb", published)
     _defer_lexical_repair(vault_root)
     return published
 
