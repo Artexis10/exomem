@@ -782,8 +782,8 @@ function populateResult() {
 
 // There is no `apply_result.copied`/`.failed` on the real run document — the
 // per-item detail lives ONLY in the `outcomes` map (keyed by original path).
-// `apply_result` (and top-level `verified_unchanged`/`verified_total`) carries
-// just the re-hash counts; always derive copied/failed from `outcomes`.
+// Apply replies expose this call's re-hash counts at the top level; `verify`
+// keeps the cumulative counts. Always derive copied/failed from `outcomes`.
 function applyResult() {
   return outcomesToResult();
 }
@@ -800,11 +800,11 @@ function outcomesToResult() {
 }
 
 function verificationLine() {
-  // verified_unchanged/verified_total appear TOP-LEVEL on the run document
-  // once it has applied outcomes (the real post-apply re-hash counts) — never
-  // nested under apply_result/result/finish.
-  const unchanged = run && run.verified_unchanged;
-  const total = run && run.verified_total;
+  // `verify` covers every completed chunk. Older runs expose only the top-level
+  // pair; keep each pair together so the counts always describe the same window.
+  const verification = run && (run.verify || run);
+  const unchanged = verification && verification.verified_unchanged;
+  const total = verification && verification.verified_total;
   if (typeof unchanged === "number" && typeof total === "number") {
     return `We double-checked your originals: ${unchanged} of ${total} are byte-for-byte unchanged (checksums match).`;
   }

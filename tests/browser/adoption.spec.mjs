@@ -152,7 +152,8 @@ test("deterministic happy path with guarantee badge and write gated on the dialo
       }
       await continuedApply;
       return (run = makeRun("applied", {
-        plan: PLAN, outcomes: APPLIED_OUTCOMES, verified_unchanged: 4, verified_total: 4, handoff: HANDOFF,
+        plan: PLAN, outcomes: APPLIED_OUTCOMES, verified_unchanged: 1, verified_total: 1,
+        verify: {verified_unchanged: 4, verified_total: 4}, handoff: HANDOFF,
       }));
     },
     ask_memory: {hits: [{title: "Alpha plan", path: "in/alpha.md", excerpt: "Ship the alpha."}]},
@@ -340,6 +341,7 @@ test("partial apply groups failures in plain language and retries only the faile
   await page.getByRole("button", {name: "Try those 2 again"}).click();
   await expect(page.getByRole("heading", {name: "All set — 4 files are in ✓"})).toBeVisible();
   const retry = applyCalls(calls)[1];
+  await expect(page.locator("#adopt-verify")).toContainText("4 of 4 are byte-for-byte unchanged");
   expect(retry.body.retry_failed).toBe(true);
   expect(retry.body.only_paths).toEqual(["projects/deep/gamma.md", "old notes/meeting.md"]);
   expect(retry.body.plan_id).toBe("plan-1");
