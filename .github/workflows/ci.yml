@@ -19,6 +19,8 @@ env:
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
   # The newest release one store schema back; move it to the next one with each schema bump.
   EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.127.5"
+  # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
+  EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 
 jobs:
   timing-tests:
@@ -203,6 +205,7 @@ jobs:
           --dist loadfile
           --max-worker-restart=0
           -o timeout=180
+          --ignore="$EXOMEM_TUI_TEST_DIRECTORY"
           --ignore="$EXOMEM_SERIAL_CORE_MODULE"
           --ignore="$EXOMEM_SERIAL_ANALYTICS_MODULE"
           --ignore="$EXOMEM_SERIAL_GRAPH_MODULE"
@@ -351,6 +354,7 @@ jobs:
           --dist loadfile
           --max-worker-restart=0
           -o timeout=180
+          --ignore="$EXOMEM_TUI_TEST_DIRECTORY"
           --group=${{ matrix.shard }}
           --splitting-algorithm=duration_based_chunks
           --durations-path="$EXOMEM_DURATIONS_PATH"
@@ -493,7 +497,7 @@ jobs:
         # The lean matrix skips tests/tui (no `tui` extra there); this job
         # opts in. Goldens render only from the deterministic FakeBackend —
         # regenerate intentionally with `pytest tests/tui --snapshot-update`.
-        run: uv run --frozen --extra tui --group tui-dev python -m pytest tests/tui tests/test_tui_entry.py -q
+        run: uv run --frozen --extra tui --group tui-dev python -m pytest "$EXOMEM_TUI_TEST_DIRECTORY" tests/test_tui_entry.py -q
 
   product-e2e:
     name: product E2E (installed wheel, stdio + HTTP)
