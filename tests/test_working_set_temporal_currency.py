@@ -356,7 +356,7 @@ def _patch_units(monkeypatch, hits):
         return [hit for hit in hits if hit.parent_path in allowed]
 
     monkeypatch.setattr(find_module, "FreshnessSnapshot", lambda root: SimpleNamespace(
-        recall_checkpoint=lambda scope: None))
+        lexical_checkpoint=lambda scope: None))
     monkeypatch.setattr(find_module, "_find_semantic_units", fake)
     return seen
 

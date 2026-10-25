@@ -2606,7 +2606,7 @@ def _carry_by_retrieval(
     if freshness_snapshot is not None:
         try:
             freshness = freshness_snapshot.for_scope("kb")
-            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+            recall_checkpoint = freshness_snapshot.lexical_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
             log.debug("activation carry freshness unavailable", exc_info=True)
             return ()
@@ -2695,7 +2695,7 @@ def _carry_groups_by_retrieval(
     if freshness_snapshot is not None:
         try:
             freshness = freshness_snapshot.for_scope("kb")
-            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+            recall_checkpoint = freshness_snapshot.lexical_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
             log.debug("activation carry freshness unavailable", exc_info=True)
             return ()
@@ -2876,7 +2876,7 @@ def _title_named_anchors(
     if freshness_snapshot is not None:
         try:
             freshness = freshness_snapshot.for_scope("kb")
-            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+            recall_checkpoint = freshness_snapshot.lexical_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot lists nothing
             log.debug("activation title listing freshness unavailable", exc_info=True)
             return (), None
@@ -3546,6 +3546,7 @@ def _carried_material(
                 index_token=index_token,
                 visible=visible,
                 status_basis=status_basis,
+                freshness_snapshot=freshness_snapshot,
             )
         got, gaps = run_lanes(
             vault_root,
@@ -3828,6 +3829,7 @@ def _follow_up_packet(
                 state_fields=conventions.state_fields,
                 date_fields=conventions.date_fields,
                 status_basis=status_basis,
+                freshness_snapshot=freshness_snapshot,
             )
         items, missing = run_lanes(
             vault_root,
@@ -4931,6 +4933,7 @@ def _compile_packet(
             state_fields=conventions.state_fields,
             date_fields=conventions.date_fields,
             status_basis=status_basis,
+            freshness_snapshot=freshness_snapshot,
         )
     reached: dict[str, set[str]] = {}
     for entry in current_state:

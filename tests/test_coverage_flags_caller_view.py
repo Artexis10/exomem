@@ -17,7 +17,9 @@ from types import SimpleNamespace
 import pytest
 from test_activate_context_request_path import TURN, _seed_live_recall
 from test_governance_egress import _external, write_rule, write_scope
+from test_working_set_carry import CARRY_PAGE, CARRY_TURN, _seed_carry_pages
 from test_working_set_index import _seed_planning, _seed_structure
+from test_working_set_topic_turns import CLEANING, _seed_workshop_vault
 
 from exomem import (
     commands,
@@ -701,6 +703,85 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
 
     assert published == [True]
     assert served.get("abstention") == {"reason": "unavailable"}
+
+
+# ---- the pages a turn names ----------------------------------------------
+
+TITLE_TURN = "The smooth chain cleaning works best with degreaser, I find."
+STATE_TURN = "what is the current state of Harbourline Trust"
+STATE_ENTITY = "Knowledge Base/Entities/Organizations/Harbourline Trust.md"
+STATE_PAGE = "Knowledge Base/Notes/Insights/harbourline-operating-state.md"
+
+
+@pytest.fixture
+def named(activation: SimpleNamespace) -> SimpleNamespace:
+    """The activation runtime over a vault where a turn can name a page without an anchor.
+
+    A research note answers the carry, a note titled in ordinary words answers the
+    title listing, and an entity declares the visible page that holds its current state.
+    """
+    vault = activation.vault
+    _seed_workshop_vault(vault)
+    _seed_carry_pages(vault)
+    for rel, body in (
+        (
+            STATE_ENTITY,
+            "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n"
+            'current_state_page: "[[harbourline-operating-state]]"\n---\n\n'
+            "# Harbourline Trust\n\nA shipping trust. See [[harbourline-operating-state]].\n",
+        ),
+        (
+            STATE_PAGE,
+            "---\ntype: note\nstatus: active\nupdated: 2026-09-20\n---\n\n"
+            "# Harbourline operating state\n\n## Summary\n\n"
+            "- [fact] The harbourline retainer is ninety thousand. ^retainer\n",
+        ),
+    ):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    _seed_live_recall(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
+    return activation
+
+
+def _around_a_withheld_write(vault: Path, turn: str) -> tuple[dict, dict]:
+    """The restricted reader's packet before and after a withheld write the lexical catalogue lags."""
+    before = _activate(vault, turn=turn)
+    _write_as_the_service_does(vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+    return before, _activate(vault, turn=turn)
+
+
+def test_a_withheld_write_leaves_the_restricted_carry_as_it_was(named: SimpleNamespace) -> None:
+    before, after = _around_a_withheld_write(named.vault, CARRY_TURN)
+
+    assert before["generation"]["carried_by"] == "retrieval"
+    assert {unit["provenance"]["path"] for unit in before["units"]} == {CARRY_PAGE}
+    assert after == before
+
+
+def test_a_withheld_write_leaves_the_restricted_title_listing_as_it_was(
+    named: SimpleNamespace,
+) -> None:
+    before, after = _around_a_withheld_write(named.vault, TITLE_TURN)
+
+    assert before["abstained"] is True
+    assert [anchor["path"] for anchor in before["anchors"]] == [CLEANING]
+    assert after == before
+
+
+def test_a_withheld_write_leaves_the_restricted_current_state_page_as_it_was(
+    named: SimpleNamespace,
+) -> None:
+    before, after = _around_a_withheld_write(named.vault, STATE_TURN)
+
+    assert [e["path"] for e in before["current_state"] if e["source"] == "canonical_page"] == [
+        STATE_PAGE
+    ]
+    assert after == before
 
 
 # ---- activation map ------------------------------------------------------
