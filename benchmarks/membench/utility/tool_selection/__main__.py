@@ -198,7 +198,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         json.loads(
             json.dumps(
                 {
-                    "design": "openspec/changes/expose-single-purpose-tools/design.md",
+                    "design": "openspec/changes/complete-single-purpose-tools/design.md",
                     "harness_digest": _harness_digest(),
                     "actor_model": args.actor_model,
                     "client": {
