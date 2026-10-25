@@ -99,27 +99,56 @@ _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
 )
 
 
+#: The vaults whose lexical catalogue a pinned request asked to repair (`pin_lexical_checkpoint`).
+_DEFERRED_LEXICAL_REPAIRS: ContextVar[set[Path] | None] = ContextVar(
+    "activation_deferred_lexical_repairs", default=None
+)
+
+
+def _defer_lexical_repair(vault_root: Path) -> None:
+    """Request the lag-only repair of the lexical catalogue once the activation ends."""
+    pending = _DEFERRED_LEXICAL_REPAIRS.get()
+    if pending is not None:
+        pending.add(Path(vault_root))
+        return
+    from . import lexstore
+
+    lexstore.request_lag_repair(vault_root)
+
+
 @contextmanager
 def defer_index_refreshes() -> Iterator[None]:
     """Dispatch this activation's refreshes after its live evidence guards.
 
     A request must not invalidate its own catalogue evidence. Independent
     publishers still meet the unchanged token guards; no worker waits here.
+    The lexical catalogue's lag-only repair is such a refresh.
     """
     if _DEFERRED_BUILDS.get() is not None:
         yield
         return
     pending: dict[Path, str] = {}
+    repairs: set[Path] = set()
     token = _DEFERRED_BUILDS.set(pending)
+    repair_token = _DEFERRED_LEXICAL_REPAIRS.set(repairs)
     try:
         yield
     finally:
         _DEFERRED_BUILDS.reset(token)
+        _DEFERRED_LEXICAL_REPAIRS.reset(repair_token)
         for root, stamp in pending.items():
             try:
                 _schedule_build(root, freshness_stamp=stamp)
             except Exception:  # noqa: BLE001 - optional dispatch cannot replace the earned result
                 log.warning("deferred activation refresh could not start", exc_info=True)
+        if repairs:
+            from . import lexstore
+
+            for root in repairs:
+                try:
+                    lexstore.request_lag_repair(root)
+                except Exception:  # noqa: BLE001 - optional dispatch cannot replace the earned result
+                    log.warning("deferred lexical repair could not start", exc_info=True)
 
 #: The token's wire version. A payload of any other version is not decoded at
 #: all: a token is a hint, and guessing at an unknown shape is worse than
@@ -1071,8 +1100,14 @@ def pin_lexical_checkpoint(
     (`visible` None), a catalogue at the request's checkpoint and any other
     lag keep the request's checkpoint and its readiness gate.
 
-    The request schedules no repair for a lag that only withheld pages cause:
-    the writer that made it announces the page and converges the catalogue.
+    A deleted page that the catalogue still holds is withheld from this
+    reader only where its own earlier verdict proves it (`view_lag.withheld_lag`).
+    The snapshot records those pages so the request's reader view rejects them:
+    no lane may rank a row on text the reader was never shown.
+
+    The repair of the lag is requested when the request ends
+    (`defer_index_refreshes`), because a catalogue that converged mid-request
+    would leave later lanes reading a checkpoint that is no longer current.
     The release decision on each hit stays per request, on the live file.
     """
     request = snapshot.recall_checkpoint("kb")
@@ -1080,14 +1115,21 @@ def pin_lexical_checkpoint(
         return request
     from . import lexstore
 
-    published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
-    # The catalogue's own comparison of what a checkpoint serves: corpus and admission policy.
-    served = lexstore._checkpoint_state  # noqa: SLF001
-    if published is None or served(published) == served(request):
+    try:
+        published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
+        # The catalogue's own comparison of what a checkpoint serves: corpus and admission policy.
+        if published is None or (
+            lexstore.checkpoint_state(published) == lexstore.checkpoint_state(request)
+        ):
+            return request
+        held = view_lag.recall_withheld_lag(vault_root, "kb", published, visible)
+    except Exception:  # noqa: BLE001 - a lag that cannot be decided counts as visible, as in `only_withheld`
+        log.debug("lexical lag undecidable; serving the request checkpoint", exc_info=True)
         return request
-    if not view_lag.recall_lag_only_withheld(vault_root, "kb", published, visible):
+    if held is None:
         return request
-    snapshot.pin_lexical_checkpoint("kb", published)
+    snapshot.pin_lexical_checkpoint("kb", published, held)
+    _defer_lexical_repair(vault_root)
     return published
 
 

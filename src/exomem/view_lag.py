@@ -43,42 +43,67 @@ def only_withheld(
     `visible` keeps a path that is no longer a page, so a deleted page reads as
     one the caller may see. `withheld_before`, when given, names which of the
     deleted paths this caller's earlier verdict already held as withheld before
-    the page left; the caller never saw such a page, so its leaving changes
-    nothing it could see.
+    the page left; the published structure never served such a page to this
+    caller, so its leaving changes nothing the caller was shown.
 
     True only when the delta is bridged, small and made wholly of paths that
     `visible` rejects or `withheld_before` names. Every other case reports the
     lag: an unbridgeable delta says nothing about what changed, so the structure
     cannot be called complete.
     """
+    return (
+        withheld_lag(
+            vault_root, delta, visible, pending=pending, withheld_before=withheld_before
+        )
+        is not None
+    )
+
+
+def withheld_lag(
+    vault_root: Path,
+    delta: Any,
+    visible: Callable[[str], bool],
+    *,
+    pending: bool = False,
+    withheld_before: Callable[[frozenset[str]], frozenset[str]] | None = None,
+) -> frozenset[str] | None:
+    """`only_withheld`, naming what `visible` alone would have kept.
+
+    `None` when the lag shows anything this caller may see. Otherwise the
+    deleted paths that `visible` keeps and `withheld_before` proved withheld:
+    a request that serves the structure as published must treat them as
+    withheld, because `visible` cannot reject a path that is no longer a page.
+    """
     if not delta.complete or getattr(delta, "requires_source_proof", False):
-        return False
+        return None
     paths = {*delta.changed, *delta.deleted}
     if pending:
         if freshness.external_pending_unscoped(vault_root):
-            return False
+            return None
         paths |= freshness.external_pending_paths(vault_root)
     if len(paths) > MAX_DECIDED_PATHS:
-        return False
+        return None
     deleted = set(delta.deleted) - set(delta.changed) if withheld_before is not None else set()
     proven: frozenset[str] | None = None
+    held: set[str] = set()
     for path in paths:
         rel = freshness.registry_rel(vault_root, path)
         # A path that cannot be decided counts as visible: the truthful answer
         # when what the caller could have seen is unknown.
         try:
             if rel is None:
-                return False
+                return None
             if visible(rel):
                 if path not in deleted:
-                    return False
+                    return None
                 if proven is None:
                     proven = withheld_before(_rels(vault_root, deleted))
                 if rel not in proven:
-                    return False
+                    return None
+                held.add(rel)
         except Exception:  # noqa: BLE001 - an undecidable path is counted visible
-            return False
-    return True
+            return None
+    return frozenset(held)
 
 
 def _rels(vault_root: Path, paths: set[Any]) -> frozenset[str]:
@@ -99,16 +124,26 @@ def recall_lag_only_withheld(
     when `built` is unknown, the scope is not live, the access policy moved, or
     the delta is not bridged, because each leaves what changed unknown.
     """
+    return recall_withheld_lag(vault_root, scope, built, visible) is not None
+
+
+def recall_withheld_lag(
+    vault_root: Path,
+    scope: str,
+    built: freshness.RecallFreshnessCheckpoint | None,
+    visible: Callable[[str], bool],
+) -> frozenset[str] | None:
+    """`recall_lag_only_withheld`, with the deleted paths a verdict proved withheld (`withheld_lag`)."""
     current = freshness.live_recall_checkpoint(vault_root, scope)
     if built is None or current is None:
-        return False
+        return None
     # A policy change moves what every page releases, whichever pages were written.
     if (built.policy_version, built.access_policy_fingerprint) != (
         current.policy_version,
         current.access_policy_fingerprint,
     ):
-        return False
-    return only_withheld(
+        return None
+    return withheld_lag(
         vault_root,
         freshness.recall_delta_since(vault_root, scope, built),
         visible,

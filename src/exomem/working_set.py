@@ -3876,12 +3876,18 @@ def _follow_up_packet(
     )
 
 
-def _reader_view(root: Path, purpose: str | None):
+def _reader_view(root: Path, purpose: str | None, snapshot: Any = None):
     """The caller's view of pages and units (`egress.ReaderView`), or `None`
-    for the owner."""
+    for the owner.
+
+    A request that reads the lexical catalogue at a checkpoint older than its
+    own (`working_set_runtime.pin_lexical_checkpoint`) sees, as withheld, the
+    pages that checkpoint holds and the caller's verdict had withheld.
+    """
     from .governance import egress
 
-    return egress.reader_view(root, purpose=purpose)
+    withheld = snapshot.lexical_withheld("kb") if snapshot is not None else frozenset()
+    return egress.reader_view(root, purpose=purpose, withheld=withheld)
 
 
 def _conversation_affordable() -> bool:
@@ -4078,7 +4084,7 @@ def _compile_packet(
     # may already be a caller-supplied released view
     # (`working_set_runtime.serve`); narrowing it again is a no-op for that
     # caller and the only guard for a direct one.
-    visible = _reader_view(root, purpose)
+    visible = _reader_view(root, purpose, freshness_snapshot)
     if visible is not None:
         heat = working_set_heat.released_view(heat, visible)
     # "Missing or stale profiles SHALL report their state": `current` (live

@@ -300,9 +300,9 @@ def activation(
     return SimpleNamespace(vault=vault, scheduled=scheduled)
 
 
-def _activate(vault: Path, *, restricted: bool = True) -> dict:
+def _activate(vault: Path, *, restricted: bool = True, turn: str = TURN) -> dict:
     with _caller(restricted):
-        packet = commands.op_activate_context(vault, turn=TURN)
+        packet = commands.op_activate_context(vault, turn=turn)
     packet.pop("continuity", None)  # a fresh random thread, not coverage
     return packet
 
@@ -539,6 +539,49 @@ def test_deleting_a_visible_page_is_reported_to_the_restricted_reader(
     _delete_as_the_service_does(activation.vault, VISIBLE_HUB)
 
     assert _activate(activation.vault)["generation"]["lexical_evidence"] == "stale"
+
+
+HUB_TURN = "What is going on with the northern corridor? Which depot owns the winter schedule?"
+NEIGHBOUR = "Knowledge Base/Notes/Patterns/coverage-withheld-neighbour.md"
+NEIGHBOUR_BODY = (
+    "# Neighbour\n\nWinter schedule depot handover for the northern corridor."
+    " See [[northern-corridor-hub]].\n"
+)
+
+
+def test_deleting_a_withheld_neighbour_that_matches_the_turn_leaves_the_restricted_packet_as_it_was(
+    activation: SimpleNamespace,
+) -> None:
+    """The catalogue still ranks the deleted page by its text; the reader was never shown that text."""
+    vault = activation.vault
+    _write_as_the_service_does(vault, NEIGHBOUR, NEIGHBOUR_BODY)
+    lexstore.ensure_fresh(vault)
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    index.update(freshness_stamp=_stamp(vault))
+    before = _activate(vault, turn=HUB_TURN)
+    assert {"role": "material", "reason": "no_material"} in before["missing"]
+
+    _delete_as_the_service_does(vault, NEIGHBOUR)
+
+    assert _activate(vault, turn=HUB_TURN) == before
+
+
+def test_a_request_served_the_published_catalogue_asks_for_its_repair_when_it_ends(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repair that ran mid-request would move the catalogue under the request's later reads."""
+    asked: list[bool] = []
+    monkeypatch.setattr(
+        lexstore, "_schedule_repair", lambda *args, lag_only=False, **kwargs: asked.append(lag_only)
+    )
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    with _caller(True), working_set_runtime.defer_index_refreshes():
+        _request_snapshot(activation.vault)
+        assert asked == []
+
+    assert asked == [True]
 
 
 @pytest.mark.parametrize("withheld_tag", [RESTRICTED_TAG], indirect=True)
