@@ -1617,7 +1617,7 @@ def _units_lane(
             degraded_out=None,
             failed_out=None,
             allowed_parent_paths=set(neighbourhood),
-            recall_checkpoint=snapshot.recall_checkpoint("kb"),
+            recall_checkpoint=snapshot.lexical_checkpoint("kb"),
             repair=False,
             max_catalog_candidates=size,
             truncated_out=capped,
@@ -1659,7 +1659,7 @@ def _units_lane(
                 snapshot.for_scope("kb"),
                 allowed_parent_paths=set(neighbourhood),
                 query_units=query_units, term_budget=working_set_runtime.material_term_budget(),
-                recall_checkpoint=snapshot.recall_checkpoint("kb"), allow_delta=False,
+                recall_checkpoint=snapshot.lexical_checkpoint("kb"), allow_delta=False,
             )
             if not result.readiness.complete:
                 return baseline._replace(task_status="unavailable")
@@ -1678,6 +1678,7 @@ def _units_lane(
             records = find_module._select_indexed_unit_records(
                 vault_root, added, plan=plan, stale_out=stale, parent_reads=parent_reads,
                 scope="kb", freshness_key=snapshot.for_scope("kb"),
+                recall_checkpoint=snapshot.lexical_checkpoint("kb"),
             )
             if stale:
                 return baseline._replace(task_status="unavailable")
@@ -1833,9 +1834,10 @@ def _material_lane(
         return LaneResult(())
     snapshot = freshness_snapshot or find.FreshnessSnapshot(Path(vault_root))
     fresh = snapshot.for_scope("kb")
-    checkpoint = snapshot.recall_checkpoint("kb")
+    checkpoint = snapshot.lexical_checkpoint("kb")
     metadata = lexstore.eligibility_metadata_result(
         vault_root, set(neighbourhood), scope="kb", freshness=fresh,
+        recall_checkpoint=checkpoint,
     )
     if not metadata.readiness.complete:
         raise RuntimeError("material catalogue unavailable")
@@ -2637,18 +2639,16 @@ def _lexical_hits_without(
     words: frozenset[str],
     *,
     freshness_snapshot: Any = None,
-    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
-    """`working_set_resolve.candidates_for`'s dependence check, read on the
-    snapshot the request's first lexical pass read, for the reader that pass
-    served (`visible`). Empty when that snapshot is unreadable: the anchors
-    then stay leads."""
+    """`working_set_resolve.candidates_for`'s dependence check, read at the
+    lexical checkpoint the request's first lexical pass read. Empty when that
+    snapshot is unreadable: the anchors then stay leads."""
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
         try:
             freshness = freshness_snapshot.for_scope("kb")
-            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+            recall_checkpoint = freshness_snapshot.lexical_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot readmits nothing
             log.debug("activation dependence check freshness unavailable", exc_info=True)
             return frozenset()
@@ -2656,7 +2656,7 @@ def _lexical_hits_without(
 
     return working_set_runtime.lexical_hits_without(
         vault_root, turn, pages, words,
-        freshness=freshness, recall_checkpoint=recall_checkpoint, visible=visible,
+        freshness=freshness, recall_checkpoint=recall_checkpoint,
     )
 
 
@@ -3876,12 +3876,18 @@ def _follow_up_packet(
     )
 
 
-def _reader_view(root: Path, purpose: str | None):
+def _reader_view(root: Path, purpose: str | None, snapshot: Any = None):
     """The caller's view of pages and units (`egress.ReaderView`), or `None`
-    for the owner."""
+    for the owner.
+
+    A request that reads the lexical catalogue at a checkpoint older than its
+    own (`working_set_runtime.pin_lexical_checkpoint`) sees, as withheld, the
+    pages that checkpoint holds and the caller's verdict had withheld.
+    """
     from .governance import egress
 
-    return egress.reader_view(root, purpose=purpose)
+    withheld = snapshot.lexical_withheld("kb") if snapshot is not None else frozenset()
+    return egress.reader_view(root, purpose=purpose, withheld=withheld)
 
 
 def _conversation_affordable() -> bool:
@@ -4046,7 +4052,7 @@ def _compile_packet(
         if unchecked:
             independent = _lexical_hits_without(
                 root, turn, frozenset(unchecked), words,
-                freshness_snapshot=freshness_snapshot, visible=visible,
+                freshness_snapshot=freshness_snapshot,
             )
             checked.update((path, path in independent) for path in unchecked)
         return frozenset(path for path in pages if checked[path])
@@ -4078,7 +4084,7 @@ def _compile_packet(
     # may already be a caller-supplied released view
     # (`working_set_runtime.serve`); narrowing it again is a no-op for that
     # caller and the only guard for a direct one.
-    visible = _reader_view(root, purpose)
+    visible = _reader_view(root, purpose, freshness_snapshot)
     if visible is not None:
         heat = working_set_heat.released_view(heat, visible)
     # "Missing or stale profiles SHALL report their state": `current` (live

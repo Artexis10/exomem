@@ -587,8 +587,11 @@ def _prepare(
     elif target.kind == PROFILE_ANCHOR:
         key, ref = target.key, anchor_profile_ref(target.key)
     # A caller not admitted to the project registry is served no project entries (`_world`).
+    # The lag is decided with the page filter, which keeps a page that no longer exists:
+    # `caller.visible` fails closed on it, and a deleted page would read as withheld.
+    lag_visible = None if caller.visible is None else egress.page_filter_over(root, caller.visible)
     state, catalogue, unlisted = context_catalogue.ensure_unlisted(
-        root, freshness_stamp=freshness_stamp, visible=caller.visible,
+        root, freshness_stamp=freshness_stamp, visible=lag_visible,
         registry_visible=caller.projects_admitted,
     )
     return _Prepared(root, target, ref, key, registries, caller, state, catalogue, unlisted)

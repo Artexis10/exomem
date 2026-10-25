@@ -547,6 +547,8 @@ class FreshnessSnapshot:
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
+        self._lexical: dict[str, freshness.RecallFreshnessCheckpoint] = {}
+        self._lexical_withheld: dict[str, frozenset[str]] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
         self._visible_recall_paths: dict[str, frozenset[str]] = {}
         self._pending_recall_paths: frozenset[str] | None = None
@@ -599,6 +601,30 @@ class FreshnessSnapshot:
             self._load_recall_projection(scope)
             checkpoint = self._recall[scope]
         return checkpoint
+
+    def lexical_checkpoint(self, scope: str) -> freshness.RecallFreshnessCheckpoint:
+        """The checkpoint this request reads the lexical catalogue at.
+
+        The request's recall checkpoint unless `pin_lexical_checkpoint` named an
+        older published one. Only catalogue reads take it: the request's own
+        freshness (`recall_checkpoint`, `projection_key`) stays what it is.
+        """
+        pinned = self._lexical.get(scope)
+        return pinned if pinned is not None else self.recall_checkpoint(scope)
+
+    def pin_lexical_checkpoint(
+        self,
+        scope: str,
+        checkpoint: freshness.RecallFreshnessCheckpoint,
+        withheld: frozenset[str] = frozenset(),
+    ) -> None:
+        """Read the lexical catalogue at `checkpoint`; `withheld` are pages it holds that have left the vault."""
+        self._lexical[scope] = checkpoint
+        self._lexical_withheld[scope] = withheld
+
+    def lexical_withheld(self, scope: str) -> frozenset[str]:
+        """The pages the pinned checkpoint holds that this caller's verdict withheld before they left."""
+        return self._lexical_withheld.get(scope, frozenset())
 
     def projection_key(self, scope: str) -> tuple:
         checkpoint = self.recall_checkpoint(scope)
@@ -2859,12 +2885,13 @@ class _UnitCandidate:
 def _unit_metadata_records(
     vault_root: Path, paths: set[str], *, scope: str, freshness_key: tuple | None,
     plan: structured_filters.FilterPlan, pending: Any | None = None,
+    recall_checkpoint: Any | None = None,
 ) -> dict[str, list[_UnitCandidate]]:
     from . import access, lexstore, semantic_index
 
     metadata_by_path = _managed_page_metadata(
         vault_root, paths, scope=scope, freshness_key=freshness_key, pending=pending,
-        include_ranking=True, include_occurrences=True,
+        include_ranking=True, include_occurrences=True, recall_checkpoint=recall_checkpoint,
     )
     unsupported_fields = _unsupported_filter_fields(plan)
     if unsupported_fields and any(
@@ -2922,7 +2949,7 @@ def _unit_metadata_records(
 def _select_indexed_unit_records(
     vault_root: Path, indexed: list[Any], *, plan: structured_filters.FilterPlan,
     scope: str, freshness_key: tuple | None, stale_out: list[str] | None = None,
-    parent_reads: UnitParentReads | None = None,
+    parent_reads: UnitParentReads | None = None, recall_checkpoint: Any | None = None,
 ) -> dict[str, tuple[Any, Any, int]]:
     from . import readiness
 
@@ -2931,7 +2958,7 @@ def _select_indexed_unit_records(
     try:
         metadata = _unit_metadata_records(
             vault_root, {hit.parent_path for hit in indexed}, scope=scope,
-            freshness_key=freshness_key, plan=plan,
+            freshness_key=freshness_key, plan=plan, recall_checkpoint=recall_checkpoint,
         )
     except (RetrievalIndexWarming, structured_filters.FilterError):
         if readiness.runtime_managed():
@@ -3533,7 +3560,7 @@ def _find_semantic_units(
     def select(indexed, *, stale_out=None):
         return _select_indexed_unit_records(
             vault_root, indexed, plan=plan, scope=scope, freshness_key=snapshot.for_scope(scope),
-            stale_out=stale_out, parent_reads=parent_reads,
+            stale_out=stale_out, parent_reads=parent_reads, recall_checkpoint=recall_checkpoint,
         )
 
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
@@ -4743,12 +4770,15 @@ def _managed_page_metadata(
     parents_only: bool = False,
     include_ranking: bool = False,
     include_occurrences: bool = False,
+    recall_checkpoint: Any | None = None,
 ) -> dict[str, Any]:
     """Resolve current page metadata without opening canonical page files.
 
     The catalogue supplies stable rows and their emitted parents. Exact pending
     snapshots replace only the identities whose committed bytes they own.
     `parents_only` skips the catalogue's filter views (see lexstore).
+    `recall_checkpoint` names the catalogue projection to read; without it the
+    catalogue is read at the live checkpoint.
     """
     from . import lexstore, semantic_index, semantic_units, vault
 
@@ -4769,6 +4799,7 @@ def _managed_page_metadata(
             parents_only=parents_only,
             include_ranking=include_ranking,
             include_occurrences=include_occurrences,
+            recall_checkpoint=recall_checkpoint,
         )
         if not result.readiness.complete:
             _raise_catalog_outcome(result.readiness)
