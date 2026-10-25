@@ -89,6 +89,8 @@ class RenderingSpec:
     effect: Effect
     title: str
     description: str
+    #: Top-level tool arguments beside `operation`; the command must take each one.
+    tool_arguments: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,11 +187,8 @@ class CommandOperations:
                 )
         return table
 
-    def renderings_with_entries(
-        self, tool_arguments: Mapping[str, tuple[str, ...]] | None = None
-    ) -> tuple[Rendering, ...]:
+    def renderings_with_entries(self) -> tuple[Rendering, ...]:
         """The renderings, each holding its own entries."""
-        extra = tool_arguments or {}
         return tuple(
             Rendering(
                 name=spec.name,
@@ -200,7 +199,7 @@ class CommandOperations:
                 description=spec.description,
                 variants=tuple(entry for entry in self.entries if entry.rendering == spec.name),
                 mode_axes=self.mode_axes,
-                tool_arguments=extra.get(spec.name, ()),
+                tool_arguments=spec.tool_arguments,
             )
             for spec in self.renderings
         )
@@ -267,6 +266,8 @@ RECORDS = CommandOperations(
             "items, discard a held candidate, revise or rebaseline a manifest, or start or "
             "cancel an import. `operation.kind` selects the operation. Guarded writes need the "
             "hashes that the matching read returns.",
+            # Success detail shapes a write's terminal response; a read has no such level.
+            tool_arguments=("response_detail",),
         ),
     ),
     entries=(
@@ -374,6 +375,8 @@ PLANS = CommandOperations(
             "plan item, or revise or rebaseline a manifest. `operation.kind` selects the "
             "operation. Writes select one queried item and need the hashes that the read "
             "returned.",
+            # Success detail shapes a write's terminal response; a read has no such level.
+            tool_arguments=("response_detail",),
         ),
     ),
     entries=(

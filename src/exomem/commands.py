@@ -13554,20 +13554,10 @@ _ARGUMENT_RULES = MappingProxyType(
 )
 
 
-def _renderings_for(
-    name: str, response_detail: str | None
-) -> tuple[operation_entries.Rendering, ...]:
+def _renderings_for(name: str) -> tuple[operation_entries.Rendering, ...]:
     """The MCP renderings of one command, from its operation entries."""
     operations = operation_entries.OPERATIONS.get(name)
-    if operations is None:
-        return ()
-    # Success detail shapes a write's terminal response; a read response has no such level.
-    tool_arguments = {
-        spec.name: ("response_detail",)
-        for spec in operations.renderings
-        if spec.effect == "write" and response_detail is not None
-    }
-    return operations.renderings_with_entries(tool_arguments)
+    return () if operations is None else operations.renderings_with_entries()
 
 
 def validate_operation_entries(commands: Iterable[Command] | None = None) -> None:
@@ -13586,6 +13576,12 @@ def validate_operation_entries(commands: Iterable[Command] | None = None) -> Non
         selector = command.renderings[0].selector
         if selector != egress_module.selector_for_command(command.name):
             raise RuntimeError(f"rendering selector is not the lease selector: {command.name}")
+        params = {param.name for param in command.params}
+        for rendering in command.renderings:
+            if missing := set(rendering.tool_arguments) - params:
+                raise RuntimeError(
+                    f"{rendering.name} names tool arguments {command.name} lacks: {sorted(missing)}"
+                )
         operation_entries.assert_coverage(
             command.name,
             command.renderings,
@@ -13715,7 +13711,7 @@ def _build_product_commands() -> tuple[Command, ...]:
         cmds.append(
             Command(
                 name=name,
-                renderings=_renderings_for(name, response_detail),
+                renderings=_renderings_for(name),
                 argument_rules=_ARGUMENT_RULES.get(name),
                 preferred_name=meta.get("preferred_name"),
                 public_title=meta.get("public_title"),

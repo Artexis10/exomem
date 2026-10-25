@@ -411,17 +411,18 @@ def test_a_write_call_the_product_refused_is_not_a_wrong_write() -> None:
     assert served_without_a_visible_change.write_calls_served == 1
 
 
-def _grouped_spelling(tool: str, operation: dict) -> tuple[str, dict]:
+def _grouped_spelling(tool: str, operation: dict, **top) -> tuple[str, dict]:
     kind = operation["kind"]
-    return "record_memory", {"action": kind, **{k: v for k, v in operation.items() if k != "kind"}}
+    fields = {k: v for k, v in operation.items() if k != "kind"}
+    return "record_memory", {"action": kind, **fields, **top}
 
 
-def _nested_spelling(tool: str, operation: dict) -> tuple[str, dict]:
-    return tool, {"operation": operation}
+def _nested_spelling(tool: str, operation: dict, **top) -> tuple[str, dict]:
+    return tool, {"operation": operation, **top}
 
 
-def _flat_spelling(tool: str, operation: dict) -> tuple[str, dict]:
-    return tool, {"action": operation["kind"], **{k: v for k, v in operation.items() if k != "kind"}}
+def _flat_spelling(tool: str, operation: dict, **top) -> tuple[str, dict]:
+    return tool, {"action": operation["kind"], **{k: v for k, v in operation.items() if k != "kind"}, **top}
 
 
 @pytest.mark.parametrize(
@@ -440,7 +441,15 @@ def test_every_arm_reads_a_call_by_its_operation_and_counts_refusals_from_result
         _call(1, *spell("read_records", {"kind": "inspect", "collection": path})),
         # The server refuses this append for its missing `why`; it still names the target operation.
         _call(2, *spell("change_records", {"kind": "append", "collection": path, "item": {}}), codes=("INVALID_RECORD_ARGUMENTS",)),
-        _call(3, *spell("change_records", {"kind": "append", "collection": path, "item": entry, "why": "log it"})),
+        # `response_detail` is a write tool's own argument beside the operation, in every shape.
+        _call(
+            3,
+            *spell(
+                "change_records",
+                {"kind": "append", "collection": path, "item": entry, "why": "log it"},
+                response_detail="full",
+            ),
+        ),
         _call(4, "a_tool_no_arm_serves", {}),
     ]
 
@@ -452,6 +461,7 @@ def test_every_arm_reads_a_call_by_its_operation_and_counts_refusals_from_result
     assert result.argument_refusals == 1
     assert result.first_correct_ordinal == 2
     assert result.unresolved_calls == 1
+    assert result.write_calls_served == 1
     assert (result.schema_bytes, result.input_tokens, result.output_tokens) == (90_000, 1000, 50)
 
 
