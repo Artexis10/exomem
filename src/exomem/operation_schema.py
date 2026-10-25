@@ -10,6 +10,7 @@ entries, so neither is declared a second time.
 from __future__ import annotations
 
 import inspect
+import json
 import typing
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -185,6 +186,47 @@ def rendering_handler(rendering: Rendering, grouped: Callable) -> Callable:
     return handler
 
 
+def _share_operation_fields(operation: dict[str, Any]) -> None:
+    """Move repeated complete field schemas above the operation alternatives."""
+    # Closed generated operation objects use fixed JSON Schema oneOf/anyOf unions; property schemas stay opaque.
+    pending = [(operation, False)]
+    nodes = []
+    while pending:
+        node, closed = pending.pop()
+        if not isinstance(node, dict) or not isinstance(node.get("properties", {}), dict):
+            return
+        nodes.append(node)
+        closed = closed or (node.get("additionalProperties") is False and not node.get("patternProperties"))
+        children = []
+        for keyword in ("oneOf", "anyOf"):
+            if keyword in node:
+                alternatives = node[keyword]
+                if not isinstance(alternatives, list) or not alternatives:
+                    return
+                children.extend(alternatives)
+        if not children and not closed:
+            return
+        pending.extend((child, closed) for child in reversed(children))
+
+    occurrences = {}
+    try:
+        for node in nodes:
+            properties = node.get("properties", {})
+            for name, field in properties.items():
+                signature = json.dumps(field, sort_keys=True, separators=(",", ":"))
+                occurrences.setdefault(name, []).append((properties, field, signature))
+    except (TypeError, ValueError):
+        return
+    for name, fields in occurrences.items():
+        if len(fields) < 2 or len({signature for _, _, signature in fields}) != 1:
+            continue
+        shared = operation.setdefault("properties", {})
+        shared[name] = fields[0][1]
+        for properties, _, _ in fields:
+            if properties is not shared:
+                properties[name] = {}
+
+
 def shared_rendering_tool(contributors):
     """Build one discovery schema from the commands that own its public variants."""
     from fastmcp.tools import FunctionTool
@@ -207,6 +249,7 @@ def shared_rendering_tool(contributors):
     schema = {"type": "object", "properties": properties, "required": required,
               "additionalProperties": False}
     tool.parameters = compact_input_schema(schema)
+    _share_operation_fields(tool.parameters["properties"]["operation"])
     tool.description = " ".join(dict.fromkeys(rendering.description for rendering, _ in contributors))
     from . import semantic_authoring
 

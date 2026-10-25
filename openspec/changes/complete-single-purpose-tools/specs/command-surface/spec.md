@@ -26,6 +26,22 @@ Typed operations SHALL preserve every accepted data field when a leaf field conf
 - **THEN** the server preserves both values under their respective leaf arguments
 - **AND** conflicting public and compatibility field spellings refuse before execution
 
+### Requirement: Shared operation fields preserve complete variant contracts
+
+Generated operation schemas MAY share identical complete field definitions at their common operation-object scope. The effective schema SHALL preserve allowed fields, required fields, defaults, nullability, literal constraints and descriptions. Sharing SHALL distinguish JSON scalar types and leave different field definitions separate. Runtime validation, normalization and authorization SHALL remain unchanged.
+
+#### Scenario: A common field remains unavailable to a sibling operation
+
+- **WHEN** two operations share a field definition and another operation does not accept that field
+- **THEN** the effective schema rejects that field for the sibling operation
+- **AND** the accepted operations retain their original required and optional behavior
+
+#### Scenario: A nested alternative has a different field contract
+
+- **WHEN** a field has a different completed schema in a nested alternative at the same operation-object scope
+- **THEN** the renderer keeps those definitions separate
+- **AND** defaults, explicit nulls and boolean or numeric values retain their original meanings
+
 ### Requirement: Governance tools preserve authorization families and variant credentials
 
 Public governance tools SHALL separate authorization families and coherent jobs. Existing operation and transport registries SHALL determine each variant's authorization family and credential rule. Public normalization SHALL preserve session identity, token checks, standing grants, purpose declarations and authorization-affecting receipts.

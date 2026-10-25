@@ -1,6 +1,6 @@
 ## Context
 
-See proposal.md for scope. The pilot already normalizes typed operations before authorization and retains grouped execution identities. Its renderer supports one command per public tool. Completing the original per-command split would produce about 50 ordinary tools. Related-job consolidation instead produces a design inventory of 39 ordinary tools and 40 Cloud tools.
+See proposal.md for scope. The pilot already normalizes typed operations before authorization and retains grouped execution identities. Its renderer supports one command per public tool. Completing the original per-command split would produce about 50 ordinary tools. The generated related-job catalogue contains 39 ordinary tools and 40 Cloud tools.
 
 ## Goals / Non-Goals
 
@@ -16,7 +16,7 @@ Simple per-command pairs avoid shared routing, but add roughly ten tools. Shared
 
 ### Inventory
 
-The ordinary inventory contains the following tools. These counts are design expectations until generated discovery proves them.
+The ordinary inventory contains the following tools. The schema revision preserves this generated catalogue.
 
 | Public tools | Count | Related operations |
 | --- | ---: | --- |
@@ -57,6 +57,18 @@ Represent scalar or nested literal conditions in operation entries. Distinguish 
 
 Use declared wire-to-leaf aliases where a data field conflicts with `operation.kind`. Observation `unit_kind` and file `file_kind` map to their existing leaf `kind` field. Public kinds may differ from grouped selectors when related commands would otherwise collide.
 
+### Share complete field schemas after compaction
+
+Keep the existing branch builder and parameter annotations. After the renderer compacts each complete operation schema, share repeated field definitions at that operation-object scope. Follow its `oneOf` and `anyOf` alternatives, including nested alternatives at the same scope. Do not descend into a field's nested object schema.
+
+Share a field only when every occurrence has the same complete JSON schema. Distinguish boolean and numeric values, including defaults. Preserve descriptions, defaults, nullability and literal constraints together. Keep every original branch field name, required field, discriminator and additional-property rule. An open alternative keeps the original representation rather than gaining a sibling's constraints.
+
+Assign each shared definition to `operation.properties` and leave its original branch field schemas empty. JSON Schema applies the common definition and the selected branch together. Sharing runs last; later compaction must not reinterpret a conditionally required field as optional.
+
+Limit this transformation to generated renderings in `discovery.public_tools`. Keep direct edit schemas, grouped discovery, runtime validation, normalization and execution metadata unchanged. Preserve FastMCP's current reference handling. Named references would add namespace and client obligations, while the measured duplication mostly consists of small repeated fields. Existing title pruning removes nothing from this fixture.
+
+Verify complete-schema behavior through accepted and refused inputs, including sibling-only fields and different definitions inside nested alternatives. Capture actual discovery for ordinary and Cloud profiles before claiming a wire reduction. Moving field guidance can affect agent behavior, so byte reduction alone does not establish quality or token savings.
+
 ### Effects follow current classifiers
 
 Maintenance uses its existing dry-run, apply and curation rules. Curation proposals persist workflow state and remain writes. Governance companion previews and session status also remain write-classified. Do not classify by an operation's English name.
@@ -77,7 +89,9 @@ Keep adoption schema changes after the containing collection-adoption merge. Pre
 
 Extend the tool-selection harness rather than introduce another runner or telemetry service. Use harder workflows across the converted families, with source-derived end-state keys authored outside measured sessions. Keep grouped and nested arms on the same bytes while measuring.
 
-Start with free contract checks and a small complete development round. Freeze the decision protocol and fresh held-out cases before the decision run. Reuse the approved non-inferiority floor of 0.10 and inspect every wrong write. Report per-case paired differences and intervals. An interval containing zero means no change. Remove the grouped baseline option only after the decision run.
+Start with free contract checks and a small complete development round. Freeze the decision protocol and fresh held-out cases before the decision run. Reuse the approved non-inferiority floor of 0.10 and inspect every wrong write. Report per-case paired differences and intervals. An interval containing zero means no change. Remove the grouped baseline option only after a qualifying decision and its last required measurement.
+
+Each revised candidate receives a separately frozen decision. Preserve earlier inputs, scores and decisions without expanding or rebalancing their cohorts. Independently author the new source and keys, and check novelty against every previous development and decision source. Freeze the new size, sampling recipe, statistic, retry rules, date assumptions and resource forecast before generating its decision items. Retain the existing loss margin and wrong-write rule.
 
 ### Scoring amendment R2-S1
 
@@ -121,9 +135,10 @@ Free admission rejected five append fixtures because their live compiled pages c
 
 1. Build the renderer foundation and verify that the pilot schemas remain unchanged.
 2. Add shared public variants and regenerate the active guidance and packages.
-3. Integrate the merged adoption contract and run the paired decision check.
-4. Review the exact integrated batch, pass full CI and merge the ready PR.
-5. Let the release owner publish and qualify the ordinary containing release.
-6. Keep Cloud rollout and rescan pending the operator's existing authority boundary.
+3. Integrate the merged adoption contract and compact repeated operation fields.
+4. Run the paired decision on independently authored fresh sources under its frozen protocol.
+5. Review the exact integrated batch, pass full CI and merge the ready PR.
+6. Let the release owner publish and qualify the ordinary containing release.
+7. Keep Cloud rollout and rescan pending the operator's existing authority boundary.
 
 The grouped call contracts remain available for compatibility. A source rollback reverts the public rendering batch; it does not rewrite stored knowledge. Hosted rollout and undo use the release owner's operational procedure.

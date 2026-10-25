@@ -194,9 +194,10 @@ def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     live = _live_schemas(_build_server(monkeypatch, tmp_path))
-    branches = live["change_files"]["inputSchema"]["properties"]["operation"]["oneOf"]
+    operation = live["change_files"]["inputSchema"]["properties"]["operation"]
+    branches = operation["oneOf"]
     by_kind = {branch["properties"]["kind"]["const"]: branch["properties"] for branch in branches}
-    properties = {**by_kind["create"], **by_kind["append"]}
+    properties = {**by_kind["create"], **by_kind["append"], **operation.get("properties", {})}
     required = {
         "validate_only",
         "semantic_transition_token",
@@ -315,9 +316,11 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     schema = tool["inputSchema"]
     assert set(schema["properties"]) == {"operation", "response_detail"}
     assert schema["required"] == ["operation"]
-    variants = schema["properties"]["operation"]["oneOf"]
+    operation = schema["properties"]["operation"]
+    variants = operation["oneOf"]
     assert {branch["properties"]["kind"]["const"] for branch in variants} == {"process", "retry"}
-    assert all("governed" in branch["properties"]["path"]["description"].lower() for branch in variants)
+    properties = [{**branch["properties"], **operation.get("properties", {})} for branch in variants]
+    assert all("governed" in fields["path"]["description"].lower() for fields in properties)
     assert schema["properties"]["response_detail"]["enum"] == ["compact", "full", "legacy"]
     assert tool["annotations"]["readOnlyHint"] is False
     assert tools["read_media"].annotations.read_only_hint is True
