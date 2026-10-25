@@ -1,6 +1,6 @@
 name: CI
 
-# Disposable hosted regression proof; this branch never merges.
+# Disposable hosted preparation proof; this branch never merges.
 on:
   workflow_dispatch:
 
@@ -8,58 +8,145 @@ permissions:
   contents: read
 
 jobs:
-  finite-mixed-regression:
+  recall-worker-preflight:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
-      KB_MCP_DISABLE_EMBEDDINGS: "1"
-      KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
-      OPENBLAS_NUM_THREADS: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
-      EXOMEM_TEST_TIER: core
-      EXOMEM_TUI_TEST_DIRECTORY: tests/tui
-      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+      UV_PYTHON: /usr/bin/python3
+      UV_PYTHON_DOWNLOADS: never
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 6838bf7967976fcfd3f95adc48d1d66920cfe81b
+          ref: 7e0c1d41c536bb455c5d258000c43be70084115b
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.11.28"
           enable-cache: true
-      - name: Exercise finite mixed recall and existing unit behavior
-        run: >-
-          uv run --frozen --python 3.13 python -m pytest -q
-          tests/test_semantic_unit_recall.py -o timeout=180
-          --junitxml=${{ runner.temp }}/finite-mixed-head.xml
-      - name: Verify the released baseline exposes the same finite completeness defect
+      - name: Resolve the encoder digest
+        id: encoder
+        run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py --encoder-cache-key >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
+      - name: Attribute warm unit cost and the existing ownership boundary
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          baseline="$RUNNER_TEMP/finite-mixed-baseline"
-          git worktree add --detach "$baseline" 9432ea367192e8833d6dc5aef1ffb2b463ed4d8a
-          cp tests/test_semantic_unit_recall.py "$baseline/tests/test_semantic_unit_recall.py"
-          set +e
-          PYTHONPATH="$baseline/src" "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest -q "$baseline/tests/test_semantic_unit_recall.py::test_hybrid_mixed_recall_fills_finite_demand_without_a_candidate_window_warning" -o timeout=180 --junitxml="$RUNNER_TEMP/finite-mixed-baseline.xml"
-          result=$?
-          set -e
-          test "$result" -eq 1
-          python3 - <<'PY'
+          uv run --frozen --group recall-benchmark python - <<'PY'
+          import json
           import os
-          import xml.etree.ElementTree as ET
+          import subprocess
+          import sys
+          import tempfile
+          import hashlib
           from pathlib import Path
-          root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "finite-mixed-baseline.xml").getroot()
-          cases = list(root.iter("testcase"))
-          assert len(cases) == 1
-          failure = cases[0].find("failure")
-          assert failure is not None and failure.attrib["message"].startswith("AssertionError")
-          assert "semantic_units_candidate_window" in (failure.text or "")
-          assert not list(root.iter("error"))
-          print("The released baseline fails on the finite completeness assertion.")
+
+          script = Path.cwd() / "scripts" / "recall_latency_gate.py"
+          original = script.read_text()
+          helper = r'''
+          import cProfile
+          import pstats
+          from contextlib import nullcontext
+
+          _profile_original_sample = _worker_sample
+
+          def _profiled_sample(vault_root, request):
+              from exomem import state_paths
+              from exomem.collection_store import ownership
+              from exomem.governance import egress
+              def invoke():
+                  boundary = ownership.read_scope(vault_root, finalize=True) if request.get("diagnostic_ownership_scope") else nullcontext()
+                  with boundary:
+                      return _profile_original_sample(vault_root, request)
+              if not request.get("diagnostic_profile"):
+                  return invoke()
+              scope_observations = {"calls": 0, "placement_present": 0, "ownership_present": 0}
+              original_decide = egress._decide_path
+              def observed_decide(*args, **kwargs):
+                  scope_observations["calls"] += 1
+                  scope_observations["placement_present"] += int(state_paths.request_memo_scope() is not None)
+                  scope_observations["ownership_present"] += int(ownership._READ.get() is not None)
+                  return original_decide(*args, **kwargs)
+              profiler = cProfile.Profile()
+              egress._decide_path = observed_decide
+              started = time.perf_counter_ns()
+              try:
+                  result = profiler.runcall(invoke)
+              finally:
+                  egress._decide_path = original_decide
+              result["diagnostic_boundary_elapsed_ms"] = (time.perf_counter_ns() - started) / 1e6
+              application = (_boot_args.worker_source / "src" / "exomem").resolve()
+              rows = []
+              for (filename, line, function), (primitive, calls, own, cumulative, callers) in pstats.Stats(profiler).stats.items():
+                  try:
+                      relative = Path(filename).resolve().relative_to(application)
+                  except ValueError:
+                      continue
+                  rows.append({"module": "exomem." + relative.with_suffix("").as_posix().replace("/", "."),
+                               "function": function, "line": line, "primitive_calls": primitive,
+                               "calls": calls, "self_seconds": own, "cumulative_seconds": cumulative})
+              result["profile"] = {"scope": "warm current-thread application calls; profiling overhead; diagnostic only",
+                                   "scope_observations": scope_observations,
+                                   "by_cumulative": sorted(rows, key=lambda row: row["cumulative_seconds"], reverse=True)[:60],
+                                   "by_self": sorted(rows, key=lambda row: row["self_seconds"], reverse=True)[:60]}
+              return result
+
+          _worker_sample = _profiled_sample
+          '''
+          overlay = "import ast\n_profile_helper = " + repr(helper) + "\n_profile_tree = ast.parse(_profile_source, filename=__file__)\nassert isinstance(_profile_tree.body[-1], ast.If)\n_profile_tree.body[-1:-1] = ast.parse(_profile_helper).body\nexec(compile(ast.fix_missing_locations(_profile_tree), __file__, 'exec'), globals())\n"
+          wrapper = "_profile_source = " + repr(original) + "\n" + overlay
+          script.write_text(wrapper)
+          sys.path.insert(0, str(Path.cwd() / "scripts"))
+          import recall_latency_gate as gate
+
+          report = {"state": "failed", "mode": "warm-unit-ownership-boundary", "timings": "profiled diagnostic only; not qualified", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "diagnostic_overlay": "stdlib-cprofile-and-declared-ownership-boundary-comparison", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
+          workers = {}
+          try:
+              profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
+              cases, _ = gate.reference_cases(profile)
+              tag = subprocess.check_output(["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"], text=True).strip()
+              report["tag"] = tag
+              cpus = sorted(os.sched_getaffinity(0))[:gate.REFERENCE["reference_cpus"]]
+              if len(cpus) != gate.REFERENCE["reference_cpus"]:
+                  raise gate.MeasurementRefused("two-cpu-reference-unavailable")
+              with tempfile.TemporaryDirectory(prefix="recall-worker-preflight-") as directory:
+                  scratch = Path(directory)
+                  try:
+                      for arm, source in (("head", gate.ROOT),):
+                          workers[arm] = gate._Worker(source, scratch / "vault", scratch / arm, cpus, profile)
+                          report.setdefault("environment", {})[arm] = workers[arm].environment
+                      head = report["environment"]["head"]
+                      if head["sqlite_version"] not in profile["sqlite_versions"]:
+                          raise gate.MeasurementRefused("reference-sqlite-unsupported")
+                      first_cases = {case["series"]: case for case in reversed(cases)}
+                      report["warm_calls"] = []
+                      for arm, worker in (("head", workers["head"]),):
+                          try:
+                              for principal in ("owner",):
+                                  case = first_cases["unit"]
+                                  for ordinal, scoped, profiled in ((0, False, False), (1, False, True), (2, True, False), (3, True, True)):
+                                      request = {**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"], "diagnostic_ownership_scope": scoped, "diagnostic_profile": profiled}
+                                      result = worker.exchange(request)
+                                      report["warm_calls"].append({"ordinal": ordinal, "ownership_scope": scoped, "profiled": profiled, "arm": arm, "principal": principal, "case": case["id"], "series": case["series"], **result})
+                          finally:
+                              worker.pause()
+                      report["state"] = "failed" if any(row["state"] != "ok" for row in report["warm_calls"]) else "observed"
+                  finally:
+                      for worker in workers.values():
+                          worker.close()
+          except Exception as error:
+              report["reason"] = error.code if isinstance(error, gate.MeasurementRefused) else type(error).__name__
+              report["phase"] = getattr(error, "phase", None)
+          finally:
+              Path("recall-bootstrap-result.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+          raise SystemExit(report["state"] == "failed")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: finite-mixed-regression
-          path: ${{ runner.temp }}/finite-mixed-*.xml
+          name: recall-worker-preflight
+          path: recall-bootstrap-result.json
           if-no-files-found: warn
