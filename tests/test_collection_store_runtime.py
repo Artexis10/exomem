@@ -612,6 +612,200 @@ def test_explicit_close_drains_authority_holders_without_owning_boundary(runtime
     assert manager.client.released.is_set()
 
 
+@pytest.mark.parametrize("body_error", [False, True], ids=["normal-exit", "exceptional-exit"])
+def test_close_waits_until_authority_grant_is_released(runtime, monkeypatch, body_error):
+    from contextlib import contextmanager, nullcontext
+    from queue import Queue
+
+    _create(runtime)
+    manager = runtime.manager
+    guard_thread = threading.current_thread()
+    grant_releasing, resume_grant = threading.Event(), threading.Event()
+    boundary_available = threading.Event()
+    observations = Queue()
+    first_event, close_errors, handoff_errors = [], [], []
+    original_claim = manager._replica_grant_claim
+    original_wait = manager._store_condition.wait
+
+    def close():
+        try:
+            manager.close()
+        except BaseException as error:  # noqa: BLE001 - report every worker failure on the test thread
+            close_errors.append(error)
+            observations.put(("close-error", error))
+        else:
+            observations.put(("closed", None))
+
+    close_worker = threading.Thread(target=close, name="close-authority-grant")
+
+    @contextmanager
+    def claim(*, exclusive=False):
+        with original_claim(exclusive=exclusive) as available:
+            if exclusive and threading.current_thread() is close_worker:
+                observations.put(("exclusive-claim", available))
+            try:
+                yield available
+            finally:
+                if not exclusive and threading.current_thread() is guard_thread:
+                    # Pause after the guard body exits, while the real shared grant remains held.
+                    grant_releasing.set()
+                    assert resume_grant.wait(5), "shared grant release was not resumed"
+
+    def wait(timeout=None):
+        if threading.current_thread() is close_worker:
+            observations.put(("drain-wait", None))
+        return original_wait(timeout)
+
+    def handoff():
+        try:
+            assert grant_releasing.wait(5), "guard never reached shared grant release"
+            close_worker.start()
+            event = observations.get(timeout=5)
+            first_event.append(event)
+            if event == ("drain-wait", None):
+                with manager._mutation_coordinator_for(runtime.root).hold(timeout_seconds=0):
+                    boundary_available.set()
+        except BaseException as error:  # noqa: BLE001 - report every worker failure on the test thread
+            handoff_errors.append(error)
+        finally:
+            resume_grant.set()
+
+    monkeypatch.setattr(manager, "_replica_grant_claim", claim)
+    monkeypatch.setattr(manager._store_condition, "wait", wait)
+    handoff_worker = threading.Thread(target=handoff, name="handoff-authority-grant")
+    handoff_worker.start()
+    try:
+        body = pytest.raises(ValueError, match="guard body failed") if body_error else nullcontext()
+        with body, manager.writer_authority_guard(vault_root=runtime.root):
+            if body_error:
+                raise ValueError("guard body failed")
+    finally:
+        resume_grant.set()
+        handoff_worker.join(5)
+        if close_worker.ident is not None:
+            close_worker.join(5)
+
+    diagnostic = (f"first close event={first_event!r}; close errors={close_errors!r}; "
+                  f"handoff errors={handoff_errors!r}")
+    assert not handoff_worker.is_alive(), diagnostic
+    assert not close_worker.is_alive(), diagnostic
+    assert first_event == [("drain-wait", None)], diagnostic
+    assert not handoff_errors, diagnostic
+    assert not close_errors, diagnostic
+    assert boundary_available.is_set(), diagnostic
+    assert manager.client.released.is_set()
+    assert manager.client.release_head == runtime.sample_head()
+
+
+def test_close_drains_a_guard_rejected_after_shared_grant_acquisition(runtime, monkeypatch):
+    from contextlib import contextmanager
+    from contextvars import copy_context
+    from queue import Queue
+
+    _create(runtime)
+    manager = runtime.manager
+    guard_thread = threading.current_thread()
+    grant_acquired, resume_acquisition = threading.Event(), threading.Event()
+    boundary_available, late_refused, late_claimed = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    observations = Queue()
+    first_event, close_errors, handoff_errors = [], [], []
+    original_claim = manager._replica_grant_claim
+    original_wait = manager._store_condition.wait
+
+    def close():
+        try:
+            manager.close()
+        except BaseException as error:  # noqa: BLE001 - report every worker failure on the test thread
+            close_errors.append(error)
+            observations.put(("close-error", error))
+        else:
+            observations.put(("closed", None))
+
+    close_worker = threading.Thread(target=close, name="close-acquiring-authority")
+
+    @contextmanager
+    def claim(*, exclusive=False):
+        with original_claim(exclusive=exclusive) as available:
+            if exclusive and threading.current_thread() is close_worker:
+                observations.put(("exclusive-claim", available))
+            elif not exclusive and threading.current_thread() is guard_thread:
+                grant_acquired.set()
+                assert resume_acquisition.wait(5), "shared grant acquisition was not resumed"
+            elif not exclusive and threading.current_thread() is handoff_worker:
+                late_claimed.set()
+            yield available
+
+    def wait(timeout=None):
+        if threading.current_thread() is close_worker:
+            observations.put(("drain-wait", None))
+        return original_wait(timeout)
+
+    def handoff():
+        try:
+            assert grant_acquired.wait(5), "guard never acquired its shared grant"
+            close_worker.start()
+            event = observations.get(timeout=5)
+            first_event.append(event)
+            if event == ("drain-wait", None):
+                with manager._mutation_coordinator_for(runtime.root).hold(timeout_seconds=0):
+                    boundary_available.set()
+                with pytest.raises(OpError, match="COLLECTION_STORE_BUSY"):
+                    with manager.writer_authority_guard(vault_root=runtime.root):
+                        pytest.fail("a guard entered after handoff began")
+                late_refused.set()
+        except BaseException as error:  # noqa: BLE001 - report every worker failure on the test thread
+            handoff_errors.append(error)
+        finally:
+            resume_acquisition.set()
+
+    monkeypatch.setattr(manager, "_replica_grant_claim", claim)
+    monkeypatch.setattr(manager._store_condition, "wait", wait)
+    handoff_worker = threading.Thread(
+        target=copy_context().run, args=(handoff,), name="handoff-acquiring-authority"
+    )
+    handoff_worker.start()
+    try:
+        with pytest.raises(OpError, match="COLLECTION_STORE_BUSY"):
+            with manager.writer_authority_guard(vault_root=runtime.root):
+                pytest.fail("a guard entered after its acquisition overlapped handoff")
+    finally:
+        resume_acquisition.set()
+        handoff_worker.join(5)
+        if close_worker.ident is not None:
+            close_worker.join(5)
+
+    diagnostic = (f"first close event={first_event!r}; close errors={close_errors!r}; "
+                  f"handoff errors={handoff_errors!r}")
+    assert not handoff_worker.is_alive(), diagnostic
+    assert not close_worker.is_alive(), diagnostic
+    assert first_event == [("drain-wait", None)], diagnostic
+    assert not handoff_errors, diagnostic
+    assert not close_errors, diagnostic
+    assert boundary_available.is_set(), diagnostic
+    assert late_refused.is_set(), diagnostic
+    assert not late_claimed.is_set(), diagnostic
+    assert manager.client.released.is_set()
+    assert manager.client.release_head == runtime.sample_head()
+
+
+def test_authority_grant_acquisition_timeout_does_not_block_close(runtime, monkeypatch):
+    _create(runtime)
+    manager = runtime.manager
+    with manager._replica_grant_claim(exclusive=True) as acquired:
+        assert acquired
+        with monkeypatch.context() as patch:
+            patch.setattr(manager, "_mutation_timeout_seconds", 0)
+            with pytest.raises(OpError, match="MUTATION_BUSY"):
+                with manager.writer_authority_guard(vault_root=runtime.root):
+                    pytest.fail("an authority guard entered while an exclusive grant was held")
+
+    manager.close()
+    assert manager.client.released.is_set()
+    assert manager.client.release_head == runtime.sample_head()
+
+
 def test_saved_adapter_cannot_read_after_checkout(runtime):
     from exomem import record_formats
 

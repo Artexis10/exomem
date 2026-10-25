@@ -216,9 +216,10 @@ def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
 
 def test_maintain_memory_schema_documents_the_reconcile_only_graph_reset() -> None:
     schema = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["check_memory"]
-    branches = schema["inputSchema"]["properties"]["operation"]["oneOf"]
+    operation = schema["inputSchema"]["properties"]["operation"]
+    branches = operation["oneOf"]
     reconcile = next(branch for branch in branches if branch["properties"]["kind"]["const"] == "reconcile")
-    rebuild_graph = reconcile["properties"]["rebuild_graph"]
+    rebuild_graph = {**reconcile["properties"], **operation.get("properties", {})}["rebuild_graph"]
 
     assert rebuild_graph["default"] is False
     assert "reconcile" in rebuild_graph["description"].lower()

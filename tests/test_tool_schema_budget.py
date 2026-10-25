@@ -24,34 +24,33 @@ from test_mcp_schema_fidelity import _build_server
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Measured on the same 0.144.0 candidate with scripts/measure-tool-schema-bytes.py:
-# grouped compatibility: 95,235 bytes; nested jobs: 180,062 bytes.
-# Related jobs and exact inputs add 84,827 bytes over this grouped surface.
-# Preview-review guidance adds 2,636 bytes over the prior nested measurement (177,426).
-# Simplification removed 855 bytes; no efficiency gain is claimed before evaluation.
-# Each ceiling rounds that tool's measured wire size up to the next 50 bytes.
+# Measured on the same 0.144.3 fixture with scripts/measure-tool-schema-bytes.py:
+# compact tool-object sums exclude array/RPC framing: grouped 95,235; nested 156,609.
+# Shared complete fields remove 23,453 bytes from the unshared nested representation.
+# Nested remains 61,374 bytes above the grouped surface; no token or quality gain is claimed.
+# Each ceiling rounds the larger grouped/nested tool object up to the next 50 bytes.
 # The separate bootstrap core budget stays unchanged.
-TOTAL_BUDGET = 180_950
+TOTAL_BUDGET = 157_600
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
     "adopt_vault": 1350,
     "adoption_studio": 3800,
     "bootstrap": 1450,
-    "browse_memory": 7350,
+    "browse_memory": 6700,
     "capture_source": 3350,
-    "change_adoption": 6300,
+    "change_adoption": 5500,
     "change_connections": 3200,
-    "change_files": 8050,
-    "change_governance": 5100,
-    "change_media": 1350,
-    "change_observations": 8150,
-    "change_plans": 4100,
-    "change_records": 7350,
-    "change_schema": 10500,
+    "change_files": 7100,
+    "change_governance": 4650,
+    "change_media": 1200,
+    "change_observations": 6000,
+    "change_plans": 3350,
+    "change_records": 5550,
+    "change_schema": 9150,
     "change_session_access": 1700,
-    "change_settings": 1650,
-    "check_memory": 9350,
+    "change_settings": 1500,
+    "check_memory": 6600,
     "configure_memory": 1400,
     "connect_memory": 4500,
     "coordination_status": 500,
@@ -61,7 +60,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "govern_memory": 3100,
     "grant_session_access": 2050,
     "maintain_memory": 3750,
-    "manage_authorization_session": 2550,
+    "manage_authorization_session": 2400,
     "manage_memory_file": 5150,
     "observe_memory": 5050,
     "plan_memory": 2700,
@@ -70,20 +69,20 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
-    "read_adoption": 1900,
-    "read_connections": 4050,
-    "read_episode": 1850,
-    "read_governance": 2500,
+    "read_adoption": 1850,
+    "read_connections": 3300,
+    "read_episode": 1500,
+    "read_governance": 2250,
     "read_media": 1250,
     "read_memory": 3150,
-    "read_plans": 3050,
-    "read_records": 3850,
-    "read_review": 10750,
-    "read_schema": 18800,
+    "read_plans": 2700,
+    "read_records": 3300,
+    "read_review": 7550,
+    "read_schema": 14450,
     "recall_context": 2950,
-    "record_episode": 5100,
+    "record_episode": 4150,
     "record_memory": 4600,
-    "repair_memory": 2450,
+    "repair_memory": 2000,
     "review_item_context": 1300,
     "review_memory": 3500,
     "schema_memory": 4200,

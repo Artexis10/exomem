@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import sys
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, quote_plus, urlsplit
 
 import pytest
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent
+from test_governance_postfilter import HIGH_ENTROPY
 
 from exomem import adoption_run, capabilities, context_refs, operation_entries
 from exomem.governance import egress, scrubber
 from exomem.governance.principal import owner_principal, request_scope
-from test_governance_postfilter import HIGH_ENTROPY
 
 
 @pytest.mark.parametrize("tool_shape", operation_entries.TOOL_SHAPES)
@@ -178,3 +179,56 @@ def test_persisted_run_metadata_cannot_disclose_an_encoded_credential(vault: Pat
     ]
     assert [record["event_type"] for record in records] == ["credential_block"]
     assert credential not in json.dumps(records)
+
+
+@pytest.mark.parametrize("prefix", ["\thttps", "ht\ttps"], ids=["leading-control", "scheme-control"])
+def test_uri_controls_cannot_skip_decoded_credential_checks(prefix: str) -> None:
+    credential = next(spec.samples[0] for spec in scrubber.CREDENTIAL_PATTERNS
+                      if spec.name == "aws_access_key_id")
+    encoded = "".join(f"%{byte:02X}" for byte in credential.encode())
+    uri = prefix + "://example.test/start?q=" + encoded
+    assert urlsplit(uri).scheme == "https"
+    assert scrubber.scrub_text(uri) == (scrubber.NOTICE, True)
+    assert scrubber.scrub_value({"ref": uri}) == ({"ref": scrubber.NOTICE}, True)
+
+
+@pytest.mark.parametrize("encode", [quote, quote_plus], ids=["percent", "form"])
+def test_narrative_uri_keeps_both_decoded_credential_checks(encode) -> None:
+    credential = next(spec.samples[0] for spec in scrubber.CREDENTIAL_PATTERNS
+                      if spec.name == "pem_private_key")
+    text = "Open https://example.test/start?q=" + encode(credential)
+    assert scrubber.scrub_text(text) == (scrubber.NOTICE, True)
+    assert scrubber.scrub_value({"ref": text}) == ({"ref": scrubber.NOTICE}, True)
+    cleaned, blocked = scrubber.scrub_json_text(json.dumps({"link": text}))
+    assert blocked
+    assert json.loads(cleaned) == {"link": scrubber.NOTICE}
+
+
+def test_normalized_uri_scheme_retains_entropy_checks() -> None:
+    uri = HIGH_ENTROPY[:16] + "\t" + HIGH_ENTROPY[16:32] + ":value"
+    assert urlsplit(uri).scheme == HIGH_ENTROPY[:32].lower()
+    assert scrubber.scrub_text(uri) == (scrubber.NOTICE, True)
+
+
+def test_json_integer_limits_cannot_downgrade_escaped_credential_checks() -> None:
+    credential = next(spec.samples[0] for spec in scrubber.CREDENTIAL_PATTERNS
+                      if spec.name == "aws_access_key_id")
+    escaped = "".join(f"\\u{ord(character):04x}" for character in credential)
+    digits = "9" * max(5000, sys.get_int_max_str_digits() + 1)
+    text = '{"n":' + digits + ',"link":"https://example.test/?q=' + escaped + '"}'
+    cleaned, blocked = scrubber.scrub_json_text(text)
+    assert blocked
+    assert escaped not in cleaned
+    assert scrubber.INSPECTION_UNAVAILABLE_NOTICE in cleaned or scrubber.NOTICE in cleaned
+
+
+def test_json_depth_limits_cannot_downgrade_escaped_credential_checks() -> None:
+    credential = next(spec.samples[0] for spec in scrubber.CREDENTIAL_PATTERNS
+                      if spec.name == "aws_access_key_id")
+    escaped = "".join(f"\\u{ord(character):04x}" for character in credential)
+    depth = sys.getrecursionlimit() + 10
+    text = "[" * depth + '{"link":"https://example.test/?q=' + escaped + '"}' + "]" * depth
+    cleaned, blocked = scrubber.scrub_json_text(text)
+    assert blocked
+    assert escaped not in cleaned
+    assert scrubber.INSPECTION_UNAVAILABLE_NOTICE in cleaned or scrubber.NOTICE in cleaned

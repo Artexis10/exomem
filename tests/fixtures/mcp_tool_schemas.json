@@ -100,10 +100,7 @@
                   "type": "integer",
                   "default": 3
                 },
-                "include_hidden": {
-                  "type": "boolean",
-                  "default": false
-                },
+                "include_hidden": {},
                 "samples": {
                   "description": "Per folder.",
                   "type": "integer",
@@ -127,10 +124,7 @@
                   "type": "string",
                   "default": ""
                 },
-                "include_hidden": {
-                  "type": "boolean",
-                  "default": false
-                },
+                "include_hidden": {},
                 "recursive": {
                   "description": "Recurse in list mode.",
                   "type": "boolean",
@@ -166,10 +160,7 @@
                   "type": "boolean",
                   "default": false
                 },
-                "include_hidden": {
-                  "type": "boolean",
-                  "default": false
-                }
+                "include_hidden": {}
               },
               "required": [
                 "kind"
@@ -233,68 +224,21 @@
                   "description": "Target for list/create/append/delete; default trash path for recover.",
                   "type": "string"
                 },
-                "content": {
-                  "type": "string",
-                  "default": ""
-                },
-                "frontmatter": {
-                  "type": "object"
-                },
-                "overwrite": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "allow_curated": {
-                  "description": "Permit operations in curated trees where canonical leaves allow it.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "file_kind": {
-                  "description": "file or dir, for create.",
-                  "type": "string",
-                  "default": "file"
-                },
-                "parents": {
-                  "type": "boolean",
-                  "default": true
-                },
-                "validate_only": {
-                  "description": "Validate a Markdown create or append without writing.",
-                  "type": "boolean",
-                  "enum": [
-                    true
-                  ]
-                },
-                "draft_id": {
-                  "type": "string"
-                },
-                "draft_hash": {
-                  "type": "string"
-                },
-                "draft_token": {
-                  "type": "string",
-                  "description": "The overwrite preview's `draft_token`, replayed unchanged on commit."
-                },
-                "semantic_transition_token": {
-                  "type": "string",
-                  "description": "The append transition token from validate_only."
-                },
-                "relation_disposition": {
-                  "type": "string",
-                  "description": "Reviewed relation outcome for semantic create/append."
-                },
-                "relation_review_hash": {
-                  "type": "string",
-                  "description": "Draft or transition hash the review covers."
-                },
-                "relation_review_reason": {
-                  "type": "string",
-                  "description": "Audit reason for reviewed-none."
-                },
-                "promotion_reason": {
-                  "type": "string",
-                  "description": "Required for a move promoting Sources/ to Evidence/."
-                }
+                "content": {},
+                "frontmatter": {},
+                "overwrite": {},
+                "allow_curated": {},
+                "file_kind": {},
+                "parents": {},
+                "validate_only": {},
+                "draft_id": {},
+                "draft_hash": {},
+                "draft_token": {},
+                "semantic_transition_token": {},
+                "relation_disposition": {},
+                "relation_review_hash": {},
+                "relation_review_reason": {},
+                "promotion_reason": {}
               },
               "required": [
                 "kind",
@@ -313,68 +257,21 @@
                   "description": "Target for list/create/append/delete; default trash path for recover.",
                   "type": "string"
                 },
-                "content": {
-                  "type": "string",
-                  "default": ""
-                },
-                "frontmatter": {
-                  "type": "object"
-                },
-                "overwrite": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "allow_curated": {
-                  "description": "Permit operations in curated trees where canonical leaves allow it.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "file_kind": {
-                  "description": "file or dir, for create.",
-                  "type": "string",
-                  "default": "file"
-                },
-                "parents": {
-                  "type": "boolean",
-                  "default": true
-                },
-                "validate_only": {
-                  "description": "Validate a Markdown create or append without writing.",
-                  "type": "boolean",
-                  "enum": [
-                    true
-                  ]
-                },
-                "draft_id": {
-                  "type": "string"
-                },
-                "draft_hash": {
-                  "type": "string"
-                },
-                "draft_token": {
-                  "type": "string",
-                  "description": "The overwrite preview's `draft_token`, replayed unchanged on commit."
-                },
-                "semantic_transition_token": {
-                  "type": "string",
-                  "description": "The append transition token from validate_only."
-                },
-                "relation_disposition": {
-                  "type": "string",
-                  "description": "Reviewed relation outcome for semantic create/append."
-                },
-                "relation_review_hash": {
-                  "type": "string",
-                  "description": "Draft or transition hash the review covers."
-                },
-                "relation_review_reason": {
-                  "type": "string",
-                  "description": "Audit reason for reviewed-none."
-                },
-                "promotion_reason": {
-                  "type": "string",
-                  "description": "Required for a move promoting Sources/ to Evidence/."
-                }
+                "content": {},
+                "frontmatter": {},
+                "overwrite": {},
+                "allow_curated": {},
+                "file_kind": {},
+                "parents": {},
+                "validate_only": {},
+                "draft_id": {},
+                "draft_hash": {},
+                "draft_token": {},
+                "semantic_transition_token": {},
+                "relation_disposition": {},
+                "relation_review_hash": {},
+                "relation_review_reason": {},
+                "promotion_reason": {}
               },
               "required": [
                 "kind",
@@ -385,6 +282,74 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "include_hidden": {
+              "type": "boolean",
+              "default": false
+            },
+            "content": {
+              "type": "string",
+              "default": ""
+            },
+            "frontmatter": {
+              "type": "object"
+            },
+            "overwrite": {
+              "type": "boolean",
+              "default": false
+            },
+            "allow_curated": {
+              "description": "Permit operations in curated trees where canonical leaves allow it.",
+              "type": "boolean",
+              "default": false
+            },
+            "file_kind": {
+              "description": "file or dir, for create.",
+              "type": "string",
+              "default": "file"
+            },
+            "parents": {
+              "type": "boolean",
+              "default": true
+            },
+            "validate_only": {
+              "description": "Validate a Markdown create or append without writing.",
+              "type": "boolean",
+              "enum": [
+                true
+              ]
+            },
+            "draft_id": {
+              "type": "string"
+            },
+            "draft_hash": {
+              "type": "string"
+            },
+            "draft_token": {
+              "type": "string",
+              "description": "The overwrite preview's `draft_token`, replayed unchanged on commit."
+            },
+            "semantic_transition_token": {
+              "type": "string",
+              "description": "The append transition token from validate_only."
+            },
+            "relation_disposition": {
+              "type": "string",
+              "description": "Reviewed relation outcome for semantic create/append."
+            },
+            "relation_review_hash": {
+              "type": "string",
+              "description": "Draft or transition hash the review covers."
+            },
+            "relation_review_reason": {
+              "type": "string",
+              "description": "Audit reason for reviewed-none."
+            },
+            "promotion_reason": {
+              "type": "string",
+              "description": "Required for a move promoting Sources/ to Evidence/."
+            }
           }
         }
       },
@@ -575,22 +540,13 @@
                   "type": "string",
                   "default": ""
                 },
-                "max_depth": {
-                  "type": "integer",
-                  "default": 3
-                },
+                "max_depth": {},
                 "include_hidden": {
                   "type": "boolean",
                   "default": false
                 },
-                "samples": {
-                  "type": "integer",
-                  "default": 5
-                },
-                "pack_limit": {
-                  "type": "integer",
-                  "default": 6
-                },
+                "samples": {},
+                "pack_limit": {},
                 "manifest_path": {
                   "type": "string"
                 }
@@ -612,29 +568,14 @@
                   "type": "string",
                   "default": ""
                 },
-                "max_depth": {
-                  "type": "integer",
-                  "default": 3
-                },
+                "max_depth": {},
                 "include_hidden": {
                   "type": "boolean",
                   "default": false
                 },
-                "samples": {
-                  "type": "integer",
-                  "default": 5
-                },
-                "pack_limit": {
-                  "type": "integer",
-                  "default": 6
-                },
-                "selected_paths": {
-                  "description": "Files for copy/compile.",
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                }
+                "samples": {},
+                "pack_limit": {},
+                "selected_paths": {}
               },
               "required": [
                 "kind",
@@ -654,29 +595,14 @@
                   "type": "string",
                   "default": ""
                 },
-                "max_depth": {
-                  "type": "integer",
-                  "default": 3
-                },
+                "max_depth": {},
                 "include_hidden": {
                   "type": "boolean",
                   "default": false
                 },
-                "samples": {
-                  "type": "integer",
-                  "default": 5
-                },
-                "pack_limit": {
-                  "type": "integer",
-                  "default": 6
-                },
-                "selected_paths": {
-                  "description": "Files for copy/compile.",
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                }
+                "samples": {},
+                "pack_limit": {},
+                "selected_paths": {}
               },
               "required": [
                 "kind",
@@ -723,10 +649,7 @@
                   "const": "select",
                   "type": "string"
                 },
-                "run_id": {
-                  "description": "From `start`; required except for `start` and run-listing `status`.",
-                  "type": "string"
-                },
+                "run_id": {},
                 "include": {
                   "items": {
                     "anyOf": [
@@ -777,14 +700,8 @@
                   "const": "plan",
                   "type": "string"
                 },
-                "run_id": {
-                  "description": "From `start`; required except for `start` and run-listing `status`.",
-                  "type": "string"
-                },
-                "continuation": {
-                  "type": "string",
-                  "description": "For `plan` and `apply`, from the previous result."
-                }
+                "run_id": {},
+                "continuation": {}
               },
               "required": [
                 "kind",
@@ -799,18 +716,12 @@
                   "const": "apply",
                   "type": "string"
                 },
-                "run_id": {
-                  "description": "From `start`; required except for `start` and run-listing `status`.",
-                  "type": "string"
-                },
+                "run_id": {},
                 "plan_id": {
                   "description": "For `apply`, from `plan`/`status`; a mismatch or changed selection refuses with PLAN_STALE.",
                   "type": "string"
                 },
-                "continuation": {
-                  "type": "string",
-                  "description": "For `plan` and `apply`, from the previous result."
-                },
+                "continuation": {},
                 "retry_failed": {
                   "description": "For `apply`, re-apply only failures.",
                   "type": "boolean",
@@ -838,14 +749,8 @@
                   "const": "cancel",
                   "type": "string"
                 },
-                "run_id": {
-                  "description": "From `start`; required except for `start` and run-listing `status`.",
-                  "type": "string"
-                },
-                "why": {
-                  "type": "string",
-                  "description": "Required for `apply-proposal`; also the `cancel` reason."
-                }
+                "run_id": {},
+                "why": {}
               },
               "required": [
                 "kind",
@@ -860,10 +765,7 @@
                   "const": "finish",
                   "type": "string"
                 },
-                "run_id": {
-                  "description": "From `start`; required except for `start` and run-listing `status`.",
-                  "type": "string"
-                },
+                "run_id": {},
                 "write_manifest": {
                   "type": "boolean",
                   "default": true
@@ -882,10 +784,7 @@
                   "const": "propose",
                   "type": "string"
                 },
-                "run_id": {
-                  "description": "From `start`; required except for `start` and run-listing `status`.",
-                  "type": "string"
-                },
+                "run_id": {},
                 "proposals": {
                   "items": {
                     "type": "object"
@@ -906,10 +805,7 @@
                   "const": "apply-proposal",
                   "type": "string"
                 },
-                "why": {
-                  "description": "Required for `apply-proposal`; also the `cancel` reason.",
-                  "type": "string"
-                },
+                "why": {},
                 "ref": {
                   "description": "For `apply-proposal`, the `exomem://review/adoption/<id>` ref.",
                   "type": "string"
@@ -934,6 +830,39 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "max_depth": {
+              "type": "integer",
+              "default": 3
+            },
+            "samples": {
+              "type": "integer",
+              "default": 5
+            },
+            "pack_limit": {
+              "type": "integer",
+              "default": 6
+            },
+            "selected_paths": {
+              "description": "Files for copy/compile.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "run_id": {
+              "description": "From `start`; required except for `start` and run-listing `status`.",
+              "type": "string"
+            },
+            "continuation": {
+              "type": "string",
+              "description": "For `plan` and `apply`, from the previous result."
+            },
+            "why": {
+              "type": "string",
+              "description": "Required for `apply-proposal`; also the `cancel` reason."
+            }
           }
         },
         "response_detail": {
@@ -1180,68 +1109,21 @@
                   "description": "Target for list/create/append/delete; default trash path for recover.",
                   "type": "string"
                 },
-                "content": {
-                  "type": "string",
-                  "default": ""
-                },
-                "frontmatter": {
-                  "type": "object"
-                },
-                "overwrite": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "allow_curated": {
-                  "description": "Permit operations in curated trees where canonical leaves allow it.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "file_kind": {
-                  "description": "file or dir, for create.",
-                  "type": "string",
-                  "default": "file"
-                },
-                "parents": {
-                  "type": "boolean",
-                  "default": true
-                },
-                "validate_only": {
-                  "description": "Validate a Markdown create or append without writing.",
-                  "type": "boolean",
-                  "enum": [
-                    false
-                  ]
-                },
-                "draft_id": {
-                  "type": "string"
-                },
-                "draft_hash": {
-                  "type": "string"
-                },
-                "draft_token": {
-                  "type": "string",
-                  "description": "The overwrite preview's `draft_token`, replayed unchanged on commit."
-                },
-                "semantic_transition_token": {
-                  "type": "string",
-                  "description": "The append transition token from validate_only."
-                },
-                "relation_disposition": {
-                  "type": "string",
-                  "description": "Reviewed relation outcome for semantic create/append."
-                },
-                "relation_review_hash": {
-                  "type": "string",
-                  "description": "Draft or transition hash the review covers."
-                },
-                "relation_review_reason": {
-                  "type": "string",
-                  "description": "Audit reason for reviewed-none."
-                },
-                "promotion_reason": {
-                  "type": "string",
-                  "description": "Required for a move promoting Sources/ to Evidence/."
-                }
+                "content": {},
+                "frontmatter": {},
+                "overwrite": {},
+                "allow_curated": {},
+                "file_kind": {},
+                "parents": {},
+                "validate_only": {},
+                "draft_id": {},
+                "draft_hash": {},
+                "draft_token": {},
+                "semantic_transition_token": {},
+                "relation_disposition": {},
+                "relation_review_hash": {},
+                "relation_review_reason": {},
+                "promotion_reason": {}
               },
               "required": [
                 "kind",
@@ -1260,68 +1142,21 @@
                   "description": "Target for list/create/append/delete; default trash path for recover.",
                   "type": "string"
                 },
-                "content": {
-                  "type": "string",
-                  "default": ""
-                },
-                "frontmatter": {
-                  "type": "object"
-                },
-                "overwrite": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "allow_curated": {
-                  "description": "Permit operations in curated trees where canonical leaves allow it.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "file_kind": {
-                  "description": "file or dir, for create.",
-                  "type": "string",
-                  "default": "file"
-                },
-                "parents": {
-                  "type": "boolean",
-                  "default": true
-                },
-                "validate_only": {
-                  "description": "Validate a Markdown create or append without writing.",
-                  "type": "boolean",
-                  "enum": [
-                    false
-                  ]
-                },
-                "draft_id": {
-                  "type": "string"
-                },
-                "draft_hash": {
-                  "type": "string"
-                },
-                "draft_token": {
-                  "type": "string",
-                  "description": "The overwrite preview's `draft_token`, replayed unchanged on commit."
-                },
-                "semantic_transition_token": {
-                  "type": "string",
-                  "description": "The append transition token from validate_only."
-                },
-                "relation_disposition": {
-                  "type": "string",
-                  "description": "Reviewed relation outcome for semantic create/append."
-                },
-                "relation_review_hash": {
-                  "type": "string",
-                  "description": "Draft or transition hash the review covers."
-                },
-                "relation_review_reason": {
-                  "type": "string",
-                  "description": "Audit reason for reviewed-none."
-                },
-                "promotion_reason": {
-                  "type": "string",
-                  "description": "Required for a move promoting Sources/ to Evidence/."
-                }
+                "content": {},
+                "frontmatter": {},
+                "overwrite": {},
+                "allow_curated": {},
+                "file_kind": {},
+                "parents": {},
+                "validate_only": {},
+                "draft_id": {},
+                "draft_hash": {},
+                "draft_token": {},
+                "semantic_transition_token": {},
+                "relation_disposition": {},
+                "relation_review_hash": {},
+                "relation_review_reason": {},
+                "promotion_reason": {}
               },
               "required": [
                 "kind",
@@ -1336,14 +1171,8 @@
                   "const": "move",
                   "type": "string"
                 },
-                "allow_curated": {
-                  "description": "Permit operations in curated trees where canonical leaves allow it.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "old_path": {
-                  "type": "string"
-                },
+                "allow_curated": {},
+                "old_path": {},
                 "new_path": {
                   "type": "string"
                 },
@@ -1351,10 +1180,7 @@
                   "type": "boolean",
                   "default": true
                 },
-                "promotion_reason": {
-                  "type": "string",
-                  "description": "Required for a move promoting Sources/ to Evidence/."
-                }
+                "promotion_reason": {}
               },
               "required": [
                 "kind",
@@ -1374,11 +1200,7 @@
                   "description": "Target for list/create/append/delete; default trash path for recover.",
                   "type": "string"
                 },
-                "allow_curated": {
-                  "description": "Permit operations in curated trees where canonical leaves allow it.",
-                  "type": "boolean",
-                  "default": false
-                },
+                "allow_curated": {},
                 "recursive": {
                   "type": "boolean",
                   "default": false
@@ -1446,9 +1268,7 @@
                   "type": "string",
                   "default": ""
                 },
-                "old_path": {
-                  "type": "string"
-                },
+                "old_path": {},
                 "source_kind": {
                   "type": "string",
                   "description": "What a captured artifact IS; reclassify sets it."
@@ -1457,10 +1277,7 @@
                   "type": "string",
                   "description": "What it is ABOUT; like source_kind."
                 },
-                "reason": {
-                  "description": "Required for reclassify and revert-reclassification.",
-                  "type": "string"
-                }
+                "reason": {}
               },
               "required": [
                 "kind",
@@ -1479,10 +1296,7 @@
                   "description": "Target for list/create/append/delete; default trash path for recover.",
                   "type": "string"
                 },
-                "reason": {
-                  "type": "string",
-                  "description": "Required for reclassify and revert-reclassification."
-                }
+                "reason": {}
               },
               "required": [
                 "kind",
@@ -1493,6 +1307,77 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "content": {
+              "type": "string",
+              "default": ""
+            },
+            "frontmatter": {
+              "type": "object"
+            },
+            "overwrite": {
+              "type": "boolean",
+              "default": false
+            },
+            "allow_curated": {
+              "description": "Permit operations in curated trees where canonical leaves allow it.",
+              "type": "boolean",
+              "default": false
+            },
+            "file_kind": {
+              "description": "file or dir, for create.",
+              "type": "string",
+              "default": "file"
+            },
+            "parents": {
+              "type": "boolean",
+              "default": true
+            },
+            "validate_only": {
+              "description": "Validate a Markdown create or append without writing.",
+              "type": "boolean",
+              "enum": [
+                false
+              ]
+            },
+            "draft_id": {
+              "type": "string"
+            },
+            "draft_hash": {
+              "type": "string"
+            },
+            "draft_token": {
+              "type": "string",
+              "description": "The overwrite preview's `draft_token`, replayed unchanged on commit."
+            },
+            "semantic_transition_token": {
+              "type": "string",
+              "description": "The append transition token from validate_only."
+            },
+            "relation_disposition": {
+              "type": "string",
+              "description": "Reviewed relation outcome for semantic create/append."
+            },
+            "relation_review_hash": {
+              "type": "string",
+              "description": "Draft or transition hash the review covers."
+            },
+            "relation_review_reason": {
+              "type": "string",
+              "description": "Audit reason for reviewed-none."
+            },
+            "promotion_reason": {
+              "type": "string",
+              "description": "Required for a move promoting Sources/ to Evidence/."
+            },
+            "old_path": {
+              "type": "string"
+            },
+            "reason": {
+              "description": "Required for reclassify and revert-reclassification.",
+              "type": "string"
+            }
           }
         },
         "response_detail": {
@@ -1566,10 +1451,7 @@
                   "const": "commit",
                   "type": "string"
                 },
-                "proposal_id": {
-                  "type": "string",
-                  "description": "Single-use reviewed proposal id for commit."
-                }
+                "proposal_id": {}
               },
               "required": [
                 "kind"
@@ -1584,13 +1466,7 @@
                   "const": "grant-standing",
                   "type": "string"
                 },
-                "scope": {
-                  "description": "Grant or revoke scope; `standing` only for a durable grant.",
-                  "enum": [
-                    "standing"
-                  ],
-                  "type": "string"
-                },
+                "scope": {},
                 "scope_ids": {
                   "items": {
                     "type": "string"
@@ -1608,10 +1484,7 @@
                   "type": "string",
                   "description": "Reserved withhold token for a session grant."
                 },
-                "authorization_session": {
-                  "type": "string",
-                  "description": "Session handle bound to the caller."
-                },
+                "authorization_session": {},
                 "purpose": {
                   "type": "string",
                   "description": "Declared purpose when governance requires it."
@@ -1641,20 +1514,11 @@
                   "const": "revoke-standing",
                   "type": "string"
                 },
-                "scope": {
-                  "description": "Grant or revoke scope; `standing` only for a durable grant.",
-                  "enum": [
-                    "standing"
-                  ],
-                  "type": "string"
-                },
+                "scope": {},
                 "grant_id": {
                   "type": "string"
                 },
-                "authorization_session": {
-                  "type": "string",
-                  "description": "Session handle bound to the caller."
-                }
+                "authorization_session": {}
               },
               "required": [
                 "kind"
@@ -1669,13 +1533,7 @@
                   "const": "suspend",
                   "type": "string"
                 },
-                "rule_ids": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Rules to suspend or resume."
-                }
+                "rule_ids": {}
               },
               "required": [
                 "kind"
@@ -1690,13 +1548,7 @@
                   "const": "resume",
                   "type": "string"
                 },
-                "rule_ids": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Rules to suspend or resume."
-                }
+                "rule_ids": {}
               },
               "required": [
                 "kind"
@@ -1711,10 +1563,7 @@
                   "const": "undo",
                   "type": "string"
                 },
-                "proposal_id": {
-                  "type": "string",
-                  "description": "Single-use reviewed proposal id for commit."
-                }
+                "proposal_id": {}
               },
               "required": [
                 "kind"
@@ -1729,10 +1578,7 @@
                   "const": "backfill-preview",
                   "type": "string"
                 },
-                "proposal_id": {
-                  "type": "string",
-                  "description": "Single-use reviewed proposal id for commit."
-                },
+                "proposal_id": {},
                 "backfill_action": {
                   "description": "Owner-reviewed companion backfill step.",
                   "enum": [
@@ -1740,10 +1586,7 @@
                   ],
                   "type": "string"
                 },
-                "companion_input": {
-                  "type": "object",
-                  "description": "Version-1 artifact, companion, semantics and binding input."
-                }
+                "companion_input": {}
               },
               "required": [
                 "kind"
@@ -1758,10 +1601,7 @@
                   "const": "backfill-commit",
                   "type": "string"
                 },
-                "proposal_id": {
-                  "type": "string",
-                  "description": "Single-use reviewed proposal id for commit."
-                },
+                "proposal_id": {},
                 "backfill_action": {
                   "description": "Owner-reviewed companion backfill step.",
                   "enum": [
@@ -1769,10 +1609,7 @@
                   ],
                   "type": "string"
                 },
-                "companion_input": {
-                  "type": "object",
-                  "description": "Version-1 artifact, companion, semantics and binding input."
-                }
+                "companion_input": {}
               },
               "required": [
                 "kind"
@@ -1783,6 +1620,34 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "description": "Single-use reviewed proposal id for commit."
+            },
+            "scope": {
+              "description": "Grant or revoke scope; `standing` only for a durable grant.",
+              "enum": [
+                "standing"
+              ],
+              "type": "string"
+            },
+            "authorization_session": {
+              "type": "string",
+              "description": "Session handle bound to the caller."
+            },
+            "rule_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "description": "Rules to suspend or resume."
+            },
+            "companion_input": {
+              "type": "object",
+              "description": "Version-1 artifact, companion, semantics and binding input."
+            }
           }
         },
         "response_detail": {
@@ -1817,17 +1682,8 @@
                   "const": "process",
                   "type": "string"
                 },
-                "path": {
-                  "type": "string",
-                  "description": "Governed KB media path; omit for bounded all-media work."
-                },
-                "paths": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "1-32 unique governed paths for process/retry."
-                }
+                "path": {},
+                "paths": {}
               },
               "required": [
                 "kind"
@@ -1841,17 +1697,8 @@
                   "const": "retry",
                   "type": "string"
                 },
-                "path": {
-                  "type": "string",
-                  "description": "Governed KB media path; omit for bounded all-media work."
-                },
-                "paths": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "1-32 unique governed paths for process/retry."
-                }
+                "path": {},
+                "paths": {}
               },
               "required": [
                 "kind"
@@ -1861,6 +1708,19 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Governed KB media path; omit for bounded all-media work."
+            },
+            "paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "description": "1-32 unique governed paths for process/retry."
+            }
           }
         },
         "response_detail": {
@@ -1895,90 +1755,25 @@
                   "const": "add",
                   "type": "string"
                 },
-                "path": {
-                  "description": "Parent page path or memory reference.",
-                  "type": "string"
-                },
-                "category": {
-                  "type": "string"
-                },
-                "content": {
-                  "description": "Provide only the unit's substantive observation; Use non-empty content that remains on one Markdown line. Pass the category and optional suffix values through the sibling `category`, `tags`, and `context` fields. Do not include the Markdown row wrapper in `content`.",
-                  "type": "string"
-                },
-                "unit_kind": {
-                  "type": "string",
-                  "description": "Governed rich kind; omitted means compact observation."
-                },
-                "tags": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Replaces on update."
-                },
-                "context": {
-                  "type": "string",
-                  "description": "Replaces on update."
-                },
-                "relations": {
-                  "items": {
-                    "type": "object"
-                  },
-                  "type": "array",
-                  "description": "{kind, target} objects. Replaces on update."
-                },
-                "verdict": {
-                  "type": "string",
-                  "description": "Rich-only: abandoned, confirmed, inconclusive, qualified, or refuted. Empty string clears it on update."
-                },
-                "check_by": {
-                  "type": "string",
-                  "description": "Rich-only ISO revisit date. Empty string clears it on update."
-                },
-                "id": {
-                  "type": "string",
-                  "description": "Unique anchor within the parent; derived on add if omitted."
-                },
-                "unit_ref": {
-                  "type": "string",
-                  "description": "Exact unit reference for update/remove or previewing an existing unit. Without it, validate previews an addition."
-                },
-                "expected_fingerprint": {
-                  "type": "string",
-                  "description": "Current unit fingerprint; required for update/remove. Echo it when previewing an existing unit."
-                },
-                "expected_hash": {
-                  "type": "string",
-                  "description": "Current parent-page content hash; required for update/remove."
-                },
-                "transition_token": {
-                  "type": "string",
-                  "description": "From validate."
-                },
-                "relation_disposition": {
-                  "type": "string",
-                  "description": "Semantic review disposition (existing page)."
-                },
-                "relation_review_hash": {
-                  "type": "string",
-                  "description": "Transition hash the reviewed-none covers."
-                },
-                "relation_review_reason": {
-                  "type": "string",
-                  "description": "Audit reason for reviewed-none."
-                },
-                "reason": {
-                  "type": "string",
-                  "description": "Optional rationale retained with the prior interpretation."
-                },
-                "target_fingerprints": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object",
-                  "description": "Exact corrective target refs and current fingerprints. Omit for ordinary page or heading relations; episode unit leaves echo them."
-                }
+                "path": {},
+                "category": {},
+                "content": {},
+                "unit_kind": {},
+                "tags": {},
+                "context": {},
+                "relations": {},
+                "verdict": {},
+                "check_by": {},
+                "id": {},
+                "unit_ref": {},
+                "expected_fingerprint": {},
+                "expected_hash": {},
+                "transition_token": {},
+                "relation_disposition": {},
+                "relation_review_hash": {},
+                "relation_review_reason": {},
+                "reason": {},
+                "target_fingerprints": {}
               },
               "required": [
                 "kind",
@@ -1995,90 +1790,25 @@
                   "const": "update",
                   "type": "string"
                 },
-                "path": {
-                  "description": "Parent page path or memory reference.",
-                  "type": "string"
-                },
-                "category": {
-                  "type": "string"
-                },
-                "content": {
-                  "type": "string",
-                  "description": "Provide only the unit's substantive observation; Use non-empty content that remains on one Markdown line. Pass the category and optional suffix values through the sibling `category`, `tags`, and `context` fields. Do not include the Markdown row wrapper in `content`."
-                },
-                "unit_kind": {
-                  "type": "string",
-                  "description": "Governed rich kind; omitted means compact observation."
-                },
-                "tags": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Replaces on update."
-                },
-                "context": {
-                  "type": "string",
-                  "description": "Replaces on update."
-                },
-                "relations": {
-                  "items": {
-                    "type": "object"
-                  },
-                  "type": "array",
-                  "description": "{kind, target} objects. Replaces on update."
-                },
-                "verdict": {
-                  "type": "string",
-                  "description": "Rich-only: abandoned, confirmed, inconclusive, qualified, or refuted. Empty string clears it on update."
-                },
-                "check_by": {
-                  "type": "string",
-                  "description": "Rich-only ISO revisit date. Empty string clears it on update."
-                },
-                "id": {
-                  "type": "string",
-                  "description": "Unique anchor within the parent; derived on add if omitted."
-                },
-                "unit_ref": {
-                  "description": "Exact unit reference for update/remove or previewing an existing unit. Without it, validate previews an addition.",
-                  "type": "string"
-                },
-                "expected_fingerprint": {
-                  "description": "Current unit fingerprint; required for update/remove. Echo it when previewing an existing unit.",
-                  "type": "string"
-                },
-                "expected_hash": {
-                  "description": "Current parent-page content hash; required for update/remove.",
-                  "type": "string"
-                },
-                "transition_token": {
-                  "type": "string",
-                  "description": "From validate."
-                },
-                "relation_disposition": {
-                  "type": "string",
-                  "description": "Semantic review disposition (existing page)."
-                },
-                "relation_review_hash": {
-                  "type": "string",
-                  "description": "Transition hash the reviewed-none covers."
-                },
-                "relation_review_reason": {
-                  "type": "string",
-                  "description": "Audit reason for reviewed-none."
-                },
-                "reason": {
-                  "type": "string",
-                  "description": "Optional rationale retained with the prior interpretation."
-                },
-                "target_fingerprints": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object",
-                  "description": "Exact corrective target refs and current fingerprints. Omit for ordinary page or heading relations; episode unit leaves echo them."
-                }
+                "path": {},
+                "category": {},
+                "content": {},
+                "unit_kind": {},
+                "tags": {},
+                "context": {},
+                "relations": {},
+                "verdict": {},
+                "check_by": {},
+                "id": {},
+                "unit_ref": {},
+                "expected_fingerprint": {},
+                "expected_hash": {},
+                "transition_token": {},
+                "relation_disposition": {},
+                "relation_review_hash": {},
+                "relation_review_reason": {},
+                "reason": {},
+                "target_fingerprints": {}
               },
               "required": [
                 "kind",
@@ -2096,26 +1826,11 @@
                   "const": "remove",
                   "type": "string"
                 },
-                "path": {
-                  "description": "Parent page path or memory reference.",
-                  "type": "string"
-                },
-                "unit_ref": {
-                  "description": "Exact unit reference for update/remove or previewing an existing unit. Without it, validate previews an addition.",
-                  "type": "string"
-                },
-                "expected_fingerprint": {
-                  "description": "Current unit fingerprint; required for update/remove. Echo it when previewing an existing unit.",
-                  "type": "string"
-                },
-                "expected_hash": {
-                  "description": "Current parent-page content hash; required for update/remove.",
-                  "type": "string"
-                },
-                "reason": {
-                  "type": "string",
-                  "description": "Optional rationale retained with the prior interpretation."
-                }
+                "path": {},
+                "unit_ref": {},
+                "expected_fingerprint": {},
+                "expected_hash": {},
+                "reason": {}
               },
               "required": [
                 "kind",
@@ -2129,6 +1844,92 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "path": {
+              "description": "Parent page path or memory reference.",
+              "type": "string"
+            },
+            "category": {
+              "type": "string"
+            },
+            "content": {
+              "description": "Provide only the unit's substantive observation; Use non-empty content that remains on one Markdown line. Pass the category and optional suffix values through the sibling `category`, `tags`, and `context` fields. Do not include the Markdown row wrapper in `content`.",
+              "type": "string"
+            },
+            "unit_kind": {
+              "type": "string",
+              "description": "Governed rich kind; omitted means compact observation."
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "description": "Replaces on update."
+            },
+            "context": {
+              "type": "string",
+              "description": "Replaces on update."
+            },
+            "relations": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array",
+              "description": "{kind, target} objects. Replaces on update."
+            },
+            "verdict": {
+              "type": "string",
+              "description": "Rich-only: abandoned, confirmed, inconclusive, qualified, or refuted. Empty string clears it on update."
+            },
+            "check_by": {
+              "type": "string",
+              "description": "Rich-only ISO revisit date. Empty string clears it on update."
+            },
+            "id": {
+              "type": "string",
+              "description": "Unique anchor within the parent; derived on add if omitted."
+            },
+            "unit_ref": {
+              "type": "string",
+              "description": "Exact unit reference for update/remove or previewing an existing unit. Without it, validate previews an addition."
+            },
+            "expected_fingerprint": {
+              "type": "string",
+              "description": "Current unit fingerprint; required for update/remove. Echo it when previewing an existing unit."
+            },
+            "expected_hash": {
+              "type": "string",
+              "description": "Current parent-page content hash; required for update/remove."
+            },
+            "transition_token": {
+              "type": "string",
+              "description": "From validate."
+            },
+            "relation_disposition": {
+              "type": "string",
+              "description": "Semantic review disposition (existing page)."
+            },
+            "relation_review_hash": {
+              "type": "string",
+              "description": "Transition hash the reviewed-none covers."
+            },
+            "relation_review_reason": {
+              "type": "string",
+              "description": "Audit reason for reviewed-none."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Optional rationale retained with the prior interpretation."
+            },
+            "target_fingerprints": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object",
+              "description": "Exact corrective target refs and current fingerprints. Omit for ordinary page or heading relations; episode unit leaves echo them."
+            }
           }
         },
         "response_detail": {
@@ -2166,12 +1967,8 @@
                 "manifest_path": {
                   "type": "string"
                 },
-                "manifest_text": {
-                  "type": "string"
-                },
-                "why": {
-                  "type": "string"
-                },
+                "manifest_text": {},
+                "why": {},
                 "scaffold": {
                   "type": "boolean"
                 }
@@ -2191,27 +1988,14 @@
                   "const": "add",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list.",
-                  "type": "string"
-                },
-                "why": {
-                  "type": "string"
-                },
+                "collection": {},
+                "why": {},
                 "item": {
                   "type": "object"
                 },
-                "plan_id": {
-                  "type": "string",
-                  "description": "row plan_id."
-                },
-                "expected_container_hash": {
-                  "type": "string",
-                  "description": "Returned snapshot."
-                },
-                "body": {
-                  "type": "string"
-                }
+                "plan_id": {},
+                "expected_container_hash": {},
+                "body": {}
               },
               "required": [
                 "kind",
@@ -2228,32 +2012,16 @@
                   "const": "update",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list.",
-                  "type": "string"
-                },
-                "why": {
-                  "type": "string"
-                },
-                "plan_id": {
-                  "description": "row plan_id.",
-                  "type": "string"
-                },
-                "expected_container_hash": {
-                  "description": "Returned snapshot.",
-                  "type": "string"
-                },
-                "body": {
-                  "type": "string"
-                },
+                "collection": {},
+                "why": {},
+                "plan_id": {},
+                "expected_container_hash": {},
+                "body": {},
                 "changes": {
                   "type": "object",
                   "description": "Update."
                 },
-                "expected_item_version": {
-                  "description": "row item_version.",
-                  "type": "string"
-                }
+                "expected_item_version": {}
               },
               "required": [
                 "kind",
@@ -2272,29 +2040,15 @@
                   "const": "triage",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list.",
-                  "type": "string"
-                },
-                "why": {
-                  "type": "string"
-                },
-                "plan_id": {
-                  "description": "row plan_id.",
-                  "type": "string"
-                },
-                "expected_container_hash": {
-                  "description": "Returned snapshot.",
-                  "type": "string"
-                },
+                "collection": {},
+                "why": {},
+                "plan_id": {},
+                "expected_container_hash": {},
                 "transition": {
                   "description": "Triage.",
                   "type": "object"
                 },
-                "expected_item_version": {
-                  "description": "row item_version.",
-                  "type": "string"
-                }
+                "expected_item_version": {}
               },
               "required": [
                 "kind",
@@ -2314,23 +2068,11 @@
                   "const": "revise",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list.",
-                  "type": "string"
-                },
-                "manifest_text": {
-                  "type": "string"
-                },
-                "why": {
-                  "type": "string"
-                },
-                "expected_manifest_hash": {
-                  "type": "string"
-                },
-                "expected_container_hash": {
-                  "description": "Returned snapshot.",
-                  "type": "string"
-                }
+                "collection": {},
+                "manifest_text": {},
+                "why": {},
+                "expected_manifest_hash": {},
+                "expected_container_hash": {}
               },
               "required": [
                 "kind",
@@ -2349,20 +2091,10 @@
                   "const": "rebaseline",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list.",
-                  "type": "string"
-                },
-                "why": {
-                  "type": "string"
-                },
-                "expected_manifest_hash": {
-                  "type": "string"
-                },
-                "expected_container_hash": {
-                  "description": "Returned snapshot.",
-                  "type": "string"
-                },
+                "collection": {},
+                "why": {},
+                "expected_manifest_hash": {},
+                "expected_container_hash": {},
                 "acknowledged_gap_codes": {
                   "items": {
                     "type": "string"
@@ -2383,6 +2115,36 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "manifest_text": {
+              "type": "string"
+            },
+            "why": {
+              "type": "string"
+            },
+            "collection": {
+              "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list.",
+              "type": "string"
+            },
+            "plan_id": {
+              "type": "string",
+              "description": "row plan_id."
+            },
+            "expected_container_hash": {
+              "type": "string",
+              "description": "Returned snapshot."
+            },
+            "body": {
+              "type": "string"
+            },
+            "expected_item_version": {
+              "description": "row item_version.",
+              "type": "string"
+            },
+            "expected_manifest_hash": {
+              "type": "string"
+            }
           }
         },
         "response_detail": {
@@ -2420,14 +2182,8 @@
                 "manifest_path": {
                   "type": "string"
                 },
-                "manifest_text": {
-                  "description": "Manifest for validate/create/revise.",
-                  "type": "string"
-                },
-                "why": {
-                  "description": "Audit reason.",
-                  "type": "string"
-                },
+                "manifest_text": {},
+                "why": {},
                 "scaffold": {
                   "type": "boolean"
                 }
@@ -2447,25 +2203,13 @@
                   "const": "append",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
-                "why": {
-                  "description": "Audit reason.",
-                  "type": "string"
-                },
+                "collection": {},
+                "why": {},
                 "item": {
                   "type": "object"
                 },
-                "item_key": {
-                  "type": "string",
-                  "description": "Update UUID; append uses the natural key."
-                },
-                "expected_container_hash": {
-                  "type": "string",
-                  "description": "Current snapshot for guarded writes."
-                },
+                "item_key": {},
+                "expected_container_hash": {},
                 "body": {
                   "type": "string"
                 },
@@ -2536,14 +2280,8 @@
                   ],
                   "type": "object"
                 },
-                "held": {
-                  "type": "string",
-                  "description": "Resume append/update; item/changes override, null removes; discard deletes."
-                },
-                "hold": {
-                  "type": "boolean",
-                  "description": "False refuses; otherwise hold invalid candidates."
-                }
+                "held": {},
+                "hold": {}
               },
               "required": [
                 "kind",
@@ -2559,22 +2297,10 @@
                   "const": "update",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
-                "why": {
-                  "description": "Audit reason.",
-                  "type": "string"
-                },
-                "item_key": {
-                  "description": "Update UUID; append uses the natural key.",
-                  "type": "string"
-                },
-                "expected_container_hash": {
-                  "description": "Current snapshot for guarded writes.",
-                  "type": "string"
-                },
+                "collection": {},
+                "why": {},
+                "item_key": {},
+                "expected_container_hash": {},
                 "changes": {
                   "type": "object"
                 },
@@ -2586,14 +2312,8 @@
                   "type": "boolean",
                   "description": "Rebuild managed Markdown with guards."
                 },
-                "held": {
-                  "type": "string",
-                  "description": "Resume append/update; item/changes override, null removes; discard deletes."
-                },
-                "hold": {
-                  "type": "boolean",
-                  "description": "False refuses; otherwise hold invalid candidates."
-                }
+                "held": {},
+                "hold": {}
               },
               "required": [
                 "kind",
@@ -2612,18 +2332,9 @@
                   "const": "bulk_upsert",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
-                "why": {
-                  "description": "Audit reason.",
-                  "type": "string"
-                },
-                "expected_container_hash": {
-                  "description": "Current snapshot for guarded writes.",
-                  "type": "string"
-                },
+                "collection": {},
+                "why": {},
+                "expected_container_hash": {},
                 "rows": {
                   "description": "bulk_upsert: 1-50 {item, body?, source?}; one guarded commit.",
                   "items": {
@@ -2660,18 +2371,9 @@
                   "const": "discard",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
-                "why": {
-                  "description": "Audit reason.",
-                  "type": "string"
-                },
-                "held": {
-                  "description": "Resume append/update; item/changes override, null removes; discard deletes.",
-                  "type": "string"
-                }
+                "collection": {},
+                "why": {},
+                "held": {}
               },
               "required": [
                 "kind",
@@ -2688,26 +2390,11 @@
                   "const": "revise",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
-                "manifest_text": {
-                  "description": "Manifest for validate/create/revise.",
-                  "type": "string"
-                },
-                "why": {
-                  "description": "Audit reason.",
-                  "type": "string"
-                },
-                "expected_container_hash": {
-                  "description": "Current snapshot for guarded writes.",
-                  "type": "string"
-                },
-                "expected_manifest_hash": {
-                  "description": "Current manifest hash for revise/rebaseline.",
-                  "type": "string"
-                }
+                "collection": {},
+                "manifest_text": {},
+                "why": {},
+                "expected_container_hash": {},
+                "expected_manifest_hash": {}
               },
               "required": [
                 "kind",
@@ -2726,22 +2413,10 @@
                   "const": "rebaseline",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
-                "why": {
-                  "description": "Audit reason.",
-                  "type": "string"
-                },
-                "expected_container_hash": {
-                  "description": "Current snapshot for guarded writes.",
-                  "type": "string"
-                },
-                "expected_manifest_hash": {
-                  "description": "Current manifest hash for revise/rebaseline.",
-                  "type": "string"
-                },
+                "collection": {},
+                "why": {},
+                "expected_container_hash": {},
+                "expected_manifest_hash": {},
                 "acknowledged_gap_codes": {
                   "description": "Inspect-reported rebaseline gaps.",
                   "items": {
@@ -2767,10 +2442,7 @@
                   "const": "import",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
+                "collection": {},
                 "import_request": {
                   "type": "object",
                   "properties": {
@@ -2797,6 +2469,40 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "manifest_text": {
+              "description": "Manifest for validate/create/revise.",
+              "type": "string"
+            },
+            "why": {
+              "description": "Audit reason.",
+              "type": "string"
+            },
+            "collection": {
+              "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
+              "type": "string"
+            },
+            "item_key": {
+              "type": "string",
+              "description": "Update UUID; append uses the natural key."
+            },
+            "expected_container_hash": {
+              "type": "string",
+              "description": "Current snapshot for guarded writes."
+            },
+            "held": {
+              "type": "string",
+              "description": "Resume append/update; item/changes override, null removes; discard deletes."
+            },
+            "hold": {
+              "type": "boolean",
+              "description": "False refuses; otherwise hold invalid candidates."
+            },
+            "expected_manifest_hash": {
+              "description": "Current manifest hash for revise/rebaseline.",
+              "type": "string"
+            }
           }
         },
         "response_detail": {
@@ -2858,27 +2564,12 @@
                         "sync-providers"
                       ]
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "vocabulary_ref": {
-                      "type": "string",
-                      "description": "Vocabulary decision for a registry save."
-                    },
-                    "vocabulary_fingerprint": {
-                      "type": "string",
-                      "description": "Reviewed vocabulary fingerprint; grants no write."
-                    },
-                    "registry_scope": {
-                      "type": "string",
-                      "description": "Public instance token or canonical private Scope ID; grants no authority."
-                    }
+                    "expected_hash": {},
+                    "proposal": {},
+                    "why": {},
+                    "vocabulary_ref": {},
+                    "vocabulary_fingerprint": {},
+                    "registry_scope": {}
                   },
                   "required": [
                     "kind",
@@ -2895,10 +2586,7 @@
                       "const": "save",
                       "type": "string"
                     },
-                    "name": {
-                      "type": "string",
-                      "description": "Saved workflow key."
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -2906,15 +2594,9 @@
                         "workflow-contracts"
                       ]
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    }
+                    "expected_hash": {},
+                    "proposal": {},
+                    "why": {}
                   },
                   "required": [
                     "kind",
@@ -2960,20 +2642,10 @@
                         "sync-providers"
                       ]
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "version": {
-                      "description": "Kept version from `history`, for `restore`.",
-                      "type": "string"
-                    },
-                    "registry_scope": {
-                      "type": "string",
-                      "description": "Public instance token or canonical private Scope ID; grants no authority."
-                    }
+                    "expected_hash": {},
+                    "why": {},
+                    "version": {},
+                    "registry_scope": {}
                   },
                   "required": [
                     "kind",
@@ -2998,16 +2670,9 @@
                         "activation-conventions"
                       ]
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "version": {
-                      "description": "Kept version from `history`, for `restore`.",
-                      "type": "string"
-                    }
+                    "expected_hash": {},
+                    "why": {},
+                    "version": {}
                   },
                   "required": [
                     "kind",
@@ -3039,10 +2704,7 @@
                       "const": "infer-and-save",
                       "type": "string"
                     },
-                    "name": {
-                      "description": "Saved workflow key.",
-                      "type": "string"
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -3050,14 +2712,8 @@
                         "contract"
                       ]
                     },
-                    "project": {
-                      "type": "string",
-                      "description": "Project scope for inference."
-                    },
-                    "page_type": {
-                      "type": "string",
-                      "description": "Page-type scope for inference."
-                    },
+                    "project": {},
+                    "page_type": {},
                     "save": {
                       "description": "Legacy inference flag; true is refused for workflow contracts.",
                       "type": "boolean",
@@ -3065,59 +2721,17 @@
                         true
                       ]
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "strict": {
-                      "description": "In validate mode, signal a failing outcome on findings.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "compare_to": {
-                      "type": "string",
-                      "description": "In diff mode, compare to this saved contract."
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "include_model_suggestions": {
-                      "description": "Add response-only relation suggestions.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "context": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "project": {
-                          "type": "string"
-                        },
-                        "domain": {
-                          "type": "string"
-                        },
-                        "activity": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "date_from": {
-                      "type": "string"
-                    },
-                    "date_to": {
-                      "type": "string"
-                    },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    }
+                    "expected_hash": {},
+                    "strict": {},
+                    "compare_to": {},
+                    "proposal": {},
+                    "why": {},
+                    "include_model_suggestions": {},
+                    "context": {},
+                    "date_from": {},
+                    "date_to": {},
+                    "continuation": {},
+                    "limit": {}
                   },
                   "required": [
                     "kind",
@@ -3132,81 +2746,30 @@
                       "const": "infer-and-save",
                       "type": "string"
                     },
-                    "name": {
-                      "type": "string",
-                      "description": "Saved workflow key."
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "default": "contract"
                     },
-                    "project": {
-                      "type": "string",
-                      "description": "Project scope for inference."
-                    },
-                    "page_type": {
-                      "type": "string",
-                      "description": "Page-type scope for inference."
-                    },
+                    "project": {},
+                    "page_type": {},
                     "save": {
                       "description": "Legacy inference flag; true is refused for workflow contracts.",
                       "type": "boolean",
                       "default": false
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "strict": {
-                      "description": "In validate mode, signal a failing outcome on findings.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "compare_to": {
-                      "type": "string",
-                      "description": "In diff mode, compare to this saved contract."
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "include_model_suggestions": {
-                      "description": "Add response-only relation suggestions.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "context": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "project": {
-                          "type": "string"
-                        },
-                        "domain": {
-                          "type": "string"
-                        },
-                        "activity": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "date_from": {
-                      "type": "string"
-                    },
-                    "date_to": {
-                      "type": "string"
-                    },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    }
+                    "expected_hash": {},
+                    "strict": {},
+                    "compare_to": {},
+                    "proposal": {},
+                    "why": {},
+                    "include_model_suggestions": {},
+                    "context": {},
+                    "date_from": {},
+                    "date_to": {},
+                    "continuation": {},
+                    "limit": {}
                   },
                   "required": [
                     "kind",
@@ -3282,10 +2845,7 @@
                   "const": "refresh",
                   "type": "string"
                 },
-                "name": {
-                  "description": "Saved workflow key.",
-                  "type": "string"
-                },
+                "name": {},
                 "subject": {
                   "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
@@ -3293,12 +2853,8 @@
                     "workflow-contracts"
                   ]
                 },
-                "expected_hash": {
-                  "type": "string"
-                },
-                "why": {
-                  "type": "string"
-                }
+                "expected_hash": {},
+                "why": {}
               },
               "required": [
                 "kind",
@@ -3323,15 +2879,9 @@
                     "context-roles"
                   ]
                 },
-                "expected_hash": {
-                  "type": "string"
-                },
-                "proposal": {
-                  "type": "object"
-                },
-                "why": {
-                  "type": "string"
-                }
+                "expected_hash": {},
+                "proposal": {},
+                "why": {}
               },
               "required": [
                 "kind",
@@ -3356,15 +2906,9 @@
                     "activation-conventions"
                   ]
                 },
-                "expected_hash": {
-                  "type": "string"
-                },
-                "proposal": {
-                  "type": "object"
-                },
-                "why": {
-                  "type": "string"
-                }
+                "expected_hash": {},
+                "proposal": {},
+                "why": {}
               },
               "required": [
                 "kind",
@@ -3389,23 +2933,11 @@
                     "relations"
                   ]
                 },
-                "expected_hash": {
-                  "type": "string"
-                },
-                "proposal": {
-                  "type": "object"
-                },
-                "why": {
-                  "type": "string"
-                },
-                "vocabulary_ref": {
-                  "type": "string",
-                  "description": "Vocabulary decision for a registry save."
-                },
-                "vocabulary_fingerprint": {
-                  "type": "string",
-                  "description": "Reviewed vocabulary fingerprint; grants no write."
-                }
+                "expected_hash": {},
+                "proposal": {},
+                "why": {},
+                "vocabulary_ref": {},
+                "vocabulary_fingerprint": {}
               },
               "required": [
                 "kind",
@@ -3427,23 +2959,11 @@
                   "type": "string",
                   "default": "contract"
                 },
-                "expected_hash": {
-                  "type": "string"
-                },
-                "proposal": {
-                  "type": "object"
-                },
-                "why": {
-                  "type": "string"
-                },
-                "vocabulary_ref": {
-                  "type": "string",
-                  "description": "Vocabulary decision for a registry save."
-                },
-                "vocabulary_fingerprint": {
-                  "type": "string",
-                  "description": "Reviewed vocabulary fingerprint; grants no write."
-                }
+                "expected_hash": {},
+                "proposal": {},
+                "why": {},
+                "vocabulary_ref": {},
+                "vocabulary_fingerprint": {}
               },
               "required": [
                 "kind",
@@ -3455,6 +2975,89 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "expected_hash": {
+              "type": "string"
+            },
+            "proposal": {
+              "type": "object"
+            },
+            "why": {
+              "type": "string"
+            },
+            "vocabulary_ref": {
+              "type": "string",
+              "description": "Vocabulary decision for a registry save."
+            },
+            "vocabulary_fingerprint": {
+              "type": "string",
+              "description": "Reviewed vocabulary fingerprint; grants no write."
+            },
+            "registry_scope": {
+              "type": "string",
+              "description": "Public instance token or canonical private Scope ID; grants no authority."
+            },
+            "name": {
+              "type": "string",
+              "description": "Saved workflow key."
+            },
+            "version": {
+              "description": "Kept version from `history`, for `restore`.",
+              "type": "string"
+            },
+            "project": {
+              "type": "string",
+              "description": "Project scope for inference."
+            },
+            "page_type": {
+              "type": "string",
+              "description": "Page-type scope for inference."
+            },
+            "strict": {
+              "description": "In validate mode, signal a failing outcome on findings.",
+              "type": "boolean",
+              "default": false
+            },
+            "compare_to": {
+              "type": "string",
+              "description": "In diff mode, compare to this saved contract."
+            },
+            "include_model_suggestions": {
+              "description": "Add response-only relation suggestions.",
+              "type": "boolean",
+              "default": false
+            },
+            "context": {
+              "additionalProperties": false,
+              "properties": {
+                "project": {
+                  "type": "string"
+                },
+                "domain": {
+                  "type": "string"
+                },
+                "activity": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "date_from": {
+              "type": "string"
+            },
+            "date_to": {
+              "type": "string"
+            },
+            "continuation": {
+              "type": "string"
+            },
+            "limit": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": "integer",
+              "default": 20
+            }
           }
         },
         "response_detail": {
@@ -3496,10 +3099,7 @@
                 "grant_id": {
                   "type": "string"
                 },
-                "authorization_session": {
-                  "type": "string",
-                  "description": "Session handle bound to the caller."
-                }
+                "authorization_session": {}
               },
               "required": [
                 "kind"
@@ -3539,10 +3139,7 @@
                   "const": "declare",
                   "type": "string"
                 },
-                "authorization_session": {
-                  "type": "string",
-                  "description": "Session handle bound to the caller."
-                },
+                "authorization_session": {},
                 "purpose": {
                   "type": "string",
                   "description": "Declared purpose when governance requires it."
@@ -3557,6 +3154,12 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "authorization_session": {
+              "type": "string",
+              "description": "Session handle bound to the caller."
+            }
           }
         },
         "response_detail": {
@@ -3595,18 +3198,8 @@
                   "description": "off/light/balanced/maximal; required by set, rejected by clear.",
                   "type": "string"
                 },
-                "expected_revision": {
-                  "description": "Returned revision; stale writes refuse.",
-                  "type": "string"
-                },
-                "context": {
-                  "enum": [
-                    "coding",
-                    "conversation"
-                  ],
-                  "type": "string",
-                  "description": "Override to set/clear; applied context is detected from the client."
-                }
+                "expected_revision": {},
+                "context": {}
               },
               "required": [
                 "kind",
@@ -3622,18 +3215,8 @@
                   "const": "clear",
                   "type": "string"
                 },
-                "expected_revision": {
-                  "description": "Returned revision; stale writes refuse.",
-                  "type": "string"
-                },
-                "context": {
-                  "description": "Override to set/clear; applied context is detected from the client.",
-                  "enum": [
-                    "coding",
-                    "conversation"
-                  ],
-                  "type": "string"
-                }
+                "expected_revision": {},
+                "context": {}
               },
               "required": [
                 "kind",
@@ -3645,6 +3228,20 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "expected_revision": {
+              "description": "Returned revision; stale writes refuse.",
+              "type": "string"
+            },
+            "context": {
+              "enum": [
+                "coding",
+                "conversation"
+              ],
+              "type": "string",
+              "description": "Override to set/clear; applied context is detected from the client."
+            }
           }
         },
         "response_detail": {
@@ -3679,29 +3276,9 @@
                   "const": "audit",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Audit category filter."
-                },
-                "detail": {
-                  "description": "Audit output detail.",
-                  "enum": [
-                    "actionable",
-                    "full"
-                  ],
-                  "type": "string",
-                  "default": "actionable"
-                },
-                "legacy_sample_limit": {
-                  "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
-                  "maximum": 50,
-                  "minimum": 0,
-                  "type": "integer",
-                  "default": 5
-                }
+                "categories": {},
+                "detail": {},
+                "legacy_sample_limit": {}
               },
               "required": [
                 "kind"
@@ -3715,10 +3292,7 @@
                   "const": "collections-store",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Planning or Records collection for structured-files."
-                }
+                "collection": {}
               },
               "required": [
                 "kind"
@@ -3732,43 +3306,15 @@
                   "const": "fix",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Audit category filter."
-                },
+                "categories": {},
                 "dry_run": {
                   "type": "boolean",
                   "description": "Report without writing. Default true for fix/backfill-ids, false for reconcile."
                 },
-                "rebuild_embeddings": {
-                  "description": "fix only.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "rebuild_graph": {
-                  "description": "reconcile only; quarantine unavailable derived graph lineage and rebuild it from Markdown.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "detail": {
-                  "description": "Audit output detail.",
-                  "enum": [
-                    "actionable",
-                    "full"
-                  ],
-                  "type": "string",
-                  "default": "actionable"
-                },
-                "legacy_sample_limit": {
-                  "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
-                  "maximum": 50,
-                  "minimum": 0,
-                  "type": "integer",
-                  "default": 5
-                }
+                "rebuild_embeddings": {},
+                "rebuild_graph": {},
+                "detail": {},
+                "legacy_sample_limit": {}
               },
               "required": [
                 "kind"
@@ -3807,43 +3353,15 @@
                   "const": "backfill-ids",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Audit category filter."
-                },
+                "categories": {},
                 "dry_run": {
                   "type": "boolean",
                   "description": "Report without writing. Default true for fix/backfill-ids, false for reconcile."
                 },
-                "rebuild_embeddings": {
-                  "description": "fix only.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "rebuild_graph": {
-                  "description": "reconcile only; quarantine unavailable derived graph lineage and rebuild it from Markdown.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "detail": {
-                  "description": "Audit output detail.",
-                  "enum": [
-                    "actionable",
-                    "full"
-                  ],
-                  "type": "string",
-                  "default": "actionable"
-                },
-                "legacy_sample_limit": {
-                  "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
-                  "maximum": 50,
-                  "minimum": 0,
-                  "type": "integer",
-                  "default": 5
-                }
+                "rebuild_embeddings": {},
+                "rebuild_graph": {},
+                "detail": {},
+                "legacy_sample_limit": {}
               },
               "required": [
                 "kind"
@@ -3882,13 +3400,7 @@
                   "const": "reconcile",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Audit category filter."
-                },
+                "categories": {},
                 "dry_run": {
                   "description": "Report without writing. Default true for fix/backfill-ids, false for reconcile.",
                   "enum": [
@@ -3896,32 +3408,10 @@
                   ],
                   "type": "boolean"
                 },
-                "rebuild_embeddings": {
-                  "description": "fix only.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "rebuild_graph": {
-                  "description": "reconcile only; quarantine unavailable derived graph lineage and rebuild it from Markdown.",
-                  "type": "boolean",
-                  "default": false
-                },
-                "detail": {
-                  "description": "Audit output detail.",
-                  "enum": [
-                    "actionable",
-                    "full"
-                  ],
-                  "type": "string",
-                  "default": "actionable"
-                },
-                "legacy_sample_limit": {
-                  "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
-                  "maximum": 50,
-                  "minimum": 0,
-                  "type": "integer",
-                  "default": 5
-                }
+                "rebuild_embeddings": {},
+                "rebuild_graph": {},
+                "detail": {},
+                "legacy_sample_limit": {}
               },
               "required": [
                 "kind",
@@ -3936,37 +3426,16 @@
                   "const": "structured-files",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Planning or Records collection for structured-files."
-                },
+                "collection": {},
                 "apply": {
                   "type": "boolean",
                   "description": "Omit to preview; true applies the reviewed plan."
                 },
-                "plan_id": {
-                  "type": "string",
-                  "description": "Preview identity required to apply."
-                },
-                "source_snapshot": {
-                  "type": "string",
-                  "description": "Preview snapshot required to apply structured-files."
-                },
-                "why": {
-                  "type": "string",
-                  "description": "Audit reason required to apply."
-                },
-                "exclude_groups": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Tag-variant groups to skip; part of plan_id."
-                },
-                "acknowledge_skipped": {
-                  "type": "boolean",
-                  "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
-                }
+                "plan_id": {},
+                "source_snapshot": {},
+                "why": {},
+                "exclude_groups": {},
+                "acknowledge_skipped": {}
               },
               "required": [
                 "kind"
@@ -4005,37 +3474,16 @@
                   "const": "tag-variants",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Planning or Records collection for structured-files."
-                },
+                "collection": {},
                 "apply": {
                   "type": "boolean",
                   "description": "Omit to preview; true applies the reviewed plan."
                 },
-                "plan_id": {
-                  "type": "string",
-                  "description": "Preview identity required to apply."
-                },
-                "source_snapshot": {
-                  "type": "string",
-                  "description": "Preview snapshot required to apply structured-files."
-                },
-                "why": {
-                  "type": "string",
-                  "description": "Audit reason required to apply."
-                },
-                "exclude_groups": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Tag-variant groups to skip; part of plan_id."
-                },
-                "acknowledge_skipped": {
-                  "type": "boolean",
-                  "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
-                }
+                "plan_id": {},
+                "source_snapshot": {},
+                "why": {},
+                "exclude_groups": {},
+                "acknowledge_skipped": {}
               },
               "required": [
                 "kind"
@@ -4074,37 +3522,16 @@
                   "const": "collections-store-adopt-local",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Planning or Records collection for structured-files."
-                },
+                "collection": {},
                 "apply": {
                   "type": "boolean",
                   "description": "Omit to preview; true applies the reviewed plan."
                 },
-                "plan_id": {
-                  "type": "string",
-                  "description": "Preview identity required to apply."
-                },
-                "source_snapshot": {
-                  "type": "string",
-                  "description": "Preview snapshot required to apply structured-files."
-                },
-                "why": {
-                  "type": "string",
-                  "description": "Audit reason required to apply."
-                },
-                "exclude_groups": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Tag-variant groups to skip; part of plan_id."
-                },
-                "acknowledge_skipped": {
-                  "type": "boolean",
-                  "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
-                }
+                "plan_id": {},
+                "source_snapshot": {},
+                "why": {},
+                "exclude_groups": {},
+                "acknowledge_skipped": {}
               },
               "required": [
                 "kind"
@@ -4143,37 +3570,16 @@
                   "const": "collections-store-export",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Planning or Records collection for structured-files."
-                },
+                "collection": {},
                 "apply": {
                   "type": "boolean",
                   "description": "Omit to preview; true applies the reviewed plan."
                 },
-                "plan_id": {
-                  "type": "string",
-                  "description": "Preview identity required to apply."
-                },
-                "source_snapshot": {
-                  "type": "string",
-                  "description": "Preview snapshot required to apply structured-files."
-                },
-                "why": {
-                  "type": "string",
-                  "description": "Audit reason required to apply."
-                },
-                "exclude_groups": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Tag-variant groups to skip; part of plan_id."
-                },
-                "acknowledge_skipped": {
-                  "type": "boolean",
-                  "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
-                }
+                "plan_id": {},
+                "source_snapshot": {},
+                "why": {},
+                "exclude_groups": {},
+                "acknowledge_skipped": {}
               },
               "required": [
                 "kind"
@@ -4261,10 +3667,7 @@
                   ],
                   "type": "string"
                 },
-                "run_id": {
-                  "type": "string",
-                  "description": "Curation run identity."
-                }
+                "run_id": {}
               },
               "required": [
                 "kind"
@@ -4285,10 +3688,7 @@
                   ],
                   "type": "string"
                 },
-                "run_id": {
-                  "type": "string",
-                  "description": "Curation run identity."
-                }
+                "run_id": {}
               },
               "required": [
                 "kind"
@@ -4298,6 +3698,72 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "categories": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "description": "Audit category filter."
+            },
+            "detail": {
+              "description": "Audit output detail.",
+              "enum": [
+                "actionable",
+                "full"
+              ],
+              "type": "string",
+              "default": "actionable"
+            },
+            "legacy_sample_limit": {
+              "description": "Audit legacy-backlog sample count; integer from 0 to 50.",
+              "maximum": 50,
+              "minimum": 0,
+              "type": "integer",
+              "default": 5
+            },
+            "collection": {
+              "type": "string",
+              "description": "Planning or Records collection for structured-files."
+            },
+            "rebuild_embeddings": {
+              "description": "fix only.",
+              "type": "boolean",
+              "default": false
+            },
+            "rebuild_graph": {
+              "description": "reconcile only; quarantine unavailable derived graph lineage and rebuild it from Markdown.",
+              "type": "boolean",
+              "default": false
+            },
+            "plan_id": {
+              "type": "string",
+              "description": "Preview identity required to apply."
+            },
+            "source_snapshot": {
+              "type": "string",
+              "description": "Preview snapshot required to apply structured-files."
+            },
+            "why": {
+              "type": "string",
+              "description": "Audit reason required to apply."
+            },
+            "exclude_groups": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "description": "Tag-variant groups to skip; part of plan_id."
+            },
+            "acknowledge_skipped": {
+              "type": "boolean",
+              "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
+            },
+            "run_id": {
+              "type": "string",
+              "description": "Curation run identity."
+            }
           }
         }
       },
@@ -5033,13 +4499,8 @@
                   ],
                   "type": "string"
                 },
-                "ttl_seconds": {
-                  "type": "integer"
-                },
-                "authorization_session": {
-                  "type": "string",
-                  "description": "Session handle bound to the caller."
-                }
+                "ttl_seconds": {},
+                "authorization_session": {}
               },
               "required": [
                 "kind"
@@ -5061,13 +4522,8 @@
                   ],
                   "type": "string"
                 },
-                "ttl_seconds": {
-                  "type": "integer"
-                },
-                "authorization_session": {
-                  "type": "string",
-                  "description": "Session handle bound to the caller."
-                }
+                "ttl_seconds": {},
+                "authorization_session": {}
               },
               "required": [
                 "kind"
@@ -5089,13 +4545,8 @@
                   ],
                   "type": "string"
                 },
-                "ttl_seconds": {
-                  "type": "integer"
-                },
-                "authorization_session": {
-                  "type": "string",
-                  "description": "Session handle bound to the caller."
-                }
+                "ttl_seconds": {},
+                "authorization_session": {}
               },
               "required": [
                 "kind"
@@ -5117,13 +4568,8 @@
                   ],
                   "type": "string"
                 },
-                "ttl_seconds": {
-                  "type": "integer"
-                },
-                "authorization_session": {
-                  "type": "string",
-                  "description": "Session handle bound to the caller."
-                }
+                "ttl_seconds": {},
+                "authorization_session": {}
               },
               "required": [
                 "kind"
@@ -5134,6 +4580,15 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "ttl_seconds": {
+              "type": "integer"
+            },
+            "authorization_session": {
+              "type": "string",
+              "description": "Session handle bound to the caller."
+            }
           }
         },
         "response_detail": {
@@ -5525,10 +4980,7 @@
                   "const": "status",
                   "type": "string"
                 },
-                "run_id": {
-                  "type": "string",
-                  "description": "From `start`; required except for `start` and run-listing `status`."
-                }
+                "run_id": {}
               },
               "required": [
                 "kind"
@@ -5542,10 +4994,7 @@
                   "const": "work-item",
                   "type": "string"
                 },
-                "run_id": {
-                  "description": "From `start`; required except for `start` and run-listing `status`.",
-                  "type": "string"
-                },
+                "run_id": {},
                 "sources": {
                   "items": {
                     "type": "string"
@@ -5571,6 +5020,12 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "description": "From `start`; required except for `start` and run-listing `status`."
+            }
           }
         }
       },
@@ -5595,21 +5050,10 @@
                   "const": "suggest-links",
                   "type": "string"
                 },
-                "path": {
-                  "type": "string"
-                },
-                "draft_title": {
-                  "type": "string"
-                },
-                "draft_body": {
-                  "type": "string"
-                },
-                "limit": {
-                  "maximum": 64,
-                  "minimum": 1,
-                  "type": "integer",
-                  "default": 8
-                },
+                "path": {},
+                "draft_title": {},
+                "draft_body": {},
+                "limit": {},
                 "scope": {
                   "type": "string",
                   "default": "kb"
@@ -5627,21 +5071,10 @@
                   "const": "suggest-relations",
                   "type": "string"
                 },
-                "path": {
-                  "type": "string"
-                },
-                "draft_title": {
-                  "type": "string"
-                },
-                "draft_body": {
-                  "type": "string"
-                },
-                "limit": {
-                  "maximum": 64,
-                  "minimum": 1,
-                  "type": "integer",
-                  "default": 8
-                },
+                "path": {},
+                "draft_title": {},
+                "draft_body": {},
+                "limit": {},
                 "include_model_suggestions": {
                   "type": "boolean",
                   "default": false
@@ -5659,68 +5092,20 @@
                   "const": "context",
                   "type": "string"
                 },
-                "path": {
-                  "type": "string"
-                },
-                "query": {
-                  "type": "string"
-                },
-                "unit_ref": {
-                  "type": "string"
-                },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "kinds": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "limit": {
-                  "maximum": 64,
-                  "minimum": 1,
-                  "type": "integer",
-                  "default": 8
-                },
-                "depth": {
-                  "type": "integer",
-                  "default": 1
-                },
-                "relation_types": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "node_types": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "max_nodes": {
-                  "type": "integer",
-                  "default": 40
-                },
-                "max_edges": {
-                  "type": "integer",
-                  "default": 80
-                },
-                "traversal_profile": {
-                  "type": "string"
-                },
-                "max_body_chars": {
-                  "type": "integer",
-                  "default": 3000
-                },
-                "entity_family": {
-                  "type": "string",
-                  "description": "Registry family: resolve-entity matches its leaf types; context and graph-context keep only its entity neighbours."
-                }
+                "path": {},
+                "query": {},
+                "unit_ref": {},
+                "categories": {},
+                "kinds": {},
+                "limit": {},
+                "depth": {},
+                "relation_types": {},
+                "node_types": {},
+                "max_nodes": {},
+                "max_edges": {},
+                "traversal_profile": {},
+                "max_body_chars": {},
+                "entity_family": {}
               },
               "required": [
                 "kind"
@@ -5734,68 +5119,20 @@
                   "const": "graph-context",
                   "type": "string"
                 },
-                "path": {
-                  "type": "string"
-                },
-                "query": {
-                  "type": "string"
-                },
-                "unit_ref": {
-                  "type": "string"
-                },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "kinds": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "limit": {
-                  "maximum": 64,
-                  "minimum": 1,
-                  "type": "integer",
-                  "default": 8
-                },
-                "depth": {
-                  "type": "integer",
-                  "default": 1
-                },
-                "relation_types": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "node_types": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "max_nodes": {
-                  "type": "integer",
-                  "default": 40
-                },
-                "max_edges": {
-                  "type": "integer",
-                  "default": 80
-                },
-                "traversal_profile": {
-                  "type": "string"
-                },
-                "max_body_chars": {
-                  "type": "integer",
-                  "default": 3000
-                },
-                "entity_family": {
-                  "type": "string",
-                  "description": "Registry family: resolve-entity matches its leaf types; context and graph-context keep only its entity neighbours."
-                }
+                "path": {},
+                "query": {},
+                "unit_ref": {},
+                "categories": {},
+                "kinds": {},
+                "limit": {},
+                "depth": {},
+                "relation_types": {},
+                "node_types": {},
+                "max_nodes": {},
+                "max_edges": {},
+                "traversal_profile": {},
+                "max_body_chars": {},
+                "entity_family": {}
               },
               "required": [
                 "kind"
@@ -5809,12 +5146,8 @@
                   "const": "inbound-links",
                   "type": "string"
                 },
-                "path": {
-                  "type": "string"
-                },
-                "target": {
-                  "type": "string"
-                }
+                "path": {},
+                "target": {}
               },
               "required": [
                 "kind"
@@ -5828,12 +5161,7 @@
                   "const": "resolve-entity",
                   "type": "string"
                 },
-                "limit": {
-                  "maximum": 64,
-                  "minimum": 1,
-                  "type": "integer",
-                  "default": 8
-                },
+                "limit": {},
                 "entity_type": {
                   "type": "string",
                   "description": "Type id from the active entity registry, incl. `_Schema/entity-types.yaml`."
@@ -5841,10 +5169,7 @@
                 "name": {
                   "type": "string"
                 },
-                "entity_family": {
-                  "type": "string",
-                  "description": "Registry family: resolve-entity matches its leaf types; context and graph-context keep only its entity neighbours."
-                }
+                "entity_family": {}
               },
               "required": [
                 "kind",
@@ -5859,27 +5184,16 @@
                   "const": "resolve-relation",
                   "type": "string"
                 },
-                "path": {
-                  "type": "string"
-                },
-                "target": {
-                  "type": "string"
-                },
-                "query": {
-                  "type": "string"
-                },
+                "path": {},
+                "target": {},
+                "query": {},
                 "requested_relation": {
                   "type": "string"
                 },
                 "continuation": {
                   "type": "string"
                 },
-                "limit": {
-                  "maximum": 64,
-                  "minimum": 1,
-                  "type": "integer",
-                  "default": 8
-                }
+                "limit": {}
               },
               "required": [
                 "kind"
@@ -5889,6 +5203,79 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "draft_title": {
+              "type": "string"
+            },
+            "draft_body": {
+              "type": "string"
+            },
+            "limit": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": "integer",
+              "default": 8
+            },
+            "query": {
+              "type": "string"
+            },
+            "unit_ref": {
+              "type": "string"
+            },
+            "categories": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kinds": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "depth": {
+              "type": "integer",
+              "default": 1
+            },
+            "relation_types": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "node_types": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "max_nodes": {
+              "type": "integer",
+              "default": 40
+            },
+            "max_edges": {
+              "type": "integer",
+              "default": 80
+            },
+            "traversal_profile": {
+              "type": "string"
+            },
+            "max_body_chars": {
+              "type": "integer",
+              "default": 3000
+            },
+            "entity_family": {
+              "type": "string",
+              "description": "Registry family: resolve-entity matches its leaf types; context and graph-context keep only its entity neighbours."
+            },
+            "target": {
+              "type": "string"
+            }
           }
         }
       },
@@ -5913,10 +5300,7 @@
                   "const": "inspect",
                   "type": "string"
                 },
-                "episode": {
-                  "type": "string",
-                  "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
-                },
+                "episode": {},
                 "subject": {
                   "type": "string",
                   "description": "One line, max 120 characters."
@@ -5934,24 +5318,10 @@
                   "const": "candidates",
                   "type": "string"
                 },
-                "episode": {
-                  "type": "string",
-                  "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
-                },
-                "order": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "max_leaves": {
-                  "type": "integer",
-                  "description": "For `resume`: 1 to 16."
-                },
-                "postcommit": {
-                  "type": "boolean",
-                  "description": "For `resume`: true attests review instead of executing."
-                }
+                "episode": {},
+                "order": {},
+                "max_leaves": {},
+                "postcommit": {}
               },
               "required": [
                 "kind"
@@ -5965,24 +5335,10 @@
                   "const": "coverage",
                   "type": "string"
                 },
-                "episode": {
-                  "type": "string",
-                  "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
-                },
-                "order": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "max_leaves": {
-                  "type": "integer",
-                  "description": "For `resume`: 1 to 16."
-                },
-                "postcommit": {
-                  "type": "boolean",
-                  "description": "For `resume`: true attests review instead of executing."
-                }
+                "episode": {},
+                "order": {},
+                "max_leaves": {},
+                "postcommit": {}
               },
               "required": [
                 "kind"
@@ -5992,6 +5348,26 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "episode": {
+              "type": "string",
+              "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
+            },
+            "order": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "max_leaves": {
+              "type": "integer",
+              "description": "For `resume`: 1 to 16."
+            },
+            "postcommit": {
+              "type": "boolean",
+              "description": "For `resume`: true attests review instead of executing."
+            }
           }
         }
       },
@@ -6030,14 +5406,8 @@
                   "const": "explain",
                   "type": "string"
                 },
-                "audience": {
-                  "type": "string",
-                  "description": "Standing grant audience, or the audience explain/simulate evaluates; non-owners may inspect only their own."
-                },
-                "purpose": {
-                  "type": "string",
-                  "description": "Declared purpose when governance requires it."
-                },
+                "audience": {},
+                "purpose": {},
                 "path": {
                   "type": "string",
                   "description": "Item path for explain."
@@ -6056,14 +5426,8 @@
                   "const": "simulate",
                   "type": "string"
                 },
-                "audience": {
-                  "type": "string",
-                  "description": "Standing grant audience, or the audience explain/simulate evaluates; non-owners may inspect only their own."
-                },
-                "purpose": {
-                  "type": "string",
-                  "description": "Declared purpose when governance requires it."
-                },
+                "audience": {},
+                "purpose": {},
                 "paths": {
                   "items": {
                     "type": "string"
@@ -6085,10 +5449,7 @@
                   "const": "vocabulary-request",
                   "type": "string"
                 },
-                "vocabulary_request_id": {
-                  "type": "string",
-                  "description": "Pending additive request id (inspect via vocabulary-request)."
-                }
+                "vocabulary_request_id": {}
               },
               "required": [
                 "kind"
@@ -6103,10 +5464,7 @@
                   "const": "vocabulary-status",
                   "type": "string"
                 },
-                "vocabulary_request_id": {
-                  "type": "string",
-                  "description": "Pending additive request id (inspect via vocabulary-request)."
-                }
+                "vocabulary_request_id": {}
               },
               "required": [
                 "kind"
@@ -6117,6 +5475,20 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "audience": {
+              "type": "string",
+              "description": "Standing grant audience, or the audience explain/simulate evaluates; non-owners may inspect only their own."
+            },
+            "purpose": {
+              "type": "string",
+              "description": "Declared purpose when governance requires it."
+            },
+            "vocabulary_request_id": {
+              "type": "string",
+              "description": "Pending additive request id (inspect via vocabulary-request)."
+            }
           }
         }
       },
@@ -6418,10 +5790,7 @@
                   "const": "inspect",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list."
-                }
+                "collection": {}
               },
               "required": [
                 "kind"
@@ -6435,10 +5804,7 @@
                   "const": "validate",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list."
-                },
+                "collection": {},
                 "manifest_path": {
                   "type": "string"
                 },
@@ -6459,10 +5825,7 @@
                   "const": "query",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list.",
-                  "type": "string"
-                },
+                "collection": {},
                 "view": {
                   "type": "string"
                 },
@@ -6515,9 +5878,7 @@
                 "descending": {
                   "type": "boolean"
                 },
-                "limit": {
-                  "type": "integer"
-                },
+                "limit": {},
                 "aggregate": {
                   "type": "string"
                 },
@@ -6552,9 +5913,7 @@
                 "hierarchy_limit": {
                   "type": "integer"
                 },
-                "continuation": {
-                  "type": "string"
-                },
+                "continuation": {},
                 "include_agent_history": {
                   "type": "boolean"
                 },
@@ -6580,16 +5939,9 @@
                   "const": "history",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list.",
-                  "type": "string"
-                },
-                "limit": {
-                  "type": "integer"
-                },
-                "continuation": {
-                  "type": "string"
-                },
+                "collection": {},
+                "limit": {},
+                "continuation": {},
                 "plan_id": {
                   "description": "row plan_id.",
                   "type": "string"
@@ -6605,6 +5957,18 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "collection": {
+              "type": "string",
+              "description": "Vault-relative manifest path, collection UUID or memory reference. Omit to list."
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "continuation": {
+              "type": "string"
+            }
           }
         }
       },
@@ -6642,10 +6006,7 @@
                   "const": "inspect",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create."
-                }
+                "collection": {}
               },
               "required": [
                 "kind"
@@ -6659,10 +6020,7 @@
                   "const": "validate",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create."
-                },
+                "collection": {},
                 "manifest_path": {
                   "type": "string"
                 },
@@ -6687,10 +6045,7 @@
                   "const": "query",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
+                "collection": {},
                 "view": {
                   "type": "string"
                 },
@@ -6743,9 +6098,7 @@
                 "descending": {
                   "type": "boolean"
                 },
-                "limit": {
-                  "type": "integer"
-                },
+                "limit": {},
                 "aggregate": {
                   "type": "string"
                 },
@@ -6765,9 +6118,7 @@
                   "type": "string",
                   "description": "Exact declared child container."
                 },
-                "continuation": {
-                  "type": "string"
-                },
+                "continuation": {},
                 "include_agent_history": {
                   "type": "boolean"
                 },
@@ -6797,16 +6148,9 @@
                   "const": "history",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
-                "limit": {
-                  "type": "integer"
-                },
-                "continuation": {
-                  "type": "string"
-                },
+                "collection": {},
+                "limit": {},
+                "continuation": {},
                 "item_key": {
                   "description": "Update UUID; append uses the natural key.",
                   "type": "string"
@@ -6826,10 +6170,7 @@
                   "const": "import",
                   "type": "string"
                 },
-                "collection": {
-                  "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create.",
-                  "type": "string"
-                },
+                "collection": {},
                 "import_request": {
                   "type": "object",
                   "properties": {
@@ -6856,6 +6197,18 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "collection": {
+              "type": "string",
+              "description": "Vault-relative manifest path, collection UUID or memory reference. Omit for inventory or new-manifest validate/create."
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "continuation": {
+              "type": "string"
+            }
           }
         }
       },
@@ -6880,22 +6233,9 @@
                   "const": "attention",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                }
+                "categories": {},
+                "limit": {},
+                "state": {}
               },
               "required": [
                 "kind"
@@ -6909,22 +6249,9 @@
                   "const": "activation",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                }
+                "categories": {},
+                "limit": {},
+                "state": {}
               },
               "required": [
                 "kind"
@@ -6938,10 +6265,7 @@
                   "const": "item",
                   "type": "string"
                 },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
+                "limit": {},
                 "ref": {
                   "description": "`exomem://review/<id>` for item mode (upkeep refs revalidate one item) or `exomem://write-advisory-result/<id>` for write-advisory-result; for a vocabulary relation question, a current relation-queue candidate ref alongside its source path.",
                   "type": "string"
@@ -6960,13 +6284,7 @@
                   "const": "audit",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
+                "categories": {},
                 "detail": {
                   "description": "Audit output detail.",
                   "enum": [
@@ -7009,10 +6327,7 @@
                   "const": "provenance",
                   "type": "string"
                 },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
+                "limit": {},
                 "tag": {
                   "type": "string",
                   "description": "Provenance tag shorthand."
@@ -7042,10 +6357,7 @@
                   "const": "evolution",
                   "type": "string"
                 },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
+                "limit": {},
                 "query": {
                   "description": "Topic for evolution when `path` is absent; in vocabulary mode, the meaning question to record.",
                   "type": "string",
@@ -7093,22 +6405,9 @@
                   "const": "stale",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                }
+                "categories": {},
+                "limit": {},
+                "state": {}
               },
               "required": [
                 "kind"
@@ -7122,22 +6421,9 @@
                   "const": "contradiction",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                }
+                "categories": {},
+                "limit": {},
+                "state": {}
               },
               "required": [
                 "kind"
@@ -7151,22 +6437,9 @@
                   "const": "unprocessed-sources",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                }
+                "categories": {},
+                "limit": {},
+                "state": {}
               },
               "required": [
                 "kind"
@@ -7180,22 +6453,9 @@
                   "const": "relation-debt",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                }
+                "categories": {},
+                "limit": {},
+                "state": {}
               },
               "required": [
                 "kind"
@@ -7209,22 +6469,9 @@
                   "const": "relation-queue",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                }
+                "categories": {},
+                "limit": {},
+                "state": {}
               },
               "required": [
                 "kind"
@@ -7238,15 +6485,8 @@
                   "const": "adoption",
                   "type": "string"
                 },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                },
+                "limit": {},
+                "state": {},
                 "ref": {
                   "type": "string",
                   "description": "`exomem://review/<id>` for item mode (upkeep refs revalidate one item) or `exomem://write-advisory-result/<id>` for write-advisory-result; for a vocabulary relation question, a current relation-queue candidate ref alongside its source path."
@@ -7264,17 +6504,8 @@
                   "const": "upkeep",
                   "type": "string"
                 },
-                "categories": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Category filter (attention, activation, audit) or upkeep family."
-                },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                }
+                "categories": {},
+                "limit": {}
               },
               "required": [
                 "kind"
@@ -7288,10 +6519,7 @@
                   "const": "plan-progress",
                   "type": "string"
                 },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
+                "limit": {},
                 "path": {
                   "type": "string",
                   "description": "Provenance scan path; for evolution it selects the path route (`query` unused; an unresolvable path raises); for vocabulary, the page the question concerns."
@@ -7327,10 +6555,7 @@
                   "const": "vocabulary",
                   "type": "string"
                 },
-                "limit": {
-                  "type": "integer",
-                  "description": "Result cap; vocabulary defaults to 4, other modes 25."
-                },
+                "limit": {},
                 "continuation": {
                   "type": "string"
                 },
@@ -7348,11 +6573,7 @@
                   ],
                   "type": "null"
                 },
-                "state": {
-                  "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
-                  "type": "string",
-                  "default": "open"
-                },
+                "state": {},
                 "family": {
                   "description": "Vocabulary family for a meaning question; with `mode=\"vocabulary\"` requires `path` and `query`; an edge needs `relation-type/v1` and the candidate `ref`. Creates only a review consideration.",
                   "enum": [
@@ -7425,6 +6646,24 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "categories": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "description": "Category filter (attention, activation, audit) or upkeep family."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Result cap; vocabulary defaults to 4, other modes 25."
+            },
+            "state": {
+              "description": "open (default), all, snoozed or dismissed for attention/activation; vocabulary takes open or all.",
+              "type": "string",
+              "default": "open"
+            }
           }
         }
       },
@@ -7476,19 +6715,9 @@
                         "sync-providers"
                       ]
                     },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    },
-                    "registry_scope": {
-                      "type": "string",
-                      "description": "Public instance token or canonical private Scope ID; grants no authority."
-                    }
+                    "continuation": {},
+                    "limit": {},
+                    "registry_scope": {}
                   },
                   "required": [
                     "kind",
@@ -7503,10 +6732,7 @@
                       "const": "inspect",
                       "type": "string"
                     },
-                    "name": {
-                      "description": "Saved workflow key.",
-                      "type": "string"
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -7529,10 +6755,7 @@
                       "const": "inspect",
                       "type": "string"
                     },
-                    "name": {
-                      "type": "string",
-                      "description": "Saved workflow key."
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -7571,13 +6794,8 @@
                     "sync-providers"
                   ]
                 },
-                "proposal": {
-                  "type": "object"
-                },
-                "registry_scope": {
-                  "type": "string",
-                  "description": "Public instance token or canonical private Scope ID; grants no authority."
-                }
+                "proposal": {},
+                "registry_scope": {}
               },
               "required": [
                 "kind",
@@ -7620,10 +6838,7 @@
                         "sync-providers"
                       ]
                     },
-                    "registry_scope": {
-                      "type": "string",
-                      "description": "Public instance token or canonical private Scope ID; grants no authority."
-                    }
+                    "registry_scope": {}
                   },
                   "required": [
                     "kind",
@@ -7674,10 +6889,7 @@
                       "const": "infer",
                       "type": "string"
                     },
-                    "name": {
-                      "description": "Saved workflow key.",
-                      "type": "string"
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -7685,14 +6897,8 @@
                         "contract"
                       ]
                     },
-                    "project": {
-                      "type": "string",
-                      "description": "Project scope for inference."
-                    },
-                    "page_type": {
-                      "type": "string",
-                      "description": "Page-type scope for inference."
-                    },
+                    "project": {},
+                    "page_type": {},
                     "save": {
                       "description": "Legacy inference flag; true is refused for workflow contracts.",
                       "type": "boolean",
@@ -7700,59 +6906,17 @@
                         false
                       ]
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "strict": {
-                      "description": "In validate mode, signal a failing outcome on findings.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "compare_to": {
-                      "type": "string",
-                      "description": "In diff mode, compare to this saved contract."
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "include_model_suggestions": {
-                      "description": "Add response-only relation suggestions.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "context": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "project": {
-                          "type": "string"
-                        },
-                        "domain": {
-                          "type": "string"
-                        },
-                        "activity": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "date_from": {
-                      "type": "string"
-                    },
-                    "date_to": {
-                      "type": "string"
-                    },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    }
+                    "expected_hash": {},
+                    "strict": {},
+                    "compare_to": {},
+                    "proposal": {},
+                    "why": {},
+                    "include_model_suggestions": {},
+                    "context": {},
+                    "date_from": {},
+                    "date_to": {},
+                    "continuation": {},
+                    "limit": {}
                   },
                   "required": [
                     "kind",
@@ -7767,81 +6931,30 @@
                       "const": "infer",
                       "type": "string"
                     },
-                    "name": {
-                      "type": "string",
-                      "description": "Saved workflow key."
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
                       "default": "contract"
                     },
-                    "project": {
-                      "type": "string",
-                      "description": "Project scope for inference."
-                    },
-                    "page_type": {
-                      "type": "string",
-                      "description": "Page-type scope for inference."
-                    },
+                    "project": {},
+                    "page_type": {},
                     "save": {
                       "description": "Legacy inference flag; true is refused for workflow contracts.",
                       "type": "boolean",
                       "default": false
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "strict": {
-                      "description": "In validate mode, signal a failing outcome on findings.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "compare_to": {
-                      "type": "string",
-                      "description": "In diff mode, compare to this saved contract."
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "include_model_suggestions": {
-                      "description": "Add response-only relation suggestions.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "context": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "project": {
-                          "type": "string"
-                        },
-                        "domain": {
-                          "type": "string"
-                        },
-                        "activity": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "date_from": {
-                      "type": "string"
-                    },
-                    "date_to": {
-                      "type": "string"
-                    },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    }
+                    "expected_hash": {},
+                    "strict": {},
+                    "compare_to": {},
+                    "proposal": {},
+                    "why": {},
+                    "include_model_suggestions": {},
+                    "context": {},
+                    "date_from": {},
+                    "date_to": {},
+                    "continuation": {},
+                    "limit": {}
                   },
                   "required": [
                     "kind"
@@ -7928,10 +7041,7 @@
                       "const": "validate",
                       "type": "string"
                     },
-                    "name": {
-                      "description": "Saved workflow key.",
-                      "type": "string"
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -7939,72 +7049,24 @@
                         "contract"
                       ]
                     },
-                    "project": {
-                      "type": "string",
-                      "description": "Project scope for inference."
-                    },
-                    "page_type": {
-                      "type": "string",
-                      "description": "Page-type scope for inference."
-                    },
+                    "project": {},
+                    "page_type": {},
                     "save": {
                       "description": "Legacy inference flag; true is refused for workflow contracts.",
                       "type": "boolean",
                       "default": false
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "strict": {
-                      "description": "In validate mode, signal a failing outcome on findings.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "compare_to": {
-                      "type": "string",
-                      "description": "In diff mode, compare to this saved contract."
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "include_model_suggestions": {
-                      "description": "Add response-only relation suggestions.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "context": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "project": {
-                          "type": "string"
-                        },
-                        "domain": {
-                          "type": "string"
-                        },
-                        "activity": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "date_from": {
-                      "type": "string"
-                    },
-                    "date_to": {
-                      "type": "string"
-                    },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    }
+                    "expected_hash": {},
+                    "strict": {},
+                    "compare_to": {},
+                    "proposal": {},
+                    "why": {},
+                    "include_model_suggestions": {},
+                    "context": {},
+                    "date_from": {},
+                    "date_to": {},
+                    "continuation": {},
+                    "limit": {}
                   },
                   "required": [
                     "kind",
@@ -8019,10 +7081,7 @@
                       "const": "validate",
                       "type": "string"
                     },
-                    "name": {
-                      "type": "string",
-                      "description": "Saved workflow key."
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -8032,72 +7091,24 @@
                         "traversal-profiles"
                       ]
                     },
-                    "project": {
-                      "type": "string",
-                      "description": "Project scope for inference."
-                    },
-                    "page_type": {
-                      "type": "string",
-                      "description": "Page-type scope for inference."
-                    },
+                    "project": {},
+                    "page_type": {},
                     "save": {
                       "description": "Legacy inference flag; true is refused for workflow contracts.",
                       "type": "boolean",
                       "default": false
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "strict": {
-                      "description": "In validate mode, signal a failing outcome on findings.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "compare_to": {
-                      "type": "string",
-                      "description": "In diff mode, compare to this saved contract."
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "include_model_suggestions": {
-                      "description": "Add response-only relation suggestions.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "context": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "project": {
-                          "type": "string"
-                        },
-                        "domain": {
-                          "type": "string"
-                        },
-                        "activity": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "date_from": {
-                      "type": "string"
-                    },
-                    "date_to": {
-                      "type": "string"
-                    },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    }
+                    "expected_hash": {},
+                    "strict": {},
+                    "compare_to": {},
+                    "proposal": {},
+                    "why": {},
+                    "include_model_suggestions": {},
+                    "context": {},
+                    "date_from": {},
+                    "date_to": {},
+                    "continuation": {},
+                    "limit": {}
                   },
                   "required": [
                     "kind",
@@ -8112,10 +7123,7 @@
                       "const": "validate",
                       "type": "string"
                     },
-                    "name": {
-                      "type": "string",
-                      "description": "Saved workflow key."
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -8123,9 +7131,7 @@
                         "workflow-contracts"
                       ]
                     },
-                    "proposal": {
-                      "type": "object"
-                    }
+                    "proposal": {}
                   },
                   "required": [
                     "kind",
@@ -8148,9 +7154,7 @@
                         "activation-conventions"
                       ]
                     },
-                    "proposal": {
-                      "type": "object"
-                    }
+                    "proposal": {}
                   },
                   "required": [
                     "kind",
@@ -8179,10 +7183,7 @@
                       "const": "diff",
                       "type": "string"
                     },
-                    "name": {
-                      "description": "Saved workflow key.",
-                      "type": "string"
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -8190,72 +7191,24 @@
                         "contract"
                       ]
                     },
-                    "project": {
-                      "type": "string",
-                      "description": "Project scope for inference."
-                    },
-                    "page_type": {
-                      "type": "string",
-                      "description": "Page-type scope for inference."
-                    },
+                    "project": {},
+                    "page_type": {},
                     "save": {
                       "description": "Legacy inference flag; true is refused for workflow contracts.",
                       "type": "boolean",
                       "default": false
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "strict": {
-                      "description": "In validate mode, signal a failing outcome on findings.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "compare_to": {
-                      "type": "string",
-                      "description": "In diff mode, compare to this saved contract."
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "include_model_suggestions": {
-                      "description": "Add response-only relation suggestions.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "context": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "project": {
-                          "type": "string"
-                        },
-                        "domain": {
-                          "type": "string"
-                        },
-                        "activity": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "date_from": {
-                      "type": "string"
-                    },
-                    "date_to": {
-                      "type": "string"
-                    },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    }
+                    "expected_hash": {},
+                    "strict": {},
+                    "compare_to": {},
+                    "proposal": {},
+                    "why": {},
+                    "include_model_suggestions": {},
+                    "context": {},
+                    "date_from": {},
+                    "date_to": {},
+                    "continuation": {},
+                    "limit": {}
                   },
                   "required": [
                     "kind",
@@ -8270,10 +7223,7 @@
                       "const": "diff",
                       "type": "string"
                     },
-                    "name": {
-                      "type": "string",
-                      "description": "Saved workflow key."
-                    },
+                    "name": {},
                     "subject": {
                       "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                       "type": "string",
@@ -8283,72 +7233,24 @@
                         "traversal-profiles"
                       ]
                     },
-                    "project": {
-                      "type": "string",
-                      "description": "Project scope for inference."
-                    },
-                    "page_type": {
-                      "type": "string",
-                      "description": "Page-type scope for inference."
-                    },
+                    "project": {},
+                    "page_type": {},
                     "save": {
                       "description": "Legacy inference flag; true is refused for workflow contracts.",
                       "type": "boolean",
                       "default": false
                     },
-                    "expected_hash": {
-                      "type": "string"
-                    },
-                    "strict": {
-                      "description": "In validate mode, signal a failing outcome on findings.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "compare_to": {
-                      "type": "string",
-                      "description": "In diff mode, compare to this saved contract."
-                    },
-                    "proposal": {
-                      "type": "object"
-                    },
-                    "why": {
-                      "type": "string"
-                    },
-                    "include_model_suggestions": {
-                      "description": "Add response-only relation suggestions.",
-                      "type": "boolean",
-                      "default": false
-                    },
-                    "context": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "project": {
-                          "type": "string"
-                        },
-                        "domain": {
-                          "type": "string"
-                        },
-                        "activity": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "date_from": {
-                      "type": "string"
-                    },
-                    "date_to": {
-                      "type": "string"
-                    },
-                    "continuation": {
-                      "type": "string"
-                    },
-                    "limit": {
-                      "maximum": 64,
-                      "minimum": 1,
-                      "type": "integer",
-                      "default": 20
-                    }
+                    "expected_hash": {},
+                    "strict": {},
+                    "compare_to": {},
+                    "proposal": {},
+                    "why": {},
+                    "include_model_suggestions": {},
+                    "context": {},
+                    "date_from": {},
+                    "date_to": {},
+                    "continuation": {},
+                    "limit": {}
                   },
                   "required": [
                     "kind",
@@ -8371,9 +7273,7 @@
                         "activation-conventions"
                       ]
                     },
-                    "proposal": {
-                      "type": "object"
-                    }
+                    "proposal": {}
                   },
                   "required": [
                     "kind",
@@ -8411,10 +7311,7 @@
                   "const": "resolve",
                   "type": "string"
                 },
-                "name": {
-                  "type": "string",
-                  "description": "Saved workflow key."
-                },
+                "name": {},
                 "subject": {
                   "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
@@ -8422,24 +7319,8 @@
                     "workflow-contracts"
                   ]
                 },
-                "proposal": {
-                  "type": "object"
-                },
-                "context": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "project": {
-                      "type": "string"
-                    },
-                    "domain": {
-                      "type": "string"
-                    },
-                    "activity": {
-                      "type": "string"
-                    }
-                  },
-                  "type": "object"
-                }
+                "proposal": {},
+                "context": {}
               },
               "required": [
                 "kind",
@@ -8455,10 +7336,7 @@
                   "const": "preview",
                   "type": "string"
                 },
-                "name": {
-                  "type": "string",
-                  "description": "Saved workflow key."
-                },
+                "name": {},
                 "subject": {
                   "description": "contract; a vocabulary registry (categories, entity-types, relations, source-kinds, domains, statuses, planning-values or note-types); traversal-profiles, context-roles, activation-conventions, or workflow-contracts.",
                   "type": "string",
@@ -8466,9 +7344,7 @@
                     "workflow-contracts"
                   ]
                 },
-                "proposal": {
-                  "type": "object"
-                }
+                "proposal": {}
               },
               "required": [
                 "kind",
@@ -8491,15 +7367,8 @@
                     "entity-types"
                   ]
                 },
-                "continuation": {
-                  "type": "string"
-                },
-                "limit": {
-                  "maximum": 64,
-                  "minimum": 1,
-                  "type": "integer",
-                  "default": 20
-                },
+                "continuation": {},
+                "limit": {},
                 "query": {
                   "type": "string"
                 },
@@ -8527,24 +7396,11 @@
                     "relations"
                   ]
                 },
-                "proposal": {
-                  "type": "object"
-                },
-                "date_from": {
-                  "type": "string"
-                },
-                "date_to": {
-                  "type": "string"
-                },
-                "continuation": {
-                  "type": "string"
-                },
-                "limit": {
-                  "maximum": 64,
-                  "minimum": 1,
-                  "type": "integer",
-                  "default": 20
-                }
+                "proposal": {},
+                "date_from": {},
+                "date_to": {},
+                "continuation": {},
+                "limit": {}
               },
               "required": [
                 "kind",
@@ -8567,12 +7423,8 @@
                     "relations"
                   ]
                 },
-                "date_from": {
-                  "type": "string"
-                },
-                "date_to": {
-                  "type": "string"
-                },
+                "date_from": {},
+                "date_to": {},
                 "detail": {
                   "enum": [
                     "counts",
@@ -8591,6 +7443,77 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "continuation": {
+              "type": "string"
+            },
+            "limit": {
+              "maximum": 64,
+              "minimum": 1,
+              "type": "integer",
+              "default": 20
+            },
+            "registry_scope": {
+              "type": "string",
+              "description": "Public instance token or canonical private Scope ID; grants no authority."
+            },
+            "name": {
+              "description": "Saved workflow key.",
+              "type": "string"
+            },
+            "proposal": {
+              "type": "object"
+            },
+            "project": {
+              "type": "string",
+              "description": "Project scope for inference."
+            },
+            "page_type": {
+              "type": "string",
+              "description": "Page-type scope for inference."
+            },
+            "expected_hash": {
+              "type": "string"
+            },
+            "strict": {
+              "description": "In validate mode, signal a failing outcome on findings.",
+              "type": "boolean",
+              "default": false
+            },
+            "compare_to": {
+              "type": "string",
+              "description": "In diff mode, compare to this saved contract."
+            },
+            "why": {
+              "type": "string"
+            },
+            "include_model_suggestions": {
+              "description": "Add response-only relation suggestions.",
+              "type": "boolean",
+              "default": false
+            },
+            "context": {
+              "additionalProperties": false,
+              "properties": {
+                "project": {
+                  "type": "string"
+                },
+                "domain": {
+                  "type": "string"
+                },
+                "activity": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "date_from": {
+              "type": "string"
+            },
+            "date_to": {
+              "type": "string"
+            }
           }
         }
       },
@@ -8724,10 +7647,7 @@
                   "const": "record",
                   "type": "string"
                 },
-                "episode": {
-                  "type": "string",
-                  "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
-                },
+                "episode": {},
                 "subject": {
                   "type": "string",
                   "description": "One line, max 120 characters."
@@ -8787,14 +7707,8 @@
                   "const": "prepare",
                   "type": "string"
                 },
-                "episode": {
-                  "type": "string",
-                  "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
-                },
-                "candidate": {
-                  "type": "string",
-                  "description": "Your stable key for one change."
-                },
+                "episode": {},
+                "candidate": {},
                 "proposal": {
                   "additionalProperties": false,
                   "properties": {
@@ -8901,24 +7815,10 @@
                   ],
                   "type": "object"
                 },
-                "input_revision": {
-                  "type": "integer",
-                  "description": "For `resume`: the revision your coverage covered."
-                },
-                "journal_digest": {
-                  "type": "string",
-                  "description": "For `resume`: from your last candidates/prepare/ disposition result; stale refuses with EPISODE_REVISION_CONFLICT."
-                },
-                "order": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "max_leaves": {
-                  "type": "integer",
-                  "description": "For `resume`: 1 to 16."
-                }
+                "input_revision": {},
+                "journal_digest": {},
+                "order": {},
+                "max_leaves": {}
               },
               "required": [
                 "kind"
@@ -8932,14 +7832,8 @@
                   "const": "disposition",
                   "type": "string"
                 },
-                "episode": {
-                  "type": "string",
-                  "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
-                },
-                "candidate": {
-                  "type": "string",
-                  "description": "Your stable key for one change."
-                },
+                "episode": {},
+                "candidate": {},
                 "disposition": {
                   "enum": [
                     "routed",
@@ -8954,14 +7848,8 @@
                 "reason": {
                   "type": "string"
                 },
-                "input_revision": {
-                  "type": "integer",
-                  "description": "For `resume`: the revision your coverage covered."
-                },
-                "journal_digest": {
-                  "type": "string",
-                  "description": "For `resume`: from your last candidates/prepare/ disposition result; stale refuses with EPISODE_REVISION_CONFLICT."
-                }
+                "input_revision": {},
+                "journal_digest": {}
               },
               "required": [
                 "kind"
@@ -8975,32 +7863,12 @@
                   "const": "resume",
                   "type": "string"
                 },
-                "episode": {
-                  "type": "string",
-                  "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
-                },
-                "candidate": {
-                  "type": "string",
-                  "description": "Your stable key for one change."
-                },
-                "input_revision": {
-                  "type": "integer",
-                  "description": "For `resume`: the revision your coverage covered."
-                },
-                "journal_digest": {
-                  "type": "string",
-                  "description": "For `resume`: from your last candidates/prepare/ disposition result; stale refuses with EPISODE_REVISION_CONFLICT."
-                },
-                "order": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "max_leaves": {
-                  "type": "integer",
-                  "description": "For `resume`: 1 to 16."
-                },
+                "episode": {},
+                "candidate": {},
+                "input_revision": {},
+                "journal_digest": {},
+                "order": {},
+                "max_leaves": {},
                 "postcommit": {
                   "type": "boolean",
                   "description": "For `resume`: true attests review instead of executing."
@@ -9014,6 +7882,34 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "episode": {
+              "type": "string",
+              "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
+            },
+            "candidate": {
+              "type": "string",
+              "description": "Your stable key for one change."
+            },
+            "input_revision": {
+              "type": "integer",
+              "description": "For `resume`: the revision your coverage covered."
+            },
+            "journal_digest": {
+              "type": "string",
+              "description": "For `resume`: from your last candidates/prepare/ disposition result; stale refuses with EPISODE_REVISION_CONFLICT."
+            },
+            "order": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "max_leaves": {
+              "type": "integer",
+              "description": "For `resume`: 1 to 16."
+            }
           }
         },
         "response_detail": {
@@ -9048,40 +7944,13 @@
                   "const": "structured-files",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Planning or Records collection for structured-files."
-                },
-                "apply": {
-                  "description": "Omit to preview; true applies the reviewed plan.",
-                  "enum": [
-                    true
-                  ],
-                  "type": "boolean"
-                },
-                "plan_id": {
-                  "type": "string",
-                  "description": "Preview identity required to apply."
-                },
-                "source_snapshot": {
-                  "type": "string",
-                  "description": "Preview snapshot required to apply structured-files."
-                },
-                "why": {
-                  "type": "string",
-                  "description": "Audit reason required to apply."
-                },
-                "exclude_groups": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Tag-variant groups to skip; part of plan_id."
-                },
-                "acknowledge_skipped": {
-                  "type": "boolean",
-                  "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
-                }
+                "collection": {},
+                "apply": {},
+                "plan_id": {},
+                "source_snapshot": {},
+                "why": {},
+                "exclude_groups": {},
+                "acknowledge_skipped": {}
               },
               "required": [
                 "kind",
@@ -9096,40 +7965,13 @@
                   "const": "tag-variants",
                   "type": "string"
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "Planning or Records collection for structured-files."
-                },
-                "apply": {
-                  "description": "Omit to preview; true applies the reviewed plan.",
-                  "enum": [
-                    true
-                  ],
-                  "type": "boolean"
-                },
-                "plan_id": {
-                  "type": "string",
-                  "description": "Preview identity required to apply."
-                },
-                "source_snapshot": {
-                  "type": "string",
-                  "description": "Preview snapshot required to apply structured-files."
-                },
-                "why": {
-                  "type": "string",
-                  "description": "Audit reason required to apply."
-                },
-                "exclude_groups": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array",
-                  "description": "Tag-variant groups to skip; part of plan_id."
-                },
-                "acknowledge_skipped": {
-                  "type": "boolean",
-                  "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
-                }
+                "collection": {},
+                "apply": {},
+                "plan_id": {},
+                "source_snapshot": {},
+                "why": {},
+                "exclude_groups": {},
+                "acknowledge_skipped": {}
               },
               "required": [
                 "kind",
@@ -9140,6 +7982,42 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "collection": {
+              "type": "string",
+              "description": "Planning or Records collection for structured-files."
+            },
+            "apply": {
+              "description": "Omit to preview; true applies the reviewed plan.",
+              "enum": [
+                true
+              ],
+              "type": "boolean"
+            },
+            "plan_id": {
+              "type": "string",
+              "description": "Preview identity required to apply."
+            },
+            "source_snapshot": {
+              "type": "string",
+              "description": "Preview snapshot required to apply structured-files."
+            },
+            "why": {
+              "type": "string",
+              "description": "Audit reason required to apply."
+            },
+            "exclude_groups": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "description": "Tag-variant groups to skip; part of plan_id."
+            },
+            "acknowledge_skipped": {
+              "type": "boolean",
+              "description": "Adopt-local reconcile apply: acknowledge changes it cannot hold."
+            }
           }
         },
         "response_detail": {

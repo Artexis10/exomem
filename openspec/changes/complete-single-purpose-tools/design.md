@@ -123,6 +123,22 @@ For those two draws, independently author fresh collection schemas through the s
 
 Free admission rejected five append fixtures because their live compiled pages contained no qualifying semantic unit. Restore valid source pages through the existing semantic contract. Preserve their task intents, requested paragraphs, draw identities and seeds. Derive their keys from the corrected source facts before materialization; do not weaken the product contract or scorer. Preserve the prior bundles and failed admission records. Inherit the other 65 case objects unchanged, including the two R2-S3 schemas. Recheck all source references and admit the corrected cohort before actors run.
 
+### Fresh candidate decision R2-C2
+
+The first candidate failed its fixed decision rule. Preserve that cohort and decision without expansion or rescoring. Evaluate the compact representation as a separate candidate. Keep the existing mixture, exact interval, loss margin, wrong-write rule, client, model, call budget and retry policy.
+
+Freeze 375 independent case pairs with one run per arm. The exact rule permits at most 26 candidate-only failures at this size. Its quality-gate power is about 81% if the true candidate-only failure probability is 6%. That assumption is uncertain; it is not an estimate for the revised candidate. Missing pairs or excess wrong writes can still prevent a pass. Smaller cohorts have low power near the loss rate observed in the first candidate.
+
+Independently author fresh source bundles after freezing this protocol. Check substantive novelty against all previous development and decision sources. Preserve each independent draw without quotas, replacement or rebalancing. Run a small development check before decision dispatch. Keep its cases outside the decision cohort.
+
+Freeze one local calendar date for adoption fixtures and verify it against the host before admission. Start the decision with enough time to finish before that date ends. A date mismatch blocks dispatch; it does not permit a key rewrite. Pin the final source, installed candidate, dependencies, cases and request configuration after generation checks and before actors start.
+
+Forecast resources from the complete prior run, including capture overhead and working files. Record subscription availability without attributing shared quota points to this session. Use only the existing subscription launcher. Keep the cohort fixed and report an incomplete or failed run without another draw.
+
+### Pre-actor source amendment R2-C2-S1
+
+Four collection-creation prompts promised an offset-bearing datetime. The existing datetime field accepts ISO 8601 values without requiring an offset. Replace that qualifier with ISO 8601 in those four prompts. Preserve the other 371 case objects and every fixture, key, draw identity, seed and decision rule. Retain the original bundle and record the child bundle's lineage. Verify the correction before admission; no model or seed response caused it.
+
 ## Risks / Trade-offs
 
 - Shared names can collide with legacy registrations. Publish schemas through discovery and retain one grouped executable.
