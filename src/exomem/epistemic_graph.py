@@ -7720,11 +7720,12 @@ class EpistemicGraphIndex:
         if conn is None:
             return set()
         try:
-            placeholders = ",".join("?" for _ in rels)
+            # Drive the supplied file keys: the kind-leading index otherwise scans every file node.
             rows = conn.execute(
-                f"SELECT DISTINCT path FROM graph_nodes WHERE path IN ({placeholders}) "
-                "AND kind = 'file'",
-                rels,
+                "SELECT n.path FROM json_each(?) requested CROSS JOIN graph_nodes n "
+                "ON n.node_key = json_extract(requested.value, '$[0]') "
+                "WHERE n.kind = 'file' AND n.path = json_extract(requested.value, '$[1]')",
+                (json.dumps([(_file_key(rel), rel) for rel in rels]),),
             ).fetchall()
         finally:
             conn.close()

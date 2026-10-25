@@ -36,6 +36,7 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
         readiness,
         warmup,
         working_set_index,
+        working_set_runtime,
     )
     from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
     from exomem.vault import walk_vault_md
@@ -52,8 +53,10 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
     monkeypatch.setenv("EXOMEM_EAGER_BOOT", "1")
     monkeypatch.setenv("EXOMEM_MODEL_OFFLINE", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
-    write_scope(root, paths="**")
-    write_rule(root, ceiling=6, audience="structural-reader")
+    # Policy also restricts the owner; keep the unrestricted and admitted paths separate.
+    if principal == "admitted":
+        write_scope(root, paths="**")
+        write_rule(root, ceiling=6, audience="structural-reader")
     reader = owner_principal() if principal == "owner" else RequestPrincipal(
         audience_id="structural-reader", surface="mcp",
     )
@@ -133,6 +136,7 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                 # Maintained indexes alone do not warm the caller's application caches.
                 # The result cache stays disabled so the measured call still executes its queries.
                 assert "warming" not in invoke()
+                working_set_runtime.reset_caches_for_tests(packets_only=True)
                 with counts.request():
                     result = invoke()
                 sample = counts.snapshot()
@@ -198,6 +202,7 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                 "matched_rows": len(sample["matched"]),
                 "unique_page_reads": sample["unique_page_reads"],
                 "selected_sources": sample["read_bound"],
+                "outside_output_reads": sample["outside_output_reads"],
             } for size, sample in ((400, small), (1600, large))},
         })
     report = json.dumps({**runtime, "principal": principal, "bounds_gating": principal == "owner",
