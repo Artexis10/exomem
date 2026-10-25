@@ -1223,7 +1223,7 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
     for rel in rels:
         raw = (vault_root / rel).read_bytes()
         sizes.append(len(raw))
-        frontmatter, body = vault.parse_frontmatter(raw.decode("utf-8"))
+        frontmatter, body, _ = vault.parse_frontmatter(raw.decode("utf-8"))
         links.append(len(find_results.wikilink_targets(body)))
         terms.update(word.strip(string.punctuation).casefold() for word in body.split())
         if frontmatter.get("media_type"):
