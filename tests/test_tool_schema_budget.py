@@ -30,9 +30,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # registry selector enums on six selector tools, then by 150 for read_memory's derived
 # view refs and `continuation` field, then by 225 for create_note's `summary` and `topics` fields,
 # then by 150 for connect_memory's typed create-entity `relations`.
-TOTAL_BUDGET = 92_905
+# Re-based by about 9 KB (from 92,905 to the listed ceilings below) for `expose-single-purpose-tools`:
+# the default `nested` shape lists `read_records`, `change_records`, `read_plans` and `change_plans`
+# (about 15.8 KB) and hides `record_memory` and `plan_memory` (about 6.4 KB), whose ceilings stay
+# for the `grouped` shape. A grouped surface still fits well inside the budget. Then by 375 for
+# the guidance the four tools carry over from the grouped descriptions (help pointer, originals,
+# propose-before-create, stale rereads).
+TOTAL_BUDGET = 102_630
 
-#: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
+#: Per-tool ceilings in bytes. The ceilings of the tools a surface lists stay within TOTAL_BUDGET.
 # Registry selector enums (close-mcp-tool-selectors) raise six selector tools' ceilings.
 # The bounded viewer and original recovery use spare per-tool headroom; correction guidance raises the total.
 TOOL_CEILINGS: dict[str, int] = {
@@ -69,6 +75,11 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_media": 625,
     "coordination_status": 500,
     "viewer_map": 3325,
+    # The four single-purpose tools of the default `nested` shape.
+    "read_records": 3180,
+    "change_records": 6850,
+    "read_plans": 2400,
+    "change_plans": 3735,
 }
 
 #: A Cloud cell serves the local surface minus `CLOUD_SURFACE_EXCLUSIONS` plus the Cloud-only
@@ -130,7 +141,7 @@ def test_every_tool_stays_under_its_ceiling(server) -> None:
         if row["total"] > TOOL_CEILINGS[row["name"]]
     ]
     assert not over, "over ceiling: " + "; ".join(over)
-    assert sum(TOOL_CEILINGS.values()) <= TOTAL_BUDGET
+    assert sum(TOOL_CEILINGS[row["name"]] for row in rows) <= TOTAL_BUDGET
 
 
 def test_cloud_surface_stays_under_its_budget_and_ceilings(

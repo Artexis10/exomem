@@ -19,7 +19,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from .. import access, find_corpus, vault
+from .. import access, capabilities, find_corpus, vault
 from .. import structured_collections as collections
 from ..find_types import ParsedPage
 from ..governance import authorization_session_authority as authority
@@ -1893,7 +1893,7 @@ class OperationAuthorization:
 
             # The store holds none of a derived collection's rows, so this read would answer none of them.
             raise refused("a whole-collection row read", repair="read its rows with a collection query: "
-                          "record_memory action query with query={\"version\": 1}")
+                          + capabilities.active_call_text("record_memory", {"action": "query", "query": {"version": 1}}))
         if release.released:
             uniform = release.released == release.rows
             with closing(self.conn.execute("SELECT * FROM items WHERE collection_id=? ORDER BY row_id", (cid,))) as cursor:

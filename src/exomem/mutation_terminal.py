@@ -9,8 +9,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
+from . import capabilities, operation_entries, relation_registry
 from . import curation as curation_module
-from . import relation_registry
 
 log = logging.getLogger(__name__)
 
@@ -776,12 +776,21 @@ _ROUTING_OPTIONAL_KEYS = frozenset(
         "signal_version",
         "instruction",
         "question",
-        "record_memory",
         "missing_fields",
     }
 )
 _ROUTING_DISPOSITIONS = frozenset({"file", "ask", "hold", "append_occurrence"})
 _ROUTING_CALL_ACTIONS = frozenset({"append", "update"})
+#: The Records command whose call a disposition proposes.
+_ROUTING_CALL_COMMAND = "record_memory"
+
+
+def _routing_call_tool() -> str:
+    """The tool a disposition names for its write: the active surface's change tool."""
+    (tool,) = capabilities.active_tools(_ROUTING_CALL_COMMAND, "write")
+    return tool
+
+
 _MAX_ROUTING_PROSE_CHARS = 480
 _MAX_ROUTING_CALL_BYTES = 4096
 _MAX_ROUTING_PREDICATES = 4
@@ -856,7 +865,7 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
         if (
             not isinstance(value, Mapping)
             or not _ROUTING_REQUIRED_KEYS <= set(value)
-            or set(value) - _ROUTING_REQUIRED_KEYS - _ROUTING_OPTIONAL_KEYS
+            or set(value) - _ROUTING_REQUIRED_KEYS - _ROUTING_OPTIONAL_KEYS - {_routing_call_tool()}
         ):
             continue
         collection = value.get("collection")
@@ -911,10 +920,11 @@ def _routing_disposition_projection(
     disposition is dropped whole, like any other malformed advisory: a partial
     instruction to act is worse than none.
     """
+    call_tool = _routing_call_tool()
     if "disposition" not in value:
         return (
             {}
-            if not set(value) & {"signal_version", "instruction", "question", "record_memory", "missing_fields"}
+            if not set(value) & {"signal_version", "instruction", "question", call_tool, "missing_fields"}
             else None
         )
     disposition = value.get("disposition")
@@ -935,22 +945,30 @@ def _routing_disposition_projection(
         out[key] = text
     if "question" in out and disposition != "ask":
         return None
-    call = value.get("record_memory")
+    call = value.get(call_tool)
     if call is not None:
+        # The call is spelled for the active surface; the checks run on the grouped call it stands for.
+        grouped = (
+            operation_entries.unspell_call(call_tool, call, capabilities.current_tool_shape())
+            if isinstance(call, Mapping)
+            else None
+        )
         if (
             disposition not in {"file", "append_occurrence"}
-            or not isinstance(call, Mapping)
-            or call.get("action") not in _ROUTING_CALL_ACTIONS
-            or call.get("collection") != collection
+            or grouped is None
+            or grouped[1].get("action") not in _ROUTING_CALL_ACTIONS
+            or grouped[1].get("collection") != collection
         ):
             return None
         try:
+            # The bound measures the grouped call, so one item passes or fails alike in every shape.
+            bounded = json.dumps(grouped[1], ensure_ascii=False, sort_keys=True)
             encoded = json.dumps(call, ensure_ascii=False, sort_keys=True)
         except (TypeError, ValueError):
             return None
-        if len(encoded.encode("utf-8")) > _MAX_ROUTING_CALL_BYTES:
+        if len(bounded.encode("utf-8")) > _MAX_ROUTING_CALL_BYTES:
             return None
-        out["record_memory"] = json.loads(encoded)
+        out[call_tool] = json.loads(encoded)
     missing = value.get("missing_fields")
     if missing is not None:
         if not _bounded_tokens(missing, _MAX_ROUTING_KEY_FIELDS):

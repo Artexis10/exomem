@@ -362,6 +362,9 @@ def _materialize_selection(
 # --------------------------------------------------------------------------- #
 def _present(root: Path, run: dict, **extra) -> dict:
     out = dict(run)
+    if "pack_suggestions" in run:
+        # The run stores the spelling of the surface that started it; serve this surface's.
+        out["pack_suggestions"] = knowledge_packs.rendered_suggestions(run["pack_suggestions"] or [])
     out["next_actions"] = _next_actions(run)
     # Whenever the run carries a persisted `verify` block (set once by `apply`
     # right after its post-commit re-hash), surface the SAME recorded counts at

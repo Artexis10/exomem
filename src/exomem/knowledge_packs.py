@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from dataclasses import asdict, dataclass
+import string
+from dataclasses import asdict, dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from . import capabilities, operation_entries
 from .entity_types import ENTITY_TYPE_IDS, load_entity_types
 from .kbdir import kb_dirname, kb_prefix
 from .text_scripts import comparison_words
@@ -47,7 +49,11 @@ PACK_REQUIRED_FIELDS: frozenset[str] = frozenset(
         "signals",
     }
 )
-PACK_OPTIONAL_FIELDS: frozenset[str] = frozenset()
+#: `references` names the grouped calls that `agent_instructions` and each workflow
+#: `route` cite as `{name}`, so every surface reads them in its own spelling.
+PACK_OPTIONAL_FIELDS: frozenset[str] = frozenset({"references"})
+PACK_REFERENCE_REQUIRED_FIELDS: frozenset[str] = frozenset({"command"})
+PACK_REFERENCE_ALLOWED_FIELDS: frozenset[str] = PACK_REFERENCE_REQUIRED_FIELDS | {"arguments"}
 PACK_ALLOWED_FIELDS: frozenset[str] = PACK_REQUIRED_FIELDS | PACK_OPTIONAL_FIELDS
 PACK_WORKFLOW_REQUIRED_FIELDS: frozenset[str] = frozenset(
     {"title", "intent", "route", "example"}
@@ -125,9 +131,38 @@ class KnowledgePack:
     actions: tuple[str, ...]
     examples: tuple[str, ...]
     signals: tuple[str, ...]
+    #: Name -> `{"command", "arguments"?}`: a grouped call the templated text cites.
+    references: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
+        """The definition, references and templates included, as `validate_pack_dict` reads it."""
         return asdict(self)
+
+    def rendered(self, shape: str | None = None) -> dict:
+        """The pack as a surface reads it: each reference spelt for `shape`.
+
+        `shape` defaults to the surface serving this call, so MCP names its tools and REST
+        and the CLI keep the grouped commands. The result has no references and no templates.
+        """
+        shape = capabilities.current_tool_shape() if shape is None else shape
+        data = self.as_dict()
+        references = data.pop("references")
+        if not references:
+            return data
+        spelt = {name: _spell_reference(spec, shape) for name, spec in references.items()}
+        data["agent_instructions"] = data["agent_instructions"].format_map(spelt)
+        data["suggested_workflows"] = tuple(
+            {**workflow, "route": workflow["route"].format_map(spelt)}
+            for workflow in data["suggested_workflows"]
+        )
+        return data
+
+
+def _spell_reference(spec: dict[str, Any], shape: str) -> str:
+    """One reference in prose: the call when it names arguments, else every tool listed."""
+    if "arguments" in spec:
+        return operation_entries.call_text(spec["command"], spec["arguments"], shape)
+    return operation_entries.tools_text(spec["command"], shape)
 
 
 @dataclass(frozen=True)
@@ -137,7 +172,7 @@ class PackSuggestion:
     matched_signals: tuple[str, ...]
 
     def as_dict(self) -> dict:
-        data = self.pack.as_dict()
+        data = self.pack.rendered()
         data["score"] = self.score
         data["matched_signals"] = list(self.matched_signals)
         return data
@@ -230,6 +265,13 @@ def validate_pack_dict(
             workflows.append(clean)
         return tuple(workflows)
 
+    references = _references(raw.get("references"))
+    agent_instructions = _nonempty_string("agent_instructions")
+    suggested_workflows = _workflow_tuple("suggested_workflows")
+    _check_templates(
+        [agent_instructions, *(workflow["route"] for workflow in suggested_workflows)], references
+    )
+
     primitives = _string_tuple("primitives")
     bad_primitives = sorted(set(primitives) - PACK_ALLOWED_PRIMITIVES)
     if bad_primitives:
@@ -287,19 +329,73 @@ def validate_pack_dict(
         purpose=_nonempty_string("purpose"),
         audience=_nonempty_string("audience"),
         beginner_description=_nonempty_string("beginner_description"),
-        agent_instructions=_nonempty_string("agent_instructions"),
+        agent_instructions=agent_instructions,
         default_note_types=_string_tuple("default_note_types"),
         default_entity_types=default_entity_types,
         default_block_types=_string_tuple("default_block_types"),
         suggested_folders=_string_tuple("suggested_folders"),
         suggested_source_kinds=suggested_source_kinds,
         suggested_domains=suggested_domains,
-        suggested_workflows=_workflow_tuple("suggested_workflows"),
+        suggested_workflows=suggested_workflows,
         primitives=primitives,
         actions=actions,
         examples=_string_tuple("examples"),
         signals=_string_tuple("signals"),
+        references=references,
     )
+
+
+def _references(value: Any) -> dict[str, dict[str, Any]]:
+    """Validate the optional references; each must spell on every tool shape."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise PackValidationError("INVALID_REFERENCE", "'references' must be a mapping")
+    out: dict[str, dict[str, Any]] = {}
+    for name, spec in value.items():
+        where = f"references.{name}"
+        if not isinstance(name, str) or not name.isidentifier():
+            raise PackValidationError("INVALID_REFERENCE", f"{where}: a name must be an identifier")
+        if not isinstance(spec, dict):
+            raise PackValidationError("INVALID_REFERENCE", f"{where} must be a mapping")
+        unknown = sorted(set(spec) - PACK_REFERENCE_ALLOWED_FIELDS)
+        missing = sorted(PACK_REFERENCE_REQUIRED_FIELDS - set(spec))
+        if unknown or missing:
+            raise PackValidationError(
+                "INVALID_REFERENCE", f"{where}: unknown field(s) {unknown}, missing {missing}"
+            )
+        if spec["command"] not in operation_entries.OPERATIONS:
+            # A command without renderings reads the same on every surface: write it as text.
+            raise PackValidationError(
+                "INVALID_REFERENCE", f"{where}: {spec['command']!r} has no renderings to spell"
+            )
+        if "arguments" in spec and not isinstance(spec["arguments"], dict):
+            raise PackValidationError("INVALID_REFERENCE", f"{where}.arguments must be a mapping")
+        for shape in operation_entries.TOOL_SHAPES:
+            try:
+                _spell_reference(spec, shape)
+            except ValueError as exc:
+                raise PackValidationError("INVALID_REFERENCE", f"{where}: {exc}") from exc
+        out[name] = {key: spec[key] for key in sorted(spec)}
+    return out
+
+
+def _check_templates(templates: list[str], references: dict[str, dict[str, Any]]) -> None:
+    """With references, text cites them as `{name}` and nothing else; without, text is literal."""
+    if not references:
+        return
+    for text in templates:
+        try:
+            parts = list(string.Formatter().parse(text))
+        except ValueError as exc:
+            raise PackValidationError("INVALID_TEMPLATE", f"{text!r}: {exc}") from exc
+        for _, name, spec, conversion in parts:
+            if name is None:
+                continue
+            if name not in references or spec or conversion:
+                raise PackValidationError(
+                    "INVALID_TEMPLATE", f"{text!r} cites {{{name}}}, which is not a plain reference"
+                )
 
 
 def _validate_pack_catalog(packs: tuple[KnowledgePack, ...]) -> None:
@@ -343,17 +439,34 @@ _PACK_BY_ID = {pack.id: pack for pack in BUILTIN_PACKS}
 
 
 def list_builtin_packs() -> list[dict]:
-    """Return the built-in pack catalog as JSON-serializable dictionaries."""
+    """Return the built-in pack catalog, spelt for the serving surface."""
     _validate_builtin_pack_catalog()
-    return [pack.as_dict() for pack in BUILTIN_PACKS]
+    return [pack.rendered() for pack in BUILTIN_PACKS]
 
 
 def get_builtin_pack(pack_id: str) -> dict:
-    """Return one built-in pack by ID."""
+    """Return one built-in pack by ID, spelt for the serving surface."""
     try:
-        return _PACK_BY_ID[pack_id].as_dict()
+        return _PACK_BY_ID[pack_id].rendered()
     except KeyError as e:
         raise PackValidationError("UNKNOWN_PACK", f"unknown pack id: {pack_id}") from e
+
+
+def rendered_suggestions(stored: list[dict]) -> list[dict]:
+    """Stored pack suggestions with each built-in pack spelt for the serving surface.
+
+    A stored suggestion holds the spelling of the surface that made it; this keeps its
+    score and signals and takes everything else from the pack. An unknown ID stays as stored.
+    """
+    out: list[dict] = []
+    for suggestion in stored:
+        pack = _PACK_BY_ID.get(suggestion.get("id")) if isinstance(suggestion, dict) else None
+        if pack is None:
+            out.append(suggestion)
+            continue
+        kept = {key: suggestion[key] for key in ("score", "matched_signals") if key in suggestion}
+        out.append({**pack.rendered(), **kept})
+    return out
 
 
 def normalize_pack_ids(pack_ids: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
@@ -388,19 +501,20 @@ def _selection_path(root: Path) -> Path:
 
 
 def _pack_summaries(pack_ids: tuple[str, ...]) -> list[dict]:
+    """Summaries of the selected packs, spelt for the serving surface."""
     return [
         {
-            "id": pack.id,
-            "name": pack.name,
-            "beginner_description": pack.beginner_description,
-            "agent_instructions": pack.agent_instructions,
-            "default_entity_types": list(pack.default_entity_types),
-            "suggested_workflows": list(pack.suggested_workflows),
-            "suggested_source_kinds": list(pack.suggested_source_kinds),
-            "suggested_domains": list(pack.suggested_domains),
-            "actions": list(pack.actions),
+            "id": pack["id"],
+            "name": pack["name"],
+            "beginner_description": pack["beginner_description"],
+            "agent_instructions": pack["agent_instructions"],
+            "default_entity_types": list(pack["default_entity_types"]),
+            "suggested_workflows": list(pack["suggested_workflows"]),
+            "suggested_source_kinds": list(pack["suggested_source_kinds"]),
+            "suggested_domains": list(pack["suggested_domains"]),
+            "actions": list(pack["actions"]),
         }
-        for pack in (_PACK_BY_ID[pack_id] for pack_id in pack_ids)
+        for pack in (_PACK_BY_ID[pack_id].rendered() for pack_id in pack_ids)
     ]
 
 

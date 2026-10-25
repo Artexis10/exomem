@@ -451,6 +451,674 @@
       "type": "object"
     }
   },
+  "change_plans": {
+    "description": "Change human-owned Planning intent: create a collection, add, update or triage a plan item, or revise or rebaseline a manifest. `operation.kind` selects the operation. Writes select one queried item and need the hashes that the read returned. Reread if stale; time never proves completion. Help: bootstrap(section=\"records_planning\").",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "description": "One operation, selected by `kind`.",
+          "discriminator": {
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "create",
+                  "type": "string"
+                },
+                "manifest_path": {
+                  "type": "string"
+                },
+                "manifest_text": {
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                },
+                "scaffold": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "manifest_path",
+                "manifest_text",
+                "why"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "add",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit to list.",
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                },
+                "item": {
+                  "type": "object"
+                },
+                "plan_id": {
+                  "type": "string",
+                  "description": "row plan_id."
+                },
+                "expected_container_hash": {
+                  "type": "string",
+                  "description": "Returned snapshot."
+                },
+                "body": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "update",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit to list.",
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                },
+                "plan_id": {
+                  "description": "row plan_id.",
+                  "type": "string"
+                },
+                "expected_container_hash": {
+                  "description": "Returned snapshot.",
+                  "type": "string"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "changes": {
+                  "type": "object",
+                  "description": "Update."
+                },
+                "expected_item_version": {
+                  "description": "row item_version.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why",
+                "plan_id",
+                "expected_container_hash",
+                "expected_item_version"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "triage",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit to list.",
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                },
+                "plan_id": {
+                  "description": "row plan_id.",
+                  "type": "string"
+                },
+                "expected_container_hash": {
+                  "description": "Returned snapshot.",
+                  "type": "string"
+                },
+                "transition": {
+                  "description": "Triage.",
+                  "type": "object"
+                },
+                "expected_item_version": {
+                  "description": "row item_version.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why",
+                "plan_id",
+                "expected_container_hash",
+                "transition",
+                "expected_item_version"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "revise",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit to list.",
+                  "type": "string"
+                },
+                "manifest_text": {
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                },
+                "expected_manifest_hash": {
+                  "type": "string"
+                },
+                "expected_container_hash": {
+                  "description": "Returned snapshot.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "manifest_text",
+                "why",
+                "expected_manifest_hash",
+                "expected_container_hash"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "rebaseline",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit to list.",
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                },
+                "expected_manifest_hash": {
+                  "type": "string"
+                },
+                "expected_container_hash": {
+                  "description": "Returned snapshot.",
+                  "type": "string"
+                },
+                "acknowledged_gap_codes": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why",
+                "expected_manifest_hash",
+                "expected_container_hash",
+                "acknowledged_gap_codes"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Success detail: compact (default), full, or legacy.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    }
+  },
+  "change_records": {
+    "description": "Change human-owned Records: create a collection, append, update or bulk-upsert items, discard a held candidate, revise or rebaseline a manifest, or start or cancel an import. `operation.kind` selects the operation. Propose a new collection before creating it. Guarded writes need the hashes that the matching read returns. Help: bootstrap(section=\"records_planning\").",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "description": "One operation, selected by `kind`.",
+          "discriminator": {
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "create",
+                  "type": "string"
+                },
+                "manifest_path": {
+                  "type": "string"
+                },
+                "manifest_text": {
+                  "description": "Manifest for validate/create/revise.",
+                  "type": "string"
+                },
+                "why": {
+                  "description": "Audit reason.",
+                  "type": "string"
+                },
+                "scaffold": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "manifest_path",
+                "manifest_text",
+                "why"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "append",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "why": {
+                  "description": "Audit reason.",
+                  "type": "string"
+                },
+                "item": {
+                  "type": "object"
+                },
+                "item_key": {
+                  "type": "string",
+                  "description": "Update UUID; append uses the natural key."
+                },
+                "expected_container_hash": {
+                  "type": "string",
+                  "description": "Current snapshot for guarded writes."
+                },
+                "body": {
+                  "type": "string"
+                },
+                "delivery": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_page": {
+                      "maxLength": 2048,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "link_field": {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "reported_remote_ref": {
+                      "maxLength": 2048,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "reported_remote_field": {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "verified_remote_field": {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "platform_reference_field": {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "platform_proof": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "algorithm": {
+                          "const": "sha256",
+                          "type": "string"
+                        },
+                        "digest": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "reference": {
+                          "maxLength": 2048,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "algorithm",
+                        "digest",
+                        "reference"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "evidence_page",
+                    "link_field",
+                    "reported_remote_ref",
+                    "reported_remote_field",
+                    "verified_remote_field"
+                  ],
+                  "type": "object"
+                },
+                "held": {
+                  "type": "string",
+                  "description": "Resume append/update; item/changes override, null removes; discard deletes."
+                },
+                "hold": {
+                  "type": "boolean",
+                  "description": "False refuses; otherwise hold invalid candidates."
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "update",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "why": {
+                  "description": "Audit reason.",
+                  "type": "string"
+                },
+                "item_key": {
+                  "description": "Update UUID; append uses the natural key.",
+                  "type": "string"
+                },
+                "expected_container_hash": {
+                  "description": "Current snapshot for guarded writes.",
+                  "type": "string"
+                },
+                "changes": {
+                  "type": "object"
+                },
+                "expected_item_version": {
+                  "description": "Queried item version.",
+                  "type": "string"
+                },
+                "refresh_presentation": {
+                  "type": "boolean",
+                  "description": "Rebuild managed Markdown with guards."
+                },
+                "held": {
+                  "type": "string",
+                  "description": "Resume append/update; item/changes override, null removes; discard deletes."
+                },
+                "hold": {
+                  "type": "boolean",
+                  "description": "False refuses; otherwise hold invalid candidates."
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why",
+                "item_key",
+                "expected_container_hash",
+                "expected_item_version"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "bulk_upsert",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "why": {
+                  "description": "Audit reason.",
+                  "type": "string"
+                },
+                "expected_container_hash": {
+                  "description": "Current snapshot for guarded writes.",
+                  "type": "string"
+                },
+                "rows": {
+                  "description": "bulk_upsert: 1-50 {item, body?, source?}; one guarded commit.",
+                  "items": {
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "source": {
+                  "type": "string",
+                  "description": "bulk_upsert default preserved Source/Evidence path."
+                },
+                "on_reject": {
+                  "enum": [
+                    "abort",
+                    "skip"
+                  ],
+                  "type": "string",
+                  "description": "bulk_upsert: abort writes nothing; skip commits the rest."
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why",
+                "expected_container_hash",
+                "rows"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "discard",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "why": {
+                  "description": "Audit reason.",
+                  "type": "string"
+                },
+                "held": {
+                  "description": "Resume append/update; item/changes override, null removes; discard deletes.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why",
+                "held"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "revise",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "manifest_text": {
+                  "description": "Manifest for validate/create/revise.",
+                  "type": "string"
+                },
+                "why": {
+                  "description": "Audit reason.",
+                  "type": "string"
+                },
+                "expected_container_hash": {
+                  "description": "Current snapshot for guarded writes.",
+                  "type": "string"
+                },
+                "expected_manifest_hash": {
+                  "description": "Current manifest hash for revise/rebaseline.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "manifest_text",
+                "why",
+                "expected_container_hash",
+                "expected_manifest_hash"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "rebaseline",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "why": {
+                  "description": "Audit reason.",
+                  "type": "string"
+                },
+                "expected_container_hash": {
+                  "description": "Current snapshot for guarded writes.",
+                  "type": "string"
+                },
+                "expected_manifest_hash": {
+                  "description": "Current manifest hash for revise/rebaseline.",
+                  "type": "string"
+                },
+                "acknowledged_gap_codes": {
+                  "description": "Inspect-reported rebaseline gaps.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "why",
+                "expected_container_hash",
+                "expected_manifest_hash",
+                "acknowledged_gap_codes"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "import",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "import_request": {
+                  "properties": {
+                    "mode": {
+                      "enum": [
+                        "start",
+                        "cancel"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "import_request"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "response_detail": {
+          "default": "compact",
+          "description": "Success detail: compact (default), full, or legacy.",
+          "enum": [
+            "compact",
+            "full",
+            "legacy"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    }
+  },
   "configure_memory": {
     "description": "Inspect or change saved Exomem engagement for this vault.\n\nSet/clear only on an explicit user setting-change request. Recall, capture,\ninstallation and missing hooks grant none. Inspect first; use its revision.\nChanges recall/capture eagerness for this identity, never authority or compute.",
     "inputSchema": {
@@ -2175,166 +2843,6 @@
       "type": "object"
     }
   },
-  "plan_memory": {
-    "description": "Manage intent; record_memory holds outcomes.\n\nInspect/query/validate/history read; others write. Writes select one queried item.\nReread if stale; time never proves completion.\nHelp: bootstrap(section=\"records_planning\").",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "enum": [
-            "inspect",
-            "validate",
-            "create",
-            "query",
-            "add",
-            "update",
-            "triage",
-            "revise",
-            "rebaseline",
-            "history"
-          ],
-          "type": "string"
-        },
-        "collection": {
-          "type": "string",
-          "description": "Omit to list."
-        },
-        "manifest_path": {
-          "type": "string"
-        },
-        "manifest_text": {
-          "type": "string"
-        },
-        "why": {
-          "type": "string"
-        },
-        "scaffold": {
-          "type": "boolean"
-        },
-        "view": {
-          "type": "string"
-        },
-        "filters": {
-          "items": {
-            "type": "object"
-          },
-          "type": "array"
-        },
-        "columns": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "sort_by": {
-          "type": "string"
-        },
-        "descending": {
-          "type": "boolean"
-        },
-        "limit": {
-          "type": "integer"
-        },
-        "aggregate": {
-          "type": "string"
-        },
-        "date_from": {
-          "type": "string"
-        },
-        "date_to": {
-          "type": "string"
-        },
-        "date_column": {
-          "type": "string"
-        },
-        "lifecycle": {
-          "enum": [
-            "active",
-            "archived",
-            "all"
-          ],
-          "type": "string"
-        },
-        "hierarchy_mode": {
-          "enum": [
-            "none",
-            "ancestors",
-            "descendants"
-          ],
-          "type": "string"
-        },
-        "hierarchy_depth": {
-          "type": "integer"
-        },
-        "hierarchy_limit": {
-          "type": "integer"
-        },
-        "continuation": {
-          "type": "string"
-        },
-        "include_agent_history": {
-          "type": "boolean"
-        },
-        "output_format": {
-          "enum": [
-            "json",
-            "markdown",
-            "csv"
-          ],
-          "type": "string"
-        },
-        "item": {
-          "type": "object"
-        },
-        "plan_id": {
-          "type": "string",
-          "description": "row plan_id."
-        },
-        "expected_manifest_hash": {
-          "type": "string"
-        },
-        "expected_container_hash": {
-          "type": "string",
-          "description": "Returned snapshot."
-        },
-        "acknowledged_gap_codes": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "body": {
-          "type": "string"
-        },
-        "changes": {
-          "type": "object",
-          "description": "Update."
-        },
-        "transition": {
-          "type": "object",
-          "description": "Triage."
-        },
-        "expected_item_version": {
-          "type": "string",
-          "description": "row item_version."
-        },
-        "response_detail": {
-          "default": "compact",
-          "description": "Success detail: compact (default), full, or legacy.",
-          "enum": [
-            "compact",
-            "full",
-            "legacy"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "action"
-      ],
-      "type": "object"
-    }
-  },
   "prepare_note": {
     "description": "Prepare a sourced note without saving.\n\nReturns skeleton/related pages; save with create_note.\nReuse capture_source(compile_guidance=true).",
     "inputSchema": {
@@ -2716,6 +3224,406 @@
       "type": "object"
     }
   },
+  "read_plans": {
+    "description": "Read human-owned Planning intent without changing it: list or inspect plan collections, validate a manifest, query plan items, or read an item's history. `operation.kind` selects the operation. Reread if stale; time never proves completion. Help: bootstrap(section=\"records_planning\").",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "description": "One operation, selected by `kind`.",
+          "discriminator": {
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "inspect",
+                  "type": "string"
+                },
+                "collection": {
+                  "type": "string",
+                  "description": "Omit to list."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "validate",
+                  "type": "string"
+                },
+                "collection": {
+                  "type": "string",
+                  "description": "Omit to list."
+                },
+                "manifest_path": {
+                  "type": "string"
+                },
+                "manifest_text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "manifest_text"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "query",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit to list.",
+                  "type": "string"
+                },
+                "view": {
+                  "type": "string"
+                },
+                "filters": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "columns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "sort_by": {
+                  "type": "string"
+                },
+                "descending": {
+                  "type": "boolean"
+                },
+                "limit": {
+                  "type": "integer"
+                },
+                "aggregate": {
+                  "type": "string"
+                },
+                "date_from": {
+                  "type": "string"
+                },
+                "date_to": {
+                  "type": "string"
+                },
+                "date_column": {
+                  "type": "string"
+                },
+                "lifecycle": {
+                  "enum": [
+                    "active",
+                    "archived",
+                    "all"
+                  ],
+                  "type": "string"
+                },
+                "hierarchy_mode": {
+                  "enum": [
+                    "none",
+                    "ancestors",
+                    "descendants"
+                  ],
+                  "type": "string"
+                },
+                "hierarchy_depth": {
+                  "type": "integer"
+                },
+                "hierarchy_limit": {
+                  "type": "integer"
+                },
+                "continuation": {
+                  "type": "string"
+                },
+                "include_agent_history": {
+                  "type": "boolean"
+                },
+                "output_format": {
+                  "enum": [
+                    "json",
+                    "markdown",
+                    "csv"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "history",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit to list.",
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer"
+                },
+                "continuation": {
+                  "type": "string"
+                },
+                "plan_id": {
+                  "description": "row plan_id.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "plan_id"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    }
+  },
+  "read_records": {
+    "description": "Read human-owned Records without changing them: describe the manifest contract, validate or inspect a collection, query rows, read an item's history, or preview or check an import. `operation.kind` selects the operation. Originals belong in Sources or Evidence. Help: bootstrap(section=\"records_planning\").",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "description": "One operation, selected by `kind`.",
+          "discriminator": {
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "describe",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "inspect",
+                  "type": "string"
+                },
+                "collection": {
+                  "type": "string",
+                  "description": "Omit for inventory or new-manifest validate/create."
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "validate",
+                  "type": "string"
+                },
+                "collection": {
+                  "type": "string",
+                  "description": "Omit for inventory or new-manifest validate/create."
+                },
+                "manifest_path": {
+                  "type": "string"
+                },
+                "manifest_text": {
+                  "description": "Manifest for validate/create/revise.",
+                  "type": "string"
+                },
+                "scaffold": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "manifest_text"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "query",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "view": {
+                  "type": "string"
+                },
+                "filters": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "columns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "sort_by": {
+                  "type": "string"
+                },
+                "descending": {
+                  "type": "boolean"
+                },
+                "limit": {
+                  "type": "integer"
+                },
+                "aggregate": {
+                  "type": "string"
+                },
+                "date_from": {
+                  "type": "string"
+                },
+                "date_to": {
+                  "type": "string"
+                },
+                "date_column": {
+                  "type": "string"
+                },
+                "expand_children": {
+                  "type": "boolean"
+                },
+                "expand_child": {
+                  "type": "string",
+                  "description": "Exact declared child container."
+                },
+                "continuation": {
+                  "type": "string"
+                },
+                "include_agent_history": {
+                  "type": "boolean"
+                },
+                "output_format": {
+                  "enum": [
+                    "json",
+                    "markdown",
+                    "csv"
+                  ],
+                  "type": "string"
+                },
+                "query": {
+                  "type": "object",
+                  "description": "v1 query object; grammar via describe."
+                }
+              },
+              "required": [
+                "kind",
+                "collection"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "history",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer"
+                },
+                "continuation": {
+                  "type": "string"
+                },
+                "item_key": {
+                  "description": "Update UUID; append uses the natural key.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "item_key"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "import",
+                  "type": "string"
+                },
+                "collection": {
+                  "description": "Omit for inventory or new-manifest validate/create.",
+                  "type": "string"
+                },
+                "import_request": {
+                  "properties": {
+                    "mode": {
+                      "enum": [
+                        "preview",
+                        "status"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "kind",
+                "collection",
+                "import_request"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    }
+  },
   "recall_context": {
     "description": "Recall bounded authorized context; abstain if uncertain.\n\nReuse held policy/context; conversation supplies relevant thread/attachment excerpts.\norigin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.",
     "inputSchema": {
@@ -2822,259 +3730,6 @@
           "description": "Caller label; no authority. Invalid labels ignored."
         }
       },
-      "type": "object"
-    }
-  },
-  "record_memory": {
-    "description": "Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.\n\nDescribe/validate/inspect/query/history and import preview/status read.\nPropose before create. Others write or hold candidates.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "action": {
-          "enum": [
-            "describe",
-            "validate",
-            "inspect",
-            "query",
-            "create",
-            "append",
-            "bulk_upsert",
-            "update",
-            "revise",
-            "rebaseline",
-            "discard",
-            "import",
-            "history"
-          ],
-          "type": "string"
-        },
-        "collection": {
-          "type": "string",
-          "description": "Omit for inventory or new-manifest validate/create."
-        },
-        "manifest_path": {
-          "type": "string"
-        },
-        "manifest_text": {
-          "type": "string",
-          "description": "Manifest for validate/create/revise."
-        },
-        "why": {
-          "type": "string",
-          "description": "Audit reason."
-        },
-        "scaffold": {
-          "type": "boolean"
-        },
-        "view": {
-          "type": "string"
-        },
-        "filters": {
-          "items": {
-            "type": "object"
-          },
-          "type": "array"
-        },
-        "columns": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "sort_by": {
-          "type": "string"
-        },
-        "descending": {
-          "type": "boolean"
-        },
-        "limit": {
-          "type": "integer"
-        },
-        "aggregate": {
-          "type": "string"
-        },
-        "date_from": {
-          "type": "string"
-        },
-        "date_to": {
-          "type": "string"
-        },
-        "date_column": {
-          "type": "string"
-        },
-        "expand_children": {
-          "type": "boolean"
-        },
-        "expand_child": {
-          "type": "string",
-          "description": "Exact declared child container."
-        },
-        "continuation": {
-          "type": "string"
-        },
-        "include_agent_history": {
-          "type": "boolean"
-        },
-        "output_format": {
-          "enum": [
-            "json",
-            "markdown",
-            "csv"
-          ],
-          "type": "string"
-        },
-        "item": {
-          "type": "object"
-        },
-        "item_key": {
-          "type": "string",
-          "description": "Update UUID; append uses the natural key."
-        },
-        "expected_container_hash": {
-          "type": "string",
-          "description": "Current snapshot for guarded writes."
-        },
-        "expected_manifest_hash": {
-          "type": "string",
-          "description": "Current manifest hash for revise/rebaseline."
-        },
-        "acknowledged_gap_codes": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Inspect-reported rebaseline gaps."
-        },
-        "body": {
-          "type": "string"
-        },
-        "delivery": {
-          "additionalProperties": false,
-          "properties": {
-            "evidence_page": {
-              "maxLength": 2048,
-              "minLength": 1,
-              "type": "string"
-            },
-            "link_field": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            },
-            "reported_remote_ref": {
-              "maxLength": 2048,
-              "minLength": 1,
-              "type": "string"
-            },
-            "reported_remote_field": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            },
-            "verified_remote_field": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            },
-            "platform_reference_field": {
-              "maxLength": 128,
-              "minLength": 1,
-              "type": "string"
-            },
-            "platform_proof": {
-              "additionalProperties": false,
-              "properties": {
-                "algorithm": {
-                  "const": "sha256",
-                  "type": "string"
-                },
-                "digest": {
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "reference": {
-                  "maxLength": 2048,
-                  "minLength": 1,
-                  "type": "string"
-                }
-              },
-              "required": [
-                "algorithm",
-                "digest",
-                "reference"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "evidence_page",
-            "link_field",
-            "reported_remote_ref",
-            "reported_remote_field",
-            "verified_remote_field"
-          ],
-          "type": "object",
-          "description": "Append receipt envelope; never sets values or creates collections."
-        },
-        "changes": {
-          "type": "object"
-        },
-        "expected_item_version": {
-          "type": "string",
-          "description": "Queried item version."
-        },
-        "refresh_presentation": {
-          "type": "boolean",
-          "description": "Rebuild managed Markdown with guards."
-        },
-        "held": {
-          "type": "string",
-          "description": "Resume append/update; item/changes override, null removes; discard deletes."
-        },
-        "hold": {
-          "type": "boolean",
-          "description": "False refuses; otherwise hold invalid candidates."
-        },
-        "rows": {
-          "items": {
-            "type": "object"
-          },
-          "type": "array",
-          "description": "bulk_upsert: 1-50 {item, body?, source?}; one guarded commit."
-        },
-        "source": {
-          "type": "string",
-          "description": "bulk_upsert default preserved Source/Evidence path."
-        },
-        "on_reject": {
-          "enum": [
-            "abort",
-            "skip"
-          ],
-          "type": "string",
-          "description": "bulk_upsert: abort writes nothing; skip commits the rest."
-        },
-        "import_request": {
-          "type": "object"
-        },
-        "query": {
-          "type": "object",
-          "description": "v1 query object; grammar via describe."
-        },
-        "response_detail": {
-          "default": "compact",
-          "description": "Success detail: compact (default), full, or legacy.",
-          "enum": [
-            "compact",
-            "full",
-            "legacy"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "action"
-      ],
       "type": "object"
     }
   },

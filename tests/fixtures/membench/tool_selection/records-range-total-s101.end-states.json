@@ -1,0 +1,178 @@
+{
+ "case": {
+  "case_id": "records-range-total-s101",
+  "params": {
+   "from_date": "2026-03-07",
+   "rows": [
+    {
+     "date": "2026-03-04",
+     "note": "before bed",
+     "value": 1
+    },
+    {
+     "date": "2026-03-06",
+     "note": "rushed",
+     "value": 8
+    },
+    {
+     "date": "2026-03-07",
+     "note": "with a friend",
+     "value": 1
+    },
+    {
+     "date": "2026-03-08",
+     "note": "slow day",
+     "value": 3
+    },
+    {
+     "date": "2026-03-10",
+     "note": "with a friend",
+     "value": 4
+    },
+    {
+     "date": "2026-03-11",
+     "note": "before bed",
+     "value": 4
+    },
+    {
+     "date": "2026-03-12",
+     "note": "with a friend",
+     "value": 9
+    }
+   ],
+   "to_date": "2026-03-10",
+   "tracker": {
+    "dir": "Practice",
+    "measure": "minutes",
+    "title": "Practice log"
+   }
+  },
+  "seed": 101,
+  "template": "records-range-total"
+ },
+ "case_id": "records-range-total-s101",
+ "end_state_after": {
+  "collections": {
+   "Knowledge Base/Records/Practice/_collection.md": {
+    "fields": {
+     "minutes": {
+      "required": false,
+      "type": "number"
+     },
+     "note": {
+      "required": false,
+      "type": "string"
+     },
+     "occurred_on": {
+      "required": true,
+      "type": "date"
+     }
+    },
+    "natural_key": [
+     "occurred_on"
+    ],
+    "profile": "records",
+    "rows": [
+     {
+      "minutes": 1,
+      "note": "before bed",
+      "occurred_on": "2026-03-04"
+     },
+     {
+      "minutes": 1,
+      "note": "with a friend",
+      "occurred_on": "2026-03-07"
+     },
+     {
+      "minutes": 3,
+      "note": "slow day",
+      "occurred_on": "2026-03-08"
+     },
+     {
+      "minutes": 4,
+      "note": "before bed",
+      "occurred_on": "2026-03-11"
+     },
+     {
+      "minutes": 4,
+      "note": "with a friend",
+      "occurred_on": "2026-03-10"
+     },
+     {
+      "minutes": 8,
+      "note": "rushed",
+      "occurred_on": "2026-03-06"
+     },
+     {
+      "minutes": 9,
+      "note": "with a friend",
+      "occurred_on": "2026-03-12"
+     }
+    ],
+    "title": "Practice log"
+   }
+  }
+ },
+ "end_state_before": {
+  "collections": {
+   "Knowledge Base/Records/Practice/_collection.md": {
+    "fields": {
+     "minutes": {
+      "required": false,
+      "type": "number"
+     },
+     "note": {
+      "required": false,
+      "type": "string"
+     },
+     "occurred_on": {
+      "required": true,
+      "type": "date"
+     }
+    },
+    "natural_key": [
+     "occurred_on"
+    ],
+    "profile": "records",
+    "rows": [
+     {
+      "minutes": 1,
+      "note": "before bed",
+      "occurred_on": "2026-03-04"
+     },
+     {
+      "minutes": 1,
+      "note": "with a friend",
+      "occurred_on": "2026-03-07"
+     },
+     {
+      "minutes": 3,
+      "note": "slow day",
+      "occurred_on": "2026-03-08"
+     },
+     {
+      "minutes": 4,
+      "note": "before bed",
+      "occurred_on": "2026-03-11"
+     },
+     {
+      "minutes": 4,
+      "note": "with a friend",
+      "occurred_on": "2026-03-10"
+     },
+     {
+      "minutes": 8,
+      "note": "rushed",
+      "occurred_on": "2026-03-06"
+     },
+     {
+      "minutes": 9,
+      "note": "with a friend",
+      "occurred_on": "2026-03-12"
+     }
+    ],
+    "title": "Practice log"
+   }
+  }
+ }
+}

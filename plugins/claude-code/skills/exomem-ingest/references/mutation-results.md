@@ -101,8 +101,8 @@ disposition is for material that genuinely stands alone.
 
 A refused Record append or update is held rather than lost: the refusal names
 every failing field under `details.issues` and returns a `held` reference, so fix
-the named field and resume with `record_memory(action="append"|"update",
-held=...)`, or `discard` it — never loop, and never preserve diagnostic
+the named field and resume with `change_records(operation={"kind": "append" or "update",
+"held": ...})`, or `discard` it — never loop, and never preserve diagnostic
 breadcrumbs as Evidence.
 
 On MCP these expected refusals arrive as normal tool content with top-level

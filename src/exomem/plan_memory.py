@@ -2,137 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import planning
+from . import operation_entries, planning
 from .cli_ops import OpError, action_argument_contract
 from .structured_collections import CollectionError, collection_remediation
 
 #: The Planning spec caps every Planning refusal message at 512 UTF-8 bytes.
 _REFUSAL_MESSAGE_MAX_BYTES = 512
 
-ACTIONS = frozenset(
-    {
-        "inspect",
-        "validate",
-        "create",
-        "query",
-        "add",
-        "update",
-        "triage",
-        "revise",
-        "rebaseline",
-        "history",
-    }
-)
-_ACTION_FIELDS = {
-    "history": frozenset({"collection", "plan_id", "limit", "continuation"}),
-    "inspect": frozenset({"collection"}),
-    "validate": frozenset({"collection", "manifest_path", "manifest_text"}),
-    "create": frozenset({"manifest_path", "manifest_text", "why", "scaffold"}),
-    "query": frozenset(
-        {
-            "collection",
-            "view",
-            "filters",
-            "columns",
-            "sort_by",
-            "descending",
-            "limit",
-            "aggregate",
-            "date_from",
-            "date_to",
-            "date_column",
-            "lifecycle",
-            "hierarchy_mode",
-            "hierarchy_depth",
-            "hierarchy_limit",
-            "continuation",
-            "include_agent_history",
-            "output_format",
-        }
-    ),
-    "add": frozenset({"collection", "item", "plan_id", "expected_container_hash", "body", "why"}),
-    "update": frozenset(
-        {
-            "collection",
-            "plan_id",
-            "expected_container_hash",
-            "expected_item_version",
-            "why",
-            "changes",
-            "body",
-        }
-    ),
-    "triage": frozenset(
-        {
-            "collection",
-            "plan_id",
-            "expected_container_hash",
-            "expected_item_version",
-            "why",
-            "transition",
-        }
-    ),
-    "revise": frozenset(
-        {
-            "collection",
-            "manifest_text",
-            "expected_manifest_hash",
-            "expected_container_hash",
-            "why",
-        }
-    ),
-    "rebaseline": frozenset(
-        {
-            "collection",
-            "expected_manifest_hash",
-            "expected_container_hash",
-            "acknowledged_gap_codes",
-            "why",
-        }
-    ),
-}
-_REQUIRED_FIELDS = {
-    "history": frozenset({"collection", "plan_id"}),
-    "inspect": frozenset(),
-    "validate": frozenset({"manifest_text"}),
-    "create": frozenset({"manifest_path", "manifest_text", "why"}),
-    "query": frozenset({"collection"}),
-    "add": frozenset({"collection", "item", "why"}),
-    "update": frozenset(
-        {"collection", "plan_id", "expected_container_hash", "expected_item_version", "why"}
-    ),
-    "triage": frozenset(
-        {
-            "collection",
-            "plan_id",
-            "expected_container_hash",
-            "expected_item_version",
-            "why",
-            "transition",
-        }
-    ),
-    "revise": frozenset(
-        {
-            "collection",
-            "manifest_text",
-            "expected_manifest_hash",
-            "expected_container_hash",
-            "why",
-        }
-    ),
-    "rebaseline": frozenset(
-        {
-            "collection",
-            "expected_manifest_hash",
-            "expected_container_hash",
-            "acknowledged_gap_codes",
-            "why",
-        }
-    ),
-}
+# The operation entries are the one table of what each action accepts and requires.
+ACTIONS = operation_entries.PLANS.actions()
+_ACTION_FIELDS = operation_entries.PLANS.action_fields()
+_REQUIRED_FIELDS = operation_entries.PLANS.required_fields()
 _VIEW_SHAPING_FIELDS = frozenset(
     {
         "filters",
@@ -361,6 +245,17 @@ def plan_memory(
         ) from error
 
 
+def validate_arguments(action: object, arguments: Mapping[str, Any]) -> None:
+    """Refuse arguments the selected action does not accept, exactly as a direct call does.
+
+    `arguments` holds only what the caller sent; a field a caller omits counts as
+    not supplied, the same as the `None` default the signature gives it.
+    """
+    values: dict[str, Any] = dict.fromkeys(operation_entries.PLANS.every_field(), None)
+    values.update(arguments)
+    _validate_arguments(action, values)
+
+
 def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if not isinstance(action, str) or action not in ACTIONS:
         _invalid_arguments()
@@ -388,6 +283,11 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("validate requires exactly one of: collection, manifest_path")
     if action == "update" and values["changes"] is None and values["body"] is None:
         _invalid_arguments("update requires at least one of: changes, body")
+
+
+def refuse_arguments(detail: str) -> Never:
+    """Raise this command's own argument refusal with `detail` as its explanation."""
+    _invalid_arguments(detail)
 
 
 def _invalid_arguments(detail: str | None = None, *, accepted: str | None = None) -> Never:

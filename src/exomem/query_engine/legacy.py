@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 
 from .. import query_data
-from ..query_compat import OPS, VERSION, QueryDataError
+from ..query_compat import DEFAULT_OP, OPS, VERSION, QueryDataError
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +33,7 @@ def normalize(*, columns_available, filters=None, columns=None, sort_by=None,
     for predicate in filters or ():
         if not isinstance(predicate, dict) or not predicate.get("column"):
             raise QueryDataError("BAD_FILTER", f"each filter needs a 'column': {predicate!r}")
-        if predicate.get("op", "eq") not in OPS:
+        if predicate.get("op", DEFAULT_OP) not in OPS:
             raise QueryDataError("BAD_OP", f"unknown op {predicate.get('op')!r}; allowed: {sorted(OPS)}")
         predicates.append(predicate)
     available = tuple(columns_available)

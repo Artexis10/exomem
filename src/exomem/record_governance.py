@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote
 
 from . import (
     access,
+    capabilities,
     collection_claims,
     memory_refs,
     mutation_terminal,
@@ -1860,6 +1861,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         })
         if selection is not None:
             selections.append(selection)
+    describe_route = capabilities.active_call_route("record_memory", {"action": "describe"})
     payload = {
         "kind": f"{semantic_profile}_inventory",
         "report_only": True,
@@ -1894,10 +1896,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
             "unreadable_manifests": False,
             **({"legacy_trackers": legacy_truncated} if semantic_profile == "records" else {}),
         },
-        "contract_route": {
-            "tool": "record_memory",
-            "arguments": {"action": "describe"},
-        },
+        "contract_route": {"tool": describe_route["tool"], "arguments": describe_route["args"]},
     }
     if selections:
         writer = bound_writer(root)

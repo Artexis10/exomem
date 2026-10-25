@@ -6,7 +6,7 @@ that matters most -- a new failure-shaped observation routed STRONG into a
 Records collection -- the advisory now carries a `disposition` chosen by the
 effective capture prominence:
 
-- `maximal`  -> `file`: a ready `record_memory` append payload, fields filled
+- `maximal`  -> `file`: a ready Records append call, fields filled
   from the note where the manifest's fields map and the note cited in
   `sources`, with an instruction to perform it without asking.
 - `balanced` -> `ask`: one precomposed yes/no question in the user's domain
@@ -17,7 +17,7 @@ effective capture prominence:
 
 When the observation matches an existing item in the same collection (the same
 natural-key value, or a strong symptom overlap), the disposition is
-`append_occurrence`: a ready `record_memory` update, with its hash guards, that
+`append_occurrence`: a ready Records update call, with its hash guards, that
 adds the note to that item's sources instead of filing a new one. An item that
 already cites the note is never its recurrence.
 
@@ -27,10 +27,15 @@ nor snoozed: editing a note that is already filed or decided must not file it,
 recur it into its own item, or ask twice.
 
 The runtime never appends. Appending is `proactive_capture` and belongs to the
-agent under the served capture disposition, through the same `record_memory`
+agent under the served capture disposition, through the same Records command
 path, writer lease and validation as any other append; the payload only saves
 the agent from composing it. Moderate routes and observations that are not
 failure-shaped keep the plain advisory.
+
+The call is stored in the grouped form and spelled for the surface that serves it
+(`capabilities.active_spell_call`): the payload key is the tool the host can call, and
+its value is that tool's arguments. `mutation_terminal` unspells it and validates the
+grouped call, so a proposed write is checked the same way on every surface.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from typing import Any
 
 from filelock import FileLock, Timeout
 
+from . import capabilities
 from .collection_store.preview import canonical_read, selected_writer
 
 log = logging.getLogger(__name__)
@@ -70,13 +76,15 @@ _ASKED_LOCK_TIMEOUT = 5
 #: Page lifecycle frontmatter, never an observed value of a record.
 _PAGE_ONLY_FIELDS = frozenset({"status"})
 
+# `{tool}` is the tool the active surface lists for the call, so the text never names a
+# spelling the host cannot call (`capabilities.active_spell_call`).
 _FILE_INSTRUCTION = (
-    "Perform this record_memory call now, without asking: the user's prominence "
+    "Perform this {tool} call now, without asking: the user's prominence "
     "delegates filing a recurring incident. Fill any missing_fields from the note "
     "first, and report what was filed in one line."
 )
 _OCCURRENCE_INSTRUCTION = (
-    "Perform this record_memory call now, without asking: it adds the note to the "
+    "Perform this {tool} call now, without asking: it adds the note to the "
     "existing item's sources. Report the added occurrence in one line."
 )
 _ASK_INSTRUCTION = (
@@ -451,23 +459,18 @@ def disposition(
         )
         if call is None:
             return None
-        result = {
-            "disposition": "append_occurrence",
-            "signal_version": signal_version,
-            "instruction": _OCCURRENCE_INSTRUCTION,
-            "record_memory": call,
-        }
+        instruction, kind = _OCCURRENCE_INSTRUCTION, "append_occurrence"
+        extra: dict[str, Any] = {}
     else:
-        result = {
-            "disposition": "file",
-            "signal_version": signal_version,
-            "instruction": _FILE_INSTRUCTION,
-            "record_memory": {
-                "action": "append",
-                "collection": collection,
-                "item": proposed,
-                "why": why,
-            },
-            **({"missing_fields": missing} if missing else {}),
-        }
+        call = {"action": "append", "collection": collection, "item": proposed, "why": why}
+        instruction, kind = _FILE_INSTRUCTION, "file"
+        extra = {"missing_fields": missing} if missing else {}
+    tool, arguments = capabilities.active_spell_call("record_memory", call)
+    result = {
+        "disposition": kind,
+        "signal_version": signal_version,
+        "instruction": instruction.format(tool=tool),
+        tool: arguments,
+        **extra,
+    }
     return result if _fits(result, collection) else None

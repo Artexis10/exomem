@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import context_refs, guards, lifecycle_statuses
+from . import context_refs, guards, knowledge_packs, lifecycle_statuses
 from . import get_page as get_page_module
 from . import note as note_module
 from . import relation_registry as relation_registry_module
@@ -595,7 +595,7 @@ def work_item(
         "constraints": _WORK_ITEM_CONSTRAINTS,
         "sources": source_rows,
         "measurements": {
-            "pack_suggestions": run.get("pack_suggestions") or [],
+            "pack_suggestions": knowledge_packs.rendered_suggestions(run.get("pack_suggestions") or []),
             "totals": scan_summary.get("totals") or {},
             "junk_counts": scan_summary.get("junk_counts") or {},
         },

@@ -16,6 +16,8 @@ from typing import Any
 VERSION = 1
 OPS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains",
                  "startswith", "in", "nin", "exists", "missing"})
+#: The operator a filter without `op` applies.
+DEFAULT_OP = "eq"
 DATE_LIKE = re.compile(r"\d{1,4}[-/]\d")
 _NUM_PREFIX = re.compile(r"^[<>≤≥=~\s]+")
 _LEADING_NUM = re.compile(r"[+-]?\d+(?:[.,]\d+)?")
@@ -68,7 +70,7 @@ def coerce_num(value: Any) -> float | None:
 
 
 def match(row: dict, filt: dict) -> bool:
-    column, op, value = filt["column"], filt.get("op", "eq"), filt.get("value")
+    column, op, value = filt["column"], filt.get("op", DEFAULT_OP), filt.get("value")
     actual = get_field(row, column)
     if op == "exists":
         return actual not in (None, "")

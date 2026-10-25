@@ -467,9 +467,15 @@ def mcp_server_entry(
     log: Path,
     server_stderr: Path,
     skip_ready_gate: bool = False,
+    warm_search: bool = False,
     startup_marker: Path | None = None,
+    budget: int = protocol.PULL_BUDGET_PER_TURN,
 ) -> dict:
-    """The ``--mcp-config`` server entry: the tap in front of the stdio server."""
+    """The ``--mcp-config`` server entry: the tap in front of the stdio server.
+
+    ``budget`` is the tap's calls per user turn; the protocol's pull budget is
+    the default, and a harness whose tasks need more calls sets its own.
+    """
 
     return {
         "command": python_executable(),
@@ -480,12 +486,13 @@ def mcp_server_entry(
             "--turn-file",
             str(slot.turn_file),
             "--budget",
-            str(protocol.PULL_BUDGET_PER_TURN),
+            str(budget),
             "--allow",
             ",".join(spec.tools),
             "--server-stderr",
             str(server_stderr),
             *(["--skip-ready-gate"] if skip_ready_gate else []),
+            *(["--warm-search"] if warm_search else []),
             "--",
             python_executable(),
             "-m",

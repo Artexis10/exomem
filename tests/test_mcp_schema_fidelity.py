@@ -274,6 +274,12 @@ def test_hand_registered_exceptions_are_explicit(
     live = set(_live_schemas(mcp))
 
     generated = {c.public_name for c in commands_module.PRODUCT_COMMANDS if "mcp" in c.surfaces}
+    generated |= {
+        rendering.name
+        for c in commands_module.PRODUCT_COMMANDS
+        if "mcp" in c.surfaces
+        for rendering in c.renderings
+    }
     exceptions = set(commands_module.HAND_REGISTERED_EXCEPTIONS)
 
     # No tool is both generated and a hand-registered exception.

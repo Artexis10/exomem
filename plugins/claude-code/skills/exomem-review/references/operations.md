@@ -13,8 +13,8 @@ commands.
 | `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_memory`; use `search_memory(deep=true)` for synthesis |
 | `create_note` | Remember a durable conclusion, decision, solved problem, or pattern | `create_note`; use `supersede_note` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
-| `plan` | Capture, inspect, query, update, or triage intended future state | `plan_memory` for a configured Planning collection |
-| `record` | Capture, correct, inspect, or query a durable observed event or current state | `record_memory` for a configured Record collection |
+| `plan` | Capture, inspect, query, update, or triage intended future state | `read_plans` or `change_plans` for a configured Planning collection |
+| `record` | Capture, correct, inspect, or query a durable observed event or current state | `read_records` or `change_records` for a configured Record collection |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
@@ -41,10 +41,11 @@ confirmed `restructure_execution`.
 
 ## Planning
 
-`plan_memory` is the one public command for human-owned intended future state.
-It has exactly nine actions: read-only `inspect`, `validate`, and `query`, plus
-guarded `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`.
-Use `plan_memory(action="inspect")` without `collection` to discover Planning
+`read_plans` and `change_plans` are the public tools for human-owned intended future
+state. `read_plans` carries the read-only operations `inspect`, `validate`, and `query`;
+`change_plans` carries the guarded `create`, `add`, `update`, `triage`, `revise`, and
+`rebaseline`. Each call names its operation as `operation={"kind": ...}`.
+Use `read_plans(operation={"kind": "inspect"})` without `collection` to discover Planning
 collections. Copy a returned `manifest_path` to inspect one collection.
 Canonical Planning is one ordinary Markdown item file per plan under
 `Knowledge Base/Planning/`; the authored horizon is never auto-rebucketed.
@@ -85,10 +86,10 @@ paths, or trash internals through curation.
 
 ## Records
 
-`record_memory` is the one public product command for human-owned observed
-state. It has exactly nine actions: `describe`, `validate`, `inspect`, and
-`query`; `create`, `append`, `update`, `revise`, and `rebaseline`. Do not replace
-it with storage-specific tools. `describe` returns the complete contract;
+`read_records` and `change_records` are the public product tools for human-owned
+observed state. `read_records` carries `describe`, `validate`, `inspect`, and
+`query`; `change_records` carries `create`, `append`, `update`, `revise`, and
+`rebaseline`. Do not replace them with storage-specific tools. `describe` returns the complete contract;
 `validate` is read-only preflight; `inspect` is report-only; `query` returns a
 bounded current view; `create` explicitly creates a reviewed collection contract;
 `append` adds a new event; `update` changes one item with current stale-write
@@ -605,14 +606,14 @@ Records collection has a declared link field, append the caller-authored item
 with the optional validation envelope:
 
 ```text
-record_memory(action="append", collection="...", item={...}, why="...",
-  delivery={
+change_records(operation={"kind": "append", "collection": "...", "item": {...}, "why": "...",
+  "delivery": {
     "evidence_page": "Knowledge Base/Evidence/.../<artifact>.md",
     "link_field": "<declared-link-field>",
     "reported_remote_ref": "<reported-platform-reference>",
     "reported_remote_field": "<declared-string-field>",
     "verified_remote_field": "<declared-boolean-field>"
-  })
+  }})
 ```
 
 The envelope validates those mapped item values; it does not set them or create
