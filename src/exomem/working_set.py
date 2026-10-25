@@ -3662,7 +3662,6 @@ def relist_carried_links(
     units: Sequence[Mapping[str, Any]],
     *,
     purpose: str | None,
-    withheld: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The `carried_link` anchors a carried packet lists when it serves `units`.
 
@@ -3671,13 +3670,7 @@ def relist_carried_links(
     surviving carried pages, so a slot a removed unit filled goes to the next
     person a surviving unit names, exactly as in a packet built without that
     unit. Each entry takes the `origin` of the page it was listed through.
-    `withheld` are the pages the request's pinned lexical checkpoint holds that
-    the caller's verdict withheld (`FreshnessSnapshot.lexical_withheld`): the
-    compiler's view rejected them, so this one does too, even if a row of the
-    working-set index outlives the page.
     """
-    from .governance import egress
-
     carried = [
         str(anchor.get("path") or "")
         for anchor in anchors
@@ -3690,7 +3683,7 @@ def relist_carried_links(
         working_set_index.WorkingSetIndex(vault_root),
         carried,
         units,
-        visible=egress.reader_view(vault_root, purpose=purpose, withheld=withheld),
+        visible=_reader_view(vault_root, purpose),
     )[:room]
     entries = [anchor.as_dict() for anchor in listed]
     _stamp_via_origins([*anchors, *entries], entries)
@@ -3885,18 +3878,18 @@ def _follow_up_packet(
     )
 
 
-def _reader_view(root: Path, purpose: str | None, snapshot: Any = None):
+def _reader_view(root: Path, purpose: str | None):
     """The caller's view of pages and units (`egress.ReaderView`), or `None`
     for the owner.
 
     A request that reads the lexical catalogue at a checkpoint older than its
     own (`working_set_runtime.pin_lexical_checkpoint`) sees, as withheld, the
-    pages that checkpoint holds and the caller's verdict had withheld.
+    pages that checkpoint holds and the caller's verdict had withheld
+    (`egress.proven_withheld_scope`).
     """
     from .governance import egress
 
-    withheld = snapshot.lexical_withheld("kb") if snapshot is not None else frozenset()
-    return egress.reader_view(root, purpose=purpose, withheld=withheld)
+    return egress.reader_view(root, purpose=purpose)
 
 
 def _conversation_affordable() -> bool:
@@ -4093,7 +4086,7 @@ def _compile_packet(
     # may already be a caller-supplied released view
     # (`working_set_runtime.serve`); narrowing it again is a no-op for that
     # caller and the only guard for a direct one.
-    visible = _reader_view(root, purpose, freshness_snapshot)
+    visible = _reader_view(root, purpose)
     if visible is not None:
         heat = working_set_heat.released_view(heat, visible)
     # "Missing or stale profiles SHALL report their state": `current` (live

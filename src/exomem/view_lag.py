@@ -29,6 +29,29 @@ _Lag = Callable[..., frozenset[str] | None]
 #: stale for a caller who may see any of it; re-measure, don't hand-tune.
 MAX_DECIDED_PATHS = 16
 
+#: The faults already reported, by decision and exception class. A persistent fault
+#: fails every request, so only the first of each class is logged. A duplicate from
+#: two racing threads is harmless, so there is no lock.
+_REPORTED_FAULTS: set[tuple[str, type[BaseException]]] = set()
+
+
+def _report_fault(decision: str, error: Exception) -> None:
+    """Warn once per process for each fault class that makes a decision report the lag.
+
+    Reporting the lag is the safe answer, but it returns every restricted flag to
+    the vault-wide one, which the operator would otherwise never see happen.
+    """
+    key = (decision, type(error))
+    if key in _REPORTED_FAULTS:
+        return
+    _REPORTED_FAULTS.add(key)
+    log.warning(
+        "lag undecidable; reporting it: decision=%s exception=%s",
+        decision,
+        type(error).__name__,
+        exc_info=error,
+    )
+
 
 def _fault_reports_the_lag(decide: _Lag) -> _Lag:
     """A fault in a lag decision is a lag the caller cannot rule out, so it reports it.
@@ -42,8 +65,8 @@ def _fault_reports_the_lag(decide: _Lag) -> _Lag:
     def guarded(*args: Any, **kwargs: Any) -> frozenset[str] | None:
         try:
             return decide(*args, **kwargs)
-        except Exception:  # noqa: BLE001 - a lag that cannot be decided is reported, as in `withheld_lag`
-            log.debug("lag undecidable; reporting it", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - a lag that cannot be decided is reported, as in `withheld_lag`
+            _report_fault(decide.__name__, error)
             return None
 
     return guarded
@@ -97,8 +120,8 @@ def consumer_lag_only_withheld(
     """
     try:
         delta = freshness.delta_since(vault_root, "vault", checkpoint)
-    except Exception:  # noqa: BLE001 - a lag that cannot be read is reported, as in `withheld_lag`
-        log.debug("lag undecidable; reporting it", exc_info=True)
+    except Exception as error:  # noqa: BLE001 - a lag that cannot be read is reported, as in `withheld_lag`
+        _report_fault("consumer_lag_only_withheld", error)
         return False
     return only_withheld(vault_root, delta, visible, pending=pending)
 

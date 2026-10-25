@@ -548,7 +548,6 @@ class FreshnessSnapshot:
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
         self._lexical: dict[str, freshness.RecallFreshnessCheckpoint] = {}
-        self._lexical_withheld: dict[str, frozenset[str]] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
         self._visible_recall_paths: dict[str, frozenset[str]] = {}
         self._pending_recall_paths: frozenset[str] | None = None
@@ -613,18 +612,10 @@ class FreshnessSnapshot:
         return pinned if pinned is not None else self.recall_checkpoint(scope)
 
     def pin_lexical_checkpoint(
-        self,
-        scope: str,
-        checkpoint: freshness.RecallFreshnessCheckpoint,
-        withheld: frozenset[str] = frozenset(),
+        self, scope: str, checkpoint: freshness.RecallFreshnessCheckpoint
     ) -> None:
-        """Read the lexical catalogue at `checkpoint`; `withheld` are pages it holds that have left the vault."""
+        """Read the lexical catalogue at `checkpoint`."""
         self._lexical[scope] = checkpoint
-        self._lexical_withheld[scope] = withheld
-
-    def lexical_withheld(self, scope: str) -> frozenset[str]:
-        """The pages the pinned checkpoint holds that this caller's verdict withheld before they left."""
-        return self._lexical_withheld.get(scope, frozenset())
 
     def projection_key(self, scope: str) -> tuple:
         checkpoint = self.recall_checkpoint(scope)

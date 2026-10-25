@@ -11,6 +11,7 @@ the vault-wide flag.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -167,6 +168,27 @@ def test_a_fault_reading_the_lag_reports_it_in_the_inbound_field(
     monkeypatch.setattr(freshness, "delta_since", unreadable)
 
     assert _links(served, restricted=True)["inbound"] is None
+
+
+def test_a_fault_reading_the_lag_is_logged_once_for_its_class(
+    served: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reply is the same lag as ever; the operator learns that the quieted flags fell back to it."""
+    monkeypatch.setattr(view_lag, "_REPORTED_FAULTS", set())
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nRewritten. See [[coverage-anchor]].\n")
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("registry delta unreadable")
+
+    monkeypatch.setattr(freshness, "delta_since", unreadable)
+    caplog.set_level(logging.WARNING, logger="exomem.view_lag")
+
+    _links(served, restricted=True)
+    _links(served, restricted=True)
+
+    warned = [record for record in caplog.records if record.name == "exomem.view_lag"]
+    assert len(warned) == 1
+    assert "RuntimeError" in warned[0].getMessage()
 
 
 def test_a_lag_longer_than_the_bound_is_reported_without_a_decision(
@@ -539,6 +561,25 @@ def test_deleting_a_page_held_as_withheld_leaves_the_restricted_packet_as_it_was
     assert _activate(activation.vault) == before
 
 
+def test_the_pages_a_request_proved_withheld_end_with_that_request(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later reader view on this thread must not reject a page for a request that is over."""
+    pinned: list[frozenset[str]] = []
+    pin = egress.pin_proven_withheld
+    monkeypatch.setattr(
+        egress, "pin_proven_withheld", lambda paths: pinned.append(paths) or pin(paths)
+    )
+    _activate(activation.vault)
+    _delete_as_the_service_does(activation.vault, HIDDEN_HUB)
+
+    _activate(activation.vault)
+
+    assert pinned[-1] == frozenset({HIDDEN_HUB})
+    with _caller(True):
+        assert egress.visible_page_filter(activation.vault)(HIDDEN_HUB) is True
+
+
 def test_deleting_a_withheld_page_with_no_held_verdict_is_reported_to_the_restricted_reader(
     activation: SimpleNamespace,
 ) -> None:
@@ -786,16 +827,31 @@ def test_a_withheld_write_leaves_the_restricted_current_state_page_as_it_was(
 
 MARSHAL = "Knowledge Base/Entities/People/Marshal Brannoch.md"
 DISPATCHER = "Knowledge Base/Entities/People/Dispatcher Vellum.md"
+NOTICE_BOARD = "Knowledge Base/Notes/Insights/Notice board.md"
+
+
+def _withhold_at_a_notice_level(vault: Path, rel: str) -> None:
+    """The external reader is told that `rel` is withheld (L1), not left to guess it exists."""
+    scope, rule = "01ARZ3NDEKTSV4RRFFQ69G5FD0", "01ARZ3NDEKTSV4RRFFQ69G5FD1"
+    governance = vault / "Knowledge Base/_Governance"
+    (governance / "scopes/notice.yaml").write_text(
+        f'governance_version: 1\nid: {scope}\nname: Notice\npaths: ["{rel}"]\n', encoding="utf-8"
+    )
+    (governance / "rules/notice-external.yaml").write_text(
+        f'governance_version: 1\nid: {rule}\nscope_ids: ["{scope}"]\naudience: external\nceiling: 1\n',
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.parametrize("withheld_path", [MARSHAL], indirect=True)
 def test_deleting_a_withheld_page_a_carried_unit_names_leaves_the_relisted_links_as_they_were(
-    named: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    named: SimpleNamespace,
 ) -> None:
     """The guard relists a carried page's links from the units it keeps.
 
-    Here it removes one unit of the carried page, so it relists. The working-set index
-    still holds the deleted page's row, and a deleted file reads as visible.
+    A unit of the carried page links a page withheld at a notice level, so the compiler keeps
+    it and the guard removes it, and the guard relists. The working-set index still holds the
+    deleted page's row, and a deleted file reads as visible.
     """
     vault = named.vault
     carried = vault / CARRY_PAGE
@@ -805,7 +861,7 @@ def test_deleting_a_withheld_page_a_carried_unit_names_leaves_the_relisted_links
             "- [finding] Marshal Brannoch signs each widening and Dispatcher Vellum files it. ^q-sign\n"
             "- [finding] A quillon parcel",
             1,
-        )
+        ).replace("nine minutes after", "nine minutes, as the [[Notice board]] posts, after", 1)
         + "\n## Context\n\n[[Marshal Brannoch]] [[Dispatcher Vellum]]\n",
         encoding="utf-8",
     )
@@ -816,29 +872,13 @@ def test_deleting_a_withheld_page_a_carried_unit_names_leaves_the_relisted_links
             f"---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n# {title}\n\n## Summary\n\nWorks the quillon queue.\n",
             encoding="utf-8",
         )
+    _write_as_the_service_does(vault, NOTICE_BOARD, "# Notice board\n\nPosted windows.\n")
+    _withhold_at_a_notice_level(vault, NOTICE_BOARD)
     _seed_live_recall(vault)
     lexstore.ensure_fresh(vault)
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(vault).rebuild()
     working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
-    # The guard removes a unit the compiler served, as it does when a policy moves between them.
-    guarding: list[bool] = []
-    guard, guarded_unit = egress.guard_working_set, egress._guarded_unit
-
-    def guard_removing_a_unit(*args, **kwargs):
-        guarding.append(True)
-        try:
-            return guard(*args, **kwargs)
-        finally:
-            guarding.clear()
-
-    monkeypatch.setattr(egress, "guard_working_set", guard_removing_a_unit)
-    monkeypatch.setattr(
-        egress,
-        "_guarded_unit",
-        lambda unit, *args: None
-        if guarding and "nine minutes" in str(unit.get("text")) else guarded_unit(unit, *args),
-    )
 
     before = _activate(vault, turn=CARRY_TURN)
     listed = [a["path"] for a in before["anchors"] if "carried_link" in a["evidence"]]

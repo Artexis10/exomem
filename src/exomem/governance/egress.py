@@ -40,7 +40,7 @@ import textwrap
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -3637,7 +3637,6 @@ def guard_working_set(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     intent_resolution: dict[str, Any] | None = None,
-    pinned_withheld: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Apply release decisions to a working-memory packet (design D7).
 
@@ -3660,11 +3659,6 @@ def guard_working_set(
 
     Units are decided by `_unit_verdict`, the rule `classify_units` gives the
     compiler, so a unit the compiler kept is one this guard keeps.
-
-    `pinned_withheld` are the pages a pinned lexical checkpoint holds that this
-    caller's verdict withheld before they left (`FreshnessSnapshot.lexical_withheld`).
-    Only the relisting of carried links reads it: it must reject the pages the
-    compiler's view rejected.
     """
     if release.blocked:
         return None
@@ -3809,8 +3803,7 @@ def guard_working_set(
         from .. import working_set
 
         relisted = working_set.relist_carried_links(
-            vault_root, guarded["anchors"], guarded["units"], purpose=purpose,
-            withheld=pinned_withheld,
+            vault_root, guarded["anchors"], guarded["units"], purpose=purpose
         )
         # A relisted row may be one this packet never named, so nothing above
         # decided it. It is decided here for this caller, like every named path,
@@ -7498,12 +7491,61 @@ def write_target_withheld(
     return exists and not keep(rel)
 
 
+class _ProvenWithheld:
+    """The pages one request has proved withheld, made by `proven_withheld_scope`."""
+
+    __slots__ = ("paths",)
+
+    def __init__(self) -> None:
+        self.paths: frozenset[str] = frozenset()
+
+
+_PROVEN_WITHHELD: ContextVar[_ProvenWithheld | None] = ContextVar(
+    "exomem_proven_withheld", default=None
+)
+
+
+@contextmanager
+def proven_withheld_scope() -> Iterator[None]:
+    """Hold, for one request, the pages that its reader views reject although they left the vault.
+
+    A request served a lexical catalogue older than itself reads pages that have since left the
+    vault, which the caller's own verdict withheld while they were pages
+    (`working_set_runtime.pin_lexical_checkpoint`, `view_lag.withheld_lag`). A deleted file reads
+    as visible, so each reader view built inside the scope rejects them (`page_filter_over`), with
+    no reader passing the set on.
+
+    The set belongs to this scope alone. A scope starts empty, also under another, and ends with
+    the request: nothing persists across requests, threads or the next request on this thread.
+    A thread that copies no context starts with none, as it starts without the request's principal.
+    """
+    token = _PROVEN_WITHHELD.set(_ProvenWithheld())
+    try:
+        yield
+    finally:
+        _PROVEN_WITHHELD.reset(token)
+
+
+def pin_proven_withheld(paths: frozenset[str]) -> bool:
+    """Add `paths` to the open request's set; False when no scope is open to hold a non-empty set."""
+    held = _PROVEN_WITHHELD.get()
+    if held is None:
+        return not paths
+    held.paths = held.paths | paths
+    return True
+
+
+def _proven_withheld() -> frozenset[str]:
+    held = _PROVEN_WITHHELD.get()
+    return frozenset() if held is None else held.paths
+
+
 def visible_page_filter(
     vault_root: Path,
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
-    withheld: frozenset[str] = frozenset(),
+    withheld: frozenset[str] | None = None,
 ) -> Callable[[str], bool] | None:
     """`restricted_release_filter` for references that may name no page.
 
@@ -7514,25 +7556,28 @@ def visible_page_filter(
 
     `withheld` names pages that have left the vault but that a structure
     published before they left still holds, and that this caller's own verdict
-    held back while they were pages (`view_lag.withheld_lag`).
+    held back while they were pages (`view_lag.withheld_lag`). Left out, it is
+    the set the request holds (`proven_withheld_scope`).
     """
     keep = restricted_release_filter(vault_root, principal=principal, purpose=purpose)
     return None if keep is None else page_filter_over(vault_root, keep, withheld=withheld)
 
 
 def page_filter_over(
-    vault_root: Path, keep: Callable[[str], bool], *, withheld: frozenset[str] = frozenset()
+    vault_root: Path, keep: Callable[[str], bool], *, withheld: frozenset[str] | None = None
 ) -> Callable[[str], bool]:
     """`visible_page_filter` over a release decision `keep` that the caller already built."""
     root = Path(vault_root)
     offered = admission_of(keep)
+    # Read as the filter is built: the pin's own filter is built before the set exists, and decides what it holds.
+    held = _proven_withheld() if withheld is None else withheld
 
     def decide(rel_path: str, publish: bool = False) -> tuple[bool, bool]:
         rel = str(rel_path or "").strip()
         if not rel:
             return True, False
         # A page that left is no page to the check below, which would keep it.
-        if rel in withheld:
+        if rel in held:
             return False, False
         if not lifecycle.is_tombstoned(root, rel):
             try:
@@ -7651,10 +7696,11 @@ def reader_view(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     unit_identity_only: bool = False,
-    withheld: frozenset[str] = frozenset(),
+    withheld: frozenset[str] | None = None,
 ) -> ReaderView | None:
     """The caller's `ReaderView`, or `None` when nothing is withheld from it
-    (`visible_page_filter`: the owner, or no bound caller)."""
+    (`visible_page_filter`: the owner, or no bound caller). `withheld` is its
+    argument of the same name."""
     pages = visible_page_filter(
         vault_root, principal=principal, purpose=purpose, withheld=withheld
     )
