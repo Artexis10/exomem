@@ -19,6 +19,7 @@ a large page count or do not bother.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import statistics
@@ -137,10 +138,13 @@ class _Writer(threading.Thread):
         self.outcomes: dict[str, int] = {}
         self.errors: list[str] = []
         self.warmup_latencies: list[float] = []
+        self.diagnostics: list[dict[str, Any]] = []
 
     def run(self) -> None:
         from types import SimpleNamespace
 
+        from exomem import call_spans
+        from exomem.mutation_lock import last_mutation_timing
         from exomem.writer_lease import get_manager, mark_active_mutation_committed
 
         vault = self.imports["vault"]
@@ -174,6 +178,13 @@ class _Writer(threading.Thread):
                 return {"status": "committed", "mutated": True, "dispatch": "fanout"}
 
             command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
+            call_token = f"graph-diagnostic-{threading.get_ident()}-{revision}"
+            context_token = call_spans.MCP_CALL_TOKEN.set(call_token)
+            # This temporary branch runs one writer and retains a slow invoke's stacks.
+            faulthandler.dump_traceback_later(BLOCKING_WRITE_SECONDS)
+            started_ns = time.monotonic_ns()
+            thread_cpu = time.thread_time()
+            process_cpu = time.process_time()
             started = time.perf_counter()
             try:
                 terminal = manager.invoke(command, (self.vault_root,), {})
@@ -187,7 +198,26 @@ class _Writer(threading.Thread):
             except Exception as error:  # noqa: BLE001 - a writer failure is a finding
                 outcome = f"error:{type(error).__name__}"
                 self.errors.append(f"{type(error).__name__}: {error}")
-            elapsed_ms = (time.perf_counter() - started) * 1_000.0
+            finally:
+                elapsed_ms = (time.perf_counter() - started) * 1_000.0
+                finished_ns = time.monotonic_ns()
+                thread_cpu_ms = (time.thread_time() - thread_cpu) * 1_000.0
+                process_cpu_ms = (time.process_time() - process_cpu) * 1_000.0
+                faulthandler.cancel_dump_traceback_later()
+                timing = last_mutation_timing()
+                spans = call_spans.pop_call_spans(call_token)
+                call_spans.MCP_CALL_TOKEN.reset(context_token)
+            self.diagnostics.append(
+                {
+                    "kind": "write", "revision": revision,
+                    "warmup": revision <= self.warmup,
+                    "started_ns": started_ns, "finished_ns": finished_ns,
+                    "wall_ms": elapsed_ms, "thread_cpu_ms": thread_cpu_ms,
+                    "process_cpu_ms": process_cpu_ms, "outcome": outcome,
+                    "mutation_timing": timing,
+                    "spans": spans,
+                }
+            )
             if revision <= self.warmup:
                 self.warmup_latencies.append(elapsed_ms)
                 continue
@@ -208,14 +238,21 @@ class _Drainer(threading.Thread):
         self.imports = imports
         self.drains = 0
         self.errors: list[str] = []
+        self.diagnostics: list[dict[str, Any]] = []
 
     def run(self) -> None:
         while not self.stop.is_set():
+            started_ns = time.monotonic_ns()
             try:
-                self.imports["index_sync"].drain_deferred_work(self.vault_root)
+                processed = self.imports["index_sync"].drain_deferred_work(self.vault_root)
                 self.drains += 1
             except Exception as error:  # noqa: BLE001 - a drain failure is a finding
                 self.errors.append(f"{type(error).__name__}: {error}")
+                processed = None
+            self.diagnostics.append(
+                {"kind": "drain", "started_ns": started_ns,
+                 "finished_ns": time.monotonic_ns(), "processed": processed}
+            )
             self.stop.wait(self.interval)
 
 
@@ -276,6 +313,10 @@ def run(
         thread.join(timeout=120)
     drainer.join(timeout=120)
     elapsed = time.perf_counter() - started
+    # Flush diagnostics after the timed workload so output does not add write latency.
+    for thread in [*writer_threads, drainer]:
+        for row in thread.diagnostics:
+            print("DIAGNOSTIC " + json.dumps(row, default=str), flush=True)
 
     quiesced = _converge(vault_root, imports, deadline_seconds=300.0)
     state = imports["graph_sync"].status(vault_root)["state"]
