@@ -140,6 +140,7 @@ The run SHALL persist phase `applying` before the first item write so a process 
 
 - **WHEN** the run is left in phase `applying` with incomplete outcomes
 - **THEN** `status` reports `interrupted: true`
+- **AND** calling `apply` again completes the remaining validated items without duplicating applied ones
 
 #### Scenario: A budget stop is remaining work, not a crash
 

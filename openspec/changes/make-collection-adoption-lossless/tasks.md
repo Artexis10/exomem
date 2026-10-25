@@ -13,7 +13,7 @@
 
 - [x] 3.1 Factor the artifact commit out of `add.add` into one streaming seam that takes an exact destination, import provenance and the ceiling; make non-text and non-UTF-8 files import form `artifact`; request extraction after each artifact commit. Verify: a test imports a PDF and an image whose artifact bytes equal the originals and finds their extraction requests; capture tests pass unchanged.
 - [x] 3.2 Render the fence verbatim (no stripping) and the `## Links` section outside it; carry tags and aliases into front matter. Verify: the graph shows an edge from an imported note to an imported target; the fenced text with trailing whitespace hashes to `original_sha256`.
-- [ ] 3.3 Bound `plan` and `apply` calls by the remaining request budget with a server-issued `continuation`; write text outcomes in their commit batch; recheck identity under the guard; fail an occupied frozen destination with `TARGET_OCCUPIED`; set `applied` only when every item has an outcome; report a budget stop as remaining work in `status`. Verify: a test with a tiny budget needs several calls, writes each item once, replays a repeated cursor without writing, and leaves originals byte-identical.
+- [x] 3.3 Bound `plan` and `apply` calls by the remaining request budget with a server-issued `continuation`; write text outcomes in their commit batch; recheck identity under the guard; fail an occupied frozen destination with `TARGET_OCCUPIED`; set `applied` only when every item has an outcome; report a budget stop as remaining work in `status`. Verify: a test with a tiny budget needs several calls, writes each item once, replays a repeated cursor without writing, and leaves originals byte-identical.
 - [x] 3.4 Add `coverage` to `finish`, record hidden folders as counted inventory rows, and match recall hits on the exact target path. Verify: a test with a pending image, an unresolved link and a hidden folder counts all three honestly.
 
 ## 4. Guidance and surface (D7)
@@ -22,5 +22,14 @@
 
 ## 5. Proof and delivery
 
-- [ ] 5.1 Run the benchmark after the change on the same seed and profiles from a clean, committed product tree; record before and after under `docs/benchmarks/`. Verify: every collection item is landed or refused with a code, and a re-run creates no Source.
+- [x] 5.1 Run the benchmark after the change on the same seed and profiles from a clean, committed product tree; record before and after under `docs/benchmarks/`. Verify: every collection item is landed or refused with a code, and a re-run creates no Source.
 - [ ] 5.2 Run the full suite, the privacy gate and `openspec validate --all --strict`; get an independent review; merge.
+
+## Delivery evidence
+
+The benchmark report binds the final measurement to commit `d7142ccf00cd5ccccf91643a816193ccdbaa21b3`.
+Both profiles import all 1,100 intended files and create no Source pages on replay.
+Independent byte checks cover 1,017 captures and 83 artifacts per profile.
+The 214 scoped integration checks and the two final browser regression cases pass.
+PR #2081 records the independent review, required CI results and actual merge; those records determine delivery completion.
+The post-terminal media fan-out follow-up remains required before a real collection import.
