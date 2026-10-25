@@ -159,3 +159,9 @@ contract revision `request-latency-v3`; thresholds, populations and budgets stay
 unchanged. Generic body work remains unbudgeted. One focused hosted proof must
 verify both principals, terminal work, persisted preparation and unit attribution
 before another full paired run. Earlier counter-wrapped calls remain diagnostics.
+
+The reference rule now releases the admitted principal at full disclosure. Its
+earlier ceiling of 3 was below the egress release floor. Every admitted hit was
+then a withheld notice and every unit result was empty, so that series timed
+notices instead of results. A model-free test checks that the admitted principal
+receives the owner's unit and mixed hits.
