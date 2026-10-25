@@ -19,7 +19,6 @@ jobs:
       EXOMEM_TEST_TIER: core
       EXOMEM_TUI_TEST_DIRECTORY: tests/tui
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/finite-mixed-env
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,7 +40,7 @@ jobs:
           git worktree add --detach "$baseline" 9432ea367192e8833d6dc5aef1ffb2b463ed4d8a
           cp tests/test_semantic_unit_recall.py "$baseline/tests/test_semantic_unit_recall.py"
           set +e
-          PYTHONPATH="$baseline/src" "$UV_PROJECT_ENVIRONMENT/bin/python" -m pytest -q "$baseline/tests/test_semantic_unit_recall.py::test_finite_mixed_recall_keeps_hits_and_reports_only_proved_completeness[complete]" -o timeout=180 --junitxml="$RUNNER_TEMP/finite-mixed-baseline.xml"
+          PYTHONPATH="$baseline/src" "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest -q "$baseline/tests/test_semantic_unit_recall.py::test_finite_mixed_recall_keeps_hits_and_reports_only_proved_completeness[complete]" -o timeout=180 --junitxml="$RUNNER_TEMP/finite-mixed-baseline.xml"
           result=$?
           set -e
           test "$result" -eq 1
