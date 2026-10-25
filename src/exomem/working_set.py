@@ -2606,7 +2606,7 @@ def _carry_by_retrieval(
     if freshness_snapshot is not None:
         try:
             freshness = freshness_snapshot.for_scope("kb")
-            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+            recall_checkpoint = freshness_snapshot.lexical_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
             log.debug("activation carry freshness unavailable", exc_info=True)
             return ()
@@ -2695,7 +2695,7 @@ def _carry_groups_by_retrieval(
     if freshness_snapshot is not None:
         try:
             freshness = freshness_snapshot.for_scope("kb")
-            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+            recall_checkpoint = freshness_snapshot.lexical_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
             log.debug("activation carry freshness unavailable", exc_info=True)
             return ()
@@ -2876,7 +2876,7 @@ def _title_named_anchors(
     if freshness_snapshot is not None:
         try:
             freshness = freshness_snapshot.for_scope("kb")
-            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+            recall_checkpoint = freshness_snapshot.lexical_checkpoint("kb")
         except Exception:  # noqa: BLE001 - an unreadable snapshot lists nothing
             log.debug("activation title listing freshness unavailable", exc_info=True)
             return (), None
@@ -3546,6 +3546,7 @@ def _carried_material(
                 index_token=index_token,
                 visible=visible,
                 status_basis=status_basis,
+                freshness_snapshot=freshness_snapshot,
             )
         got, gaps = run_lanes(
             vault_root,
@@ -3661,6 +3662,7 @@ def relist_carried_links(
     units: Sequence[Mapping[str, Any]],
     *,
     purpose: str | None,
+    withheld: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The `carried_link` anchors a carried packet lists when it serves `units`.
 
@@ -3669,7 +3671,13 @@ def relist_carried_links(
     surviving carried pages, so a slot a removed unit filled goes to the next
     person a surviving unit names, exactly as in a packet built without that
     unit. Each entry takes the `origin` of the page it was listed through.
+    `withheld` are the pages the request's pinned lexical checkpoint holds that
+    the caller's verdict withheld (`FreshnessSnapshot.lexical_withheld`): the
+    compiler's view rejected them, so this one does too, even if a row of the
+    working-set index outlives the page.
     """
+    from .governance import egress
+
     carried = [
         str(anchor.get("path") or "")
         for anchor in anchors
@@ -3682,7 +3690,7 @@ def relist_carried_links(
         working_set_index.WorkingSetIndex(vault_root),
         carried,
         units,
-        visible=_reader_view(vault_root, purpose),
+        visible=egress.reader_view(vault_root, purpose=purpose, withheld=withheld),
     )[:room]
     entries = [anchor.as_dict() for anchor in listed]
     _stamp_via_origins([*anchors, *entries], entries)
@@ -3828,6 +3836,7 @@ def _follow_up_packet(
                 state_fields=conventions.state_fields,
                 date_fields=conventions.date_fields,
                 status_basis=status_basis,
+                freshness_snapshot=freshness_snapshot,
             )
         items, missing = run_lanes(
             vault_root,
@@ -4931,6 +4940,7 @@ def _compile_packet(
             state_fields=conventions.state_fields,
             date_fields=conventions.date_fields,
             status_basis=status_basis,
+            freshness_snapshot=freshness_snapshot,
         )
     reached: dict[str, set[str]] = {}
     for entry in current_state:
