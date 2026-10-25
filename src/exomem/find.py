@@ -2267,7 +2267,7 @@ def find(
                 metadata = _managed_page_metadata(
                     vault_root, represented, scope="vault",
                     freshness_key=snapshot.for_scope("vault"), pending=pending,
-                    include_occurrences=True,
+                    include_structure=True,
                 )
                 # Complete structural units bound matches before prose, query
                 # filtering and deduplication, including page-only parents.
@@ -4813,6 +4813,7 @@ def _managed_page_metadata(
     parents_only: bool = False,
     include_ranking: bool = False,
     include_occurrences: bool = False,
+    include_structure: bool = False,
     recall_checkpoint: Any | None = None,
 ) -> dict[str, Any]:
     """Resolve current page metadata without opening canonical page files.
@@ -4842,6 +4843,7 @@ def _managed_page_metadata(
             parents_only=parents_only,
             include_ranking=include_ranking,
             include_occurrences=include_occurrences,
+            include_structure=include_structure,
             recall_checkpoint=recall_checkpoint,
         )
         if not result.readiness.complete:
@@ -4861,57 +4863,64 @@ def _managed_page_metadata(
             units: tuple[dict[str, Any], ...] = ()
             occurrences: tuple = ()
             selected_parent = None
-            if include_units or include_occurrences:
-                # Parsing bounded, already-proven pending bytes is permitted;
-                # reopening the file here could observe a later commit instead.
-                # The frontmatter parser consumes one separator LF before the held body.
-                source = (
-                    "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n\n" + page.body
-                )
-                state = semantic_index.selected_parent_index_state(vault_root, rel, source=source)
-                units = tuple(
-                    structured_filters.unit_view(unit, instance=state.instance_id)
-                    for unit in state.document.units
-                )
-                if include_occurrences:
-                    receipt = pending.rows[rel]
-                    if page.snapshot_hash is None or receipt.after_hash != page.snapshot_hash:
-                        raise RetrievalIndexWarming(site="pending_metadata_incomplete")
-                    # Reconstruction parses held bytes; only the receipt's original
-                    # hash and current core inputs identify their canonical generation.
-                    parser, language_hash, relation_hash = semantic_index.current_registry_identity(vault_root)
-                    state = replace(
-                        state, parent_source_hash=page.snapshot_hash, parser_version=parser,
-                        language_registry_hash=language_hash, relation_registry_hash=relation_hash,
-                        parent_generation=semantic_index.parent_generation(
-                            parent_path=rel, parent_ref=state.parent_ref, parent_source_hash=page.snapshot_hash,
-                            language_registry_hash=language_hash, relation_registry_hash=relation_hash,
-                            parser_version=parser,
-                        ),
+            if include_units or include_occurrences or include_structure:
+                try:
+                    # Parsing bounded, already-proven pending bytes is permitted;
+                    # reopening the file here could observe a later commit instead.
+                    # The frontmatter parser consumes one separator LF before the held body.
+                    source = (
+                        "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n\n" + page.body
                     )
-                    parent = semantic_index.Interpretations(vault_root).parent(
-                        rel, semantic_index.structural_metadata(state),
-                    )
-                    if not parent.structure.complete:
-                        raise RetrievalIndexWarming(site="pending_metadata_incomplete")
-                    selected_parent = parent
-                    selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
-                    values = []
-                    for order, raw in enumerate(semantic_units.candidate_units(state.candidates)):
-                        key = semantic_units.occurrence_key(raw.form, raw.span, raw.source_hash)
-                        selected_unit = selected_by_key.get(key)
-                        if selected_unit is None or selected_unit.unit_ref is None:
-                            continue
-                        row = (
-                            key, rel, state.parent_ref, state.parent_generation, state.parent_source_hash,
-                            state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
-                            json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
-                            raw.line, raw.end_line, order,
+                    state = semantic_index.selected_parent_index_state(vault_root, rel, source=source)
+                    if include_units or include_occurrences:
+                        units = tuple(
+                            structured_filters.unit_view(unit, instance=state.instance_id)
+                            for unit in state.document.units
                         )
-                        unit_view = structured_filters.unit_view(raw, instance=state.instance_id)
-                        unit_view.update(category=selected_unit.category, kind=selected_unit.kind)
-                        values.append((lexstore._unit_hit(row, selected_unit, None), parent, unit_view, key))
-                    occurrences = tuple(values)
+                    if include_occurrences or include_structure:
+                        receipt = pending.rows[rel]
+                        if page.snapshot_hash is None or receipt.after_hash != page.snapshot_hash:
+                            raise RetrievalIndexWarming(site="pending_metadata_incomplete")
+                        # Reconstruction parses held bytes; only the receipt's original
+                        # hash and current core inputs identify their canonical generation.
+                        parser, language_hash, relation_hash = semantic_index.current_registry_identity(vault_root)
+                        state = replace(
+                            state, parent_source_hash=page.snapshot_hash, parser_version=parser,
+                            language_registry_hash=language_hash, relation_registry_hash=relation_hash,
+                            parent_generation=semantic_index.parent_generation(
+                                parent_path=rel, parent_ref=state.parent_ref, parent_source_hash=page.snapshot_hash,
+                                language_registry_hash=language_hash, relation_registry_hash=relation_hash,
+                                parser_version=parser,
+                            ),
+                        )
+                        parent = semantic_index.Interpretations(vault_root).parent(
+                            rel, semantic_index.structural_metadata(state),
+                        )
+                        if not parent.structure.complete and include_occurrences:
+                            raise RetrievalIndexWarming(site="pending_metadata_incomplete")
+                        selected_parent = parent
+                        if include_occurrences:
+                            selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
+                            values = []
+                            for order, raw in enumerate(semantic_units.candidate_units(state.candidates)):
+                                key = semantic_units.occurrence_key(raw.form, raw.span, raw.source_hash)
+                                selected_unit = selected_by_key.get(key)
+                                if selected_unit is None or selected_unit.unit_ref is None:
+                                    continue
+                                row = (
+                                    key, rel, state.parent_ref, state.parent_generation, state.parent_source_hash,
+                                    state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
+                                    json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
+                                    raw.line, raw.end_line, order,
+                                )
+                                unit_view = structured_filters.unit_view(raw, instance=state.instance_id)
+                                unit_view.update(category=selected_unit.category, kind=selected_unit.kind)
+                                values.append((lexstore._unit_hit(row, selected_unit, None), parent, unit_view, key))
+                            occurrences = tuple(values)
+                except (RetrievalIndexWarming, ValueError, OSError, KeyError, TypeError):
+                    if include_units or include_occurrences:
+                        raise
+                    # An optional bound stays unknown when its held proof is unavailable.
             metadata[rel] = lexstore.EligibilityMetadata(
                 structured_filters.page_view(page),
                 page.parent_media + ".md" if page.parent_media else None,

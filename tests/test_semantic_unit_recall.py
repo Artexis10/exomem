@@ -1103,7 +1103,7 @@ def test_finite_mixed_recall_keeps_hits_and_reports_only_proved_completeness(
 
         def pending_parent_lost(*args, **kwargs):
             metadata = original(*args, **kwargs)
-            if kwargs.get("include_occurrences") and not kwargs.get("include_ranking"):
+            if kwargs.get("include_structure") and not kwargs.get("include_ranking"):
                 # Pending tombstones may omit represented parents from metadata.
                 return {}
             return metadata
@@ -1199,6 +1199,58 @@ def test_page_only_parent_uses_structural_bound_after_occurrence_loss(
     assert "semantic_units_candidate_window" in failed
 
 
+def test_page_only_parent_unit_growth_keeps_keyword_metadata_work_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell, record_property,
+) -> None:
+    """A represented page's nonmatching units must not become occurrence reads for its cap bound."""
+    from recall_structural_counts import RequestCounts
+
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    for index in range(170):
+        _write_page(
+            tmp_path, f"ordinary-{index:03d}",
+            body=f"- [config] windowmarker reading {index} ^reading",
+        )
+    counts = RequestCounts(tmp_path, monkeypatch)
+    observations = []
+    for unit_count in (4, 400):
+        page_only = _write_page(
+            tmp_path, "windowmarker-large", updated="2026-07-16",
+            body="\n".join(
+                f"- [config] Separate calibration {index}. ^calibration-{index}"
+                for index in range(unit_count)
+            ),
+        )
+        warm_managed_cell(tmp_path)
+        options = dict(
+            query="windowmarker", mode="keyword", scope="kb-only", graph=False,
+            result_level="mixed", limit=4, include_timings=True,
+        )
+        commands.op_find(tmp_path, **options)
+        with counts.request():
+            result = commands.op_find(tmp_path, **options)
+        sample = counts.snapshot()
+        steps = sum(
+            value for (_selection, store, _scope, stage), value in sample["steps"].items()
+            if store == "lexical" and stage.startswith("keyword/")
+            and stage.endswith("/_eligibility_metadata_query")
+        )
+        relative = page_only.relative_to(tmp_path).as_posix()
+        assert len(result["hits"]) == 4
+        assert any(hit.get("path") == relative for hit in result["hits"])
+        assert not any(hit.get("parent_path") == relative for hit in result["hits"])
+        assert "semantic_units_candidate_window" in result.get("degraded", [])
+        assert steps > 0, sample["steps"]
+        identities = [
+            (hit["result_type"], hit.get("path"), hit.get("unit_ref")) for hit in result["hits"]
+        ]
+        observations.append((identities, steps))
+    (small_hits, small_steps), (large_hits, large_steps) = observations
+    record_property("keyword_metadata_vm_steps", {4: small_steps, 400: large_steps})
+    assert large_hits == small_hits
+    assert large_steps <= small_steps * 1.5, (small_steps, large_steps)
+
+
 @pytest.mark.parametrize("matching_hash", [True, False], ids=["current", "mismatched-summary"])
 def test_zero_unit_parent_retains_only_a_snapshot_bound_structural_summary(
     tmp_path: Path, matching_hash: bool,
@@ -1225,7 +1277,7 @@ def test_zero_unit_parent_retains_only_a_snapshot_bound_structural_summary(
 
     metadata = find_module._managed_page_metadata(
         tmp_path, {relative}, scope="kb", freshness_key=find_module.FreshnessSnapshot(tmp_path).kb(),
-        pending=None, include_occurrences=True,
+        pending=None, include_structure=True,
     )[relative]
 
     assert metadata.occurrences == ()
@@ -1251,7 +1303,7 @@ def test_pending_zero_unit_parent_keeps_its_frozen_structural_bound(tmp_path: Pa
 
     metadata = find_module._managed_page_metadata(
         tmp_path, {relative}, scope="kb", freshness_key=None,
-        pending=overlay, include_occurrences=True,
+        pending=overlay, include_structure=True,
     )[relative]
 
     assert metadata.occurrences == ()
@@ -1259,6 +1311,21 @@ def test_pending_zero_unit_parent_keeps_its_frozen_structural_bound(tmp_path: Pa
     assert metadata.selected_parent.structure.units == ()
     assert metadata.content_hash == page.snapshot_hash
     assert metadata.selected_parent.metadata["parent_source_hash"] == page.snapshot_hash
+    overlay.rows[relative] = pending_recall.PendingRow(
+        relative, "generation", "batch", "unproven-generation", page, None,
+    )
+
+    unknown = find_module._managed_page_metadata(
+        tmp_path, {relative}, scope="kb", freshness_key=None,
+        pending=overlay, include_structure=True,
+    )[relative]
+
+    assert unknown.selected_parent is None
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module._managed_page_metadata(
+            tmp_path, {relative}, scope="kb", freshness_key=None,
+            pending=overlay, include_occurrences=True,
+        )
 
 
 def test_mixed_relation_survivors_keep_the_original_unit_corpus_scores(tmp_path: Path) -> None:

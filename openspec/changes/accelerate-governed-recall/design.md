@@ -532,12 +532,15 @@ it with the current path on the reference corpus.
   selected hydration. Task 6.6 must preserve those mechanisms rather than add
   another cache for the same work.
 
-  A hosted reference diagnostic on 2026-10-25 found another cost before scoring.
-  One unit query made 3,250 exact bridge snapshot reads and 3,524,084 filesystem
-  name comparisons ([run 40232728916](https://github.com/Artexis10/exomem/actions/runs/40232728916)).
-  The profile includes instrumentation overhead and establishes no latency gain.
-  The remaining admission work needs a separate design that preserves release
-  decisions before scoring and their policy, caller and source dependencies.
+  A hosted reference diagnostic window on 2026-10-25 recorded 3,250 exact
+  bridge snapshot reads and 3,524,084 filesystem name comparisons
+  ([run 40232728916](https://github.com/Artexis10/exomem/actions/runs/40232728916)).
+  These are application counts during that window, not proved foreground work.
+  Python 3.12.3's profiler uses interpreter-wide monitoring and can include
+  background audits. Its timings establish no latency gain or foreground cost.
+  Remaining admission work needs thread-qualified attribution before a repair.
+  Release decisions must still precede scoring and retain their policy, caller
+  and source dependencies.
 
   Mixed recall also freezes its combined page and unit slots before canonical
   hydration. Each lane retains its original collection limit and rank. Managed
