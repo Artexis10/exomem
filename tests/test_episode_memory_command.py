@@ -1095,7 +1095,7 @@ def test_direct_heat_failure_does_not_turn_committed_episode_into_retryable_erro
 def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import call_ledger, call_spans
+    from exomem import call_spans
 
     real = episode_recovery.EpisodeInputOwner.bind_committed_input
     calls = {"n": 0}
@@ -1123,11 +1123,8 @@ def test_a_ledger_failure_after_the_write_is_idempotent_on_retry(
     assert retried["ledger"] == "bound"
     assert retried["revision"] == 1
     assert len(_episodes(vault)) == 1
-    row = call_ledger.build_row(
-        sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id=token,
-        tool="episode_memory", outcome="ok", duration_ms=None, access="write", spans=spans,
-    )
-    phases = {span["name"]: span for span in row["spans"]}
+    # The ledger keeps only the slowest spans; attribution uses the complete recorder output.
+    phases = {span["name"]: span for span in spans}
     # Failed binding and an idempotent Source retry must both remain attributable.
     for name in ("episode.guard_entry", "episode.write", "episode.revisions", "episode.journal_bind"):
         assert phases[name]["count"] == 2
