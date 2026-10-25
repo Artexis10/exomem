@@ -357,6 +357,38 @@ def test_walk_md_admits_agrees_with_walk_md_on_every_rule(tmp_path: Path) -> Non
         assert find_corpus.walk_md_admits(kb, path, shared) is expected, path
 
 
+def test_vault_md_admits_uses_the_vault_scanner_rule(tmp_path: Path) -> None:
+    from exomem import vault
+
+    _kb, candidates = _adversarial_kb(tmp_path)
+    for relative in (".git/hidden.md", ".obsidian/hidden.md", "Reference/ordinary.md"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Page\n")
+        candidates.append(path)
+    walked = set(vault.walk_vault_md(tmp_path))
+    shared = {}
+    for path in candidates:
+        assert vault.walk_vault_md_admits(tmp_path, path, shared) is (path in walked), path
+
+
+def test_vault_md_admits_requires_the_listed_spelling_even_when_an_alias_stats(tmp_path, monkeypatch):
+    from exomem import vault
+
+    actual = tmp_path / "Notes" / "page.md"
+    actual.parent.mkdir()
+    actual.write_text("# Page\n")
+    alias = actual.with_name("PAGE.md")
+    original_lstat = Path.lstat
+
+    def case_insensitive_lstat(path, *args, **kwargs):
+        return original_lstat(actual if path == alias else path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", case_insensitive_lstat)
+    assert vault.walk_vault_md_admits(tmp_path, actual, {}) is True
+    assert vault.walk_vault_md_admits(tmp_path, alias, {}) is False
+
+
 @pytest.mark.skipif(
     sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
     reason="directory permission bits do not bind here",
@@ -371,6 +403,10 @@ def test_walk_md_admits_refuses_what_the_walk_cannot_list(tmp_path: Path) -> Non
     try:
         assert hidden not in set(find_corpus.walk_md(kb))
         assert find_corpus.walk_md_admits(kb, hidden, {}) is False
+        from exomem import vault
+
+        assert hidden not in set(vault.walk_vault_md(tmp_path))
+        assert vault.walk_vault_md_admits(tmp_path, hidden, {}) is False
     finally:
         locked.chmod(0o755)
 
