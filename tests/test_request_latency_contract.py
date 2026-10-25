@@ -119,10 +119,15 @@ def test_the_packaged_contract_keeps_owners_and_strict_comparisons() -> None:
     contract = load_contract()
     raw = json.loads(files("exomem").joinpath("request_latency_contract.json").read_text())
     assert contract.revision == raw["revision"]
+    assert contract.revision == "request-latency-v3"
     assert contract.bar("activation-live-warm").comparison == "<"
     assert contract.bar("governed-hybrid").threshold_ms == 200
     assert contract.bar("governed-keyword").threshold_ms == 100
     assert contract.references[contract.bar("governed-hybrid").reference]["pages_min"] == 6500
+    # These are the protocol's five in-process whole-call bars.
+    for bar_id in ("governed-hybrid", "governed-hybrid-p95-target", "governed-keyword",
+                   "governed-keyword-p95-target", "governed-p50-target"):
+        assert contract.bar(bar_id).boundary.id == "recall-bound-command-v1"
     assert all(bar.requirement and bar.provenance for bar in contract.bars)
 
 

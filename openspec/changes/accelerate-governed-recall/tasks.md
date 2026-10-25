@@ -55,7 +55,8 @@ The slices follow the gate, so each one reports a before and an after on the sam
   - run as the vault owner through the product's owner-authority path with nothing patched, plus a separate admitted-principal series;
   - run the hybrid, keyword, filtered, dedicated temporal and `mixed` series, clear only the result cache between samples, and send query text unchanged;
   - check quiescence once, before the series, and record the load beside every percentile; on the live cell, have the served process record each request thread's run-queue delay from `/proc/self/task/<tid>/schedstat` in the timing diagnostics, apply the contract's contended-sample rule, and report the contended count and the p95 with contended samples included;
-  - time the entire `ask_memory` call, including response work after the retrieval snapshot; record wall time and process-clock `cpu_ms` per stage, plus `overlap_cpu_ms` and `unattributed_cpu_ms` per request, as the contract states; report every CPU field as unknown on a platform without `/proc/self/task` or the process clock, and a stage with fewer than 20 samples as insufficient;
+  - time the entire registered in-process bound `ask_memory` command, including dispatcher ownership, terminal filtering, ownership completion, response scrubbing, logging and the due-state carrier; keep transport and installed MCP acceptance separate; record wall time and process-clock `cpu_ms` per stage, plus `overlap_cpu_ms` and `unattributed_cpu_ms` per request, as the contract states; report every CPU field as unknown on a platform without `/proc/self/task` or the process clock, and a stage with fewer than 20 samples as insufficient;
+  - reconcile persisted advisory state synchronously under the preparation owner before starting managed recall, verify that its normal loader accepts it, and retain catalogue admission and both principals' warm-up; preserve normal TTL refresh and request-local placement and invocation scopes;
   - before any budget is trusted, measure the query encode for each query-length band (1-3, 4-9 and 15-40 words) on one and on two intra-op threads, on the pinned profile, and store the figures under `verification/`;
   - ground the BM25 and keyword targets with a replay on a new connection per request, on SQLite 3.45.1 and 3.46.1, over the whole query mix with the 15-40 word band included, and with keyword recall's page reads and hit construction inside the keyword row; until then report both stages against 8 ms and apply no twice-budget rule to them;
   - record the SQLite version in every summary, and give no ceiling verdict for a workstation run on a SQLite outside the reference; keep the reference versions (today 3.45.1 in CI's system Python, 3.46.1 on Cloud cells) with the gate's other inputs under `benchmarks/recall-latency/`, so that a SQLite upgrade in CI or the Cloud image is a one-line data change;
@@ -150,3 +151,11 @@ and live run-queue attribution. Hosted execution must verify stored rows,
 worker execution, paired qualification and the complete job duration.
 Encoder thread profiling, SQL replay and absolute and live acceptance remain
 unmeasured. Model-free transport checks establish no live acceptance.
+
+The next correction uses each arm's maintained bound command rather than its
+direct leaf. It prepares persisted advisory state and spans unit-only selection.
+The five governed-recall bars move to boundary `recall-bound-command-v1` in
+contract revision `request-latency-v3`; thresholds, populations and budgets stay
+unchanged. Generic body work remains unbudgeted. One focused hosted proof must
+verify both principals, terminal work, persisted preparation and unit attribution
+before another full paired run. Earlier counter-wrapped calls remain diagnostics.

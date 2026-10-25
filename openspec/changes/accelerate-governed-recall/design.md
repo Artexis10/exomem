@@ -787,9 +787,28 @@ absolute threshold.
   existing due-state call spans. They change no authority, admission,
   selection, egress or returned fields. Restricted public diagnostics stay
   suppressed; the operator-owned synthetic harness reads its own collectors.
-- *Call boundary.* Each worker measures the whole `op_ask_memory` call with
-  its own wall clock. The retrieval envelope snapshots before logging and
-  due-state work, so that snapshot cannot supply the verdict's elapsed time.
+- *Call boundary.* Each worker resolves `ask_memory` from its arm's command
+  registry and binds it through the existing `command_surface.bind_vault`.
+  It creates that callable before sampling and times the entire bound call.
+  This includes dispatcher ownership, terminal filtering, ownership completion,
+  disclosure receipts, response scrubbing and logging, plus the leaf's due-state
+  carrier. The in-process bound command excludes transport, authentication
+  middleware, FastMCP serialization and the live server's active-surface descriptor.
+  Historical leaf measurements keep their narrower boundary and cannot establish
+  this boundary's acceptance. The leaf and terminal filter retain their own
+  resolution scopes; the worker adds no outer placement or invocation lifetime.
+- *Warm preparation.* Under the existing preparation owner scope, the harness
+  calls `due_state.reconcile` synchronously before starting managed recall.
+  It verifies that `due_state.load` accepts the persisted projection, then
+  retains the existing managed catalogue admission and per-principal warm-up.
+  This completes the missing-projection audit before sampling. Normal TTL
+  refresh remains enabled. A failed preparation refuses measurement because
+  a cold fixture cannot prove warm latency; a false refusal costs one benchmark
+  rerun and never changes production admission.
+- *Unit attribution.* The unit-only path records selection as `semantic_units`
+  after computing admission. Nested eligibility spans keep their qualified names.
+  The mixed path retains its existing outer unit span. Generic `command.body`
+  work remains unbudgeted rather than being assigned to the unit row.
 - *Worker isolation.* The harness pauses only its inactive benchmark child,
   outside sample timers, on the same CPU pair. It resumes the child for its
   next sample and during cleanup. Each active arm retains its own native

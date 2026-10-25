@@ -345,7 +345,9 @@ def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
     nothing, so registering its real interval keeps the number honest without
     inventing clock noise, and the source says why it was free.
     """
-    with _span(timings, "filter_eligibility", source=find_types.SOURCE_CACHE, cache_hit=True):
+    with _span(
+        timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_CACHE, cache_hit=True
+    ):
         pass
 
 
@@ -1842,7 +1844,7 @@ def find(
         # base reads only the vault-scope set, so it never decides the other.
         if admit_path is None:
             return None
-        with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+        with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
             return snapshot.admitted_paths(admission_scope, admit_path, page_of=_page_of)
 
     resolved_config = config if config is not None else _active_ranking()
@@ -1947,26 +1949,28 @@ def find(
                     return copy.deepcopy(cached_hits)
         if _cache_probe:
             return _QueryPreparation(unit=not unit_algebra.definitely_empty, page=False)
-        unit_hits = _find_semantic_units(
-            vault_root,
-            query=query,
-            limit=limit,
-            scope=walk_scope,
-            plan=filter_plan,
-            allowed_parent_paths=_admitted(walk_scope),
-            snapshot=snapshot,
-            prefer_active=prefer_active,
-            status_basis=status_basis,
-            config=resolved_config,
-            mode=mode,
-            degraded_out=degraded,
-            failed_out=failed,
-            retrieval_trace=retrieval_trace,
-            timings=timings,
-            prepared_queries=_prepared_queries,
-            parent_reads=unit_reads,
-            _defer_hydration=True,
-        )
+        unit_admitted = _admitted(walk_scope)
+        with _span(timings, "semantic_units"):
+            unit_hits = _find_semantic_units(
+                vault_root,
+                query=query,
+                limit=limit,
+                scope=walk_scope,
+                plan=filter_plan,
+                allowed_parent_paths=unit_admitted,
+                snapshot=snapshot,
+                prefer_active=prefer_active,
+                status_basis=status_basis,
+                config=resolved_config,
+                mode=mode,
+                degraded_out=degraded,
+                failed_out=failed,
+                retrieval_trace=retrieval_trace,
+                timings=timings,
+                prepared_queries=_prepared_queries,
+                parent_reads=unit_reads,
+                _defer_hydration=True,
+            )
         if relation_paths is not None:
             # A unit qualifies through its parent page (per-unit edge anchoring is
             # deferred); annotate the survivors with why the page participated.
@@ -2348,7 +2352,7 @@ def find(
     # map to a KB-only walk in the underlying rankers.
     eligible_paths: set[str] | None = None
     if filter_plan.root is not None:
-        with _span(timings, "filter_eligibility"):
+        with _span(timings, _nested_name(timings, "filter_eligibility")):
             eligible_paths = _resolve_eligible_filter_paths(
                 vault_root,
                 scope=walk_scope,
@@ -3635,7 +3639,7 @@ def _find_semantic_units(
             # Exact eligibility is normal-table metadata only. Hybrid/vector
             # content ranking consumes this finite candidate set independently,
             # so FTS absence cannot change the catalog outcome.
-            with _span(timings, "filter_eligibility", source=find_types.SOURCE_INDEX):
+            with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
                 exact_freshness = snapshot.for_scope(scope)
                 exact_repair = (
                     _bounded_lexical_repair_allowed(exact_freshness)

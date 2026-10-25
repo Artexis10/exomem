@@ -1218,6 +1218,73 @@ def test_missing_prose_refuses_before_a_worker_or_encoder_starts(tmp_path: Path,
         gate.reference_cases(profile, tmp_path)
 
 
+def test_worker_sample_includes_bound_command_logging(tmp_path: Path, monkeypatch, warm_managed_cell) -> None:
+    from types import SimpleNamespace
+
+    from synth_vault import gen_dense_vault
+
+    from exomem import command_surface, commands
+
+    gen_dense_vault(tmp_path, 3)
+    warm_managed_cell(tmp_path)
+    command = command_surface.resolve_command("ask_memory", commands.PRODUCT_COMMANDS)
+    ask_memory = command_surface.bind_vault(command.leaf, tmp_path, command=command)
+    clock = [0]
+
+    def log_success(**_kwargs):
+        clock[0] += 25_000_000
+
+    monkeypatch.setattr(command_surface, "_log_tool_success", log_success)
+    monkeypatch.setattr(gate, "time", SimpleNamespace(perf_counter_ns=lambda: clock[0]))
+    sample = gate._worker_sample(ask_memory, {
+        "principal": "owner", "query": "topic", "arguments": {"mode": "keyword"},
+        "rows": {"keyword": ["keyword"]},
+    })
+    assert sample["state"] == "ok"
+    assert sample["elapsed_ms"] == 25.0
+
+
+@pytest.mark.skipif(not hasattr(gate.os, "sched_getaffinity"), reason="The worker uses the Linux reference profile")
+@pytest.mark.parametrize("persisted", [False, True])
+def test_worker_prepares_persisted_advisory_before_managed_admission(
+    tmp_path: Path, monkeypatch, persisted: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    import managed_recall
+    import synth_vault
+
+    from exomem import due_state, embeddings, recall_space
+
+    (tmp_path / "Knowledge Base").mkdir()
+    identity = SimpleNamespace(dim=2, fingerprint="reference-space")
+    artifact = SimpleNamespace(artifact_digest="reference-artifact", fingerprint=lambda: identity.fingerprint)
+    index = SimpleNamespace(identity=identity, rebuild_all=lambda: None)
+    monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(profile=artifact))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_args, **_kwargs: SimpleNamespace(shape=(1, 2)))
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: index)
+    monkeypatch.setattr(recall_space, "current_identity", lambda _dim: identity)
+    monkeypatch.setattr(synth_vault, "reference_source", lambda *_args: (["reference"], "source-digest"))
+    monkeypatch.setattr(synth_vault, "gen_reference_vault", lambda *_args: [])
+    monkeypatch.setattr(gate, "_stored_corpus", lambda *_args: {})
+    if not persisted:
+        monkeypatch.setattr(due_state, "save", lambda *_args: None)
+    admitted = []
+
+    def enter_managed(root, *, full_startup):
+        assert due_state.load(root) is not None
+        admitted.append(full_startup)
+
+    monkeypatch.setattr(managed_recall, "enter_managed_recall", enter_managed)
+    if persisted:
+        gate._prepare_worker(tmp_path, {"profile": {}})
+        assert admitted == [True]
+    else:
+        with pytest.raises(gate.MeasurementRefused, match="advisory-projection-unavailable"):
+            gate._prepare_worker(tmp_path, {"profile": {}})
+        assert admitted == []
+
+
 @pytest.mark.skipif(not hasattr(gate.os, "sched_getaffinity"), reason="The worker uses the Linux reference profile")
 @pytest.mark.parametrize("invalid_cpus", [False, True])
 def test_actual_worker_bootstrap_reports_failures_before_model_preparation(tmp_path: Path, invalid_cpus) -> None:

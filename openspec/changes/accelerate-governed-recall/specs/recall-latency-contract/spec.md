@@ -487,9 +487,23 @@ actual collectors and span boundaries while their original bodies run. It
 SHALL NOT change principal authority, admission, selection, egress or returned
 fields. Internal timings for an admitted series SHALL remain private to the
 operator-owned harness; public timing suppression still applies. Each worker
-SHALL measure the entire `ask_memory` call, including response work after the
-retrieval timing snapshot. Only the active benchmark worker SHALL run during
-a sample, so the inactive arm's native pools cannot consume its CPUs.
+SHALL resolve its arm's registered `ask_memory` command and bind it through
+the existing command surface before sampling. Its timer SHALL include the
+entire bound call, including dispatcher ownership, both terminal filters,
+ownership completion, disclosure receipts, response scrubbing and logging.
+The boundary SHALL identify itself as the in-process bound command. It SHALL
+exclude transport, authentication middleware, FastMCP serialization and the
+live server's active-surface descriptor. Historical leaf measurements SHALL
+retain their narrower boundary and SHALL NOT establish bound-command acceptance.
+Only the active benchmark worker SHALL run during a sample, so the inactive
+arm's native pools cannot consume its CPUs.
+
+Preparation SHALL complete the existing advisory reconciliation synchronously
+under the preparation owner before starting managed recall. The harness SHALL
+verify a usable persisted due-state projection, retain managed catalogue admission,
+and warm each principal's series. It SHALL NOT disable normal TTL refresh or
+extend placement or invocation scopes across requests. Failed preparation SHALL
+report a refused measurement rather than measuring a cold fixture as warm.
 
 The job SHALL compute each case's paired ratio of head to the pairing base. It SHALL
 fail a series only when the lower bound of the 95% confidence interval of those
@@ -531,6 +545,18 @@ series as a step of the release runbook, validate its summary against the
 content-free summary schema, and attach it to that release's GitHub
 Release. A release with no attached summary SHALL show
 "not measured". A failed or refused live-cell state SHALL open follow-up work.
+
+#### Scenario: The bound call includes terminal work
+
+- **WHEN** the paired runner samples either principal through its registered bound command
+- **THEN** its elapsed time includes the body, ownership completion and both terminal filter passes
+- **AND** the callable retains no principal between requests and public diagnostic suppression remains intact
+
+#### Scenario: Missing advisory state is prepared before sampling
+
+- **WHEN** the reference fixture has no usable persisted due-state projection
+- **THEN** preparation completes reconciliation before the first timed request
+- **AND** subsequent requests use normal advisory behavior without a test-only synchronous mode
 
 #### Scenario: A constant-factor regression blocks the release
 

@@ -181,25 +181,32 @@ def test_open_intervals_are_a_broken_instrument() -> None:
         trace.result({})
 
 
-def test_private_adapter_observes_real_owner_and_admitted_calls_without_disclosing(monkeypatch, tmp_path: Path) -> None:
+def test_private_adapter_observes_real_owner_and_admitted_calls_without_disclosing(
+    monkeypatch, tmp_path: Path, warm_managed_cell,
+) -> None:
     scripts = str(Path(__file__).resolve().parents[1] / "scripts")
     monkeypatch.syspath_prepend(scripts)
     from recall_latency_adapter import instrument
     from synth_vault import gen_dense_vault
     from test_governance_egress import _external, write_rule, write_scope
 
-    from exomem import commands, find_types, lexstore
+    from exomem import command_surface, commands, due_state, find_types
     from exomem.governance import principal
 
     gen_dense_vault(tmp_path, 12)
     write_scope(tmp_path, paths="Notes/**")
     write_rule(tmp_path, ceiling=3)
-    lexstore.ensure_fresh(tmp_path)
+    with principal.library_scope():
+        due_state.reconcile(tmp_path)
+        assert due_state.load(tmp_path) is not None
+    warm_managed_cell(tmp_path)
+    command = command_surface.resolve_command("ask_memory", commands.PRODUCT_COMMANDS)
+    ask_memory = command_surface.bind_vault(command.leaf, tmp_path, command=command)
     timing_type = find_types.FindTimings
     for caller in (principal.owner_principal(surface="library"), _external()):
         with principal.request_scope(caller), principal.invocation_scope():
             with instrument() as (trace, collectors):
-                result = commands.op_ask_memory(tmp_path, query="topic", mode="keyword", include_timings=True)
+                result = ask_memory(query="topic", mode="keyword", include_timings=True)
             assert find_types.FindTimings is timing_type
             assert collectors and all(type(item) is timing_type for item in collectors)
             observed = trace.result({"keyword": ["keyword"], "due_state": ["due_state"]})
@@ -210,6 +217,35 @@ def test_private_adapter_observes_real_owner_and_admitted_calls_without_disclosi
             else:
                 assert any(item.name == "due_state" for item in trace.intervals)
                 assert result["timings"]["runqueue_ms"] is not None or sys.platform != "linux"
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_managed_unit_timing_preserves_hits_and_has_no_parent_conflicts(
+    monkeypatch, tmp_path: Path, warm_managed_cell, empty: bool,
+) -> None:
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    from recall_latency_adapter import instrument
+    from test_semantic_unit_recall import _write_page
+
+    from exomem import find, find_types
+
+    _write_page(tmp_path, "harbor", body="- [config] Harbor gauges follow the tide. ^gauges")
+    warm_managed_cell(tmp_path)
+    filters = ({"$and": [{"unit.category": {"$eq": "config"}},
+                          {"unit.category": {"$eq": "rule"}}]}
+               if empty else {"unit.category": {"$eq": "config"}})
+    request = {"query": "", "mode": "keyword", "scope": "kb-only", "result_level": "unit",
+               "filters": filters, "admit_path": lambda _path: True}
+    expected = [hit.as_dict() for hit in find.find(tmp_path, **request)]
+    with instrument() as (trace, collectors):
+        timings = find_types.FindTimings()
+        actual = [hit.as_dict() for hit in find.find(tmp_path, timings=timings, **request)]
+    assert actual == expected
+    assert bool(actual) is not empty
+    assert collectors == [timings]
+    assert timings.parent_conflicts() == {}
+    assert timings.stages["semantic_units.filter_eligibility"]["parent"] == "semantic_units"
+    assert trace.result({"units": ["semantic_units"]})["stages"]["units"]["ms"] > 0
 
 
 def test_whole_call_timing_includes_tail_after_find(monkeypatch, tmp_path: Path) -> None:

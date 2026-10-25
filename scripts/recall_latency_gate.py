@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1253,7 +1254,7 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
     from managed_recall import enter_managed_recall
     from synth_vault import gen_reference_vault, reference_source
 
-    from exomem import embeddings, freshness, recall_space
+    from exomem import due_state, embeddings, freshness, recall_space
     from exomem.governance import principal
 
     profile = startup["profile"]
@@ -1298,6 +1299,10 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
         lexstore.ensure_fresh(vault_root)
         # Managed serialization requires its maintained reference sidecar before sampling.
         memory_refs.ReferenceIndex(vault_root).rebuild_all()
+        due_state.reconcile(vault_root)
+        if due_state.load(vault_root) is None:
+            # A failed best-effort save must not label a cold benchmark fixture warm.
+            raise MeasurementRefused("advisory-projection-unavailable")
         corpus = _stored_corpus(vault_root, index, rels, profile)
         for scope in ("vault", "kb"):
             freshness.seed(vault_root, scope, (
@@ -1317,10 +1322,9 @@ def _failed_stage(result: Any, collectors=()) -> bool:
     ) or any(stage.get("error") for collector in collectors for stage in collector.stages.values())
 
 
-def _worker_sample(vault_root: Path, request: dict) -> dict:
+def _worker_sample(ask_memory: Callable[..., Any], request: dict) -> dict:
     from recall_latency_adapter import clear_results, instrument
 
-    from exomem import commands
     from exomem.governance import principal
 
     clear_results()
@@ -1329,8 +1333,8 @@ def _worker_sample(vault_root: Path, request: dict) -> dict:
     with principal.request_scope(caller), principal.invocation_scope():
         with instrument() as (trace, collectors):
             started = time.perf_counter_ns()
-            result = commands.op_ask_memory(
-                vault_root, query=request["query"], include_timings=True,
+            result = ask_memory(
+                query=request["query"], include_timings=True,
                 limit=DEFAULT_LIMIT, rerank=False, **request["arguments"],
             )
             elapsed_ms = (time.perf_counter_ns() - started) / 1e6
@@ -1356,6 +1360,10 @@ def worker_main(vault_root: Path) -> int:
         preparation_started = True
         with redirect_stdout(sys.stderr):
             environment = _prepare_worker(vault_root, startup)
+            from exomem import command_surface, commands
+
+            command = command_surface.resolve_command("ask_memory", commands.PRODUCT_COMMANDS)
+            ask_memory = command_surface.bind_vault(command.leaf, vault_root, command=command)
         print(json.dumps({"state": "ready", "runtime_prefix": sys.prefix,
                           "environment": {**environment, **runtime}}), flush=True)
         phase = "worker-request"
@@ -1364,7 +1372,7 @@ def worker_main(vault_root: Path) -> int:
             if request.get("stop"):
                 break
             with redirect_stdout(sys.stderr):
-                sample = _worker_sample(vault_root, request)
+                sample = _worker_sample(ask_memory, request)
             print(json.dumps(sample, allow_nan=False), flush=True)
     except Exception as error:  # noqa: BLE001 - raw errors can contain corpus content.
         response = {"state": "worker-error", "error_class": type(error).__name__, "phase": phase}

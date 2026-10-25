@@ -18,6 +18,16 @@ Each case runs three times per arm, with the first arm alternating between cases
 The inactive worker stops outside measurement so its native pool cannot slow the other arm.
 The adapter wraps real timing boundaries and delegates their original bodies.
 It does not replace principal resolution or release decisions.
+Each worker resolves `ask_memory` from its own command registry and binds it once.
+The request timer covers the returned callable, including dispatcher ownership,
+terminal checks, postfiltering and logging, for both owner and admitted principals.
+The `request-latency-v3` contract names this boundary `recall-bound-command-v1`.
+Historical leaf measurements use a different boundary and cannot certify it.
+Transport, authentication middleware, FastMCP serialization and the live server's
+active-surface descriptor remain outside this in-process measurement.
+Owner preparation reconciles the advisory projection and validates its persisted
+state before managed startup and sampling. A failed persistence refuses the
+benchmark fixture; normal advisory refreshes can still run during measurement.
 Explicit fork/join contexts retain each branch's complete lifetime, including gaps and waits.
 Anonymous work on different threads has an unknown critical path; shares include only known paths and show their sample count.
 
