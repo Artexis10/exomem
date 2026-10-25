@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.144.0](https://github.com/Artexis10/exomem/compare/v0.143.2...v0.144.0) (2026-10-25)
+
+
+### Features
+
+* **adoption:** preserve collection files and resume imports ([#2081](https://github.com/Artexis10/exomem/issues/2081)) ([9cc52a3](https://github.com/Artexis10/exomem/commit/9cc52a34e9601d791e6d3e9662ea660eee3212bd))
+
 ## [0.143.2](https://github.com/Artexis10/exomem/compare/v0.143.1...v0.143.2) (2026-10-25)
 
 
