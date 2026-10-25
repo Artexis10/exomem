@@ -1019,14 +1019,16 @@ def test_embeddings_disabled_unit_recall_never_loads_vector_backend(
     assert [hit.as_dict()["source_anchor"] for hit in hits] == ["embeddings-off"]
 
 
+@pytest.mark.parametrize("unit_count", [7, 170], ids=["small", "beyond-raw-window"])
 def test_mixed_recall_caps_units_per_parent_and_reports_truncation(
     tmp_path: Path,
+    unit_count: int,
 ) -> None:
     many_units = _write_page(
         tmp_path,
         "many-units",
         body="\n".join(
-            f"- [config] shared mixed needle {index} ^many-{index}" for index in range(7)
+            f"- [config] shared mixed needle {index} ^many-{index}" for index in range(unit_count)
         ),
     )
     one_unit = _write_page(
@@ -1061,7 +1063,7 @@ def test_mixed_recall_caps_units_per_parent_and_reports_truncation(
         and payload["parent_path"] == "Knowledge Base/Notes/many-units.md"
     ]
     assert len(repeated_units) == 3
-    assert page["mixed_units_truncated"] == 4
+    assert page["mixed_units_truncated"] == unit_count - 3
     assert any(
         payload.get("result_type") == "page"
         and payload["path"] == "Knowledge Base/Notes/one-unit.md"
@@ -1072,3 +1074,316 @@ def test_mixed_recall_caps_units_per_parent_and_reports_truncation(
         and payload["parent_path"] == "Knowledge Base/Notes/one-unit.md"
         for payload in payloads
     )
+
+
+@pytest.mark.parametrize("summary_available", [True, False], ids=["complete", "pending-parent-lost"])
+def test_finite_mixed_recall_keeps_hits_and_reports_only_proved_completeness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, summary_available: bool,
+) -> None:
+    """A finite result stays identical and needs every represented parent's bound to claim completeness."""
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    paths = [_write_page(
+        tmp_path, f"leading-{index}", body=f"- [config] windowmarker reading {index} ^reading",
+    ) for index in range(4)]
+    _prepare_semantic_catalog(tmp_path, paths)
+    options = dict(
+        query="windowmarker", mode="keyword", scope="kb-only", graph=False,
+        result_level="mixed", limit=4, explain=True,
+    )
+    before = commands.op_find(tmp_path, **options)
+    assert len(before["hits"]) == 4
+    for index in range(166):
+        paths.append(_write_page(
+            tmp_path, f"trailing-{index:03d}", updated="2026-06-01",
+            body=f"- [config] windowmarker reading {index} ^reading",
+        ))
+    _prepare_semantic_catalog(tmp_path, paths)
+    if not summary_available:
+        original = find_module._managed_page_metadata
+
+        def pending_parent_lost(*args, **kwargs):
+            metadata = original(*args, **kwargs)
+            if kwargs.get("include_structure") and not kwargs.get("include_ranking"):
+                # Pending tombstones may omit represented parents from metadata.
+                return {}
+            return metadata
+
+        monkeypatch.setattr(find_module, "_managed_page_metadata", pending_parent_lost)
+
+    after = commands.op_find(tmp_path, **options)
+
+    assert after["hits"] == before["hits"]
+    assert ("semantic_units_candidate_window" not in after.get("degraded", [])) == summary_available
+
+
+def test_hybrid_mixed_recall_fills_finite_demand_without_a_candidate_window_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A filled hybrid result from small parents must not inherit raw-window incompleteness."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    paths = [_write_page(
+        tmp_path, f"ordinary-{index:03d}",
+        body=f"- [config] windowmarker reading {index} ^reading",
+    ) for index in range(170)]
+    _prepare_semantic_catalog(tmp_path, paths)
+
+    result = commands.op_find(
+        tmp_path, query="windowmarker", mode="hybrid", scope="kb-only", graph=False,
+        rerank=False, result_level="mixed", limit=4, explain=True,
+    )
+
+    assert len(result["hits"]) == 4
+    assert {hit["result_type"] for hit in result["hits"]} == {"page", "semantic_unit"}
+    assert "semantic_units_candidate_window" not in result.get("degraded", [])
+
+
+def test_finite_mixed_recall_keeps_dominant_parent_incomplete_without_prefix_counts(
+    tmp_path: Path,
+) -> None:
+    """A capped raw prefix cannot prove the unseen units or its cap-only omission count."""
+    dominant = _write_page(
+        tmp_path, "dominant", updated="2026-07-16",
+        body="\n".join(f"- [config] windowmarker reading {index} ^reading-{index}" for index in range(170)),
+    )
+    trailing = _write_page(
+        tmp_path, "trailing", body="- [config] windowmarker trailing reading ^reading",
+    )
+    _prepare_semantic_catalog(tmp_path, [dominant, trailing])
+    failed: list[str] = []
+
+    hits = find_module.find(
+        tmp_path, query="windowmarker", mode="keyword", scope="kb-only",
+        graph=False, result_level="mixed", limit=4, failed_out=failed,
+    )
+
+    assert hits
+    assert "semantic_units_candidate_window" in failed
+    assert all("mixed_units_truncated" not in hit.as_dict() for hit in hits)
+
+
+@pytest.mark.parametrize("occurrence_rows", [0, 1], ids=["zero-rows", "missing-rows"])
+def test_page_only_parent_uses_structural_bound_after_occurrence_loss(
+    tmp_path: Path, occurrence_rows: int,
+) -> None:
+    """A selected page's missing occurrence rows cannot prove that its structural units fit the cap."""
+    paths = [_write_page(
+        tmp_path, f"ordinary-{index:03d}",
+        body=f"- [config] windowmarker reading {index} ^reading",
+    ) for index in range(170)]
+    page_only = _write_page(
+        tmp_path, "windowmarker-large", updated="2026-07-16",
+        body="\n".join(f"- [config] Separate calibration {index}. ^calibration-{index}" for index in range(4)),
+    )
+    paths.append(page_only)
+    _prepare_semantic_catalog(tmp_path, paths)
+    relative = page_only.relative_to(tmp_path).as_posix()
+    connection = lexstore.get_store(tmp_path)._connect()
+    try:
+        with connection:
+            connection.execute(
+                "DELETE FROM semantic_units WHERE parent_path = ? AND source_order >= ?",
+                (relative, occurrence_rows),
+            )
+    finally:
+        connection.close()
+    failed: list[str] = []
+
+    hits = find_module.find(
+        tmp_path, query="windowmarker", mode="keyword", scope="kb-only",
+        graph=False, result_level="mixed", limit=4, failed_out=failed,
+    )
+
+    assert any(isinstance(hit, find_module.Hit) and hit.path == relative for hit in hits)
+    assert not any(getattr(hit, "parent_path", None) == relative for hit in hits)
+    assert "semantic_units_candidate_window" in failed
+
+
+def test_page_only_parent_unit_growth_keeps_keyword_metadata_work_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell, record_property,
+) -> None:
+    """A represented page's nonmatching units must not become occurrence reads for its cap bound."""
+    from recall_structural_counts import RequestCounts
+
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    for index in range(170):
+        _write_page(
+            tmp_path, f"ordinary-{index:03d}",
+            body=f"- [config] windowmarker reading {index} ^reading",
+        )
+    counts = RequestCounts(tmp_path, monkeypatch)
+    observations = []
+    for unit_count in (4, 400):
+        page_only = _write_page(
+            tmp_path, "windowmarker-large", updated="2026-07-16",
+            body="\n".join(
+                f"- [config] Separate calibration {index}. ^calibration-{index}"
+                for index in range(unit_count)
+            ),
+        )
+        warm_managed_cell(tmp_path)
+        options = dict(
+            query="windowmarker", mode="keyword", scope="kb-only", graph=False,
+            result_level="mixed", limit=4, include_timings=True,
+        )
+        commands.op_find(tmp_path, **options)
+        with counts.request():
+            result = commands.op_find(tmp_path, **options)
+        sample = counts.snapshot()
+        steps = sum(
+            value for (_selection, store, _scope, stage), value in sample["steps"].items()
+            if store == "lexical" and stage.startswith("keyword/")
+            and stage.endswith("/_eligibility_metadata_query")
+        )
+        relative = page_only.relative_to(tmp_path).as_posix()
+        assert len(result["hits"]) == 4
+        assert any(hit.get("path") == relative for hit in result["hits"])
+        assert not any(hit.get("parent_path") == relative for hit in result["hits"])
+        assert "semantic_units_candidate_window" in result.get("degraded", [])
+        assert steps > 0, sample["steps"]
+        identities = [
+            (hit["result_type"], hit.get("path"), hit.get("unit_ref")) for hit in result["hits"]
+        ]
+        observations.append((identities, steps))
+    (small_hits, small_steps), (large_hits, large_steps) = observations
+    record_property("keyword_metadata_vm_steps", {4: small_steps, 400: large_steps})
+    assert large_hits == small_hits
+    assert large_steps <= small_steps * 1.5, (small_steps, large_steps)
+
+
+@pytest.mark.parametrize("matching_hash", [True, False], ids=["current", "mismatched-summary"])
+def test_zero_unit_parent_retains_only_a_snapshot_bound_structural_summary(
+    tmp_path: Path, matching_hash: bool,
+) -> None:
+    """Zero occurrence rows prove a bound only through a summary with the admitted page hash."""
+    import json
+
+    page = _write_page(tmp_path, "empty-parent", body="Ordinary calibration prose.")
+    _prepare_semantic_catalog(tmp_path, [page])
+    relative = page.relative_to(tmp_path).as_posix()
+    if not matching_hash:
+        connection = lexstore.get_store(tmp_path)._connect()
+        try:
+            summary = json.loads(connection.execute(
+                "SELECT structure_json FROM pages WHERE path = ?", (relative,),
+            ).fetchone()[0])
+            summary["parent_source_hash"] = "different-generation"
+            with connection:
+                connection.execute(
+                    "UPDATE pages SET structure_json = ? WHERE path = ?", (json.dumps(summary), relative),
+                )
+        finally:
+            connection.close()
+
+    metadata = find_module._managed_page_metadata(
+        tmp_path, {relative}, scope="kb", freshness_key=find_module.FreshnessSnapshot(tmp_path).kb(),
+        pending=None, include_structure=True,
+    )[relative]
+
+    assert metadata.occurrences == ()
+    if not matching_hash:
+        assert metadata.selected_parent is None
+        return
+    assert metadata.selected_parent.structure.complete
+    assert metadata.selected_parent.structure.units == ()
+    assert metadata.selected_parent.metadata["parent_source_hash"] == metadata.content_hash
+
+
+def test_pending_zero_unit_parent_keeps_its_frozen_structural_bound(tmp_path: Path) -> None:
+    """A later file edit must not replace a pending receipt's zero-unit summary."""
+    from exomem import find_corpus, pending_recall
+
+    path = _write_page(tmp_path, "pending-parent", body="Ordinary calibration prose.")
+    relative = path.relative_to(tmp_path).as_posix()
+    page = find_corpus.parse_page(path, path.stat().st_mtime, tmp_path)
+    overlay = pending_recall.PendingOverlay("ready", None, 1, {
+        relative: pending_recall.PendingRow(relative, "generation", "batch", page.snapshot_hash, page, None),
+    })
+    path.write_text("- [config] Later structural content. ^later\n", encoding="utf-8")
+
+    metadata = find_module._managed_page_metadata(
+        tmp_path, {relative}, scope="kb", freshness_key=None,
+        pending=overlay, include_structure=True,
+    )[relative]
+
+    assert metadata.occurrences == ()
+    assert metadata.selected_parent.structure.complete
+    assert metadata.selected_parent.structure.units == ()
+    assert metadata.content_hash == page.snapshot_hash
+    assert metadata.selected_parent.metadata["parent_source_hash"] == page.snapshot_hash
+    overlay.rows[relative] = pending_recall.PendingRow(
+        relative, "generation", "batch", "unproven-generation", page, None,
+    )
+
+    unknown = find_module._managed_page_metadata(
+        tmp_path, {relative}, scope="kb", freshness_key=None,
+        pending=overlay, include_structure=True,
+    )[relative]
+
+    assert unknown.selected_parent is None
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module._managed_page_metadata(
+            tmp_path, {relative}, scope="kb", freshness_key=None,
+            pending=overlay, include_occurrences=True,
+        )
+
+
+def test_mixed_relation_survivors_keep_the_original_unit_corpus_scores(tmp_path: Path) -> None:
+    """A relation filter must remove ranked units without changing admitted BM25 corpus statistics."""
+    from exomem import epistemic_graph
+
+    anchor = _write_page(tmp_path, "anchor", body="Reference page.")
+    related = _write_page(
+        tmp_path, "related",
+        body="- [config] windowmarker reading ^reading\n\n## Relations\n\n"
+        "- supports [[Knowledge Base/Notes/anchor]]",
+    )
+    unrelated = _write_page(
+        tmp_path, "unrelated",
+        body="- [config] windowmarker windowmarker reading with extended calibration details. ^reading",
+    )
+    _prepare_semantic_catalog(tmp_path, [anchor, related, unrelated])
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    options = dict(
+        query="windowmarker", mode="hybrid", scope="kb-only", graph=False,
+        rerank=False, result_level="mixed", limit=10,
+    )
+    before = find_module.find(tmp_path, **options)
+    expected = {
+        hit.unit_ref: (hit.bm25_rank, hit.bm25_score)
+        for hit in before if isinstance(hit, find_module.SemanticUnitHit)
+        and hit.parent_path == related.relative_to(tmp_path).as_posix()
+    }
+
+    after = find_module.find(tmp_path, relations=["supports"], **options)
+
+    actual = {
+        hit.unit_ref: (hit.bm25_rank, hit.bm25_score)
+        for hit in after if isinstance(hit, find_module.SemanticUnitHit)
+    }
+    assert actual == expected
+    assert actual
+
+
+def test_mixed_evidence_loss_keeps_empty_slots_and_the_original_annotation_target(tmp_path: Path) -> None:
+    """Losing the selected count target must not refill its rank or move the count to another unit."""
+    from exomem.ranking_config import DEFAULT_RANKING
+
+    page = _write_page(
+        tmp_path, "ranked-units",
+        body="\n".join(f"- [config] windowmarker reading {index} ^reading-{index}" for index in range(7)),
+    )
+    _prepare_semantic_catalog(tmp_path, [page])
+    units = find_module.find(
+        tmp_path, query="windowmarker", mode="keyword", scope="kb-only", graph=False,
+        result_level="unit", categories=["config"], limit=10,
+    )
+    plan = find_module._mixed_plan([], units, limit=4, config=DEFAULT_RANKING)
+
+    surviving = find_module._merge_mixed_hits(
+        [], units[1:], limit=4, config=DEFAULT_RANKING, plan=plan,
+    )
+
+    assert [hit.unit_ref for hit in surviving] == [hit.unit_ref for hit in units[1:3]]
+    assert all("mixed_units_truncated" not in hit.as_dict() for hit in surviving)
+    assert plan.truncation_targets[units[0].parent_path] == (1, units[0].unit_ref)
