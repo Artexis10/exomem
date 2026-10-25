@@ -70,7 +70,7 @@ The directory rescan after release is a secondary signal.
 - Decision: `nested` ships.
 - The shipped surface differs from the measured one in two ways, both added after the held-out run.
   - The measured build refused a Planning filter without `op` as `PLAN_RESPONSE_TOO_LARGE`, 37 times on nested and 4 on grouped, although the query grammar defaults `op` to `eq`. The shipped build answers it. A repair check on the 12 held-out cases that exposed it gave 12 of 12 success, with mean calls 2.58 and no such refusal. Those 12 cases are no longer held out.
-  - The four tool descriptions regained the grouped commands' guidance (+375 bytes in total). It was not measured on fresh cases; round 2 measures it.
+  - The four tool descriptions regained the grouped commands' guidance (+360 bytes: 932 to 1,292 across the four descriptions). It was not measured on fresh cases; round 2 measures it.
 
 ## Risks
 
