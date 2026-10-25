@@ -28,6 +28,7 @@ import logging
 import os
 import posixpath
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
@@ -3942,13 +3943,17 @@ def compile_packet(
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget: the whole compiler in one call.
 
-    `_compile_packet` below documents every argument. This wrapper only adds
-    the `origin` label every served anchor carries, which whichever branch
-    built the packet, the turn's own words are by default.
+    `_compile_packet` below documents every argument. This wrapper closes its
+    optional catalogue selection before adding each served anchor's `origin`
+    label, which defaults to the turn's own words.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     origins: dict[str, str] = {}
-    packet = _compile_packet(vault_root, _origins=origins, **kwargs, status_basis=status_basis)
+    with ExitStack() as selection:
+        packet = _compile_packet(
+            vault_root, _origins=origins, _selection_stack=selection,
+            **kwargs, status_basis=status_basis,
+        )
     _label_origins(
         packet,
         origins,
@@ -3994,6 +3999,7 @@ def _label_origins(
 def _compile_packet(
     vault_root: Path,
     *,
+    _selection_stack: ExitStack,
     _origins: dict[str, str] | None = None,
     conversation: working_set_conversation.Conversation | None = None,
     turn: str,
@@ -4133,6 +4139,14 @@ def _compile_packet(
     row_lexicons = None
     if budget_exhausted("working_set.resolve"):
         raise BudgetExhausted("working_set.resolve")
+    if freshness_snapshot is not None:
+        from . import working_set_runtime
+
+        _selection_stack.enter_context(
+            working_set_runtime.lexical_selection_scope(
+                root, freshness_snapshot.lexical_checkpoint("kb")
+            )
+        )
     with _span(timings, "working_set.resolve"):
         # `analysis` is needed on BOTH branches. The override replaces which
         # anchor the turn is about; it does not replace which lenses the turn asks

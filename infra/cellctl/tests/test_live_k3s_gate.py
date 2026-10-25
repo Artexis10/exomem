@@ -62,12 +62,12 @@ def test_the_live_suite_runs_on_pull_requests_that_touch_the_policy_templates() 
     assert scope["outputs"]["run"] == "${{ steps.scope.outputs.run }}"
 
     live = jobs["live-k3s"]
-    assert set(live["needs"]) == {"checks", "live-k3s-scope"}
+    assert set(live["needs"]) == {"live-k3s-scope"}
     assert " ".join(str(live["if"]).split()) == "needs.live-k3s-scope.outputs.run == 'true'"
 
 
 def test_parallel_live_groups_run_every_collected_case_once(tmp_path: Path) -> None:
-    """Two green import groups must not silently omit the platform scenarios."""
+    """Parallel import shards must not omit or repeat any platform or import case."""
     live = _workflow()["jobs"]["live-k3s"]
     step = next(step for step in live["steps"] if step.get("name") == "Live K3s suite")
     # The real shell step and pytest select cases; this hook records collection without running fixtures.
@@ -94,14 +94,17 @@ def test_parallel_live_groups_run_every_collected_case_once(tmp_path: Path) -> N
     expected = set(json.loads(Path(env["COLLECTED_NODES"]).read_text()))
     assert expected
     observed: set[str] = set()
-    for suite in live["strategy"]["matrix"]["suite"]:
-        output = tmp_path / suite
+    for row in live["strategy"]["matrix"]["include"]:
+        suite = row["suite"]
+        output = tmp_path / f"{suite}-{row['shard']}"
         output.mkdir()
         group_env = {
             **env,
             "RUNNER_TEMP": str(output),
             "COLLECTED_NODES": str(output / "nodes.json"),
             "SUITE_GROUP": suite,
+            "SUITE_SHARD": str(row["shard"]),
+            "SUITE_SHARDS": str(row["shards"]),
             "IMPORT_TEST": step["env"]["IMPORT_TEST"],
             "EXPORT_TEST": step["env"]["EXPORT_TEST"],
         }

@@ -1136,6 +1136,26 @@ def pin_lexical_checkpoint(
     return published
 
 
+@contextmanager
+def lexical_selection_scope(
+    vault_root: Path, recall_checkpoint: freshness.RecallFreshnessCheckpoint | None
+) -> Iterator[None]:
+    """Retain optional lexical reads while deferring lag repair until activation ends."""
+    from . import lexstore
+
+    if (
+        recall_checkpoint is None or not _managed() or not freshness.event_indexes_enabled()
+        or lexstore.backend() == "python"
+    ):
+        yield
+        return
+    with (
+        lexstore.admitted_catalog_scope(vault_root),
+        lexstore.catalog_selection_scope(vault_root, lag_dispatch=_defer_lexical_repair),
+    ):
+        yield
+
+
 def lexical_evidence(
     vault_root: Path,
     turn: str,
@@ -1169,15 +1189,16 @@ def lexical_evidence(
         return [], "available"
     turn = working_set_index.subject_text(turn)
     try:
-        result = _lexical_query(
-            vault_root,
-            turn,
-            set(by_path),
-            limit=limit,
-            freshness=freshness,
-            recall_checkpoint=recall_checkpoint,
-            selection=selection,
-        )
+        with lexical_selection_scope(vault_root, recall_checkpoint):
+            result = _lexical_query(
+                vault_root,
+                turn,
+                set(by_path),
+                limit=limit,
+                freshness=freshness,
+                recall_checkpoint=recall_checkpoint,
+                selection=selection,
+            )
         if not result.readiness.complete:
             return [], result.readiness.status
         hits = [
