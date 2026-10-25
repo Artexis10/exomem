@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import asdict, replace
 
+from .. import capabilities
 from . import cursors, reductions, runtime, typed_rows, validation
 from .runtime import QueryError, QueryLimits
 
@@ -142,8 +143,9 @@ def _admitted_rows(session, query, limits) -> dict:
 
 def contract() -> dict:
     """The short query section of store-mode ``describe``: the route and where its grammar is."""
-    return {"route": {"tool": "record_memory", "args": {"action": "query", "collection": "<collection>",
-                                                         "query": {"version": VERSION}}},
+    return {"route": capabilities.active_call_route(
+                "record_memory",
+                {"action": "query", "collection": "<collection>", "query": {"version": VERSION}}),
             "grammar": {"tool": "schema_memory",
                         "args": {"subject": "query-engine", "operation": "inspect", "name": "collections"}},
             "modes": list(validation.MODES), "execution_profiles": list(validation.PROFILES)}
@@ -161,12 +163,13 @@ def chapter(name: str | None) -> dict:
         from ..collection_store import importer
 
         return {**head, "capability": "collection-import",
-                "route": {"tool": "record_memory", "args": {"action": "import", "collection": "<collection>",
-                                                             "import_request": {"mode": "preview"}}},
+                "route": capabilities.active_call_route(
+                    "record_memory",
+                    {"action": "import", "collection": "<collection>", "import_request": {"mode": "preview"}}),
                 "contract": importer.contract(),
                 "before_start": {
-                    "step": "Apply recommended_declarations from the preview with one record_memory revise, "
-                            "then start.",
+                    "step": "Apply recommended_declarations from the preview with one "
+                            f"{capabilities.active_tools_text('record_memory', 'write')} revise, then start.",
                     "revise": "Merge fields into item_schema.fields and rollups into rollups in the manifest. "
                               "Take both hashes from inspect lifecycle_guards.",
                     "result": "The imported rows answer filters and sorts on the time field by index, and daily "

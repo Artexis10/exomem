@@ -2,7 +2,7 @@
 name: exomem-continue
 description: Resume prior project or session context from Exomem when the user wants to continue, pick something back up, or remember what was happening on a topic.
 metadata:
-  skill_contract: 92942a443c9c50a58e52cac11a999c9db669f221119a9472619886132487a06e
+  skill_contract: 18bc41852b079e428221255dd2a0180d1fb038870deda6bf18c5e0e8efa2016e
   version: "0.1.0"
 ---
 
@@ -43,7 +43,7 @@ identity after an uncertain commit.
 2. Use `search_memory(deep=true)` when several hits matter or the state needs synthesis.
 3. Read only the top relevant pages with `read_memory` when excerpts are not enough.
 4. Prefer recent active compiled notes, then linked sources/evidence when provenance is needed.
-5. Read the Planning inventory with `plan_memory(action="inspect")` (no collection) when the topic has one, and read the due-state block any response already carried rather than re-deriving it. Both are read-only and create nothing.
+5. Read the Planning inventory with `read_plans(operation={"kind": "inspect"})` (no collection) when the topic has one, and read the due-state block any response already carried rather than re-deriving it. Both are read-only and create nothing.
 6. Summarize current state, decisions already made, blockers, and likely next actions.
 
 ## Relation governance

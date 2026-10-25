@@ -599,6 +599,9 @@ _INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope"})
 
 def _present(root: Path, run: dict, **extra) -> dict:
     out = {key: value for key, value in run.items() if key not in _INTERNAL_KEYS}
+    if "pack_suggestions" in run:
+        # The run stores the spelling of the surface that started it; serve this surface's.
+        out["pack_suggestions"] = knowledge_packs.rendered_suggestions(run["pack_suggestions"] or [])
     out["next_actions"] = _next_actions(run)
     # Whenever the run carries a persisted `verify` block (kept current by `apply`
     # from the per-item re-hash of the originals), surface the SAME recorded counts

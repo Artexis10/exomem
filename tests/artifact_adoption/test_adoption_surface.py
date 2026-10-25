@@ -498,9 +498,12 @@ def test_delivery_registry_mcp_and_openapi_close_nested_platform_proof(
         "content"
     ]["application/json"]["schema"]["properties"]["delivery"]
     tools = {item.name: item for item in asyncio.run(mcp.list_tools())}
-    mcp_delivery = tools["record_memory"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
+    # MCP lists Records writes as `change_records`; delivery belongs to its append variant.
+    variants = tools["change_records"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
         "inputSchema"
-    ]["properties"]["delivery"]
+    ]["properties"]["operation"]["oneOf"]
+    append = next(item for item in variants if item["properties"]["kind"].get("const") == "append")
+    mcp_delivery = append["properties"]["delivery"]
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "record_memory")
     registry_delivery = next(item for item in command.params if item.name == "delivery").schema
     assert registry_delivery is not None

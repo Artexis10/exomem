@@ -65,7 +65,13 @@ def test_mcp_fixture_and_capability_contract_have_matching_bounded_arguments() -
     fixture = json.loads(
         (Path(__file__).parent / "fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8")
     )
-    properties = fixture["record_memory"]["inputSchema"]["properties"]
+    # The grouped command is hidden; its fields live in the branches of the operation tools.
+    properties = {
+        name: schema
+        for tool in ("read_records", "change_records")
+        for branch in fixture[tool]["inputSchema"]["properties"]["operation"]["oneOf"]
+        for name, schema in branch["properties"].items()
+    }
 
     assert properties["expand_child"]["type"] == "string"
     assert "declared child" in properties["expand_child"]["description"]

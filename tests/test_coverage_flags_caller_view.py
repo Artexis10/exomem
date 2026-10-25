@@ -11,13 +11,17 @@ the vault-wide flag.
 from __future__ import annotations
 
 import json
+import logging
+from contextvars import copy_context
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from test_activate_context_request_path import TURN, _seed_live_recall
 from test_governance_egress import _external, write_rule, write_scope
+from test_working_set_carry import CARRY_PAGE, CARRY_TURN, _seed_carry_pages
 from test_working_set_index import _seed_planning, _seed_structure
+from test_working_set_topic_turns import CLEANING, _seed_workshop_vault
 
 from exomem import (
     commands,
@@ -36,6 +40,7 @@ from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.governance import egress
 from exomem.governance.principal import owner_principal, request_scope
+from exomem.published_admission import admission_of
 
 ANCHOR = "Knowledge Base/Notes/Insights/coverage-anchor.md"
 OUTLINKED = "Knowledge Base/Notes/Insights/coverage-outlinked.md"
@@ -150,6 +155,41 @@ def test_a_lag_history_cannot_bridge_is_reported_to_the_restricted_reader(served
 
     assert _links(served, restricted=True)["inbound"] is None
     assert context_pack.INBOUND_INCOMPLETE_TRUNCATION in _pack_truncation(served, restricted=True)[1]
+
+
+def test_a_fault_reading_the_lag_reports_it_in_the_inbound_field(
+    served: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry fault is a lag nobody can rule out, not a failed read of the page."""
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nRewritten. See [[coverage-anchor]].\n")
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("registry delta unreadable")
+
+    monkeypatch.setattr(freshness, "delta_since", unreadable)
+
+    assert _links(served, restricted=True)["inbound"] is None
+
+
+def test_a_fault_reading_the_lag_is_logged_once_for_its_class(
+    served: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reply is the same lag as ever; the operator learns that the quieted flags fell back to it."""
+    monkeypatch.setattr(view_lag, "_REPORTED_FAULTS", set())
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nRewritten. See [[coverage-anchor]].\n")
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("registry delta unreadable")
+
+    monkeypatch.setattr(freshness, "delta_since", unreadable)
+    caplog.set_level(logging.WARNING, logger="exomem.view_lag")
+
+    _links(served, restricted=True)
+    _links(served, restricted=True)
+
+    warned = [record for record in caplog.records if record.name == "exomem.view_lag"]
+    assert len(warned) == 1
+    assert "RuntimeError" in warned[0].getMessage()
 
 
 def test_a_lag_longer_than_the_bound_is_reported_without_a_decision(
@@ -294,13 +334,14 @@ def activation(
         "_schedule_build",
         lambda root, freshness_stamp="": scheduled.append(freshness_stamp),
     )
+    # A real repair worker would converge the catalogue mid-test, so a lag would not stay where the test put it.
     monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: False)
     return SimpleNamespace(vault=vault, scheduled=scheduled)
 
 
-def _activate(vault: Path, *, restricted: bool = True) -> dict:
+def _activate(vault: Path, *, restricted: bool = True, turn: str = TURN) -> dict:
     with _caller(restricted):
-        packet = commands.op_activate_context(vault, turn=TURN)
+        packet = commands.op_activate_context(vault, turn=turn)
     packet.pop("continuity", None)  # a fresh random thread, not coverage
     return packet
 
@@ -321,6 +362,47 @@ def test_a_withheld_write_leaves_the_restricted_activation_packet_as_it_was(
 
     assert _activate(activation.vault) == before
     assert activation.scheduled, "the catalogue was behind, so a build was scheduled"
+
+
+def _units_by_role(packet: dict) -> set[str]:
+    return {unit["role"] for unit in packet["units"]}
+
+
+def test_a_withheld_write_leaves_the_restricted_packet_whole_while_the_lexical_catalogue_lags(
+    activation: SimpleNamespace,
+) -> None:
+    """The lexical catalogue is not refreshed after the write, as it is until the watcher folds it in."""
+    before = _activate(activation.vault)
+    assert before["generation"]["correction_context"] == "available"
+    assert "constraints" in _units_by_role(before)
+
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    assert _activate(activation.vault) == before
+
+
+def test_a_visible_write_is_reported_by_the_restricted_packet_while_the_lexical_catalogue_lags(
+    activation: SimpleNamespace,
+) -> None:
+    _activate(activation.vault)
+    _append_to_sled(activation.vault)
+
+    after = _activate(activation.vault)
+
+    assert after["generation"]["lexical_evidence"] == "stale"
+    assert {"role": "constraints", "reason": "lane_failed"} in after["missing"]
+
+
+def test_a_withheld_write_is_reported_by_the_owner_packet_while_the_lexical_catalogue_lags(
+    activation: SimpleNamespace,
+) -> None:
+    _activate(activation.vault, restricted=False)
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    after = _activate(activation.vault, restricted=False)
+
+    assert after["generation"]["lexical_evidence"] == "stale"
+    assert {"role": "constraints", "reason": "lane_failed"} in after["missing"]
 
 
 def test_a_visible_write_marks_the_restricted_activation_packet_stale(
@@ -353,12 +435,20 @@ def _lexical_flag(vault: Path, *, restricted: bool = True) -> str:
 SLED = "Knowledge Base/Products/Cargo Sled.md"
 
 
+def _request_snapshot(vault: Path):
+    """The snapshot of a restricted request, with its lexical checkpoint decided as the request decides it."""
+    snapshot = find_module.FreshnessSnapshot(vault)
+    working_set_runtime.pin_lexical_checkpoint(vault, snapshot, egress.visible_page_filter(vault))
+    return snapshot
+
+
 def _lexical(vault: Path, *, restricted: bool = True) -> tuple[list[str], str]:
     """The activation lexical lane as the request runs it: `(hit paths, state)`."""
     with _caller(restricted):
+        checkpoint = _request_snapshot(vault).lexical_checkpoint("kb")
         hits, state = working_set_runtime.lexical_evidence(
             vault, TURN, working_set_index.WorkingSetIndex(vault).anchors(),
-            limit=10, visible=egress.visible_page_filter(vault),
+            limit=10, freshness=checkpoint.triple, recall_checkpoint=checkpoint,
         )
     return [hit.path for hit in hits], state
 
@@ -406,9 +496,9 @@ def test_the_dependence_check_reads_the_catalogue_the_lexical_lane_was_served(
     """Which pages the turn still reaches without a word; the same catalogue, the same reader."""
     def reached() -> frozenset[str]:
         with _caller(True):
-            return working_set_runtime.lexical_hits_without(
+            return working_set._lexical_hits_without(
                 activation.vault, TURN, frozenset({SLED}), frozenset({"north"}),
-                visible=egress.visible_page_filter(activation.vault),
+                freshness_snapshot=_request_snapshot(activation.vault),
             )
 
     before = reached()
@@ -425,7 +515,7 @@ def test_a_page_retagged_as_withheld_is_not_released_from_the_lagging_catalogue(
 ) -> None:
     """The lagging catalogue still ranks the page by its old text; the release decision, made
     on the live file for each request, drops it."""
-    assert _lexical(activation.vault) == ([SLED], "available")
+    assert SLED in json.dumps(_activate(activation.vault))
     page = activation.vault / SLED
     _write_as_the_service_does(
         activation.vault, SLED,
@@ -434,15 +524,147 @@ def test_a_page_retagged_as_withheld_is_not_released_from_the_lagging_catalogue(
 
     with _caller(True):
         assert not egress.visible_page_filter(activation.vault)(SLED)
-        hits, state = working_set_runtime.lexical_evidence(
-            activation.vault, TURN, working_set_index.WorkingSetIndex(activation.vault).anchors(),
-            limit=10, visible=egress.visible_page_filter(activation.vault),
-        )
-        released = egress.annotate_hits(activation.vault, hits, limit=10).hits
-
-    assert (state, [hit.path for hit in hits]) == ("available", [SLED])
-    assert released == []
     assert SLED not in json.dumps(_activate(activation.vault))
+
+
+VISIBLE_HUB = "Knowledge Base/Notes/Insights/northern-corridor-hub.md"
+TAGGED = "Knowledge Base/Notes/Insights/coverage-tagged.md"
+TAGGED_BODY = "---\ntype: note\ntags: [{tags}]\nstatus: active\n---\n\n# Tagged\n\nTagged lede.\n"
+
+
+def _delete_as_the_service_does(vault: Path, rel: str) -> None:
+    path = vault / rel
+    path.unlink()
+    freshness.on_files_changed(vault, deleted=[path])
+
+
+def _hold_verdicts(vault: Path) -> frozenset[str]:
+    """What a search of the restricted reader leaves in the catalogue: a verdict per page."""
+    with _caller(True):
+        admission = admission_of(egress.visible_page_filter(vault))
+        assert admission is not None
+        store = lexstore.get_store(vault)
+        held = store.published_admitted_paths(
+            "kb", store.published_recall_checkpoint("kb"), admission,
+            find_module.FreshnessSnapshot(vault).recall_paths("kb"),
+        )
+    assert held is not None
+    return held
+
+
+def test_deleting_a_page_held_as_withheld_leaves_the_restricted_packet_as_it_was(
+    activation: SimpleNamespace,
+) -> None:
+    before = _activate(activation.vault)
+
+    _delete_as_the_service_does(activation.vault, HIDDEN_HUB)
+
+    assert _activate(activation.vault) == before
+
+
+def test_the_pages_a_request_proved_withheld_end_with_that_request(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later reader view on this thread must not reject a page for a request that is over."""
+    pinned = []
+    pin = egress.pin_proven_withheld
+
+    def remember_pin(paths):
+        result = pin(paths)
+        pinned.append((paths, copy_context()))
+        return result
+
+    monkeypatch.setattr(egress, "pin_proven_withheld", remember_pin)
+    _activate(activation.vault)
+    _delete_as_the_service_does(activation.vault, HIDDEN_HUB)
+
+    _activate(activation.vault)
+
+    paths, copied = pinned[-1]
+    assert paths == frozenset({HIDDEN_HUB})
+    with _caller(True):
+        assert egress.visible_page_filter(activation.vault)(HIDDEN_HUB) is True
+    assert copied.run(lambda: egress.visible_page_filter(activation.vault)(HIDDEN_HUB)) is True
+    assert copied.run(pin, paths) is False
+
+
+def test_deleting_a_withheld_page_with_no_held_verdict_is_reported_to_the_restricted_reader(
+    activation: SimpleNamespace,
+) -> None:
+    _delete_as_the_service_does(activation.vault, HIDDEN_HUB)
+
+    assert _activate(activation.vault)["generation"]["lexical_evidence"] == "stale"
+
+
+def test_deleting_a_visible_page_is_reported_to_the_restricted_reader(
+    activation: SimpleNamespace,
+) -> None:
+    _activate(activation.vault)
+
+    _delete_as_the_service_does(activation.vault, VISIBLE_HUB)
+
+    assert _activate(activation.vault)["generation"]["lexical_evidence"] == "stale"
+
+
+HUB_TURN = "What is going on with the northern corridor? Which depot owns the winter schedule?"
+NEIGHBOUR = "Knowledge Base/Notes/Patterns/coverage-withheld-neighbour.md"
+NEIGHBOUR_BODY = (
+    "# Neighbour\n\nWinter schedule depot handover for the northern corridor."
+    " See [[northern-corridor-hub]].\n"
+)
+
+
+def test_deleting_a_withheld_neighbour_that_matches_the_turn_leaves_the_restricted_packet_as_it_was(
+    activation: SimpleNamespace,
+) -> None:
+    """The catalogue still ranks the deleted page by its text; the reader was never shown that text."""
+    vault = activation.vault
+    _write_as_the_service_does(vault, NEIGHBOUR, NEIGHBOUR_BODY)
+    lexstore.ensure_fresh(vault)
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild()
+    index.update(freshness_stamp=_stamp(vault))
+    before = _activate(vault, turn=HUB_TURN)
+    assert {"role": "material", "reason": "no_material"} in before["missing"]
+
+    _delete_as_the_service_does(vault, NEIGHBOUR)
+
+    assert _activate(vault, turn=HUB_TURN) == before
+
+
+def test_a_request_served_the_published_catalogue_asks_for_its_repair_when_it_ends(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repair that ran mid-request would move the catalogue under the request's later reads."""
+    asked: list[bool] = []
+    monkeypatch.setattr(
+        lexstore, "_schedule_repair", lambda *args, lag_only=False, **kwargs: asked.append(lag_only)
+    )
+    _write_as_the_service_does(activation.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+
+    with _caller(True), working_set_runtime.defer_index_refreshes():
+        _request_snapshot(activation.vault)
+        assert asked == []
+
+    assert asked == [True]
+
+
+@pytest.mark.parametrize("withheld_tag", [RESTRICTED_TAG], indirect=True)
+def test_a_verdict_held_before_the_page_became_visible_does_not_hide_its_deletion(
+    activation: SimpleNamespace,
+) -> None:
+    """The catalogue holds the page as visible by now; the earlier verdict describes other text."""
+    _write_as_the_service_does(
+        activation.vault, TAGGED, TAGGED_BODY.format(tags=RESTRICTED_TAG)
+    )
+    lexstore.ensure_fresh(activation.vault)
+    assert TAGGED not in _hold_verdicts(activation.vault)
+    _write_as_the_service_does(activation.vault, TAGGED, TAGGED_BODY.format(tags="open"))
+    lexstore.ensure_fresh(activation.vault)
+
+    _delete_as_the_service_does(activation.vault, TAGGED)
+
+    assert _activate(activation.vault)["generation"]["lexical_evidence"] == "stale"
 
 
 def test_a_lag_with_no_remembered_stamp_is_reported_to_the_restricted_reader(
@@ -454,6 +676,24 @@ def test_a_lag_with_no_remembered_stamp_is_reported_to_the_restricted_reader(
     working_set_runtime._STAMP_CHECKPOINTS.clear()
 
     assert _activate(activation.vault)["generation"]["index_stale"] is True
+
+
+def test_a_fault_reading_the_lag_is_reported_to_the_restricted_reader_not_raised(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decision only quiets a flag; a registry fault must not fail the tool call."""
+    _activate(activation.vault)
+    _write_hidden_hub(activation.vault, "Second.")
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("registry delta unreadable")
+
+    monkeypatch.setattr(freshness, "recall_delta_since", unreadable)
+
+    served = _activate(activation.vault)
+
+    assert served["abstained"] is False
+    assert served["generation"]["index_stale"] is True
 
 
 def test_a_withheld_publication_during_the_request_does_not_withdraw_the_packet(
@@ -514,6 +754,150 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
     assert served.get("abstention") == {"reason": "unavailable"}
 
 
+# ---- the pages a turn names ----------------------------------------------
+
+TITLE_TURN = "The smooth chain cleaning works best with degreaser, I find."
+STATE_TURN = "what is the current state of Harbourline Trust"
+STATE_ENTITY = "Knowledge Base/Entities/Organizations/Harbourline Trust.md"
+STATE_PAGE = "Knowledge Base/Notes/Insights/harbourline-operating-state.md"
+
+
+@pytest.fixture
+def named(activation: SimpleNamespace) -> SimpleNamespace:
+    """The activation runtime over a vault where a turn can name a page without an anchor.
+
+    A research note answers the carry, a note titled in ordinary words answers the
+    title listing, and an entity declares the visible page that holds its current state.
+    """
+    vault = activation.vault
+    _seed_workshop_vault(vault)
+    _seed_carry_pages(vault)
+    for rel, body in (
+        (
+            STATE_ENTITY,
+            "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n"
+            'current_state_page: "[[harbourline-operating-state]]"\n---\n\n'
+            "# Harbourline Trust\n\nA shipping trust. See [[harbourline-operating-state]].\n",
+        ),
+        (
+            STATE_PAGE,
+            "---\ntype: note\nstatus: active\nupdated: 2026-09-20\n---\n\n"
+            "# Harbourline operating state\n\n## Summary\n\n"
+            "- [fact] The harbourline retainer is ninety thousand. ^retainer\n",
+        ),
+    ):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    _seed_live_recall(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
+    return activation
+
+
+def _around_a_withheld_write(vault: Path, turn: str) -> tuple[dict, dict]:
+    """The restricted reader's packet before and after a withheld write the lexical catalogue lags."""
+    before = _activate(vault, turn=turn)
+    _write_as_the_service_does(vault, HIDDEN_HUB, HUB_BODY.format("Second."))
+    return before, _activate(vault, turn=turn)
+
+
+def test_a_withheld_write_leaves_the_restricted_carry_as_it_was(named: SimpleNamespace) -> None:
+    before, after = _around_a_withheld_write(named.vault, CARRY_TURN)
+
+    assert before["generation"]["carried_by"] == "retrieval"
+    assert {unit["provenance"]["path"] for unit in before["units"]} == {CARRY_PAGE}
+    assert after == before
+
+
+def test_a_withheld_write_leaves_the_restricted_title_listing_as_it_was(
+    named: SimpleNamespace,
+) -> None:
+    before, after = _around_a_withheld_write(named.vault, TITLE_TURN)
+
+    assert before["abstained"] is True
+    assert [anchor["path"] for anchor in before["anchors"]] == [CLEANING]
+    assert after == before
+
+
+def test_a_withheld_write_leaves_the_restricted_current_state_page_as_it_was(
+    named: SimpleNamespace,
+) -> None:
+    before, after = _around_a_withheld_write(named.vault, STATE_TURN)
+
+    assert [e["path"] for e in before["current_state"] if e["source"] == "canonical_page"] == [
+        STATE_PAGE
+    ]
+    assert after == before
+
+
+MARSHAL = "Knowledge Base/Entities/People/Marshal Brannoch.md"
+DISPATCHER = "Knowledge Base/Entities/People/Dispatcher Vellum.md"
+NOTICE_BOARD = "Knowledge Base/Notes/Insights/Notice board.md"
+
+
+def _withhold_at_a_notice_level(vault: Path, rel: str) -> None:
+    """The external reader is told that `rel` is withheld (L1), not left to guess it exists."""
+    scope, rule = "01ARZ3NDEKTSV4RRFFQ69G5FD0", "01ARZ3NDEKTSV4RRFFQ69G5FD1"
+    governance = vault / "Knowledge Base/_Governance"
+    (governance / "scopes/notice.yaml").write_text(
+        f'governance_version: 1\nid: {scope}\nname: Notice\npaths: ["{rel}"]\n', encoding="utf-8"
+    )
+    (governance / "rules/notice-external.yaml").write_text(
+        f'governance_version: 1\nid: {rule}\nscope_ids: ["{scope}"]\naudience: external\nceiling: 1\n',
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("withheld_path", [MARSHAL], indirect=True)
+def test_deleting_a_withheld_page_a_carried_unit_names_leaves_the_relisted_links_as_they_were(
+    named: SimpleNamespace,
+) -> None:
+    """The guard relists a carried page's links from the units it keeps.
+
+    A unit of the carried page links a page withheld at a notice level, so the compiler keeps
+    it and the guard removes it, and the guard relists. The working-set index still holds the
+    deleted page's row, and a deleted file reads as visible.
+    """
+    vault = named.vault
+    carried = vault / CARRY_PAGE
+    carried.write_text(
+        carried.read_text(encoding="utf-8").replace(
+            "- [finding] A quillon parcel",
+            "- [finding] Marshal Brannoch signs each widening and Dispatcher Vellum files it. ^q-sign\n"
+            "- [finding] A quillon parcel",
+            1,
+        ).replace("nine minutes after", "nine minutes, as the [[Notice board]] posts, after", 1)
+        + "\n## Context\n\n[[Marshal Brannoch]] [[Dispatcher Vellum]]\n",
+        encoding="utf-8",
+    )
+    for rel, title in ((MARSHAL, "Marshal Brannoch"), (DISPATCHER, "Dispatcher Vellum")):
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n# {title}\n\n## Summary\n\nWorks the quillon queue.\n",
+            encoding="utf-8",
+        )
+    _write_as_the_service_does(vault, NOTICE_BOARD, "# Notice board\n\nPosted windows.\n")
+    _withhold_at_a_notice_level(vault, NOTICE_BOARD)
+    _seed_live_recall(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
+
+    before = _activate(vault, turn=CARRY_TURN)
+    listed = [a["path"] for a in before["anchors"] if "carried_link" in a["evidence"]]
+    assert listed == [DISPATCHER], before["anchors"]
+    assert before["units"] and not any("nine minutes" in unit["text"] for unit in before["units"])
+
+    _delete_as_the_service_does(vault, MARSHAL)
+
+    assert _activate(vault, turn=CARRY_TURN) == before
+
+
 # ---- activation map ------------------------------------------------------
 
 
@@ -569,6 +953,29 @@ def test_a_withheld_write_marks_the_owner_map_stale(mapped: SimpleNamespace) -> 
     _write_as_the_service_does(mapped.vault, HIDDEN_HUB, HUB_BODY.format("Second."))
 
     assert _map_activation(mapped.vault, restricted=False)["map"]["stale"] is True
+
+
+def test_deleting_a_visible_page_holds_the_restricted_map_back_as_warming(
+    mapped: SimpleNamespace,
+) -> None:
+    _map_activation(mapped.vault)
+
+    _delete_as_the_service_does(mapped.vault, VISIBLE_HUB)
+
+    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+
+
+def test_deleting_a_page_held_as_withheld_leaves_the_restricted_map_served(
+    mapped: SimpleNamespace,
+) -> None:
+    before = _map_activation(mapped.vault)
+    assert HIDDEN_HUB not in _hold_verdicts(mapped.vault)
+
+    _delete_as_the_service_does(mapped.vault, HIDDEN_HUB)
+
+    after = _map_activation(mapped.vault)
+    assert after["abstained"] is False
+    assert after["map"]["items"] == before["map"]["items"]
 
 
 REGISTRY = "Knowledge Base/_Schema/project-keys.yaml"

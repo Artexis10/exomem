@@ -1445,13 +1445,17 @@ async def _stdio_session(
     async with asyncio.timeout(timeout * 12):
         async with client:
             tools = {tool.name for tool in await asyncio.wait_for(client.list_tools(), timeout)}
-            from exomem.command_surface import resolve_command
+            from exomem.command_surface import find_rendering, resolve_command
             from exomem.commands import PRODUCT_COMMANDS
 
-            tools = {
-                command.name if (command := resolve_command(name, PRODUCT_COMMANDS)) else name
-                for name in tools
-            }
+            def _command_name(name: str) -> str:
+                # A listed rendering (read_records, change_plans, ...) exposes its grouped command.
+                if (command := resolve_command(name, PRODUCT_COMMANDS)) is not None:
+                    return command.name
+                found = find_rendering(name, PRODUCT_COMMANDS)
+                return found[0].name if found is not None else name
+
+            tools = {_command_name(name) for name in tools}
             required = {
                 "capture_source",
                 "remember",

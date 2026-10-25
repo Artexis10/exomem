@@ -72,15 +72,16 @@
 - [ ] 3.17 Compute coverage flags relative to the caller's view: the activation `index_stale` and `lexical_evidence`, the direct-read `inbound: null`, and the context-pack inbound and outbound incomplete entries.
   - For a restricted caller, report a lag only when a changed path since the published generation is one the caller may see. Use the freshness delta and the existing release decision. The cost follows the lag, not the vault.
   - Verify: an owner write to a withheld page leaves a restricted caller's response unchanged; a write to a visible page is reported; owner responses are unchanged.
+  - Closed since: the activation lexical lane, units, materials, dependence check, carry retrieval, title listing and canonical-page lookup read one reader checkpoint per request; a fault reading a lag reports the lag instead of failing the request; `ensure_unlisted` and the map's project entries follow the caller's view; a deleted page counts as withheld when the caller's own published verdict for that generation proves it (#2079 and this change). The anchors surface serves project anchors to every reader, so a registry edit stays a reported lag there by design.
   - Still open in the same class:
-    - The activation `lexical_evidence` follows the lexical store's readiness proof, which gates the served evidence, so a hidden write can still read as "stale" until the lexical catalogue catches up.
-    - `context_catalogue.ensure_unlisted` folds the vault-wide `index_stale` into `unlisted`.
-    - A project-registry change reports stale to every caller.
-    - A deleted or moved withheld page counts as visible.
+    - The packet's correction context needs the exact-checkpoint resolver and the graph read snapshot, so a hidden write still makes it unavailable to a restricted caller until both are published. Closing it needs published-generation proofs for those two structures.
+    - A catalogue publication between the request's pinned checkpoint and a later lane's query makes that lane report stale for the request.
+    - The direct-read and graph callers of `only_withheld` have no deleted-page proof, so a deleted withheld page still counts as visible there. Their lag is stamped by the consumer registry, and the published verdicts are stamped by the catalogue, so no generation of one proves a verdict of the other.
     - A lag longer than the decision bound (16 paths), or an unbridgeable change history, reports the lag without deciding each path, so a burst of withheld writes can still flip a restricted caller's flag until the structure is published.
-- [ ] 3.15 Publish admitted sets for structured eligibility and the activation carry. Key them by audience, purpose, grants, tombstone generation and catalogue generation. Patch them from catalogue deltas, and abstain on a key mismatch.
+- [x] 3.15 Publish admitted sets for structured eligibility and the activation carry. Key them by audience, purpose, grants, tombstone generation and catalogue generation. Patch them from catalogue deltas, and abstain on a key mismatch.
   - Verify: a revoked or retagged page leaves the next request's eligibility and rarity.
   - This is a separate slice from 3.8-3.14.
+  - Evidence: merged in #2076 (abda7bb1e); per-caller page verdicts beside the admitted recall path set, patched by catalogue row signature; pages in a collection placement layer are decided on every request; tests/test_published_admitted_sets.py.
 - [ ] 3.16 After installation, compare `ask_memory`, `activate_context` and `read_memory` dispatch timings in the request ledger by concurrency bucket: alone, 1.5 to 3, and 3 to 6.
   - Use at least 100 calls per tool per arm, report the write count per window, and give bootstrap 95% intervals.
   - Record each site's span check from 3.8-3.14.

@@ -8,122 +8,21 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import query_data, record_governance, record_history, records, structured_collections
+from . import (
+    operation_entries,
+    query_data,
+    record_governance,
+    record_history,
+    records,
+    structured_collections,
+)
 from .cli_ops import OpError, action_argument_contract
 from .structured_collections import CollectionError
 
-ACTIONS = frozenset(
-    {
-        "describe",
-        "validate",
-        "inspect",
-        "create",
-        "query",
-        "append",
-        "bulk_upsert",
-        "update",
-        "revise",
-        "rebaseline",
-        "discard",
-        "import",
-        "history",
-    }
-)
-
-_ACTION_FIELDS = {
-    "describe": frozenset(),
-    "inspect": frozenset({"collection"}),
-    "validate": frozenset({"collection", "manifest_path", "manifest_text", "scaffold"}),
-    "create": frozenset({"manifest_path", "manifest_text", "why", "scaffold"}),
-    "query": frozenset(
-        {
-            "collection",
-            "view",
-            "filters",
-            "columns",
-            "sort_by",
-            "descending",
-            "limit",
-            "aggregate",
-            "date_from",
-            "date_to",
-            "date_column",
-            "expand_children",
-            "expand_child",
-            "continuation",
-            "include_agent_history",
-            "output_format",
-            "query",
-        }
-    ),
-    "append": frozenset(
-        {
-            "collection",
-            "item",
-            "why",
-            "item_key",
-            "expected_container_hash",
-            "body",
-            "delivery",
-            "held",
-            "hold",
-        }
-    ),
-    "update": frozenset(
-        {
-            "collection",
-            "item_key",
-            "changes",
-            "expected_container_hash",
-            "expected_item_version",
-            "why",
-            "refresh_presentation",
-            "held",
-            "hold",
-        }
-    ),
-    "bulk_upsert": frozenset(
-        {"collection", "rows", "why", "expected_container_hash", "source", "on_reject"}
-    ),
-    "discard": frozenset({"collection", "held", "why"}),
-    "history": frozenset({"collection", "item_key", "limit", "continuation"}),
-    "revise": frozenset(
-        {"collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why"}
-    ),
-    "rebaseline": frozenset(
-        {"collection", "expected_manifest_hash", "expected_container_hash", "acknowledged_gap_codes", "why"}
-    ),
-    "import": frozenset({"collection", "import_request"}),
-}
-_REQUIRED_FIELDS = {
-    "describe": frozenset(),
-    "inspect": frozenset(),
-    "validate": frozenset({"manifest_text"}),
-    "create": frozenset({"manifest_path", "manifest_text", "why"}),
-    "query": frozenset({"collection"}),
-    # `item` is required only when the caller is not resuming a held candidate,
-    # which the argument rules below say in as many words.
-    "append": frozenset({"collection", "why"}),
-    "discard": frozenset({"collection", "held", "why"}),
-    "history": frozenset({"collection", "item_key"}),
-    "bulk_upsert": frozenset({"collection", "rows", "why", "expected_container_hash"}),
-    "update": frozenset(
-        {
-            "collection",
-            "item_key",
-            "expected_container_hash",
-            "expected_item_version",
-            "why",
-        }
-    ),
-    "revise": frozenset(
-        {"collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why"}
-    ),
-    "rebaseline": frozenset(
-        {"collection", "expected_manifest_hash", "expected_container_hash", "acknowledged_gap_codes", "why"}
-    ),
-    "import": frozenset({"collection", "import_request"}),
-}
+# The operation entries are the one table of what each action accepts and requires.
+ACTIONS = operation_entries.RECORDS.actions()
+_ACTION_FIELDS = operation_entries.RECORDS.action_fields()
+_REQUIRED_FIELDS = operation_entries.RECORDS.required_fields()
 _QUERY_SHAPING_FIELDS = frozenset(
     {
         "filters",
@@ -672,6 +571,17 @@ def _json_safe_details(value: object) -> dict[str, Any] | None:
     return {str(key): normalize(item) for key, item in value.items()}
 
 
+def validate_arguments(action: object, arguments: Mapping[str, Any]) -> None:
+    """Refuse arguments the selected action does not accept, exactly as a direct call does.
+
+    `arguments` holds only what the caller sent; a field a caller omits counts as
+    not supplied, the same as the `None` default the signature gives it.
+    """
+    values: dict[str, Any] = dict.fromkeys(operation_entries.RECORDS.every_field(), None)
+    values.update(arguments)
+    _validate_arguments(action, values)
+
+
 def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if not isinstance(action, str) or action not in ACTIONS:
         _invalid_arguments()
@@ -724,6 +634,11 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("view excludes shaping fields: " + ", ".join(offending))
     if action == "query" and values["expand_children"] is True and values["expand_child"] is not None:
         _invalid_arguments("expand_children and expand_child are mutually exclusive")
+
+
+def refuse_arguments(detail: str) -> Never:
+    """Raise this command's own argument refusal with `detail` as its explanation."""
+    _invalid_arguments(detail)
 
 
 def _invalid_arguments(detail: str | None = None) -> Never:

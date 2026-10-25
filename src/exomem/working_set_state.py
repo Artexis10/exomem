@@ -119,8 +119,14 @@ def _from_canonical_page(
     *,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis,
+    freshness_snapshot: Any = None,
 ) -> dict[str, Any] | None:
     """The leading current-state unit of the page the anchor declares current.
+
+    Read at the request's `freshness_snapshot` and the lexical checkpoint it
+    pinned for a restricted reader, so a write that reader may not see cannot
+    make this lookup abstain while the catalogue lags; without one, at a
+    snapshot of its own.
 
     The entry carries the page's `path`, so the egress guard decides it like any
     other page reference, and the unit's OWN authored time as `as_of`; a unit
@@ -144,12 +150,16 @@ def _from_canonical_page(
         ]
 
     try:
-        snapshot = find_module.FreshnessSnapshot(vault_root)
+        snapshot = (
+            freshness_snapshot
+            if freshness_snapshot is not None
+            else find_module.FreshnessSnapshot(vault_root)
+        )
         plan = structured_filters.compile_filter(
             None,
             shortcuts=structured_filters.FilterShortcuts(categories=CANONICAL_CATEGORIES),
         )
-        checkpoint = snapshot.recall_checkpoint("kb")
+        checkpoint = snapshot.lexical_checkpoint("kb")
 
         def read(size: int) -> tuple[list[Any], bool]:
             hits = find_module._find_semantic_units(
@@ -220,6 +230,7 @@ def current_state_for(
     state_fields: Sequence[str] | None = None,
     date_fields: Sequence[str] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    freshness_snapshot: Any = None,
 ) -> tuple[dict[str, Any], ...]:
     """Resolve each stateful anchor's current state, Records first.
 
@@ -227,6 +238,9 @@ def current_state_for(
     neighbourhood pages before choosing the newest note. `None` retains the
     owner's unrestricted view. Each entry carries its source page's path for
     the release guard.
+
+    `freshness_snapshot` is the request's: the canonical-page lookup reads the
+    lexical catalogue at the checkpoint it pinned for a restricted reader.
 
     `index_generation` names the activation index generation whose published
     manifests this lookup may route with, and `index_token` the sidecar that
@@ -257,7 +271,13 @@ def current_state_for(
     out: list[dict[str, Any]] = []
     for anchor in anchors:
         if getattr(anchor, "kind", "") in CANONICAL_KINDS:
-            entry = _from_canonical_page(root, anchor, visible=visible, status_basis=status_basis)
+            entry = _from_canonical_page(
+                root,
+                anchor,
+                visible=visible,
+                status_basis=status_basis,
+                freshness_snapshot=freshness_snapshot,
+            )
             if entry is not None:
                 out.append(entry)
             continue

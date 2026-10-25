@@ -1,0 +1,780 @@
+[
+ {
+  "case_id": "records-log-entry-s101",
+  "params": {
+   "rows": [
+    {
+     "date": "2026-03-06",
+     "note": "commute",
+     "value": 7
+    },
+    {
+     "date": "2026-03-15",
+     "note": "after lunch",
+     "value": 1
+    },
+    {
+     "date": "2026-03-18",
+     "note": "with a friend",
+     "value": 2
+    }
+   ],
+   "target": {
+    "date": "2026-03-21",
+    "note": "morning",
+    "value": 5
+   },
+   "tracker": {
+    "dir": "Coffee",
+    "measure": "cups",
+    "title": "Coffee log"
+   }
+  },
+  "seed": 101,
+  "template": "records-log-entry"
+ },
+ {
+  "case_id": "records-log-entry-s102",
+  "params": {
+   "rows": [
+    {
+     "date": "2026-03-05",
+     "note": "after lunch",
+     "value": 2
+    },
+    {
+     "date": "2026-03-17",
+     "note": "slow day",
+     "value": 7
+    },
+    {
+     "date": "2026-03-19",
+     "note": "after lunch",
+     "value": 4
+    }
+   ],
+   "target": {
+    "date": "2026-03-21",
+    "note": "slow day",
+    "value": 6
+   },
+   "tracker": {
+    "dir": "Practice",
+    "measure": "minutes",
+    "title": "Practice log"
+   }
+  },
+  "seed": 102,
+  "template": "records-log-entry"
+ },
+ {
+  "case_id": "records-log-entry-s103",
+  "params": {
+   "rows": [
+    {
+     "date": "2026-03-06",
+     "note": "with a friend",
+     "value": 5
+    },
+    {
+     "date": "2026-03-08",
+     "note": "morning",
+     "value": 9
+    },
+    {
+     "date": "2026-03-11",
+     "note": "commute",
+     "value": 7
+    }
+   ],
+   "target": {
+    "date": "2026-03-12",
+    "note": "after lunch",
+    "value": 9
+   },
+   "tracker": {
+    "dir": "Sleep",
+    "measure": "hours",
+    "title": "Sleep log"
+   }
+  },
+  "seed": 103,
+  "template": "records-log-entry"
+ },
+ {
+  "case_id": "records-update-row-s101",
+  "params": {
+   "index": 1,
+   "new_value": 3,
+   "rows": [
+    {
+     "date": "2026-03-03",
+     "note": "slow day",
+     "value": 9
+    },
+    {
+     "date": "2026-03-05",
+     "note": "slow day",
+     "value": 1
+    },
+    {
+     "date": "2026-03-16",
+     "note": "weekend",
+     "value": 3
+    },
+    {
+     "date": "2026-03-19",
+     "note": "before bed",
+     "value": 3
+    }
+   ],
+   "tracker": {
+    "dir": "Reading",
+    "measure": "pages",
+    "title": "Reading log"
+   }
+  },
+  "seed": 101,
+  "template": "records-update-row"
+ },
+ {
+  "case_id": "records-update-row-s102",
+  "params": {
+   "index": 0,
+   "new_value": 6,
+   "rows": [
+    {
+     "date": "2026-03-03",
+     "note": "weekend",
+     "value": 2
+    },
+    {
+     "date": "2026-03-04",
+     "note": "with a friend",
+     "value": 4
+    },
+    {
+     "date": "2026-03-18",
+     "note": "weekend",
+     "value": 8
+    },
+    {
+     "date": "2026-03-20",
+     "note": "commute",
+     "value": 1
+    }
+   ],
+   "tracker": {
+    "dir": "Practice",
+    "measure": "minutes",
+    "title": "Practice log"
+   }
+  },
+  "seed": 102,
+  "template": "records-update-row"
+ },
+ {
+  "case_id": "records-update-row-s103",
+  "params": {
+   "index": 2,
+   "new_value": 7,
+   "rows": [
+    {
+     "date": "2026-03-08",
+     "note": "with a friend",
+     "value": 8
+    },
+    {
+     "date": "2026-03-10",
+     "note": "after lunch",
+     "value": 5
+    },
+    {
+     "date": "2026-03-15",
+     "note": "weekend",
+     "value": 9
+    },
+    {
+     "date": "2026-03-17",
+     "note": "after lunch",
+     "value": 6
+    }
+   ],
+   "tracker": {
+    "dir": "Runs",
+    "measure": "km",
+    "title": "Run log"
+   }
+  },
+  "seed": 103,
+  "template": "records-update-row"
+ },
+ {
+  "case_id": "records-range-total-s101",
+  "params": {
+   "from_date": "2026-03-07",
+   "rows": [
+    {
+     "date": "2026-03-04",
+     "note": "before bed",
+     "value": 1
+    },
+    {
+     "date": "2026-03-06",
+     "note": "rushed",
+     "value": 8
+    },
+    {
+     "date": "2026-03-07",
+     "note": "with a friend",
+     "value": 1
+    },
+    {
+     "date": "2026-03-08",
+     "note": "slow day",
+     "value": 3
+    },
+    {
+     "date": "2026-03-10",
+     "note": "with a friend",
+     "value": 4
+    },
+    {
+     "date": "2026-03-11",
+     "note": "before bed",
+     "value": 4
+    },
+    {
+     "date": "2026-03-12",
+     "note": "with a friend",
+     "value": 9
+    }
+   ],
+   "to_date": "2026-03-10",
+   "tracker": {
+    "dir": "Practice",
+    "measure": "minutes",
+    "title": "Practice log"
+   }
+  },
+  "seed": 101,
+  "template": "records-range-total"
+ },
+ {
+  "case_id": "records-range-total-s102",
+  "params": {
+   "from_date": "2026-03-07",
+   "rows": [
+    {
+     "date": "2026-03-04",
+     "note": "weekend",
+     "value": 1
+    },
+    {
+     "date": "2026-03-05",
+     "note": "commute",
+     "value": 5
+    },
+    {
+     "date": "2026-03-07",
+     "note": "slow day",
+     "value": 8
+    },
+    {
+     "date": "2026-03-08",
+     "note": "rushed",
+     "value": 4
+    },
+    {
+     "date": "2026-03-09",
+     "note": "after lunch",
+     "value": 8
+    },
+    {
+     "date": "2026-03-13",
+     "note": "after lunch",
+     "value": 1
+    },
+    {
+     "date": "2026-03-14",
+     "note": "slow day",
+     "value": 7
+    }
+   ],
+   "to_date": "2026-03-14",
+   "tracker": {
+    "dir": "Coffee",
+    "measure": "cups",
+    "title": "Coffee log"
+   }
+  },
+  "seed": 102,
+  "template": "records-range-total"
+ },
+ {
+  "case_id": "records-range-total-s103",
+  "params": {
+   "from_date": "2026-03-03",
+   "rows": [
+    {
+     "date": "2026-03-02",
+     "note": "with a friend",
+     "value": 3
+    },
+    {
+     "date": "2026-03-03",
+     "note": "morning",
+     "value": 7
+    },
+    {
+     "date": "2026-03-05",
+     "note": "after lunch",
+     "value": 9
+    },
+    {
+     "date": "2026-03-06",
+     "note": "commute",
+     "value": 2
+    },
+    {
+     "date": "2026-03-08",
+     "note": "slow day",
+     "value": 5
+    },
+    {
+     "date": "2026-03-09",
+     "note": "after lunch",
+     "value": 8
+    },
+    {
+     "date": "2026-03-11",
+     "note": "morning",
+     "value": 5
+    }
+   ],
+   "to_date": "2026-03-09",
+   "tracker": {
+    "dir": "Reading",
+    "measure": "pages",
+    "title": "Reading log"
+   }
+  },
+  "seed": 103,
+  "template": "records-range-total"
+ },
+ {
+  "case_id": "records-create-collection-s101",
+  "params": {
+   "collection": {
+    "date_field": "held_on",
+    "dir": "Meetings",
+    "number_field": "attendees",
+    "number_kind": "whole",
+    "text_field": "subject",
+    "title": "Meeting notes index",
+    "topic": "meetings"
+   }
+  },
+  "seed": 101,
+  "template": "records-create-collection"
+ },
+ {
+  "case_id": "records-create-collection-s102",
+  "params": {
+   "collection": {
+    "date_field": "watered_on",
+    "dir": "Plants",
+    "number_field": "millilitres",
+    "number_kind": "whole",
+    "text_field": "plant",
+    "title": "Plant watering",
+    "topic": "watering the plants"
+   }
+  },
+  "seed": 102,
+  "template": "records-create-collection"
+ },
+ {
+  "case_id": "plan-add-item-s101",
+  "params": {
+   "items": [
+    {
+     "commitment": "committed",
+     "horizon": "month",
+     "priority": "medium",
+     "status": "active",
+     "title": "Prototype the support macros"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "quarter",
+     "priority": "medium",
+     "status": "active",
+     "title": "Draft the partner brief"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "medium",
+     "status": "blocked",
+     "title": "Migrate the release notes"
+    }
+   ],
+   "new_priority": "low",
+   "new_title": "Test the data model"
+  },
+  "seed": 101,
+  "template": "plan-add-item"
+ },
+ {
+  "case_id": "plan-add-item-s102",
+  "params": {
+   "items": [
+    {
+     "commitment": "considering",
+     "horizon": "month",
+     "priority": "low",
+     "status": "planned",
+     "title": "Archive the data model"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "critical",
+     "status": "active",
+     "title": "Archive the pricing page"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "month",
+     "priority": "high",
+     "status": "blocked",
+     "title": "Audit the backup runbook"
+    }
+   ],
+   "new_priority": "high",
+   "new_title": "Prototype the onboarding guide"
+  },
+  "seed": 102,
+  "template": "plan-add-item"
+ },
+ {
+  "case_id": "plan-triage-item-s101",
+  "params": {
+   "horizon": "week",
+   "items": [
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "critical",
+     "status": "active",
+     "title": "Audit the release notes"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "medium",
+     "status": "blocked",
+     "title": "Draft the release notes"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "month",
+     "priority": "high",
+     "status": "active",
+     "title": "Ship the onboarding guide"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "quarter",
+     "priority": "critical",
+     "status": "planned",
+     "title": "Ship the pricing page"
+    }
+   ],
+   "target": 3
+  },
+  "seed": 101,
+  "template": "plan-triage-item"
+ },
+ {
+  "case_id": "plan-triage-item-s102",
+  "params": {
+   "horizon": "month",
+   "items": [
+    {
+     "commitment": "committed",
+     "horizon": "quarter",
+     "priority": "low",
+     "status": "active",
+     "title": "Audit the release notes"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "critical",
+     "status": "active",
+     "title": "Prototype the support macros"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "critical",
+     "status": "active",
+     "title": "Migrate the support macros"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "month",
+     "priority": "critical",
+     "status": "planned",
+     "title": "Document the search index"
+    }
+   ],
+   "target": 3
+  },
+  "seed": 102,
+  "template": "plan-triage-item"
+ },
+ {
+  "case_id": "plan-triage-item-s103",
+  "params": {
+   "horizon": "week",
+   "items": [
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "low",
+     "status": "active",
+     "title": "Archive the onboarding guide"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "week",
+     "priority": "high",
+     "status": "planned",
+     "title": "Test the search index"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "month",
+     "priority": "low",
+     "status": "planned",
+     "title": "Test the release notes"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "month",
+     "priority": "medium",
+     "status": "planned",
+     "title": "Draft the pricing page"
+    }
+   ],
+   "target": 3
+  },
+  "seed": 103,
+  "template": "plan-triage-item"
+ },
+ {
+  "case_id": "plan-committed-week-s101",
+  "params": {
+   "items": [
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "medium",
+     "status": "blocked",
+     "title": "Archive the onboarding guide"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "quarter",
+     "priority": "low",
+     "status": "active",
+     "title": "Audit the billing export"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "week",
+     "priority": "high",
+     "status": "planned",
+     "title": "Plan the release notes"
+    },
+    {
+     "commitment": "uncommitted",
+     "horizon": "inbox",
+     "priority": "medium",
+     "status": "candidate",
+     "title": "Audit the data model"
+    },
+    {
+     "commitment": "uncommitted",
+     "horizon": "inbox",
+     "priority": "critical",
+     "status": "candidate",
+     "title": "Plan the search index"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "medium",
+     "status": "active",
+     "title": "Review the pricing page"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "low",
+     "status": "active",
+     "title": "Review the backup runbook"
+    }
+   ]
+  },
+  "seed": 101,
+  "template": "plan-committed-week"
+ },
+ {
+  "case_id": "plan-committed-week-s103",
+  "params": {
+   "items": [
+    {
+     "commitment": "considering",
+     "horizon": "week",
+     "priority": "medium",
+     "status": "planned",
+     "title": "Plan the onboarding guide"
+    },
+    {
+     "commitment": "uncommitted",
+     "horizon": "inbox",
+     "priority": "high",
+     "status": "candidate",
+     "title": "Plan the data model"
+    },
+    {
+     "commitment": "uncommitted",
+     "horizon": "inbox",
+     "priority": "critical",
+     "status": "candidate",
+     "title": "Draft the partner brief"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "medium",
+     "status": "active",
+     "title": "Ship the data model"
+    },
+    {
+     "commitment": "uncommitted",
+     "horizon": "inbox",
+     "priority": "critical",
+     "status": "candidate",
+     "title": "Draft the release notes"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "month",
+     "priority": "high",
+     "status": "active",
+     "title": "Test the billing export"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "critical",
+     "status": "blocked",
+     "title": "Draft the backup runbook"
+    }
+   ]
+  },
+  "seed": 103,
+  "template": "plan-committed-week"
+ },
+ {
+  "case_id": "plan-item-history-s103",
+  "params": {
+   "after": {
+    "commitment": "considering",
+    "horizon": "month",
+    "status": "planned"
+   },
+   "asked_field": "status",
+   "items": [
+    {
+     "commitment": "committed",
+     "horizon": "week",
+     "priority": "low",
+     "status": "blocked",
+     "title": "Draft the release notes"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "month",
+     "priority": "low",
+     "status": "blocked",
+     "title": "Ship the quarterly report"
+    },
+    {
+     "commitment": "committed",
+     "horizon": "month",
+     "priority": "medium",
+     "status": "active",
+     "title": "Audit the pricing page"
+    }
+   ],
+   "target": {
+    "commitment": "uncommitted",
+    "horizon": "inbox",
+    "priority": "low",
+    "status": "candidate",
+    "title": "Test the partner brief"
+   }
+  },
+  "seed": 103,
+  "template": "plan-item-history"
+ },
+ {
+  "case_id": "plan-item-history-s108",
+  "params": {
+   "after": {
+    "commitment": "committed",
+    "horizon": "week",
+    "status": "active"
+   },
+   "asked_field": "horizon",
+   "items": [
+    {
+     "commitment": "uncommitted",
+     "horizon": "inbox",
+     "priority": "high",
+     "status": "candidate",
+     "title": "Test the quarterly report"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "month",
+     "priority": "medium",
+     "status": "planned",
+     "title": "Ship the partner brief"
+    },
+    {
+     "commitment": "considering",
+     "horizon": "month",
+     "priority": "medium",
+     "status": "planned",
+     "title": "Audit the partner brief"
+    }
+   ],
+   "target": {
+    "commitment": "considering",
+    "horizon": "month",
+    "priority": "medium",
+    "status": "planned",
+    "title": "Document the release notes"
+   }
+  },
+  "seed": 108,
+  "template": "plan-item-history"
+ }
+]

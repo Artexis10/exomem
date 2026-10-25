@@ -96,8 +96,8 @@ def test_the_short_capture_check_keeps_the_incident_rules_by_name():
         "live policy",
         "no transcripts",
         "supersede_note supersedes",
-        "Planning/plan_memory",
-        "Records/record_memory",
+        "intent->Planning",
+        "outcome->Records",
         "transient code/test/CI",
     ):
         assert rule in text

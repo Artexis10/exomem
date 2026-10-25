@@ -43,6 +43,12 @@ def test_mcp_discovery_and_both_names_reach_guarded_execution(vault, monkeypatch
                 assert excluded not in discovered
                 assert await mcp.get_tool(excluded) is None
             for command in commands.product_commands_for("mcp", cloud=cloud):
+                if command.renderings:
+                    # Discovered as its renderings; the grouped name stays callable but unlisted.
+                    assert {r.name for r in command.renderings} <= discovered
+                    assert command.name not in discovered
+                    assert await mcp.get_tool(command.name) is not None
+                    continue
                 assert command.public_name in discovered
                 if command.public_name != command.name:
                     assert command.name not in discovered

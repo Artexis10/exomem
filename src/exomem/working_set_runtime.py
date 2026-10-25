@@ -99,27 +99,56 @@ _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
 )
 
 
+#: The vaults whose lexical catalogue a pinned request asked to repair (`pin_lexical_checkpoint`).
+_DEFERRED_LEXICAL_REPAIRS: ContextVar[set[Path] | None] = ContextVar(
+    "activation_deferred_lexical_repairs", default=None
+)
+
+
+def _defer_lexical_repair(vault_root: Path) -> None:
+    """Request the lag-only repair of the lexical catalogue once the activation ends."""
+    pending = _DEFERRED_LEXICAL_REPAIRS.get()
+    if pending is not None:
+        pending.add(Path(vault_root))
+        return
+    from . import lexstore
+
+    lexstore.request_lag_repair(vault_root)
+
+
 @contextmanager
 def defer_index_refreshes() -> Iterator[None]:
     """Dispatch this activation's refreshes after its live evidence guards.
 
     A request must not invalidate its own catalogue evidence. Independent
     publishers still meet the unchanged token guards; no worker waits here.
+    The lexical catalogue's lag-only repair is such a refresh.
     """
     if _DEFERRED_BUILDS.get() is not None:
         yield
         return
     pending: dict[Path, str] = {}
+    repairs: set[Path] = set()
     token = _DEFERRED_BUILDS.set(pending)
+    repair_token = _DEFERRED_LEXICAL_REPAIRS.set(repairs)
     try:
         yield
     finally:
         _DEFERRED_BUILDS.reset(token)
+        _DEFERRED_LEXICAL_REPAIRS.reset(repair_token)
         for root, stamp in pending.items():
             try:
                 _schedule_build(root, freshness_stamp=stamp)
             except Exception:  # noqa: BLE001 - optional dispatch cannot replace the earned result
                 log.warning("deferred activation refresh could not start", exc_info=True)
+        if repairs:
+            from . import lexstore
+
+            for root in repairs:
+                try:
+                    lexstore.request_lag_repair(root)
+                except Exception:  # noqa: BLE001 - optional dispatch cannot replace the earned result
+                    log.warning("deferred lexical repair could not start", exc_info=True)
 
 #: The token's wire version. A payload of any other version is not decoded at
 #: all: a token is a hint, and guessing at an unknown shape is worse than
@@ -1057,6 +1086,56 @@ def material_term_budget():
     return replace(budget, max_units=96, max_stems=128, common_after_units=budget.max_units)
 
 
+def pin_lexical_checkpoint(
+    vault_root: Path, snapshot, visible: Callable[[str], bool] | None
+) -> freshness.RecallFreshnessCheckpoint:
+    """Decide, once for the request, the checkpoint every lexical read of it uses.
+
+    The request's recall checkpoint, except for a restricted reader (`visible`
+    given) whose catalogue trails it only by pages that reader may not see
+    (`view_lag`): that catalogue holds every page the reader may see as it is
+    now, so the reader is served at the checkpoint the catalogue published. The
+    lexical lane, its dependence check and the role lanes then read one
+    checkpoint, with no second readiness call to race a repair. The owner
+    (`visible` None), a catalogue at the request's checkpoint and any other
+    lag keep the request's checkpoint and its readiness gate.
+
+    A deleted page that the catalogue still holds is withheld from this
+    reader only where its own earlier verdict proves it (`view_lag.withheld_lag`).
+    The request's `egress.proven_withheld_scope` records those pages, so every
+    reader view built after this rejects them: no lane may rank a row on text
+    the reader was never shown. A request with no scope to hold a non-empty set
+    keeps its own checkpoint.
+
+    The repair of the lag is requested when the request ends
+    (`defer_index_refreshes`), because a catalogue that converged mid-request
+    would leave later lanes reading a checkpoint that is no longer current.
+    The release decision on each hit stays per request, on the live file.
+    """
+    request = snapshot.recall_checkpoint("kb")
+    if visible is None:
+        return request
+    from . import lexstore
+    from .governance import egress
+
+    try:
+        published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
+        # The catalogue's own comparison of what a checkpoint serves: corpus and admission policy.
+        if published is None or (
+            lexstore.checkpoint_state(published) == lexstore.checkpoint_state(request)
+        ):
+            return request
+        held = view_lag.recall_withheld_lag(vault_root, "kb", published, visible)
+    except Exception:  # noqa: BLE001 - a lag that cannot be decided counts as visible, as in `only_withheld`
+        log.debug("lexical lag undecidable; serving the request checkpoint", exc_info=True)
+        return request
+    if held is None or not egress.pin_proven_withheld(held):
+        return request
+    snapshot.pin_lexical_checkpoint("kb", published)
+    _defer_lexical_repair(vault_root)
+    return published
+
+
 def lexical_evidence(
     vault_root: Path,
     turn: str,
@@ -1066,17 +1145,15 @@ def lexical_evidence(
     freshness=None,
     recall_checkpoint=None,
     selection: dict | None = None,
-    visible: Callable[[str], bool] | None = None,
 ):
     """Rank only anchor pages in the maintained full-page text index.
 
     This is own-page retrieval evidence, not a second vote for title overlap.
     Unavailable FTS never falls back to a corpus walk or foreground repair.
 
-    The state is the catalogue's readiness. A catalogue that trails serves no
-    hits and reads as it is, except for a restricted reader (`visible` given)
-    when it trails only by pages that reader may not see: it is current for
-    that reader, so it serves and reads `available` (`_reader_lexical_query`).
+    The state is the catalogue's readiness at `recall_checkpoint`. A catalogue
+    that trails it serves no hits and reads as it is. A restricted reader's
+    request names the checkpoint it can be served (`pin_lexical_checkpoint`).
 
     Bounded on any turn: at most `ACTIVATION_LEXICAL_MAX_TERMS` of the
     turn's units, the rarest in the knowledge base, carrying at most
@@ -1092,11 +1169,10 @@ def lexical_evidence(
         return [], "available"
     turn = working_set_index.subject_text(turn)
     try:
-        result = _reader_lexical_query(
+        result = _lexical_query(
             vault_root,
             turn,
             set(by_path),
-            visible=visible,
             limit=limit,
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
@@ -1158,36 +1234,6 @@ def _lexical_query(
     )
 
 
-def _reader_lexical_query(
-    vault_root: Path,
-    words: str,
-    paths: set[str],
-    *,
-    visible: Callable[[str], bool] | None,
-    **query,
-):
-    """`_lexical_query`, serving a restricted reader a catalogue that trails only by
-    pages that reader may not see.
-
-    Such a catalogue holds every page the reader may see as it is now, so a write
-    to a page it may not see changes neither the hits nor their state (`view_lag`).
-    The query then reads the catalogue at its own checkpoint, once. Every other
-    lag, and the owner (`visible` None), keep the readiness gate: no hits, `stale`.
-    The release decision on each hit stays per request, on the live file.
-    """
-    result = _lexical_query(vault_root, words, paths, **query)
-    readiness = result.readiness
-    if (
-        visible is None
-        or readiness.status != "stale"
-        or not view_lag.recall_lag_only_withheld(vault_root, "kb", readiness.published, visible)
-    ):
-        return result
-    return _lexical_query(
-        vault_root, words, paths, **{**query, "recall_checkpoint": readiness.published}
-    )
-
-
 def lexical_hits_without(
     vault_root: Path,
     turn: str,
@@ -1196,7 +1242,6 @@ def lexical_hits_without(
     *,
     freshness=None,
     recall_checkpoint=None,
-    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
     """Which of `pages` the activation lexical query still reaches for `turn`
     when the stems of the `left_out` words are not counted
@@ -1217,11 +1262,10 @@ def lexical_hits_without(
     if not pages:
         return frozenset()
     try:
-        result = _reader_lexical_query(
+        result = _lexical_query(
             vault_root,
             turn,
             set(pages),
-            visible=visible,
             limit=len(pages),
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,

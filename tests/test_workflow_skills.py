@@ -338,7 +338,8 @@ def test_core_skill_routes_tool_loading_by_current_intent() -> None:
         "preserve_evidence",
         "preserve_artifacts",
         "transfer_artifact",
-        "record_memory",
+        "read_records",
+        "change_records",
         "review_memory",
         "connect_memory",
         "adopt_vault",
@@ -415,7 +416,5 @@ def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() ->
 
     for path in operation_copies:
         text = " ".join(path.read_text(encoding="utf-8").split())
-        assert (
-            "`describe`, `validate`, `inspect`, and `query`; `create`, `append`, "
-            "`update`, `revise`, and `rebaseline`"
-        ) in text
+        assert "`read_records` carries `describe`, `validate`, `inspect`, and `query`" in text
+        assert "`change_records` carries `create`, `append`, `update`, `revise`, and `rebaseline`" in text

@@ -24,7 +24,9 @@ from starlette.middleware import Middleware as ASGIMiddleware
 from . import capabilities, cloud_cell, edit_operations, guards, multi_edit
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
+from .command_surface import DEFAULT_TOOL_SHAPE, TOOL_SHAPES, listed_names, rendering_annotations
 from .edge_ingress import EdgeIngressMiddleware
+from .operation_schema import rendering_handler
 from .server_assets import (
     register_asset_routes,
     register_health_routes,
@@ -49,28 +51,123 @@ _link_summary = commands_module._link_summary
 
 
 class PreferredToolDiscovery(Transform):
-    """Hide compatible registrations from discovery while retaining direct lookup."""
+    """Hide compatible registrations from discovery while retaining direct lookup.
 
-    def __init__(self, commands) -> None:
+    A grouped command whose operations are split across renderings is hidden too, unless
+    the surface publishes the `grouped` shape. A hidden name stays callable.
+    """
+
+    def __init__(self, commands, *, shape: str = DEFAULT_TOOL_SHAPE) -> None:
         self.compatibility_names = frozenset(command.name for command in commands if command.preferred_name)
+        self.rendered_names = (
+            frozenset()
+            if shape == "grouped"
+            else frozenset(command.name for command in commands if command.renderings)
+        )
 
     async def list_tools(self, tools):
-        return [tool for tool in tools if tool.name not in self.compatibility_names]
+        hidden = self.compatibility_names | self.rendered_names
+        return [tool for tool in tools if tool.name not in hidden]
 
 
 class PublicCommandNameMiddleware(Middleware):
-    """Bind public spellings to stable identities before authorization and tracing."""
+    """Bind public spellings to stable identities before authorization and tracing.
 
-    def __init__(self, commands) -> None:
+    A rendering rewrites to its grouped command with the arguments a direct call would
+    carry, so authorization, the blob guard, the idempotency digest, the writer lease, the
+    egress filter and the ledger see the grouped call. An operation the rendering does not
+    carry also rewrites, but its refusal travels with it to `RenderedRefusalMiddleware`,
+    after authorization and before any lease.
+    """
+
+    def __init__(self, commands, *, shape: str = DEFAULT_TOOL_SHAPE) -> None:
         self.commands = commands
+        self.shape = shape
 
     async def on_call_tool(self, context, call_next):
-        from .command_surface import resolve_command
+        from .cli_ops import OpError
+        from .command_surface import (
+            find_rendering,
+            rendered_call_writes,
+            rendering_scope,
+            resolve_command,
+            resolve_invocation,
+        )
+        from .governance.authorization_transport import MCP_CREDENTIAL_PARAMETER
 
-        command = resolve_command(context.message.name, self.commands)
-        if command is not None:
-            context = context.copy(message=context.message.model_copy(update={"name": command.name}))
-        return await call_next(context)
+        name = context.message.name
+        found = find_rendering(name, self.commands, shape=self.shape)
+        if found is None:
+            command = resolve_command(name, self.commands)
+            if command is not None:
+                context = context.copy(message=context.message.model_copy(update={"name": command.name}))
+            return await call_next(context)
+        arguments = context.message.arguments or {}
+        passthrough = frozenset({MCP_CREDENTIAL_PARAMETER})
+        writes = False
+        try:
+            command, flat = resolve_invocation(
+                name,
+                arguments,
+                self.commands,
+                shape=self.shape,
+                passthrough=passthrough,
+                strict=context.fastmcp_context.fastmcp.strict_input_validation,
+            )
+            refusal = None
+        except OpError as error:
+            command, refusal = found[0], error
+            flat = dict(arguments)
+            writes = rendered_call_writes(command, found[1], arguments, passthrough=passthrough)
+        message = context.message.model_copy(update={"name": command.name, "arguments": flat})
+        with rendering_scope(name, refusal, writes=writes):
+            return await call_next(context.copy(message=message))
+
+
+class RenderedRefusalMiddleware(Middleware):
+    """Answer a refused rendered call with the grouped command's own refusal envelope.
+
+    It runs innermost, inside authorization and the call trace, so the refused call is
+    authorized and traced as the grouped command and never reaches the bound wrapper:
+    no writer lease, no coordinator contact and no leaf run.
+    """
+
+    async def on_call_tool(self, context, call_next):
+        from . import cli_ops
+        from .command_surface import (
+            _log_tool_failure,
+            mcp_idempotency_key,
+            mcp_request_id,
+            pending_rendering_refusal,
+            pending_rendering_refusal_writes,
+        )
+
+        error = pending_rendering_refusal()
+        if error is None:
+            return await call_next(context)
+        request_id = mcp_request_id()
+        if pending_rendering_refusal_writes() and isinstance(error, cli_ops.OpError):
+            # The grouped write refusal comes from inside the lease, which adds these ids;
+            # this refusal comes before any lease, so it holds no receipt.
+            error.details.update(request_id=request_id, receipt_id=None)
+            try:
+                explicit_key = mcp_idempotency_key()
+            except ValueError:
+                explicit_key = None
+            if explicit_key is not None:
+                error.details["idempotency_key"] = explicit_key
+        refusal = cli_ops.public_refusal(error)
+        if refusal is None:
+            raise error
+        _log_tool_failure(
+            tool=context.message.name,
+            request_id=request_id,
+            code=str(refusal.get("code") or "OP_ERROR"),
+            duration_ms=0.0,
+            message=str(refusal.get("message") or ""),
+        )
+        tool = await context.fastmcp_context.fastmcp.get_tool(context.message.name)
+        return tool.convert_result(cli_ops.envelope(False, error=refusal))
 
 
 class ExomemFastMCP(FastMCP):
@@ -419,7 +516,7 @@ def _record_ledger_row(
     """Append one call-ledger row. Never raises into the call path."""
     try:
         from . import call_ledger, request_budget
-        from .command_surface import mcp_caller_identity, mcp_retry_scope
+        from .command_surface import current_rendering, mcp_caller_identity, mcp_retry_scope
         from .governance.principal import resolve_mcp_principal
 
         identity = mcp_caller_identity()
@@ -432,6 +529,7 @@ def _record_ledger_row(
         # stages mutated, so this is the outcome as the caller experienced it.
         active_budget = request_budget.current()
         call_ledger.record_call(
+            rendering=current_rendering(),
             request_id=request_id,
             tool=tool,
             outcome=outcome,
@@ -701,11 +799,13 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
     product_commands = commands_module.product_commands_for(
         "mcp", expose_tier2=expose_tier2, cloud=cloud
     )
-    mcp.add_middleware(PublicCommandNameMiddleware(product_commands))
+    tool_shape = _tool_shape_from_environment()
+    mcp.add_middleware(PublicCommandNameMiddleware(product_commands, shape=tool_shape))
     mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
     # Cloud traces retain their content-free form after name normalization.
     mcp.add_middleware(CallTraceMiddleware(hosted=cloud))
-    mcp.add_transform(PreferredToolDiscovery(product_commands))
+    mcp.add_middleware(RenderedRefusalMiddleware())
+    mcp.add_transform(PreferredToolDiscovery(product_commands, shape=tool_shape))
     legacy_commands = (
         # A cell has no legacy clients, and a leaf's alias would re-expose
         # a command CLOUD_SURFACE_EXCLUSIONS just removed (design D1.3) --
@@ -725,8 +825,17 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             else "product"
         ),
         tier2_enabled=expose_tier2,
-        product_commands=tuple(command.public_name for command in product_commands),
-        compatibility_commands=tuple(command.name for command in product_commands if command.preferred_name),
+        product_commands=tuple(
+            name for command in product_commands for name in listed_names(command, tool_shape)
+        ),
+        # A hidden spelling stays callable: the compatibility alias of a preferred name, and
+        # the grouped name of a command whose operations the surface lists as renderings.
+        compatibility_commands=tuple(
+            command.name
+            for command in product_commands
+            if command.preferred_name or (command.renderings and tool_shape != "grouped")
+        ),
+        tool_shape=tool_shape,
         exported_aliases=tuple(command.name for command in legacy_commands),
         hand_registered_tools=tuple(
             sorted(commands_module.HAND_REGISTERED_EXCEPTIONS)
@@ -757,18 +866,24 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
                 else {}
             ),
         }
+        grouped = None
         for exposed_name in cmd.callable_names:
-            mcp.tool(
-                commands_module.bind_vault(
-                    cmd.leaf,
-                    *injected,
-                    name=exposed_name,
-                    description=description,
-                    command=cmd,
-                    surface_descriptor=surface_descriptor,
-                ),
-                **tool_kwargs,
+            bound = commands_module.bind_vault(
+                cmd.leaf,
+                *injected,
+                name=exposed_name,
+                description=description,
+                command=cmd,
+                surface_descriptor=surface_descriptor,
             )
+            grouped = bound if exposed_name == cmd.name else grouped
+            mcp.tool(bound, **tool_kwargs)
+        if tool_shape != "grouped":
+            for rendering in cmd.renderings:
+                mcp.tool(
+                    rendering_handler(rendering, grouped),
+                    **{**tool_kwargs, "annotations": rendering_annotations(rendering)},
+                )
 
     if legacy_commands:
         _register_legacy_mcp_tools(
@@ -787,6 +902,22 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
     # as the composed server object can serve requests.
     mcp._exomem_server_runtime = runtime
     return mcp
+
+
+def _tool_shape_from_environment() -> str:
+    """The MCP tool shape for this server, read once at build. EXPERIMENTAL.
+
+    `nested` is the default surface. `grouped` is today's surface, selectable only as the
+    baseline of the tool-selection eval, and the round that ends that comparison removes it.
+    A misspelt or retired value stops the build: an eval arm that silently ran another
+    shape would invalidate the comparison, and nothing else sets this variable.
+    """
+    shape = os.environ.get("EXOMEM_MCP_TOOL_SHAPE", DEFAULT_TOOL_SHAPE).strip() or DEFAULT_TOOL_SHAPE
+    if shape not in TOOL_SHAPES:
+        raise RuntimeError(
+            f"EXOMEM_MCP_TOOL_SHAPE must be one of {', '.join(TOOL_SHAPES)}; got {shape!r}"
+        )
+    return shape
 
 
 def _newest_open_adoption_run(vault_root: Path) -> dict | None:

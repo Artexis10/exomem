@@ -38,6 +38,9 @@ BUDGET_REFUSAL = (
 )
 #: The text a call to a tool outside the arm's filter receives.
 FILTER_REFUSAL = "Refused: this tool is not available in this session."
+#: An ``--allow`` entry that admits every tool the server lists, for a harness
+#: whose arms are the server's own surfaces and need no client-side filter.
+ALLOW_ALL = "*"
 
 #: The MCP handshakes whose answer carries the server instructions: the
 #: session-based ``initialize`` and the stateless ``server/discover`` that a
@@ -46,8 +49,10 @@ HANDSHAKE_METHODS = frozenset({"initialize", "server/discover"})
 
 # Amendment 4 measured projection readiness near 450 s; allow contention margin.
 READY_TIMEOUT_SECONDS = 1200.0
-# Amendment 4's 2026-10-23 measurement (~447 s) and op_activate_context's read path justify clearing this closed product component for arm parity.
-REQUIRED_CLEAR_COMPONENTS = frozenset({"recall_projection"})
+# Amendment 4's 2026-10-23 measurement (~447 s) and op_activate_context's read path justify clearing the recall projection for arm parity.
+# Amendment 10: development rounds 1 and 2 admitted every actor before the dense and image lanes
+# warmed, so most early searches ran without vectors and the arms' warm-up timing differed.
+REQUIRED_CLEAR_COMPONENTS = frozenset({"recall_projection", "embeddings", "clip"})
 # Product refusal tokens, pinned to their definitions by the harness tests.
 ACTIVATION_WARMING_REASON = "index_warming"
 RECALL_WARMING_CODE = "RETRIEVAL_INDEX_WARMING"
@@ -167,6 +172,7 @@ class Tap:
         allow: frozenset[str],
         ready_timeout: float = READY_TIMEOUT_SECONDS,
         skip_ready_gate: bool = False,
+        warm_search: bool = False,
     ) -> None:
         self.server = server
         self.log = log
@@ -174,11 +180,15 @@ class Tap:
         self.allow = allow
         self.ready_timeout = ready_timeout
         self._ready = skip_ready_gate
+        self.warm_search = warm_search
         self._probe_id: str | None = None
         self._probe_replies: queue.Queue[dict] = queue.Queue()
         self._out_lock = threading.Lock()
         self._pending: dict[object, tuple[str, dict]] = {}
         self._pending_lock = threading.Lock()
+
+    def allowed(self, name: object) -> bool:
+        return ALLOW_ALL in self.allow or name in self.allow
 
     def to_client(self, message: dict) -> None:
         with self._out_lock:
@@ -223,7 +233,7 @@ class Tap:
                 "name": name,
                 "arguments": params.get("arguments"),
             }
-            if name not in self.allow:
+            if not self.allowed(name):
                 self.log.write("call", outcome="refused_filtered", **call)
                 self._refuse(request_id, FILTER_REFUSAL)
                 return
@@ -237,6 +247,20 @@ class Tap:
             with self._pending_lock:
                 self._pending[request_id] = (method, {})
         self._forward(raw)
+
+    def _probe(self, probe_id: str, probe_params: dict, params: dict, deadline: float) -> dict | None:
+        """Send one probe call outside the arm budget; its reply, or None at the deadline."""
+
+        self._probe_id = probe_id
+        if "_meta" in params:
+            probe_params = {**probe_params, "_meta": params["_meta"]}
+        self._forward(
+            json.dumps({"jsonrpc": "2.0", "id": probe_id, "method": "tools/call", "params": probe_params})
+        )
+        try:
+            return self._probe_replies.get(timeout=max(0.0, deadline - time.monotonic()))
+        except queue.Empty:
+            return None
 
     def _wait_ready(self, params: dict) -> None:
         """Hold discovery and calls; probe this connection outside the arm budget."""
@@ -300,9 +324,28 @@ class Tap:
                     break
                 components = (warming or {}).get("components") or []
                 if not REQUIRED_CLEAR_COMPONENTS.intersection(components):
-                    self._ready = True
-                    outcome = "ready"
-                    break
+                    if not self.warm_search:
+                        self._ready = True
+                        outcome = "ready"
+                        break
+                    # A first search with hits can still find a maintained index (the
+                    # reference sidecar) unbuilt: it schedules the build and refuses as
+                    # warming. Searching here until it answers keeps that refusal out of
+                    # the arm. Every initialized vault holds the scaffold's log page, so
+                    # this query has hits whatever the case.
+                    probes += 1
+                    searched = self._probe(
+                        f"switch-eval-search-{probes}",
+                        {"name": "search_memory", "arguments": {"query": "log", "scope": "vault"}},
+                        params,
+                        deadline,
+                    )
+                    if searched is None:
+                        break
+                    if not warming_refusal(searched):
+                        self._ready = True
+                        outcome = "ready"
+                        break
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
         self._probe_id = None
         finished = time.monotonic()
@@ -357,9 +400,9 @@ class Tap:
                 )
             elif method == "tools/list" and isinstance(result, dict):
                 tools = result.get("tools") or []
-                kept = [tool for tool in tools if tool.get("name") in self.allow]
+                kept = [tool for tool in tools if self.allowed(tool.get("name"))]
                 withheld = sorted(
-                    str(tool.get("name")) for tool in tools if tool.get("name") not in self.allow
+                    str(tool.get("name")) for tool in tools if not self.allowed(tool.get("name"))
                 )
                 message = {**message, "result": {**result, "tools": kept}}
                 self.log.write("tools_list", tools=kept, withheld=withheld)
@@ -391,7 +434,14 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-ready-gate", action="store_true", help="capture discovery without recall probes"
     )
     parser.add_argument(
-        "--allow", required=True, help="comma-separated tool names the arm may see and call"
+        "--warm-search",
+        action="store_true",
+        help="after recall is ready, also search until the search indexes answer",
+    )
+    parser.add_argument(
+        "--allow",
+        required=True,
+        help="comma-separated tool names the arm may see and call, or * for every listed tool",
     )
     parser.add_argument("--server-stderr", required=True, type=Path)
     parser.add_argument("server", nargs=argparse.REMAINDER, help="-- then the server argv")
@@ -426,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         allow=frozenset(args.allow.split(",")),
         ready_timeout=args.ready_timeout,
         skip_ready_gate=args.skip_ready_gate,
+        warm_search=args.warm_search,
     )
 
     closing = threading.Event()

@@ -39,6 +39,28 @@ def test_planning_query_uses_the_authored_horizon_without_rebucketing(tmp_path: 
     assert result["generated_at"].endswith("Z")
 
 
+def test_a_filter_without_an_op_matches_by_equality(tmp_path: Path) -> None:
+    # The query grammar defaults a missing op to equality; the answer must not be refused.
+    from exomem.planning import add, create_collection, query
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    manifest_path = "Knowledge Base/Planning/Work/_collection.md"
+    create_collection(tmp_path, manifest_path, _manifest(), why="create planning collection")
+    for title, horizon in (("Quarterly intent", "quarter"), ("Weekly intent", "week")):
+        add(
+            tmp_path,
+            manifest_path,
+            item={"title": title, "status": "planned", "commitment": "considering", "horizon": horizon},
+            why="capture intent",
+        )
+
+    result = query(tmp_path, manifest_path, filters=[{"column": "horizon", "value": "week"}])
+
+    assert result["total_matched"] == 1
+    assert result["rows"][0]["title"] == "Weekly intent"
+
+
 def test_planning_default_horizon_view_selects_the_authored_bucket(tmp_path: Path) -> None:
     from exomem.planning import add, create_collection, query
 

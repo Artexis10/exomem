@@ -7204,11 +7204,9 @@ def cached_inbound_wikilinks(
             and not freshness.external_pending(vault_root)
         ):
             return True
-        return visible is not None and view_lag.only_withheld(
-            vault_root,
-            freshness.delta_since(vault_root, "vault", checkpoint),
-            visible,
-            pending=True,
+        # No deleted-page proof: the verdict store is stamped by another checkpoint than this index.
+        return visible is not None and view_lag.consumer_lag_only_withheld(
+            vault_root, checkpoint, visible, pending=True
         )
 
     if not current():
@@ -7889,7 +7887,7 @@ def append_frontmatter_list_item(text: str, key: str, value: str) -> str:
     wider write than the one the caller asked for. The YAML parser therefore
     reports where the list ends, and the edit inserts one item there. A block
     list gains a line at its existing items' indent, a flow list keeps its
-    flow form, and an empty `key:` becomes a block list.
+    flow form, and an empty or null `key:` (`~`, `null`) becomes a block list.
 
     The result is accepted only when the strict frontmatter parser reads it as
     the old mapping with exactly `value` added at the end of `key`. Otherwise

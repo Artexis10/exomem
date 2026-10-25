@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote, unquote
 
-from . import memory_refs, reserved_paths, vault
+from . import memory_refs, query_compat, reserved_paths, vault
 from .collection_profiles import profile_for
 from .planning_values import PlanningValues, Unavailable
 
@@ -118,23 +118,8 @@ _SAVED_VIEW_QUERY_KEYS = frozenset(
 _SAVED_VIEW_SHARED_SYSTEM_FIELDS = frozenset(
     {"collection_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
-_SAVED_VIEW_QUERY_OPS = frozenset(
-    {
-        "eq",
-        "ne",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "contains",
-        "icontains",
-        "startswith",
-        "in",
-        "nin",
-        "exists",
-        "missing",
-    }
-)
+# The query grammar's closed operator set.
+_SAVED_VIEW_QUERY_OPS = query_compat.OPS
 _SAVED_VIEW_AGGREGATES = frozenset({"min", "max", "sum", "avg", "latest", "distinct", "group"})
 
 
@@ -2170,7 +2155,7 @@ def _normalize_saved_view_filters(value: object, fields: set[str]) -> list[dict[
         ):
             raise CollectionError("INVALID_SAVED_VIEW", "saved view filter is invalid")
         column = raw.get("column")
-        operator = raw.get("op", "eq")
+        operator = raw.get("op", query_compat.DEFAULT_OP)
         if (
             type(column) is not str
             or column not in fields

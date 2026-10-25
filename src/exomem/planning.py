@@ -13,7 +13,7 @@ from typing import Any, Never
 
 import yaml
 
-from . import memory_refs, record_formats, record_governance, records, state_paths
+from . import memory_refs, query_compat, record_formats, record_governance, records, state_paths
 from . import structured_collections as collections
 from .collection_store import ownership
 from .collection_store.preview import QUERY_RECEIPT_BOUNDARY
@@ -716,22 +716,7 @@ def _valid_query_descriptor(value: Any, manifest: collections.CollectionManifest
             not isinstance(filter_value, Mapping)
             or set(filter_value) - {"column", "op", "value"}
             or filter_value.get("column") not in fields
-            or filter_value.get("op")
-            not in {
-                "eq",
-                "ne",
-                "gt",
-                "gte",
-                "lt",
-                "lte",
-                "contains",
-                "icontains",
-                "startswith",
-                "in",
-                "nin",
-                "exists",
-                "missing",
-            }
+            or filter_value.get("op", query_compat.DEFAULT_OP) not in query_compat.OPS
             or not _json_value(filter_value.get("value"))
         ):
             return False

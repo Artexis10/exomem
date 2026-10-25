@@ -63,7 +63,7 @@ deleted view (`VIEW_DELETED`), or a view stamped by another store
 the default attention surface, and it lists only corrections you may read.
 Read the held view and its diagnostics first. A `VIEW_CONFLICT` or
 `VIEW_FOREIGN` correction holds bytes that the view no longer shows. Resume a
-Records `VIEW_CONFLICT` through `record_memory(action="update", held=...)`, or
+Records `VIEW_CONFLICT` through `change_records(operation={"kind": "update", "held": ...})`, or
 discard either with a reason; a later edit of the view never resolves them. A
 `VIEW_INVALID` edit kept in place or a `VIEW_DELETED` view is resolved when the
 owner saves a valid edit of the view, or when you discard it. Discarding an

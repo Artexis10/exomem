@@ -90,7 +90,7 @@ def _matched(admitted, query):
     """A bounded disk relation; indexes exist before data, so no uncapped sorter."""
     session, conn = admitted.session, admitted.session.connection
     predicates = json.loads(query.filters_json)
-    if any(predicate.get("op", "eq") not in LEGACY_SQL_OPERATORS for predicate in predicates):
+    if any(predicate.get("op", compat.DEFAULT_OP) not in LEGACY_SQL_OPERATORS for predicate in predicates):
         raise QueryError("QUERY_UNSUPPORTED")
 
     def matches(raw):

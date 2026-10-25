@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 92942a443c9c50a58e52cac11a999c9db669f221119a9472619886132487a06e
+  skill_contract: 18bc41852b079e428221255dd2a0180d1fb038870deda6bf18c5e0e8efa2016e
   version: "0.1.0"
 ---
 
@@ -94,7 +94,7 @@ carry transient progress; capture reusable decisions and verified milestones.
    `references/writing.md` § Names in another script.
 
 ## Lifecycle
-Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `record_memory(action="append")`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.
+Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `change_records(operation={"kind": "append", ...})`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.
 
 ## Artifact role and current state
 Read the supporting units for `artifact_role_promotion` and

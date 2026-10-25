@@ -15,9 +15,11 @@ from urllib.parse import quote, unquote
 
 from . import (
     access,
+    capabilities,
     collection_claims,
     memory_refs,
     mutation_terminal,
+    query_compat,
     query_data,
     record_formats,
     state_paths,
@@ -94,23 +96,8 @@ _INSPECTION_VIEW_QUERY_KEYS = frozenset(
     }
 )
 _INSPECTION_VIEW_FILTER_KEYS = frozenset({"column", "op", "value"})
-_INSPECTION_VIEW_OPS = frozenset(
-    {
-        "eq",
-        "ne",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "contains",
-        "icontains",
-        "startswith",
-        "in",
-        "nin",
-        "exists",
-        "missing",
-    }
-)
+# The query grammar's closed operator set.
+_INSPECTION_VIEW_OPS = query_compat.OPS
 _INSPECTION_INVALID = object()
 
 
@@ -1860,6 +1847,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
         })
         if selection is not None:
             selections.append(selection)
+    describe_route = capabilities.active_call_route("record_memory", {"action": "describe"})
     payload = {
         "kind": f"{semantic_profile}_inventory",
         "report_only": True,
@@ -1894,10 +1882,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
             "unreadable_manifests": False,
             **({"legacy_trackers": legacy_truncated} if semantic_profile == "records" else {}),
         },
-        "contract_route": {
-            "tool": "record_memory",
-            "arguments": {"action": "describe"},
-        },
+        "contract_route": {"tool": describe_route["tool"], "arguments": describe_route["args"]},
     }
     if selections:
         writer = bound_writer(root)
@@ -2066,23 +2051,8 @@ _SYSTEM_FIELDS = frozenset(
         "child_index",
     }
 )
-_QUERY_OPS = frozenset(
-    {
-        "eq",
-        "ne",
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "contains",
-        "icontains",
-        "startswith",
-        "in",
-        "nin",
-        "exists",
-        "missing",
-    }
-)
+# The query grammar's closed operator set.
+_QUERY_OPS = query_compat.OPS
 _MAX_QUERY_DEPTH = 8
 _MAX_QUERY_NODES = 4_096
 

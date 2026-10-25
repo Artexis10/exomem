@@ -74,6 +74,10 @@ def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch, tmp_pa
     for cmd in commands_module.product_commands_for("mcp"):
         if "mcp" not in cmd.surfaces:
             continue  # note: hand-registered for MCP, checked below
+        if cmd.renderings:
+            # Listed as its renderings; tests/test_single_purpose_tools_mcp.py pins their hints.
+            assert cmd.public_name not in ann
+            continue
         assert ann[cmd.public_name]["readOnlyHint"] is cmd.read_only, (
             f"{cmd.name}: readOnlyHint={ann[cmd.public_name]['readOnlyHint']} "
             f"but registry cli_writes={cmd.cli_writes}"
@@ -89,6 +93,9 @@ def test_destructive_hint_only_for_overwrite_ops(
     assert ann["adoption_studio"]["destructiveHint"] is True
     for cmd in commands_module.product_commands_for("mcp"):
         if "mcp" not in cmd.surfaces or cmd.read_only:
+            continue
+        if cmd.renderings:
+            assert cmd.public_name not in ann
             continue
         expected = cmd.name in commands_module.DESTRUCTIVE_OPS
         assert ann[cmd.public_name]["destructiveHint"] is expected, (
@@ -137,6 +144,12 @@ def test_product_titles_reach_both_mcp_title_fields(
         if "mcp" not in command.surfaces:
             continue
         assert command.public_title
+        if command.renderings:
+            assert command.public_name not in wire
+            for rendering in command.renderings:
+                tool = wire[rendering.name]
+                assert tool.title == tool.annotations.title == rendering.title
+            continue
         tool = wire[command.public_name]
         assert tool.title == tool.annotations.title == command.public_title
 

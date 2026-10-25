@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, NoReturn
 
-from . import held_fs
+from . import capabilities, held_fs
 from .kbdir import kb_dirname
 from .vault import (
     BatchWriteError,
@@ -292,7 +292,8 @@ def _records_store_unsupported(kind: str) -> CurationError:
     return _error(
         RECORDS_STORE_UNSUPPORTED,
         "a Records leaf writes a collection-store collection only through the service that serves "
-        f"this vault: send the request there, or make the change with record_memory {action}",
+        "this vault: send the request there, or make the change with "
+        f"{capabilities.active_tools_text('record_memory', 'write')} {action}",
     )
 
 

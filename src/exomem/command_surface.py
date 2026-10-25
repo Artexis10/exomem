@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import inspect
 import json
@@ -17,9 +18,16 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from mcp.types import ToolAnnotations
-from pydantic import Field, WithJsonSchema
+from pydantic import Field, TypeAdapter, ValidationError, WithJsonSchema
 
-from . import activation_result, call_spans, capabilities, request_budget, reserved_paths
+from . import (
+    activation_result,
+    call_spans,
+    capabilities,
+    operation_entries,
+    request_budget,
+    reserved_paths,
+)
 from .call_spans import (  # noqa: F401 - re-exported for existing importers
     pop_call_spans,
     record_span,
@@ -321,6 +329,16 @@ class Param:
 
 
 @dataclass(frozen=True)
+class ArgumentRules:
+    """A grouped command's own argument checks, shared by every spelling of the command."""
+
+    #: Raises the command's refusal unless `arguments` suit the selected action.
+    validate: Callable[[object, Mapping[str, typing.Any]], None]
+    #: Raises the command's refusal with `detail` as its explanation.
+    refuse: Callable[[str], typing.NoReturn]
+
+
+@dataclass(frozen=True)
 class Command:
     name: str
     leaf: Callable
@@ -348,8 +366,17 @@ class Command:
     preferred_name: str | None = None
     public_title: str | None = None
     executor: str = "cell"
+    #: Public MCP tool spellings that split this command's selector across tools.
+    #: Each rendering resolves back to this command before authorization.
+    renderings: tuple[operation_entries.Rendering, ...] = field(
+        default=(), compare=False, hash=False
+    )
+    #: The command's own argument rules, which every spelling of it shares.
+    argument_rules: ArgumentRules | None = field(default=None, compare=False, hash=False)
 
     def __post_init__(self) -> None:
+        if self.renderings and self.argument_rules is None:
+            raise ValueError(f"a command with renderings needs argument rules: {self.name}")
         if self.executor not in EXECUTORS:
             raise ValueError(f"unknown command executor {self.executor!r}: {self.name}")
 
@@ -418,18 +445,234 @@ def resolve_command(name: str, commands: Iterable[Command]) -> Command | None:
     return next((command for command in commands if name in command.callable_names), None)
 
 
-def bind_vault(
-    leaf: Callable,
-    *injected: object,
-    name: str | None = None,
-    description: str | None = None,
-    command: Command | None = None,
-    surface_descriptor: capabilities.ActiveSurfaceDescriptor | None = None,
-) -> Callable:
-    """Return a callable FastMCP introspects exactly like a hand-written wrapper."""
+ToolShape = operation_entries.ToolShape
+TOOL_SHAPES = operation_entries.TOOL_SHAPES
+DEFAULT_TOOL_SHAPE = operation_entries.DEFAULT_TOOL_SHAPE
+
+
+def listed_names(command: Command, shape: str) -> tuple[str, ...]:
+    """The names MCP discovery lists for a command on a surface of this shape.
+
+    A command with renderings is listed by them, and its own name stays callable but
+    hidden; every other command, and every command on the `grouped` shape, is listed
+    under its public name.
+    """
+    if command.renderings and shape != "grouped":
+        return tuple(rendering.name for rendering in command.renderings)
+    return (command.public_name,)
+
+
+class UnresolvedInvocation(LookupError):
+    """A public tool name that neither a command spelling nor a rendering resolves."""
+
+
+def find_rendering(
+    public_name: str, commands: Iterable[Command], *, shape: str = DEFAULT_TOOL_SHAPE
+) -> tuple[Command, operation_entries.Rendering] | None:
+    """The command and rendering that `public_name` spells, when this shape lists renderings."""
+    if shape == "grouped":
+        return None
+    for command in commands:
+        for rendering in command.renderings:
+            if rendering.name == public_name:
+                return command, rendering
+    return None
+
+
+def resolve_invocation(
+    public_name: str,
+    arguments: Mapping[str, typing.Any],
+    commands: Iterable[Command],
+    *,
+    shape: str = DEFAULT_TOOL_SHAPE,
+    passthrough: frozenset[str] = frozenset(),
+    strict: bool = True,
+) -> tuple[Command, dict[str, typing.Any]]:
+    """Resolve one public call to its command and the arguments a direct call would carry.
+
+    A command spelling resolves to itself with its arguments untouched. A rendering
+    resolves to its grouped command with the selector and fields flattened, after the
+    command's own argument rules accept them for the variant this rendering carries
+    and each value has the type the grouped command publishes for it.
+    The caller then dispatches the command exactly as if it had been called directly.
+    `passthrough` names transport-owned top-level keys that cross untouched. `strict`
+    is the server's `strict_input_validation`, which FastMCP applies to the grouped call.
+
+    Raises the command's own refusal for arguments the rendering does not carry, and
+    `UnresolvedInvocation` for a name nothing resolves: a name that routes no call
+    must fail closed rather than reach a default.
+    """
+    command = resolve_command(public_name, commands)
+    if command is not None:
+        return command, dict(arguments)
+    found = find_rendering(public_name, commands, shape=shape)
+    if found is None:
+        raise UnresolvedInvocation(public_name)
+    command, rendering = found
+    rules = command.argument_rules
+    if rules is None:
+        raise UnresolvedInvocation(public_name)
+    carried, tool_arguments, parsed = _split_rendered_call(rendering, arguments, passthrough)
+    if parsed is None:
+        rules.refuse(f"{rendering.name} takes an operation object and nothing else")
+    kind, fields = parsed
+    label = operation_entries.OPERATION_KIND
+    variant = rendering.variant_for(kind, fields)
+    if variant is None:
+        sibling = next(
+            (
+                other.name
+                for other in command.renderings
+                if other is not rendering and other.variant_for(kind, fields) is not None
+            ),
+            None,
+        )
+        if sibling is not None:
+            rules.refuse(f"{kind} is not a {rendering.effect} operation: send it to {sibling}")
+        modes = rendering.modes_of(kind) if isinstance(kind, str) else ()
+        if modes:
+            axis = rendering.mode_axes[str(kind)]
+            rules.refuse(f"{kind} needs {axis.argument}.{axis.key} to be one of: {', '.join(modes)}")
+        rules.refuse(f"{rendering.name} takes {label} as one of: {', '.join(rendering.kinds)}")
+    rules.validate(variant.action, fields)
+    wrong = _type_errors(command, {**fields, **tool_arguments}, skip=rendering.selector, strict=strict)
+    if wrong:
+        # FastMCP's own error for the grouped call would name a tool the host cannot call.
+        rules.refuse(f"wrong type in {rendering.name} {kind}: {'; '.join(wrong)}")
+    # The selector goes last: a field spelt like it must not replace the variant's action.
+    return command, {**fields, **tool_arguments, **carried, rendering.selector: variant.action}
+
+
+def _split_rendered_call(
+    rendering: operation_entries.Rendering,
+    arguments: Mapping[str, typing.Any],
+    passthrough: frozenset[str],
+) -> tuple[dict[str, typing.Any], dict[str, typing.Any], tuple[object, dict[str, typing.Any]] | None]:
+    """A rendered call's transport keys, its tool-level arguments and its parsed operation."""
+    carried = {key: value for key, value in arguments.items() if key in passthrough}
+    body = {key: value for key, value in arguments.items() if key not in passthrough}
+    tool_arguments = rendering.take_tool_arguments(body)
+    return carried, tool_arguments, operation_entries.split_operation(body)
+
+
+def rendered_call_writes(
+    command: Command,
+    rendering: operation_entries.Rendering,
+    arguments: Mapping[str, typing.Any],
+    *,
+    passthrough: frozenset[str] = frozenset(),
+) -> bool:
+    """Whether the grouped call that a rendered call spells would take the writer lease.
+
+    A refused rendered call never reaches the lease, but the grouped command's write
+    refusal carries the lease's ids, so the refusal answers with the same keys. An
+    operation that does not parse classifies as a grouped call without a selector.
+    """
+    from .commands import invocation_is_read_only
+    from .governance.egress import SelectorCoverageError
+
+    _, _, parsed = _split_rendered_call(rendering, arguments, passthrough)
+    flat = {} if parsed is None else {**parsed[1], rendering.selector: parsed[0]}
+    try:
+        return not invocation_is_read_only(command, flat)
+    except SelectorCoverageError:
+        # The dispatcher treats an uncovered selector as a write; so does the refusal.
+        return True
+
+
+@functools.cache
+def _published_annotations(command: Command) -> Mapping[str, object]:
+    """Each parameter's annotation as `bind_vault` publishes it for the grouped command."""
+    _, published, _ = _published_parameters(
+        command.leaf, 0, description=command.doc, command=command
+    )
+    return types.MappingProxyType({parameter.name: parameter.annotation for parameter in published})
+
+
+@functools.cache
+def _argument_adapter(command: Command, name: str) -> TypeAdapter:
+    return TypeAdapter(_published_annotations(command)[name])
+
+
+def _type_errors(
+    command: Command, values: Mapping[str, typing.Any], *, skip: str, strict: bool
+) -> list[str]:
+    """`field: reason` for each value FastMCP would reject on the grouped call, input withheld."""
+    annotations = _published_annotations(command)
+    wrong = []
+    for name, value in values.items():
+        if name == skip or annotations.get(name, inspect.Parameter.empty) is inspect.Parameter.empty:
+            continue
+        try:
+            _argument_adapter(command, name).validate_python(value, strict=strict)
+        except ValidationError as error:
+            first = error.errors(include_url=False)[0]
+            where = ".".join(str(part) for part in (name, *first["loc"]))
+            wrong.append(f"{where}: {first['msg']}")
+    return wrong
+
+
+_MCP_RENDERING: ContextVar[str | None] = ContextVar("exomem_mcp_rendering", default=None)
+_MCP_RENDERING_REFUSAL: ContextVar[BaseException | None] = ContextVar(
+    "exomem_mcp_rendering_refusal", default=None
+)
+_MCP_RENDERING_REFUSAL_WRITES: ContextVar[bool] = ContextVar(
+    "exomem_mcp_rendering_refusal_writes", default=False
+)
+
+
+@contextmanager
+def rendering_scope(name: str, refusal: BaseException | None = None, *, writes: bool = False):
+    """Carry the public spelling of one rendered call to the middleware inside the rewrite.
+
+    The rewrite hands FastMCP the grouped command's name, so tracing would otherwise lose
+    which tool the client called. `refusal` is the grouped command's refusal for a call
+    whose operation the rendering does not carry; the innermost middleware answers with it.
+    `writes` says whether the grouped call it spells would take the writer lease.
+    """
+    rendering_reset = _MCP_RENDERING.set(name)
+    refusal_reset = _MCP_RENDERING_REFUSAL.set(refusal)
+    writes_reset = _MCP_RENDERING_REFUSAL_WRITES.set(writes)
+    try:
+        yield
+    finally:
+        _MCP_RENDERING_REFUSAL_WRITES.reset(writes_reset)
+        _MCP_RENDERING_REFUSAL.reset(refusal_reset)
+        _MCP_RENDERING.reset(rendering_reset)
+
+
+def current_rendering() -> str | None:
+    """The rendering the client called for this request, or None for a direct call."""
+    return _MCP_RENDERING.get()
+
+
+def pending_rendering_refusal() -> BaseException | None:
+    """The refusal that translation recorded for this request, if it refused."""
+    return _MCP_RENDERING_REFUSAL.get()
+
+
+def pending_rendering_refusal_writes() -> bool:
+    """Whether the refused rendered call spells a grouped call that takes the writer lease."""
+    return _MCP_RENDERING_REFUSAL_WRITES.get()
+
+
+def rendering_annotations(rendering: operation_entries.Rendering) -> ToolAnnotations:
+    """Discovery hints for one rendering, from its own variants rather than its command's name."""
+    return ToolAnnotations(
+        title=rendering.title,
+        readOnlyHint=rendering.read_only,
+        destructiveHint=False if rendering.read_only else rendering.destructive,
+        idempotentHint=rendering.read_only,
+        openWorldHint=False,
+    )
+
+
+def _published_parameters(
+    leaf: Callable, skip: int, *, description: str | None, command: Command | None
+) -> tuple[inspect.Signature, list[inspect.Parameter], dict[str, typing.Any]]:
+    """The leaf's signature, the parameters MCP publishes after `skip` injected ones, and its hints."""
     sig = inspect.signature(leaf)
-    params = list(sig.parameters.values())
-    visible = params[len(injected):]
+    visible = list(sig.parameters.values())[skip:]
 
     try:
         resolved = typing.get_type_hints(leaf, include_extras=True)
@@ -516,6 +759,21 @@ def bind_vault(
             len(visible),
         )
         visible.insert(insert_at, response_detail)
+    return sig, visible, resolved
+
+
+def bind_vault(
+    leaf: Callable,
+    *injected: object,
+    name: str | None = None,
+    description: str | None = None,
+    command: Command | None = None,
+    surface_descriptor: capabilities.ActiveSurfaceDescriptor | None = None,
+) -> Callable:
+    """Return a callable FastMCP introspects exactly like a hand-written wrapper."""
+    sig, visible, resolved = _published_parameters(
+        leaf, len(injected), description=description, command=command
+    )
     # Raw transport consumes credentials before validation; tools advertise task inputs only.
     new_sig = sig.replace(parameters=visible)
 
