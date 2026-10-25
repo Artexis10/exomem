@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.144.2](https://github.com/Artexis10/exomem/compare/v0.144.1...v0.144.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **leases:** drain shared authority guards before collection close ([#2103](https://github.com/Artexis10/exomem/issues/2103)) ([4c23665](https://github.com/Artexis10/exomem/commit/4c2366563bf90e4c77e2f257e810c29e9b748923))
+
 ## [0.144.1](https://github.com/Artexis10/exomem/compare/v0.144.0...v0.144.1) (2026-10-25)
 
 
