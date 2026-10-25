@@ -110,7 +110,9 @@ def arm_files(layout: Layout, spec: ArmSpec, *, budget: int = CALL_BUDGET) -> Ar
         spec,
         log=slot.runtime / "tap.jsonl",
         server_stderr=slot.runtime / "server.stderr",
-        skip_ready_gate=True,
+        # Hold the first call until recall and the search indexes answer, so no arm
+        # loses a session because its agent happened to search first.
+        warm_search=True,
         budget=budget,
     )
     entry["env"] = {**entry["env"], **shape_env(spec.arm_id)}

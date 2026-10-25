@@ -170,6 +170,7 @@ class Tap:
         allow: frozenset[str],
         ready_timeout: float = READY_TIMEOUT_SECONDS,
         skip_ready_gate: bool = False,
+        warm_search: bool = False,
     ) -> None:
         self.server = server
         self.log = log
@@ -177,6 +178,7 @@ class Tap:
         self.allow = allow
         self.ready_timeout = ready_timeout
         self._ready = skip_ready_gate
+        self.warm_search = warm_search
         self._probe_id: str | None = None
         self._probe_replies: queue.Queue[dict] = queue.Queue()
         self._out_lock = threading.Lock()
@@ -244,6 +246,20 @@ class Tap:
                 self._pending[request_id] = (method, {})
         self._forward(raw)
 
+    def _probe(self, probe_id: str, probe_params: dict, params: dict, deadline: float) -> dict | None:
+        """Send one probe call outside the arm budget; its reply, or None at the deadline."""
+
+        self._probe_id = probe_id
+        if "_meta" in params:
+            probe_params = {**probe_params, "_meta": params["_meta"]}
+        self._forward(
+            json.dumps({"jsonrpc": "2.0", "id": probe_id, "method": "tools/call", "params": probe_params})
+        )
+        try:
+            return self._probe_replies.get(timeout=max(0.0, deadline - time.monotonic()))
+        except queue.Empty:
+            return None
+
     def _wait_ready(self, params: dict) -> None:
         """Hold discovery and calls; probe this connection outside the arm budget."""
 
@@ -306,9 +322,28 @@ class Tap:
                     break
                 components = (warming or {}).get("components") or []
                 if not REQUIRED_CLEAR_COMPONENTS.intersection(components):
-                    self._ready = True
-                    outcome = "ready"
-                    break
+                    if not self.warm_search:
+                        self._ready = True
+                        outcome = "ready"
+                        break
+                    # A first search with hits can still find a maintained index (the
+                    # reference sidecar) unbuilt: it schedules the build and refuses as
+                    # warming. Searching here until it answers keeps that refusal out of
+                    # the arm. Every initialized vault holds the scaffold's log page, so
+                    # this query has hits whatever the case.
+                    probes += 1
+                    searched = self._probe(
+                        f"switch-eval-search-{probes}",
+                        {"name": "search_memory", "arguments": {"query": "log", "scope": "vault"}},
+                        params,
+                        deadline,
+                    )
+                    if searched is None:
+                        break
+                    if not warming_refusal(searched):
+                        self._ready = True
+                        outcome = "ready"
+                        break
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
         self._probe_id = None
         finished = time.monotonic()
@@ -397,6 +432,11 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-ready-gate", action="store_true", help="capture discovery without recall probes"
     )
     parser.add_argument(
+        "--warm-search",
+        action="store_true",
+        help="after recall is ready, also search until the search indexes answer",
+    )
+    parser.add_argument(
         "--allow",
         required=True,
         help="comma-separated tool names the arm may see and call, or * for every listed tool",
@@ -434,6 +474,7 @@ def main(argv: list[str] | None = None) -> int:
         allow=frozenset(args.allow.split(",")),
         ready_timeout=args.ready_timeout,
         skip_ready_gate=args.skip_ready_gate,
+        warm_search=args.warm_search,
     )
 
     closing = threading.Event()

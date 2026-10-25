@@ -467,6 +467,7 @@ def mcp_server_entry(
     log: Path,
     server_stderr: Path,
     skip_ready_gate: bool = False,
+    warm_search: bool = False,
     startup_marker: Path | None = None,
     budget: int = protocol.PULL_BUDGET_PER_TURN,
 ) -> dict:
@@ -491,6 +492,7 @@ def mcp_server_entry(
             "--server-stderr",
             str(server_stderr),
             *(["--skip-ready-gate"] if skip_ready_gate else []),
+            *(["--warm-search"] if warm_search else []),
             "--",
             python_executable(),
             "-m",
