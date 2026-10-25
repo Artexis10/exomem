@@ -1,226 +1,167 @@
-# Disposable native observation; this branch never merges.
+# Disposable hosted proof; never merge this branch.
 name: CI
 'on':
   workflow_dispatch: null
 permissions:
   contents: read
-env:
-  EXOMEM_TEST_OLDER_READER_VERSION: 0.106.0
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: 0.127.5
-  EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 jobs:
-  windows-held-filesystem:
-    name: Windows held filesystem (native NTFS)
-    if: ${{ github.head_ref != 'release-please--branches--main' }}
-    runs-on: windows-latest
-    timeout-minutes: 12
+  recall-worker-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_PYTHON: /usr/bin/python3
+      UV_PYTHON_DOWNLOADS: never
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: 8175a27e4588c8adf9385bf1d4ecfae9d7f92d6f
-    - name: Install uv
-      uses: astral-sh/setup-uv@v5
+        ref: 713c5861ba57aadc7799ec8469043aa276067c77
+        fetch-depth: 0
+    - uses: astral-sh/setup-uv@v5
       with:
+        version: 0.11.28
         enable-cache: true
-    - name: Verify lockfile is current
-      run: uv lock --check
-    - name: Require NTFS and 8.3 aliases
-      shell: pwsh
-      run: "$drive = (Get-Item $env:GITHUB_WORKSPACE).PSDrive.Name\n$volume = Get-Volume -DriveLetter $drive\nif\
-        \ ($volume.FileSystem -ne \"NTFS\") {\n  throw \"held-filesystem verification requires NTFS\"\n}\n$writableNtfs\
-        \ = @()\nforeach ($candidate in Get-Volume | Where-Object { $_.DriveLetter -and $_.FileSystem -eq \"NTFS\"\
-        \ }) {\n  $probe = \"$($candidate.DriveLetter):\\exomem-held-volume-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT\"\
-        \n  try {\n    New-Item -ItemType Directory -Path $probe -ErrorAction Stop | Out-Null\n    Remove-Item -LiteralPath\
-        \ $probe -Force -ErrorAction Stop\n    $writableNtfs += $candidate.DriveLetter\n  } catch {\n    # The native\
-        \ test will report which volume was unavailable.\n  }\n}\nif (@($writableNtfs | Sort-Object -Unique).Count\
-        \ -lt 2) {\n  throw \"held-filesystem verification requires at least two writable NTFS volumes\"\n}\nfsutil.exe\
-        \ 8dot3name set \"$drive`:\" 0\nif ($LASTEXITCODE -ne 0) {\n  throw \"failed to enable per-volume 8.3 alias\
-        \ creation\"\n}\nfsutil.exe 8dot3name query \"$drive`:\"\nif ($LASTEXITCODE -ne 0) {\n  throw \"failed to\
-        \ verify per-volume 8.3 alias creation\"\n}\n"
-    - name: Prepare diagnostic observation of the alias fixture
-      shell: python
-      run: 'import os
-
-        from pathlib import Path
-
-        target = Path(os.environ["RUNNER_TEMP"]) / "native_alias_observer.py"
-
-        target.write_bytes(''"""Disposable observation of one native collection-store fixture\''s stop call."""\n\nfrom
-        __future__ import annotations\n\nimport ast\nimport faulthandler\nimport functools\nimport hashlib\nimport
-        inspect\nimport json\nimport logging\nimport math\nimport os\nfrom pathlib import Path\nimport subprocess\nimport
-        sys\nimport tempfile\nimport textwrap\nimport time\n\nimport pytest\n\n\n# The diagnostic observes this
-        fixed pytest node, never a user\''s request text.\n_NODE = "tests/test_collection_store_service.py::test_projection_admission_accepts_the_served_vault_through_a_root_alias[junction]"\n_LOG
-        = logging.getLogger("native_alias_observer")\n_PATCH = None\n\n\ndef _info(value):\n    try:\n        _LOG.info("native_alias_observer
-        %s", json.dumps(value, sort_keys=True))\n    except Exception:\n        pass  # Observation must not replace
-        the test\''s result.\n\n\ndef _number(value):\n    if value is None or type(value) in (bool, int):\n        return
-        value\n    if type(value) is float and math.isfinite(value):\n        return value\n    return "unavailable"\n\n\ndef
-        _token(value):\n    # These checks validate the shape of protocol codes and Python symbols, not meaning.\n    if
-        isinstance(value, str) and 0 < len(value) <= 160 and value.isascii():\n        if all(character.isalnum()
-        or character in "._-<>" for character in value):\n            return value\n    return "unavailable"\n\n\ndef
-        _sha(value):\n    if isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in
-        value):\n        return value\n    return "unverified"\n\n\ndef _file_name(value):\n    normalized = str(value).replace("\\\\",
-        "/")\n    for marker in ("/src/exomem/", "/tests/"):\n        if marker in normalized:\n            return
-        marker[1:] + normalized.rsplit(marker, 1)[1]\n    return normalized.rsplit("/", 1)[-1]\n\n\ndef _code(function):\n    lines,
-        first = inspect.getsourcelines(function)\n    source = "".join(lines)\n    parsed = ast.parse(textwrap.dedent(source))\n    returns
-        = {}\n    for node in ast.walk(parsed):\n        if isinstance(node, ast.Return):\n            returns[first
-        + node.lineno - 1] = (\n                "literal_false" if isinstance(node.value, ast.Constant) and node.value.value
-        is False\n                else "other_return"\n            )\n    code = function.__code__\n    identity
-        = {\n        "module": _token(function.__module__), "function": _token(function.__qualname__),\n        "file":
-        _file_name(code.co_filename), "first_line": code.co_firstlineno,\n        "function_source_sha256": hashlib.sha256(source.encode()).hexdigest(),\n        "file_sha256":
-        hashlib.sha256(Path(code.co_filename).read_bytes()).hexdigest(),\n        "return_lines": returns,\n    }\n    return
-        code, returns, identity\n\n\ndef _git(root, argument):\n    try:\n        result = subprocess.run(\n            ["git",
-        "-C", str(root), "rev-parse", argument], capture_output=True,\n            text=True, timeout=3, check=False,\n        )\n        return
-        _sha(result.stdout.strip()) if result.returncode == 0 else "unverified"\n    except Exception as error:\n        return
-        {"error_class": type(error).__name__}\n\n\ndef _write(report, target):\n    try:\n        target.write_text(json.dumps(report,
-        sort_keys=True, indent=2, allow_nan=False) + "\\n", encoding="utf-8")\n    except Exception as error:\n        _info({"phase":
-        "artifact_write", "error_class": type(error).__name__})\n\n\ndef _state(manager, server):\n    result =
-        {}\n    # Scalar names come from LeaseManager.__init__; borrower identities never leave the process.\n    for
-        name in ("_fencing_token", "_store_bound", "_store_handoff", "_store_publishing",\n                 "_store_closed",
-        "_store_released", "_active_mutations", "_active_authority_guards",\n                 "_mutation_timeout_seconds"):\n        result[name]
-        = _number(getattr(manager, name, None))\n    borrowers = manager._store_borrowers\n    result["borrower_threads"]
-        = len(borrowers)\n    result["borrower_checkouts"] = sum(tuple(borrowers.values()))\n    result["stop_set"]
-        = manager._stop.is_set()\n    runtime = manager._collection_store\n    result["runtime_present"] = runtime
-        is not None\n    if runtime is not None:\n        result["runtime"] = {name: _number(getattr(runtime, name))
-        for name in (\n            "_bootstrap", "_admitted_token", "_writer_token", "_handed_off",\n        )}\n        pending
-        = runtime._takeover\n        result["runtime"]["takeover_present"] = pending is not None\n        if pending
-        is not None:\n            result["runtime"]["takeover"] = {\n                "code": _token(pending.code),
-        "token": _number(pending.token),\n                "recorded_commit_seq": _number(pending.recorded), "local_commit_seq":
-        _number(pending.local),\n            }\n    try:\n        status = manager.status()\n        result["manager_status"]
-        = {\n            key: _number(status.get(key)) for key in ("enabled", "coordinator_healthy", "renewer_alive")\n        }\n        result["manager_status"]["role"]
-        = _token(status.get("role"))\n        store = status.get("collection_store")\n        if isinstance(store,
-        dict):\n            result["manager_status"]["collection_store"] = {\n                "status": _token(store.get("status")),
-        "code": _token(store.get("code")),\n                "attention": _number(store.get("attention")),\n                "recorded_commit_seq":
-        _number(store.get("recorded_commit_seq")),\n                "local_commit_seq": _number(store.get("local_commit_seq")),\n            }\n    except
-        Exception as error:\n        result["manager_status"] = {"error_class": type(error).__name__}\n    result["server_present"]
-        = server is not None\n    if server is not None:\n        result["server_runtime_present"] = server.runtime
-        is not None\n        result["server_session_present"] = server.session is not None\n        result["server_retry_at"]
-        = _number(server._retry_at)\n        result["server_refusal_code"] = _token(server.refusal[0])\n        try:\n            queue
-        = server._queue_refusal_state()\n            frames = queue.get("frames", [])\n            result["worker"]
-        = {\n                "alive": _number(queue.get("alive")), "queued_requests": _number(queue.get("queued_requests")),\n                "stack_status":
-        _token(queue.get("stack_status")),\n                "frames_truncated": _number(queue.get("frames_truncated")),\n                "frames":
-        [{"module": _token(frame.get("module")), "function": _token(frame.get("function")),\n                            "line":
-        _number(frame.get("line"))} for frame in frames[:64]],\n            }\n        except Exception as error:\n            result["worker"]
-        = {"error_class": type(error).__name__}\n    return result\n\n\ndef _stacks(target):\n    # faulthandler\''s
-        fixed frame format has no arguments, locals or source text.\n    with tempfile.TemporaryFile(dir=target.parent)
-        as sink:\n        faulthandler.dump_traceback(file=sink, all_threads=True)\n        sink.seek(0)\n        raw
-        = sink.read(65537)\n    lines = []\n    for line in raw[:65536].decode("utf-8", errors="replace").splitlines():\n        if
-        line.lstrip().startswith(\''File "\''):\n            before, quote, rest = line.partition(\''"\'')\n            filename,
-        quote, after = rest.partition(\''"\'')\n            line = before + \''"\'' + _file_name(filename) + \''"\''
-        + after\n        lines.append(line[:512])\n    return {"status": "captured", "truncated": len(raw) > 65536,
-        "lines": lines}\n\n\ndef _trace(codes, entry):\n    events = entry["close_trace"]\n    entry["trace_events_omitted"]
-        = 0\n    returns_seen = {}\n\n    def observe(frame, event, argument):\n        if frame.f_code not in codes:\n            return
-        None\n        try:\n            returns, identity = codes[frame.f_code]\n            frame_key = id(frame)\n            if
-        event == "call":\n                returns_seen[frame_key] = None\n            if event == "line" and frame.f_lineno
-        in returns:\n                returns_seen[frame_key] = frame.f_lineno\n            if event == "exception":\n                #
-        Reserve return records even when boundary retries raise many times.\n                if len(events) < 24:\n                    error
-        = argument[1]\n                    events.append({"event": "exception", "function": identity["function"],\n                                   "line":
-        frame.f_lineno, "exception_class": type(error).__name__,\n                                   "code": _token(getattr(error,
-        "code", None)),\n                                   "errno": _number(getattr(error, "errno", None)),\n                                   "winerror":
-        _number(getattr(error, "winerror", None))})\n                else:\n                    entry["trace_events_omitted"]
-        += 1\n            if event == "return":\n                origin = returns_seen.pop(frame_key, None)\n                if
-        len(events) >= 32:\n                    events.pop(0)\n                    entry["trace_events_omitted"]
-        += 1\n                deadline = frame.f_locals.get("deadline")\n                numeric = type(deadline)
-        in (int, float) and math.isfinite(deadline)\n                boundary_deadline = frame.f_locals.get("boundary_deadline")\n                boundary_numeric
-        = type(boundary_deadline) in (int, float) and math.isfinite(boundary_deadline)\n                now = time.monotonic()\n                events.append({"event":
-        "return", "function": identity["function"],\n                               "result": "false" if argument
-        is False else "true" if argument is True else "other",\n                               "token": _number(frame.f_locals.get("token")),\n                               "origin_line":
-        origin, "origin_kind": returns.get(origin),\n                               "return_event_line": frame.f_lineno,\n                               "deadline_remaining_seconds":
-        deadline - now if numeric else None,\n                               "deadline_expired": deadline <= now
-        if numeric else None,\n                               "boundary_deadline_remaining_seconds": boundary_deadline
-        - now if boundary_numeric else None,\n                               "cancelled_present": frame.f_locals.get("cancelled")
-        is not None})\n        except Exception as error:\n            if len(events) < 32:\n                events.append({"event":
-        "trace_error", "error_class": type(error).__name__})\n        return observe\n\n    return observe\n\n\n@pytest.hookimpl(tryfirst=True)\ndef
-        pytest_runtest_setup(item):\n    global _PATCH\n    if item.nodeid.replace("\\\\", "/") != _NODE:\n        return\n    artifact
-        = os.environ.get("EXOMEM_WINDOWS_ALIAS_PROBE_ARTIFACT")\n    if not artifact:\n        _info({"phase": "setup",
-        "status": "skipped", "reason": "artifact_env_unset"})\n        return\n    try:\n        target = Path(artifact)\n        target.parent.mkdir(parents=True,
-        exist_ok=True)\n        module = item.module\n        original = module.Service.stop\n        codes = {}\n        identities
-        = []\n        for name in ("_release_collection_store", "_release_unadmitted_store"):\n            code,
-        returns, identity = _code(getattr(module.writer_lease.LeaseManager, name))\n            codes[code] = returns,
-        identity\n            identities.append(identity)\n        report = {\n            "schema_version": 1,
-        "node": _NODE, "platform": _token(sys.platform),\n            "python": list(sys.version_info[:3]),\n            "github_sha":
-        _sha(os.environ.get("GITHUB_SHA")),\n            "declared_pr_head_sha": _sha(os.environ.get("EXOMEM_WINDOWS_ALIAS_PROBE_HEAD_SHA")),\n            "checkout_sha":
-        _git(item.config.rootpath, "HEAD"),\n            "checkout_tree_sha": _git(item.config.rootpath, "HEAD^{tree}"),\n            "test_code":
-        _code(module.test_projection_admission_accepts_the_served_vault_through_a_root_alias)[2],\n            "original_stop_code":
-        _code(original)[2], "release_codes": identities,\n            "plugin_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),\n            "stop_calls":
-        [],\n        }\n\n        @functools.wraps(original)\n        def observed_stop(service, *, deadline=None):\n            entry
-        = {"requested_deadline": _number(deadline), "close_trace": []}\n            try:\n                server
-        = module.runtime._SERVERS.get(service.root)\n                entry["before_stop"] = _state(service.manager,
-        server)\n            except Exception as error:\n                entry["before_stop"] = {"error_class":
-        type(error).__name__}\n            try:\n                entry["all_thread_stacks"] = _stacks(target)\n            except
-        Exception as error:\n                entry["all_thread_stacks"] = {"error_class": type(error).__name__}\n            report["stop_calls"].append(entry)\n            _write(report,
-        target)\n            _info({"phase": "before_stop", "status": entry.get("before_stop", {}).get("manager_status"),\n                   "worker":
-        entry.get("before_stop", {}).get("worker")})\n            previous = sys.gettrace()\n            trace =
-        _trace(codes, entry)\n            installed = False\n            if previous is not None:\n                entry["trace_status"]
-        = "skipped_existing_trace"\n            else:\n                try:\n                    sys.settrace(trace)\n                    installed
-        = True\n                    entry["trace_status"] = "installed"\n                except Exception as error:\n                    entry["trace_status"]
-        = "install_failed"\n                    entry["trace_error_class"] = type(error).__name__\n            try:\n                return
-        original(service, deadline=deadline)\n            except BaseException as error:\n                entry["stop_exception_class"]
-        = type(error).__name__\n                raise\n            finally:\n                if installed:\n                    try:\n                        sys.settrace(previous)\n                        entry["trace_restore"]
-        = "restored"\n                    except Exception as error:\n                        entry["trace_restore"]
-        = "failed"\n                        entry["trace_restore_error_class"] = type(error).__name__\n                _write(report,
-        target)\n                _info({"phase": "after_stop", "trace_status": entry.get("trace_status"),\n                       "stop_exception_class":
-        entry.get("stop_exception_class"),\n                       "trace_events_omitted": entry["trace_events_omitted"],\n                       "close_trace":
-        entry["close_trace"]})\n\n        module.Service.stop = observed_stop\n        _PATCH = (module.Service,
-        original, observed_stop)\n        _write(report, target)\n        _info({"phase": "setup", "status": "installed",
-        "checkout_sha": report["checkout_sha"],\n               "github_sha": report["github_sha"]})\n    except
-        Exception as error:\n        _info({"phase": "setup", "error_class": type(error).__name__})\n\n\n@pytest.hookimpl(hookwrapper=True,
-        tryfirst=True)\ndef pytest_runtest_teardown(item):\n    global _PATCH\n    try:\n        yield\n    finally:\n        if
-        item.nodeid.replace("\\\\", "/") == _NODE and _PATCH is not None:\n            service, original, observed
-        = _PATCH\n            if service.stop is observed:\n                service.stop = original\n            _PATCH
-        = None\n''.encode("utf-8"))
-
-        print("diagnostic_plugin_sha256=7e72a072649b211d2fb063bb78cb91e15961d3e7e34b896aec7bc03c5bc58af4")
-
-        '
-    - name: Native held-filesystem gate
-      env:
-        KB_MCP_DISABLE_EMBEDDINGS: '1'
-        KB_MCP_DISABLE_MEDIA_EXTRACTION: '1'
-        EXOMEM_DISABLE_CLIP: '1'
-        EXOMEM_DISABLE_EMBEDDINGS: '1'
-        EXOMEM_DISABLE_WARMUP: '1'
-        EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state
-        PYTHONDONTWRITEBYTECODE: '1'
-        PYTHONPATH: ${{ runner.temp }}
-        PYTEST_ADDOPTS: --log-cli-level=INFO --junitxml=${{ runner.temp }}/native-alias-tests.xml -p native_alias_observer
-        EXOMEM_WINDOWS_ALIAS_PROBE_ARTIFACT: ${{ runner.temp }}/native-alias-diagnostic.json
-        EXOMEM_WINDOWS_ALIAS_PROBE_HEAD_SHA: 0ac1ecf139fc01aa23df6b2e19bcec7d42ac987d
-      run: uv run --frozen --python 3.13 python -m pytest -q tests/test_held_fs_contract.py tests/test_held_fs_windows.py
-        tests/test_reserved_admin_paths.py tests/test_mutation_concurrency.py tests/test_windows_idempotency_trust.py
-        tests/test_writer_lease.py::test_concurrent_cold_idempotency_initialization_keeps_both_clients_usable tests/test_writer_lease.py::test_concurrent_legacy_idempotency_initialization_preserves_completed_results
-        tests/test_windows_path_alias_guard.py tests/test_artifact_recovery.py::test_retained_copy_rechecks_bytes_even_with_unchanged_mtime
-        tests/test_artifact_recovery.py::test_in_place_rewrite_during_final_origin_check_releases_no_stale_original
-        "tests/test_collection_store_service.py::test_projection_admission_accepts_the_served_vault_through_a_root_alias[junction]"
-        tests/test_collection_store_replica.py::test_first_and_successive_publish_are_reopenable_business_snapshots
-        tests/test_collection_store_replica.py::test_matching_installed_copy_retires_the_still_owned_redundant_stage
-        tests/test_collection_store_replica.py::test_install_crash_reopens_without_foreign_divergence tests/test_collection_store_replica.py::test_displacement_crash_with_missing_stage_restores_predecessor_then_flushes_new_head
-        tests/test_collection_store_replica.py::test_failed_foreign_stage_relocation_cannot_delete_changed_bytes_on_context_exit
-        tests/test_collection_store_replica.py::test_unresolved_staging_preserves_workspace_without_allocating_again
-        tests/test_collection_store_replica.py::test_abandoned_predecessor_aside_releases_owners_before_workspace_removal
-        tests/test_collection_store_runtime.py::test_coalesced_publication_keeps_warm_release_work_bounded tests/test_collection_store_runtime.py::test_external_sql_during_publication_invalidates_warm_data_without_a_head_change
-        tests/test_collection_store_runtime.py::test_failed_publication_transaction_returns_foreground_ownership_and_keeps_rows
-        --session-timeout=600
-    - name: Native reserved-path compatibility gate
-      env:
-        KB_MCP_DISABLE_EMBEDDINGS: '1'
-        KB_MCP_DISABLE_MEDIA_EXTRACTION: '1'
-        EXOMEM_DISABLE_CLIP: '1'
-        EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state-compat
-        PYTHONDONTWRITEBYTECODE: '1'
-      run: uv run --frozen --python 3.13 python -m pytest -q tests/test_governance_receipts.py tests/test_graph_lifecycle_windows.py
-        tests/test_media_processing.py -k "test_reconcile_dry_run_keeps_evidence_and_operational_files_byte_identical
-        or test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refusal or test_windows_deletion_post_rename_flush_refusal_durably_inverse_restores_prior_truth
-        or test_windows_deletion_inverse_move_failure_retains_epoch_and_marker_for_reconcile or test_windows_recovery_post_rename_flush_refusal_durably_inverse_restores_prior_truth
-        or test_windows_recovery_inverse_move_failure_retains_epoch_and_marker_for_reconcile or test_prose_only_sidecar_is_repaired_without_losing_notes
-        or test_partial_pending_sidecar_is_canonically_repaired_with_prose or test_completed_sidecar_with_invalid_cheap_provenance_is_reconciled
-        or test_legacy_completed_sidecar_without_any_provenance_is_preserved or test_legacy_completed_mp4_backfills_partial_provenance_without_rewriting_transcript
-        or test_caller_supplied_completed_text_backfills_missing_provenance_in_place or test_bounded_reconcile_skips_converged_prefix_and_advances_later_work"
-        --session-timeout=600
+    - name: Resolve the encoder digest
+      id: encoder
+      run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py
+        --encoder-cache-key >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
+    - name: Verify both principals through the real bound command
+      shell: bash
+      run: "EXOMEM_DISABLE_EMBEDDINGS=1 KB_MCP_DISABLE_EMBEDDINGS=1 KB_MCP_DISABLE_MEDIA_EXTRACTION=1\
+        \ uv run --frozen --group recall-benchmark python -m pytest -q -o timeout=180\
+        \ tests/test_recall_latency_gate.py tests/test_recall_timing.py tests/test_request_latency_contract.py\
+        \ --junitxml=recall-bound-scoped.xml\nuv run --frozen --group recall-benchmark\
+        \ python - <<'PY'\nimport ast\nimport hashlib\nimport json\nimport os\nimport\
+        \ subprocess\nimport sys\nimport tempfile\nfrom pathlib import Path\n\nscript\
+        \ = Path.cwd() / \"scripts\" / \"recall_latency_gate.py\"\noriginal = script.read_text()\n\
+        helper = r'''\nfrom contextlib import contextmanager\nimport hashlib\nimport\
+        \ inspect\n\n_proof_prepare_original = _prepare_worker\n_proof_sample_original\
+        \ = _worker_sample\n_proof_preparation = {}\n\ndef _proof_prepare(root, startup):\n\
+        \    from exomem import due_state\n    reconcile = due_state.reconcile\n \
+        \   observations = []\n    def observed_reconcile(vault_root, *args, **kwargs):\n\
+        \        before_missing = due_state.load(vault_root) is None\n        result\
+        \ = reconcile(vault_root, *args, **kwargs)\n        observations.append({\"\
+        before_missing\": before_missing,\n                             \"persisted_usable\"\
+        : due_state.load(vault_root) is not None})\n        return result\n    due_state.reconcile\
+        \ = observed_reconcile\n    try:\n        environment = _proof_prepare_original(root,\
+        \ startup)\n    finally:\n        due_state.reconcile = reconcile\n    _proof_preparation.update({\"\
+        reconciliations\": observations,\n                               \"persisted_usable\"\
+        : due_state.load(root) is not None})\n    environment[\"advisory_preparation\"\
+        ] = dict(_proof_preparation)\n    return environment\n\ndef _proof_sample(ask_memory,\
+        \ request):\n    import recall_latency_adapter as adapter\n    from exomem\
+        \ import command_surface, due_state\n    from exomem.collection_store import\
+        \ ownership\n    from exomem.governance import egress, principal\n\n    observed\
+        \ = {\"postfilter_callers\": [], \"ownership_finish_calls\": 0,\n        \
+        \        \"admission_calls\": 0, \"all_admissions_owned\": True, \"success_log_calls\"\
+        : 0,\n                \"parent_conflicts\": [], \"timing_suppressed\": None}\n\
+        \    postfilter, finish = egress.postfilter, ownership.ReadScope.finish\n\
+        \    decide = egress._decide_path\n    log_success, instrument = command_surface._log_tool_success,\
+        \ adapter.instrument\n    timed_hits = []\n    def observed_filter(*args,\
+        \ **kwargs):\n        frame = inspect.currentframe().f_back\n        observed[\"\
+        postfilter_callers\"].append({\n            \"module\": frame.f_globals.get(\"\
+        __name__\"), \"function\": frame.f_code.co_name,\n            \"ownership_active\"\
+        : ownership._READ.get() is not None})\n        del frame\n        return postfilter(*args,\
+        \ **kwargs)\n    def observed_finish(scope):\n        observed[\"ownership_finish_calls\"\
+        ] += 1\n        return finish(scope)\n    def observed_decide(*args, **kwargs):\n\
+        \        if adapter._CLOCK.CURRENT.get() is not None:\n            observed[\"\
+        admission_calls\"] += 1\n            observed[\"all_admissions_owned\"] &=\
+        \ ownership._READ.get() is not None\n        return decide(*args, **kwargs)\n\
+        \    def observed_log(*args, **kwargs):\n        observed[\"success_log_calls\"\
+        ] += 1\n        return log_success(*args, **kwargs)\n    @contextmanager\n\
+        \    def observed_instrument():\n        with instrument() as value:\n   \
+        \         yield value\n        observed[\"parent_conflicts\"] = [collector.parent_conflicts()\
+        \ for collector in value[1]]\n    def observed_ask(**kwargs):\n        result\
+        \ = ask_memory(**kwargs)\n        observed[\"timing_suppressed\"] = \"timings\"\
+        \ not in result\n        timed_hits.extend(result.get(\"hits\", []))\n   \
+        \     return result\n\n    # These fixed application boundaries observe the\
+        \ existing command, not user text.\n    egress.postfilter = observed_filter\n\
+        \    egress._decide_path = observed_decide\n    ownership.ReadScope.finish\
+        \ = observed_finish\n    command_surface._log_tool_success = observed_log\n\
+        \    adapter.instrument = observed_instrument\n    try:\n        result =\
+        \ _proof_sample_original(observed_ask, request)\n    finally:\n        egress.postfilter\
+        \ = postfilter\n        egress._decide_path = decide\n        ownership.ReadScope.finish\
+        \ = finish\n        command_surface._log_tool_success = log_success\n    \
+        \    adapter.instrument = instrument\n\n    # Compare the same real bound\
+        \ command outside its diagnostic timer/collector.\n    caller = (principal.owner_principal(surface=\"\
+        library\") if request[\"principal\"] == \"owner\"\n              else principal.RequestPrincipal(audience_id=\"\
+        benchmark-admitted\", surface=\"mcp\"))\n    adapter.clear_results()\n   \
+        \ with principal.request_scope(caller), principal.invocation_scope():\n  \
+        \      untimed = ask_memory(query=request[\"query\"], include_timings=False,\n\
+        \                            limit=DEFAULT_LIMIT, rerank=False, **request[\"\
+        arguments\"])\n    stable = lambda value: hashlib.sha256(json.dumps(value,\
+        \ sort_keys=True).encode()).hexdigest()\n    observed[\"hits_equal_untimed\"\
+        ] = stable(timed_hits) == stable(untimed.get(\"hits\", []))\n    observed[\"\
+        hit_count\"] = len(timed_hits)\n    observed[\"preparation\"] = dict(_proof_preparation)\n\
+        \    result[\"boundary_proof\"] = observed\n    return result\n\n_prepare_worker\
+        \ = _proof_prepare\n_worker_sample = _proof_sample\n'''\ntree = ast.parse(original,\
+        \ filename=str(script))\nassert isinstance(tree.body[-1], ast.If)\ntree.body[-1:-1]\
+        \ = ast.parse(helper).body\nwrapper = \"_proof_source = \" + repr(original)\
+        \ + \"\\n_proof_helper = \" + repr(helper) + \"\\n\"\nwrapper += \"import\
+        \ ast\\n_proof_tree = ast.parse(_proof_source, filename=__file__)\\n\"\nwrapper\
+        \ += \"_proof_tree.body[-1:-1] = ast.parse(_proof_helper).body\\n\"\nwrapper\
+        \ += \"exec(compile(ast.fix_missing_locations(_proof_tree), __file__, 'exec'),\
+        \ globals())\\n\"\nscript.write_text(wrapper)\nsys.path.insert(0, str(Path.cwd()\
+        \ / \"scripts\"))\nimport recall_latency_gate as gate\n\nreport = {\"state\"\
+        : \"failed\", \"mode\": \"bound-reference-proof\",\n          \"timings\"\
+        : \"observed diagnostic only; not a qualifying paired comparison\",\n    \
+        \      \"source\": subprocess.check_output([\"git\", \"rev-parse\", \"HEAD\"\
+        ], text=True).strip(),\n          \"instrument_sha256\": hashlib.sha256(original.encode()).hexdigest(),\n\
+        \          \"overlay_sha256\": hashlib.sha256(wrapper.encode()).hexdigest()}\n\
+        worker = None\ntry:\n    profile = json.loads((gate.BENCHMARK / \"profile.json\"\
+        ).read_text())\n    cases, _ = gate.reference_cases(profile)\n    cpus = sorted(os.sched_getaffinity(0))[:gate.REFERENCE[\"\
+        reference_cpus\"]]\n    if len(cpus) != gate.REFERENCE[\"reference_cpus\"\
+        ]:\n        raise gate.MeasurementRefused(\"two-cpu-reference-unavailable\"\
+        )\n    selected = {case[\"series\"]: case for case in reversed(cases)}\n \
+        \   with tempfile.TemporaryDirectory(prefix=\"recall-bound-reference-\") as\
+        \ directory:\n        scratch = Path(directory)\n        try:\n          \
+        \  worker = gate._Worker(gate.ROOT, scratch / \"vault\", scratch / \"head\"\
+        , cpus, profile)\n            report[\"environment\"] = worker.environment\n\
+        \            report[\"samples\"] = []\n            for principal_name in (\"\
+        owner\", \"admitted\"):\n                for series in (\"unit\", \"mixed\"\
+        ):\n                    case = selected[series]\n                    for ordinal\
+        \ in range(2):\n                        request = {**case, \"principal\":\
+        \ principal_name, \"rows\": gate.REFERENCE[\"stage_rows\"]}\n            \
+        \            result = worker.exchange(request)\n                        report[\"\
+        samples\"].append({\"principal\": principal_name, \"series\": series,\n  \
+        \                                                \"ordinal\": ordinal, **result})\n\
+        \            failures = []\n            for sample in report[\"samples\"]:\n\
+        \                proof = sample[\"boundary_proof\"]\n                callers\
+        \ = {row[\"module\"] for row in proof[\"postfilter_callers\"]}\n         \
+        \       if sample[\"state\"] != \"ok\":\n                    failures.append(\"\
+        sample-not-ok\")\n                if not {\"exomem.writer_lease\", \"exomem.command_surface\"\
+        } <= callers:\n                    failures.append(\"terminal-pass-missing\"\
+        )\n                if not all(row[\"ownership_active\"] for row in proof[\"\
+        postfilter_callers\"]):\n                    failures.append(\"terminal-ownership-missing\"\
+        )\n                if proof[\"ownership_finish_calls\"] < 2 or proof[\"success_log_calls\"\
+        ] != 1:\n                    failures.append(\"completion-boundary-missing\"\
+        )\n                if not proof[\"admission_calls\"] or not proof[\"all_admissions_owned\"\
+        ]:\n                    failures.append(\"body-ownership-missing\")\n    \
+        \            if not proof[\"hits_equal_untimed\"] or not proof[\"hit_count\"\
+        ]:\n                    failures.append(\"result-identity-lost\")\n      \
+        \          if proof[\"timing_suppressed\"] != (sample[\"principal\"] == \"\
+        admitted\"):\n                    failures.append(\"public-timing-suppression-changed\"\
+        )\n                if not proof[\"parent_conflicts\"] or any(proof[\"parent_conflicts\"\
+        ]):\n                    failures.append(\"collector-parent-conflict\")\n\
+        \                if not proof[\"preparation\"][\"persisted_usable\"]:\n  \
+        \                  failures.append(\"advisory-preparation-missing\")\n   \
+        \             if sample[\"series\"] == \"unit\" and not sample[\"stages\"\
+        ][\"governed-stage-semantic_units\"][\"ms\"]:\n                    failures.append(\"\
+        unit-stage-missing\")\n            report[\"failures\"] = sorted(set(failures))\n\
+        \            report[\"state\"] = \"failed\" if failures else \"observed\"\n\
+        \        finally:\n            if worker is not None:\n                worker.close()\n\
+        except Exception as error:\n    report[\"reason\"] = error.code if isinstance(error,\
+        \ gate.MeasurementRefused) else type(error).__name__\n    report[\"phase\"\
+        ] = getattr(error, \"phase\", None)\nfinally:\n    Path(\"recall-bound-reference-proof.json\"\
+        ).write_text(json.dumps(report, indent=2, sort_keys=True) + \"\\n\")\nraise\
+        \ SystemExit(report[\"state\"] == \"failed\")\n\nPY\n"
     - uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: native-alias-observation
-        path: '${{ runner.temp }}/native-alias-*.json
+        name: recall-bound-reference-proof
+        path: 'recall-bound-reference-proof.json
 
-          ${{ runner.temp }}/native-alias-*.xml'
+          recall-bound-scoped.xml'
         if-no-files-found: warn
