@@ -1370,6 +1370,9 @@ def worker_main(vault_root: Path) -> int:
         response = {"state": "worker-error", "error_class": type(error).__name__, "phase": phase}
         if isinstance(error, MeasurementRefused):
             response.update(reason=error.code, phase=error.phase or phase)
+        elif getattr(error, "code", None) == "RETRIEVAL_INDEX_WARMING":
+            # The product validates this public site; raw exception messages stay private.
+            response["reason"] = "benchmark-warming-site-" + error.site
         print(json.dumps(response), flush=True)
         return 1
     finally:
