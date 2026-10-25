@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import hmac
+import json
 import math
 import re
 from collections import Counter
@@ -34,6 +35,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from ..issued_cursor import is_issued_cursor
 from . import authorization_sessions
@@ -598,7 +600,7 @@ def _scrub_explicit(text: str) -> tuple[str, int]:
     return text, replacements
 
 
-def scrub_text(text: str) -> tuple[str, bool]:
+def _scrub_plain_text(text: str) -> tuple[str, bool]:
     """Replace credential-shaped substrings in `text`; report whether any fired."""
     if not text:
         return text, False
@@ -618,8 +620,45 @@ def scrub_text(text: str) -> tuple[str, bool]:
     return cleaned, blocked
 
 
+def _scrub_uri(text: str, *, structural: bool) -> tuple[str, bool] | None:
+    """Inspect decoded URI content without scanning encoding as credential text."""
+    if ":" not in text or any(character.isspace() for character in text):
+        return None
+    try:
+        uri = urlsplit(text)
+    except ValueError:
+        return None
+    if not uri.scheme:
+        return None
+    if _scrub_explicit(text)[1]:
+        return NOTICE, True
+    # urlsplit normalizes scheme case and strips leading controls; retain both.
+    components = [text.partition(":")[0], *(unquote(component) for component in uri[1:])]
+    # URI queries may use literal plus signs or form separators. Inspect both
+    # interpretations; percent decoding must never erase a credential boundary.
+    for key, value in parse_qsl(uri.query, keep_blank_values=True):
+        components.extend((key, value))
+    for component in components:
+        blocked = (
+            bool(_scrub_explicit(component)[1])
+            if structural else _scrub_plain_text(component)[1]
+        )
+        if blocked:
+            return NOTICE, True
+    return text, False
+
+
+def scrub_text(text: str) -> tuple[str, bool]:
+    """Replace credential-shaped substrings in `text`; report whether any fired."""
+    uri_result = _scrub_uri(text, structural=False)
+    return _scrub_plain_text(text) if uri_result is None else uri_result
+
+
 def _scrub_structural(value: str) -> tuple[str, bool]:
     """A structural identifier: explicit credential patterns only, no entropy."""
+    uri_result = _scrub_uri(value, structural=True)
+    if uri_result is not None:
+        return uri_result
     cleaned, replacements = _scrub_explicit(value)
     return cleaned, replacements > 0
 
@@ -666,11 +705,45 @@ def scrub_value(value: Any, *, field_name: str | None = None) -> tuple[Any, bool
     `field_name` carries the key a string arrived under so the structural
     allowlist can suppress the entropy heuristic for identifier fields.
     """
-    classify = functools.lru_cache(maxsize=256)(_scrub_string)
+    cached = functools.lru_cache(maxsize=256)(_scrub_string)
+
+    def classify(text: str, structural: bool) -> tuple[str, bool]:
+        # Bound per-invocation retention by both entries and text length.
+        scanner = cached if type(text) is str and len(text) <= 1024 else _scrub_string
+        return scanner(text, structural)
+
     try:
         return _scrub_value(value, field_name=field_name, classify=classify, result=True)
     finally:
-        classify.cache_clear()
+        cached.cache_clear()
+
+
+def scrub_json_text(text: str) -> tuple[str, bool]:
+    """Decode a JSON text block while retaining its full string-scanning mode."""
+    duplicate_objects: list[list[tuple[str, Any]]] = []
+
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            value[key] = item
+        if len(value) != len(pairs):
+            # A dict cannot retain duplicate keys; scan every original pair too.
+            duplicate_objects.append(pairs)
+        return value
+
+    try:
+        value = json.loads(text, object_pairs_hook=object_pairs)
+        cleaned, blocked = _scrub_value(
+            [value, duplicate_objects] if duplicate_objects else value, field_name=None,
+            # JSON text never acquired structural-field or issuance authority.
+            classify=lambda value, _structural: scrub_text(value),
+        )
+    except (ValueError, RecursionError):
+        return scrub_text(text)
+    if blocked and duplicate_objects:
+        # Ambiguous duplicate objects cannot preserve their shape when serialized.
+        return NOTICE, True
+    return (json.dumps(cleaned, ensure_ascii=False), True) if blocked else (text, False)
 
 
 def _scrub_string(text: str, structural: bool) -> tuple[str, bool]:
@@ -688,9 +761,7 @@ def _scrub_value(
     """``result`` marks the walk's root mapping; ``structural`` a string under one of its result fields."""
     if isinstance(value, str):
         structural = structural or (field_name is not None and _is_structural_field(field_name))
-        # Bound per-invocation retention by both entries and text length.
-        scanner = classify if type(value) is str and len(value) <= 1024 else _scrub_string
-        return scanner(value, structural)
+        return classify(value, structural)
     if isinstance(value, Mapping):
         blocked = False
         entries: list[tuple[Any, Any, bool, Any, bool]] = []
@@ -698,8 +769,7 @@ def _scrub_value(
             cleaned_key = key
             key_hit = False
             if isinstance(key, str):
-                scanner = classify if type(key) is str and len(key) <= 1024 else _scrub_string
-                cleaned_key, key_hit = scanner(key, False)
+                cleaned_key, key_hit = classify(key, False)
                 blocked = blocked or key_hit
             if result and key in _RESULT_STRUCTURAL_FIELDS and is_issued_cursor(item):
                 # Only codec-issued root continuations bypass scanning; user strings retain every check.
@@ -744,8 +814,7 @@ def _scrub_value(
                 for item in value:
                     out = {}
                     for key, text in item.items():
-                        scanner = classify if len(text) <= 1024 else _scrub_string
-                        cleaned, hit = scanner(text, modes[key])
+                        cleaned, hit = classify(text, modes[key])
                         out[key] = cleaned
                         blocked = blocked or hit
                     items.append(out)
