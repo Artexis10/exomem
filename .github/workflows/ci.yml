@@ -30,7 +30,7 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: recall-encoder-${{ runner.os }}-${{ steps.encoder.outputs.digest }}
-      - name: Verify real worker preparation and representative warm calls
+      - name: Diagnose unit and mixed classification on the actual reference
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -41,12 +41,52 @@ jobs:
           import subprocess
           import sys
           import tempfile
+          import textwrap
+          import hashlib
           from pathlib import Path
 
+          script = Path.cwd() / "scripts" / "recall_latency_gate.py"
+          original = script.read_text()
+          overlay = textwrap.dedent(r'''
+          import ast
+
+          class _ClassificationOverlay(ast.NodeTransformer):
+              matches = 0
+
+              def visit_FunctionDef(self, node):
+                  if node.name == "_worker_sample":
+                      statement = node.body[-1]
+                      assert isinstance(statement, ast.Return) and isinstance(statement.value, ast.Dict)
+                      statement.value.keys.append(ast.Constant("diagnostic"))
+                      # These are public producer fields and a closed failure token, not query text.
+                      statement.value.values.append(ast.parse("""{
+                          'failed_stage': failed_stage,
+                          'has_degraded': bool(isinstance(result, dict) and result.get('degraded')),
+                          'candidate_window_degraded': bool(isinstance(result, dict) and 'semantic_units_candidate_window' in (result.get('degraded') or ())),
+                          'has_warming': bool(isinstance(result, dict) and 'warming' in result),
+                          'collector_count': len(collectors),
+                          'interval_count': len(trace.intervals),
+                          'public_error_entries': sum(bool(stage.get('error')) for stage in ((result.get('timings') or {}).get('stages', {}).values() if isinstance(result, dict) else ())),
+                          'collector_error_entries': sum(bool(stage.get('error')) for collector in collectors for stage in collector.stages.values()),
+                          'unmapped_error_entries': sum(bool(stage.get('error')) and not any(name in producers for producers in REFERENCE['stage_rows'].values()) for collector in collectors for name, stage in collector.stages.items()),
+                          'canonical_error_rows': [row for row, producers in REFERENCE['stage_rows'].items() if any(collector.stages.get(name, {}).get('error') for collector in collectors for name in producers)]
+                      }""", mode="eval").body)
+                      self.matches += 1
+                  return node
+
+          _classification_tree = ast.parse(_classification_source, filename=__file__)
+          _classification_transformer = _ClassificationOverlay()
+          _classification_tree = _classification_transformer.visit(_classification_tree)
+          assert _classification_transformer.matches == 1
+          exec(compile(ast.fix_missing_locations(_classification_tree), __file__, "exec"), globals())
+          ''')
+          wrapper = "_classification_source = " + repr(original) + "\n" + overlay
+          script.write_text(wrapper)
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           import recall_latency_gate as gate
 
-          report = {"state": "failed", "timings": "not qualified; preparation and warm-up only", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}
+          report = {"state": "failed", "mode": "unit-mixed-diagnostic", "timings": "diagnostic warm-up only; not qualified", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                    "diagnostic_overlay": "classification-metadata-only", "instrument_sha256": hashlib.sha256(original.encode()).hexdigest(), "overlay_sha256": hashlib.sha256(wrapper.encode()).hexdigest()}
           workers = {}
           try:
               profile = json.loads((gate.BENCHMARK / "profile.json").read_text())
@@ -78,17 +118,17 @@ jobs:
                           raise gate.MeasurementRefused("reference-sqlite-unsupported")
                       first_cases = {case["series"]: case for case in reversed(cases)}
                       report["warm_calls"] = []
-                      for arm, worker in workers.items():
+                      for arm, worker in (("head", workers["head"]),):
                           try:
-                              for principal in ("owner", "admitted"):
-                                  for case in first_cases.values():
+                              # Replay the observed shapes to separate first-use cost from persistent work.
+                              for repeat in range(3):
+                                  for case in (first_cases["unit"], first_cases["mixed"]):
+                                      principal = "owner"
                                       result = worker.exchange({**case, "principal": principal, "rows": gate.REFERENCE["stage_rows"]})
-                                      report["warm_calls"].append({"arm": arm, "principal": principal, "case": case["id"], "series": case["series"], "state": result.get("state"), "elapsed_ms": result.get("elapsed_ms")})
-                                      if result.get("state") != "ok":
-                                          raise gate.MeasurementRefused("reference-warm-call-not-ok")
+                                      report["warm_calls"].append({"arm": arm, "principal": principal, "case": case["id"], "series": case["series"], "repeat": repeat, **result})
                           finally:
                               worker.pause()
-                      report["state"] = "prepared"
+                      report["state"] = "failed" if any(row["state"] != "ok" for row in report["warm_calls"]) else "observed"
                   finally:
                       for worker in workers.values():
                           worker.close()
@@ -97,7 +137,7 @@ jobs:
               report["phase"] = getattr(error, "phase", None)
           finally:
               Path("recall-bootstrap-result.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-          raise SystemExit(report["state"] != "prepared")
+          raise SystemExit(report["state"] == "failed")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
