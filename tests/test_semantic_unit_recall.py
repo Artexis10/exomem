@@ -1116,6 +1116,28 @@ def test_finite_mixed_recall_keeps_hits_and_reports_only_proved_completeness(
     assert ("semantic_units_candidate_window" not in after.get("degraded", [])) == summary_available
 
 
+def test_hybrid_mixed_recall_fills_finite_demand_without_a_candidate_window_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A filled hybrid result from small parents must not inherit raw-window incompleteness."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    paths = [_write_page(
+        tmp_path, f"ordinary-{index:03d}",
+        body=f"- [config] windowmarker reading {index} ^reading",
+    ) for index in range(170)]
+    _prepare_semantic_catalog(tmp_path, paths)
+
+    result = commands.op_find(
+        tmp_path, query="windowmarker", mode="hybrid", scope="kb-only", graph=False,
+        rerank=False, result_level="mixed", limit=4, explain=True,
+    )
+
+    assert len(result["hits"]) == 4
+    assert {hit["result_type"] for hit in result["hits"]} == {"page", "semantic_unit"}
+    assert "semantic_units_candidate_window" not in result.get("degraded", [])
+
+
 def test_finite_mixed_recall_keeps_dominant_parent_incomplete_without_prefix_counts(
     tmp_path: Path,
 ) -> None:
