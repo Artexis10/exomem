@@ -1293,9 +1293,11 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
             embeddings.embed_texts = original
         if index.identity != identity:
             raise MeasurementRefused("seeded-index-identity-mismatch")
-        from exomem import lexstore
+        from exomem import lexstore, memory_refs
 
         lexstore.ensure_fresh(vault_root)
+        # Managed serialization requires its maintained reference sidecar before sampling.
+        memory_refs.ReferenceIndex(vault_root).rebuild_all()
         corpus = _stored_corpus(vault_root, index, rels, profile)
         for scope in ("vault", "kb"):
             freshness.seed(vault_root, scope, (
