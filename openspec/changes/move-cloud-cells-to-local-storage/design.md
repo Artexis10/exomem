@@ -316,7 +316,9 @@ For one pool, let `A` charge every ordinary physical LV at the larger of its vir
 
 The effective backup reserve is `max(2 * L * C, sum(outstanding family reservations))`. Each active or retiring family reserves twice its frozen source size. An ordinary create or growth requires prospective `A + reserve <= physical pool size`. New families also respect configured concurrency; lowering concurrency never releases an outstanding family's charge.
 
-A family owns at most one snapshot and one clone, each no larger than its frozen source size. Their ownership tags enter the same LVM command that creates them. A partial multi-command operation retains a recognizable charge and recorded target. Recovery completes or cleans that operation before reporting a ready volume.
+A family owns at most one snapshot and one clone, each no larger than its frozen source size. Freeze each role's child identity before its allocation. Their ownership tags enter the same LVM command that creates them. A partial multi-command operation retains a recognizable charge and recorded target. Recovery completes or cleans that operation before reporting a ready volume.
+
+Before a family has captured its snapshot, growth of that source waits for the snapshot or family closure. This prevents a larger source from exceeding the frozen reservation; the growing cell pays a brief retry delay and keeps its desired target. Once the snapshot exists, source growth uses the prospective budget without changing that snapshot's size. Cellctl renders the clone request from the family's frozen snapshot size, independently of later serving-volume growth.
 
 This check prevents one allocation from consuming another cell's online-backup room. A conservative charge can delay admission or growth; the requesting cell pays that delay. An unreadable inventory retries without treating missing observations as free bytes. Physical orphans remain charged until an authorized cleanup observes their absence.
 
