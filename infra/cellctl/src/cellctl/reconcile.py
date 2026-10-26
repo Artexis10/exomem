@@ -883,7 +883,7 @@ def _compute_render_digest(
     """D4: a SHA-256 over the non-secret render inputs -- the renderer
     version, chart-level cell settings, the set of cell_token_key versions
     in play, and the row's storage and key versions. Never a secret value
-    itself. storage_gib bumps no generation, so it must be here: it renders
+    itself. A storage_gib raise bumps generation under migration 0071 and renders
     into the PVC and the quota, and it is part of the refusal park key."""
 
     resources, placement = cluster_config.workload_for_cell(row.cell_id)
@@ -1659,8 +1659,20 @@ async def _reconcile_row(
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
-    from .imports import ImportStorage, decide_import, job_name
+    from .imports import ImportLimits, ImportStorage, decide_import, job_name
 
+    if row.desired_state != "deleted":
+        storage = cluster_config.storage
+        storage_class = observation.pvc_storage_class or observation.pv_storage_class or storage.domain
+        # Local import growth awaits authoritative shared-pool accounting; clear earlier published caps.
+        limits = None if storage.is_local(storage_class) else asdict(ImportLimits.for_cell(row, storage, config))
+        if limits != row.import_limits:
+            await db.write_observed(connection, row.cell_id, {"import_limits": limits})
+            row = dataclass_replace(row, import_limits=limits)
+    receipt = storage_receipt(row, observation, cluster_config.storage, now=now)
+    if receipt:
+        await db.write_observed(connection, row.cell_id, receipt)
+        row = dataclass_replace(row, **receipt)
     item = await db.read_import(connection, row.cell_id)
     import_decision = None
     if item is not None and not _identity_conflict(row, observation, cluster_config.storage):
@@ -1758,6 +1770,15 @@ async def _reconcile_row(
     )
     import_storage = None
     if import_decision is not None:
+        imported = jobs.get("import")
+        report = imported.report if imported and imported.succeeded and isinstance(imported.report, dict) else {}
+        counts = (report.get("files"), report.get("bytes"))
+        # C5 stores counts as PostgreSQL bigint; values outside that format stay unknown.
+        if item.staged_files is None and report.get("ok") is True and all(
+            type(value) is int and 0 <= value <= 2**63 - 1 for value in counts
+        ):
+            # Persist the successful report before cleanup can remove its Pod; C5 makes it immutable.
+            await db.write_import(connection, item.import_id, {"staged_files": counts[0], "staged_bytes": counts[1]})
         if decision.finalize_import:
             current = await db.finalize_import(connection, row.cell_id, item.import_id)
             if current is None:
@@ -1925,9 +1946,7 @@ async def _reconcile_row(
             image=decision.image,
             replicas=decision.replicas,
             read_only=decision.read_only,
-            # D10: only a local claim grows. A cell back on its retained
-            # Hetzner volume (a D7 rollback) renders storage_gib, that
-            # volume's own size, so its claim still binds and never grows it.
+            # Local claims keep backup growth; attachable claims follow desired storage.
             storage_gib=row.size_gib if local_volume else row.storage_gib,
             resources=resources,
             model_env=cluster_config.model_env or {},
@@ -2106,7 +2125,6 @@ async def _reconcile_row(
         await db.write_import(connection, item.import_id, {"observed_state": "discarded", "recipient": None,
                               "upload_id": None, "part_urls": None, "urls_expire_at": None})
     row_updates: dict[str, object] = dict(decision.row_updates)
-    row_updates.update(storage_receipt(row, observation, cluster_config.storage, now=now))
     if refused:
         # D4: the StatefulSet landed but another object was refused. The
         # refusal is what the row records, and nothing converged.

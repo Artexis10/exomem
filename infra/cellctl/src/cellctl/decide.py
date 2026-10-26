@@ -57,6 +57,7 @@ class ReconcileConfig:
     # most defensible default.
     init_deadline: timedelta = timedelta(minutes=10)
     import_deadline: timedelta = timedelta(hours=2)
+    import_growth_deadline: timedelta = timedelta(minutes=60)
     import_cleanup_deadline: timedelta = timedelta(minutes=2)
     import_cleanup_retry: timedelta = timedelta(hours=1)
     # C6: an export hold not finished this long per started 10 GiB of its cap
@@ -921,9 +922,9 @@ def plan_growth(
         return None, None
     if used * 100 <= total * GROWTH_THRESHOLD_PERCENT:
         return GROWTH_NOT_NEEDED, None
-    if row.size_gib >= local.max_cell_gib:
+    if row.size_gib >= storage.max_cell_gib:
         return GROWTH_AT_CAP, None
-    grown = min(row.size_gib + local.default_cell_gib, local.max_cell_gib)
+    grown = min(row.size_gib + local.default_cell_gib, storage.max_cell_gib)
     free = room.free_bytes.get(observation.pv_node) if observation.pv_node else None
     if not pool_takes(local, free_bytes=free, added_bytes=(grown - row.size_gib) * GIB,
                       largest_cell_gib=max(room.largest_cell_gib, grown)):
