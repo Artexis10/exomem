@@ -1297,12 +1297,17 @@ def test_worker_prepares_persisted_advisory_before_managed_admission(
     from types import SimpleNamespace
 
     import managed_recall
+    import numpy as np
     import synth_vault
 
     from exomem import due_state, embedding_backend, embeddings, recall_space
 
     (tmp_path / "Knowledge Base").mkdir()
-    identity = SimpleNamespace(dim=2, fingerprint="reference-space")
+    identity = recall_space.SpaceIdentity(recall_space.LEGACY_MODEL, "reference-space", 2)
+    monkeypatch.setattr(recall_space, "current_identity", lambda _dim: identity)
+    rel = "Knowledge Base/reference.md"
+    (tmp_path / rel).write_text("---\ntitle: Reference\n---\nReference passage.\n")
+    vector = np.asarray([[1.0, 0.0]], dtype=np.float32)
     artifact_root = tmp_path / "artifact"
     artifact_root.mkdir()
     for name in embedding_backend._ARTIFACT_FILES:
@@ -1311,18 +1316,19 @@ def test_worker_prepares_persisted_advisory_before_managed_admission(
         artifact_digest=embedding_backend._artifact_digest(artifact_root),
         fingerprint=lambda: identity.fingerprint,
     )
-    index = SimpleNamespace(identity=identity, rebuild_all=lambda: None)
+    index = embeddings.EmbeddingIndex(tmp_path)
+    index.upsert_file(rel, ["Reference passage."], vector, 1.0)
+    monkeypatch.setattr(index, "rebuild_all", lambda: None)
     monkeypatch.setattr(embeddings, "get_model", lambda: SimpleNamespace(profile=artifact))
-    monkeypatch.setattr(embeddings, "embed_texts", lambda *_args, **_kwargs: SimpleNamespace(shape=(1, 2)))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_args, **_kwargs: vector)
     monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: index)
-    monkeypatch.setattr(recall_space, "current_identity", lambda _dim: identity)
     monkeypatch.setattr(synth_vault, "reference_source", lambda *_args: (["reference"], "source-digest"))
-    monkeypatch.setattr(synth_vault, "gen_reference_vault", lambda *_args: [])
-    # The mocked generator creates no pages or vectors.
+    monkeypatch.setattr(synth_vault, "gen_reference_vault", lambda *_args: [rel])
+    # This preparation fixture has one real page and one stored vector.
     census = {
-        "pages": 0, "chunks": 0, "units": 0, "unit_pages": 0,
-        "vector_units": 0, "median_page_bytes": 0, "spot_checks": 0,
-        "vocabulary_terms": 0, "wikilinks_min": 0, "wikilinks_max": 0,
+        "pages": 1, "chunks": 1, "units": 0, "unit_pages": 0,
+        "vector_units": 0, "median_page_bytes": (tmp_path / rel).stat().st_size, "spot_checks": 1,
+        "vocabulary_terms": 1, "wikilinks_min": 0, "wikilinks_max": 0,
         "transcript_pages": 0,
     }
     monkeypatch.setattr(gate, "_stored_corpus", lambda *_args: census)
@@ -1338,6 +1344,16 @@ def test_worker_prepares_persisted_advisory_before_managed_admission(
     if persisted:
         environment = gate._prepare_worker(tmp_path, {"profile": {}})
         assert admitted == [True]
+        try:
+            # The first managed selection must use the prepared dense lane.
+            selected = index.select_chunks(
+                vector[0], 1, allowed_paths={rel}, encoded_for=identity, defer_cold_load=True,
+            )
+        finally:
+            loading = index._matrix_loading()
+            if loading is not None:
+                loading.join(timeout=30)
+        assert [row[0] for row in selected] == [rel]
         startup = {
             "runtime_prefix": sys.prefix,
             "runtime_lock_digest": gate._runtime_lock_digest(ROOT),

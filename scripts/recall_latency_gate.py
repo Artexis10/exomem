@@ -1315,6 +1315,8 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
                 (str(vault_root / rel), freshness.stat_signature(vault_root / rel)) for rel in rels
             ))
         enter_managed_recall(vault_root, full_startup=True)
+        # Normal startup may leave this disposable matrix cold; preparation owns the wait.
+        index.all_vectors()
     return {"corpus": corpus, "encoder_digest": artifact.artifact_digest,
             "encoder_identity": artifact.fingerprint(), "sqlite_version": sqlite3.sqlite_version,
             "python_version": sys.version.split()[0], "cpus": sorted(os.sched_getaffinity(0))}
