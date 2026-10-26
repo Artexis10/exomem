@@ -97,6 +97,14 @@ The slices follow the gate, so each one reports a before and an after on the sam
 - [ ] 6.5 Ranking metadata from catalogue columns (fusion and multipliers 24.4 / 65.6 ms, temporal 43.6 / 124.4 ms, graph 26.3 / 135.4 ms, 92 hydrations and 126 page file reads per request; expected at or below 5, 3 and 9 ms): read type, status, `updated` and emitted parent from `pages` for the request's generation; add derived catalogue columns for the lexical guard's per-page `stem_set` and `letter_script` (`find_policy.py:754-809`); answer the graph seeds' `make_excerpt` and `stem_tokens_present` test (`find_candidates.py:702-708`) from catalogue text; hydrate Markdown only for returned hits; verify fused-order identity, identical guard decisions and graph seeds, and Markdown reads within the candidate count plus the fixed overfetch.
 - [ ] 6.6 Unit lanes (`mixed` and `unit` levels, baseline 647.4 / 2,142.9 ms and 442 page reads per request; expected at or below 12 ms): preserve the shipped generation-bound matrix, admitted lexical statistics and selected parent reads. Use thread-qualified measurements to profile the remaining admission cost before adding reuse. Verify unit-hit identity for the owner and an admitted principal, with mixed Markdown reads within the candidate count plus fixed overfetch.
 
+  The source path now reuses checkpoint-bound release verdicts before unit scoring.
+  Model-free unit and mixed checks compare the published path with live decisions
+  on the same corpus. They preserve results and remove corpus-wide policy passes.
+  Registry reassignment invalidates both content and release verdicts without a
+  page edit. Selected hydration and final egress retain their live checks.
+  The 12 ms budget and complete bound-command gain remain unverified; task 6.6
+  stays open until the reference measurement and remaining acceptance checks pass.
+
   Repair finite mixed completeness before qualifying the paired latency gate.
   Defer only the exhausted candidate-window verdict until relation survivors,
   parent capping and the finite mixed plan are known. Clear that verdict only

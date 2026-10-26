@@ -6651,14 +6651,14 @@ def op_activate_context(
     trigger: Literal["user_turn", "task_refresh"] = "user_turn",
     initiator: str | None = None,
 ) -> dict:
-    """Recall bounded authorized context; abstain if uncertain.
+    """Recall authorized context; abstain if uncertain.
 
-    Reuse held policy/context; conversation supplies relevant thread/attachment excerpts.
-    origin=focus: agent cues, not human words;
-    focus cannot settle human ambiguity. Reads no attachments.
-    Clarify unknown subjects first. Keep source identity and scope.
-    Due items/refresh grant no writes.
-    Packets may carry maps; pull refs with read_memory.
+    Reuse held context; conversation supplies excerpts, not attachment reads.
+    focus is agent-authored, not human intent; clarify ambiguity.
+    Keep source identity/scope. Due/refresh grants no writes.
+    Pull map refs with read_memory.
+    Optional epistemic_status has counts/completeness; read_memory gives
+    items/reading provenance.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -7505,10 +7505,10 @@ def op_read_memory(
     continuation: _OptionalViewContinuation = None,
     follow_corrections: bool = True,
 ) -> dict:
-    """Read a page, exact semantic unit, or exomem://map view.
+    """Read a page, exact unit, or exomem://map view.
 
-    unit_ref includes bounded parent context. Missing or stale units report
-    status; no substitution.
+    Missing/stale units report status; never substituted.
+    Sensing: epistemic_status includes readings/provenance; incomplete counts are partial.
 
     Args:
         path: Vault-relative path or KB shorthand.

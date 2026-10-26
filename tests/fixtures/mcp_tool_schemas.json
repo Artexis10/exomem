@@ -3218,7 +3218,7 @@
     }
   },
   "read_memory": {
-    "description": "Read a page, exact semantic unit, or exomem://map view.\n\nunit_ref includes bounded parent context. Missing or stale units report\nstatus; no substitution.",
+    "description": "Read a page, exact unit, or exomem://map view.\n\nMissing/stale units report status; never substituted.\nSensing: epistemic_status includes readings/provenance; incomplete counts are partial.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3680,7 +3680,7 @@
     }
   },
   "recall_context": {
-    "description": "Recall bounded authorized context; abstain if uncertain.\n\nReuse held policy/context; conversation supplies relevant thread/attachment excerpts.\norigin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.",
+    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation supplies excerpts, not attachment reads.\nfocus is agent-authored, not human intent; clarify ambiguity.\nKeep source identity/scope. Due/refresh grants no writes.\nPull map refs with read_memory.\nOptional epistemic_status has counts/completeness; read_memory gives\nitems/reading provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

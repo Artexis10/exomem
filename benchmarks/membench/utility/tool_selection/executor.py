@@ -357,7 +357,7 @@ class ToolSelectionExecutor(ClaudeSessionExecutor):
             self._prepare_slot(slot, case)
             before = read_end_state(slot.vault)
             try:
-                result = self._execute(inputs, attempt_dir, slot)
+                result = self.execute_prepared(inputs, attempt_dir, slot)
             finally:
                 _end_orphan_server(_read_jsonl(slot.runtime / "tap.jsonl"))
             after = read_end_state(slot.vault)
