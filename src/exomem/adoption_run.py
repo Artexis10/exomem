@@ -22,6 +22,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import posixpath
 import secrets
 import stat
 import threading
@@ -29,7 +30,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode
 
 from . import adopt as adopt_module
@@ -763,6 +764,49 @@ def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
     return {"label": adoption_plan.nfc(chosen), "root": collection_root}
 
 
+def _refuse_outside_vault(root: Path, path: str) -> None:
+    """Refuse a `start` path that names a place outside the vault, before `_clean` can reshape it.
+
+    `_clean` and the overview resolver strip leading slashes, so `/etc` would read as the
+    vault-relative `etc` and fail as NOT_FOUND, hiding that the caller meant a folder elsewhere.
+    The check is lexical and never touches the filesystem: resolving a caller's absolute or UNC
+    value would let a Windows host open a network connection to the host that the value names.
+    """
+    raw = path or ""
+    route = (
+        "start scans folders inside the vault; stage a folder elsewhere with "
+        "`exomem import <folder>`, then start on the path it prints"
+    )
+    # Both spellings, whatever the host: a drive letter or UNC share is absolute on Windows
+    # and an ordinary relative name on POSIX, and either one means "not a vault path".
+    if PurePosixPath(raw).is_absolute() or PureWindowsPath(raw).anchor:
+        inside = _vault_relative(root, raw)
+        if inside is None:
+            raise AdoptionRunError("IMPORT_PATH_OUTSIDE_VAULT", route)
+        raise AdoptionRunError(
+            "IMPORT_PATH_OUTSIDE_VAULT",
+            f"start takes a vault-relative path, not an absolute one; use {inside!r}",
+        )
+    # Parent steps that climb above the vault root, normalised as text.
+    climbed = posixpath.normpath(raw.replace("\\", "/"))
+    if climbed == ".." or climbed.startswith("../"):
+        raise AdoptionRunError("IMPORT_PATH_OUTSIDE_VAULT", route)
+
+
+def _vault_relative(root: Path, raw: str) -> str | None:
+    """The vault-relative form of an absolute path written in the host's own spelling, or None.
+
+    Only the host's flavour counts: a Windows drive spelling is an ordinary file name on POSIX, not a place in the vault.
+    """
+    if not PurePath(raw).is_absolute() or not PurePath(root).is_absolute():
+        return None
+    try:
+        relative = PurePath(os.path.normpath(raw)).relative_to(os.path.normpath(root))
+    except ValueError:
+        return None
+    return relative.as_posix() if relative.parts else None
+
+
 def start(
     root: Path,
     *,
@@ -773,6 +817,7 @@ def start(
     today: dt.date | None = None,
 ) -> dict:
     root = Path(root)
+    _refuse_outside_vault(root, path)
     run_date = _today(today)
     kb = root / kb_dirname()
     if not kb.is_dir():
