@@ -1100,7 +1100,7 @@ def _entity_candidate_projection(leaf: Any) -> dict[str, Any] | None:
 #: opposite reason — `audit` owns which categories exist, and a second copy of that
 #: list would drift the day a category ships, so a category is checked as a bounded
 #: token and its meaning is left to the module that owns it.
-_MAX_DUE_STATE_CATEGORIES = 8
+_MAX_DUE_STATE_CATEGORIES = 16
 _MAX_DUE_STATE_TOP = 5
 _MAX_DUE_STATE_TOKEN_CHARS = 64
 _MAX_DUE_STATE_REF_CHARS = 256

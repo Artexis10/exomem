@@ -36,6 +36,9 @@ from exomem import commands, writer_lease
 from exomem import find as find_module
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
+# These tests count dated obligations; the fixture vault's Source backlog would shift every total.
+pytestmark = pytest.mark.usefixtures("obligations_only")
+
 
 def _due_state():
     """Import the projection module lazily.

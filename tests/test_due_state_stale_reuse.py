@@ -21,6 +21,9 @@ from exomem import due_state, review_state
 from exomem import find as find_module
 from exomem.governance.principal import RequestPrincipal
 
+# These tests count dated obligations; the fixture vault's Source backlog would shift every total.
+pytestmark = pytest.mark.usefixtures("obligations_only")
+
 TODAY = dt.date(2026, 8, 16)
 NOW = dt.datetime(2026, 8, 16, 12, tzinfo=dt.UTC)
 INSIGHTS = "Knowledge Base/Notes/Insights"

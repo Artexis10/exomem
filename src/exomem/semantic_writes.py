@@ -2738,8 +2738,17 @@ def _observation_delta(
             log.debug("observation due-state delta failed (non-fatal)", exc_info=True)
 
 
-def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
+def _due_state_block(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    prior_markdown: str | None = None,
+    related_pages: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
     """Update the due-state projection for one written page and return its block.
+
+    `prior_markdown` and `related_pages` name what the write changed besides the
+    page itself, so the Sources those pages cite are refreshed too.
 
     Shares `_structure_suggestion`'s placement and its fail-open guard, for the
     same reason: this runs after the guarded write has returned, and a fault here
@@ -2772,7 +2781,12 @@ def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
         try:
             from . import due_state
 
-            block = due_state.block_for_write(vault_root, rel_path)
+            block = due_state.block_for_write(
+                vault_root,
+                rel_path,
+                prior_markdown=prior_markdown,
+                related_pages=related_pages,
+            )
             if not block:
                 return None
             return {**block, "_vault": str(vault_root)}
@@ -2903,7 +2917,7 @@ def commit_existing(
     delivered_routing = _records_routing_for_delivery(
         vault_root, routing, state=preflight.after, created=False
     )
-    due = _due_state_block(vault_root, preflight.path)
+    due = _due_state_block(vault_root, preflight.path, prior_markdown=preflight.before_source)
     sweep = _capture_sweep_block(vault_root, preflight.after, preflight.after_corpus)
     candidate = _entity_candidate_block(
         vault_root,
@@ -4586,7 +4600,11 @@ def commit_creation(
     delivered_routing = _records_routing_for_delivery(
         vault_root, routing, state=preflight.semantic_state
     )
-    due = _due_state_block(vault_root, preflight.destination)
+    due = _due_state_block(
+        vault_root,
+        preflight.destination,
+        related_pages=(predecessor_path,) if predecessor_path else (),
+    )
     sweep = _capture_sweep_block(vault_root, preflight.semantic_state, preflight.corpus)
     candidate = _entity_candidate_block(vault_root, preflight.semantic_state, preflight.corpus)
     context = {

@@ -38,6 +38,9 @@ from exomem import state_paths
 from exomem.governance import egress as egress_module
 from exomem.governance.principal import RequestPrincipal, request_scope
 
+# These tests count dated obligations; the fixture vault's Source backlog would shift every total.
+pytestmark = pytest.mark.usefixtures("obligations_only")
+
 TODAY = dt.date(2026, 8, 16)
 TOMORROW = dt.date(2026, 8, 17)
 
@@ -728,6 +731,8 @@ def test_a_withheld_item_contributes_zero_everywhere(vault: Path) -> None:
     assert block is not None
     assert block["total"] == 1
     assert block["categories"] == {"prediction_window": 1}
+    # The outstanding count follows the same egress rule as the visible one.
+    assert block["outstanding_total"] == 1
     assert [row["due_since"] for row in block["top"]] == ["2026-08-01"]
 
 

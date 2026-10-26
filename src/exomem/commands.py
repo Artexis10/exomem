@@ -6023,11 +6023,13 @@ def op_delete(
     if restricted and recursive:
         raise ValueError(_FOLDER_DELETE_REFUSAL)
     path = _resolve_memory_identifier(vault_root, path)
+    rel = None
     try:
         abs_path, rel = resolve_under_vault(vault_root, path)
         is_dir = abs_path.is_dir()
     except VaultPathError:
         is_dir = False  # let the file backend raise the precise path error
+    prior_markdown = _markdown_before_delete(abs_path) if rel and confirm and not is_dir else None
     if restricted and is_dir:
         from . import list_directory as list_directory_module
 
@@ -6064,7 +6066,33 @@ def op_delete(
         delete_directory_module.DeleteDirectoryError,
     ) as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
+    if rel and prior_markdown is not None:
+        _refresh_due_state_after_delete(vault_root, rel, prior_markdown)
     return result.as_dict()
+
+
+def _markdown_before_delete(abs_path: Path) -> str | None:
+    """The page about to be trashed, so its cited Sources can be refreshed afterwards."""
+    if abs_path.suffix.lower() != ".md":
+        return None
+    try:
+        return abs_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _refresh_due_state_after_delete(vault_root: Path, rel: str, prior_markdown: str) -> None:
+    """Re-judge the Sources a trashed page cited: they may no longer be compiled.
+
+    Best effort, as every projection delta is: a fault here costs the projection a
+    refresh that the next reconcile performs, never the delete.
+    """
+    from . import due_state as due_state_module
+
+    try:
+        due_state_module.apply_write_delta(vault_root, rel, prior_markdown=prior_markdown)
+    except Exception:  # noqa: BLE001 — a projection delta never breaks a delete
+        log.debug("due-state delta failed after deleting %s", rel, exc_info=True)
 
 
 def op_append_to_file(
