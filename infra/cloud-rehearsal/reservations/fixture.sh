@@ -72,17 +72,18 @@ global {
     locking_dir = "$PROOF_NATIVE_LOCKS"
     use_lvmlockd = 0
 }
+# The hosted runner runs udevd, as a production host does; disabling LVM's udev sync races its device probes.
 activation {
     monitoring = 0
-    udev_sync = 0
-    udev_rules = 0
 }
 EOF
 /sbin/lvm pvcreate --yes "$loop_device"
 pv_created=1
 /sbin/lvm vgcreate --physicalextentsize 4M "$PROOF_VG" "$loop_device"
 vg_created=1
-/sbin/lvm lvcreate --yes --type thin-pool --size 512M --poolmetadatasize 16M --name "$PROOF_POOL" "$PROOF_VG"
+# A metadata spare serves only pool repair, which no proof exercises.
+/sbin/lvm lvcreate --yes --type thin-pool --size 512M --poolmetadatasize 16M --poolmetadataspare n \
+    --name "$PROOF_POOL" "$PROOF_VG"
 /sbin/lvm lvcreate --yes --size 4M --name fence "$PROOF_VG"
 /sbin/lvm lvmconfig --type current --mergedconfig devices/global_filter global/wait_for_locks global/locking_dir
 setsid "$binary" "-test.run=^$test_name\$" -test.v -test.timeout=3m > "$output" 2>&1 &
