@@ -9014,8 +9014,9 @@ def op_review_memory(
 ) -> dict:
     """Review health, provenance, drift and backlog.
 
-    Attention reads; repairs use maintain_memory. Vocabulary path/query/family
-    submits a meaning question: requires write access, grants no page or vocabulary mutation authority.
+    Attention reads; repairs use maintain_memory. unprocessed-sources lists
+    Sources no live note cites; dismissal is not completion. Vocabulary
+    path/query/family submits a meaning question: requires write access, grants no page or vocabulary mutation authority.
 
     mode="audit", categories=["unresolved_source_citation"] finds citations
     unresolved to authorized governed Source/Evidence; never reconstruct originals.
@@ -9035,17 +9036,16 @@ def op_review_memory(
         key: Provenance key filter.
         value: Provenance value filter.
         path: Provenance scan path; for evolution it selects the path route (`query`
-            unused; an unresolvable path raises); for vocabulary, the page the
-            question concerns.
+            unused); for vocabulary, the page the question concerns.
         state: open (default), all, snoozed or dismissed for attention/activation;
             vocabulary takes open or all.
         ref: `exomem://review/<id>` for item mode (upkeep refs revalidate one
             item) or `exomem://write-advisory-result/<id>` for
             write-advisory-result; for a vocabulary relation question, a current
             relation-queue candidate ref alongside its source path.
-        family: Vocabulary family for a meaning question; with `mode="vocabulary"`
-            requires `path` and `query`; an edge needs `relation-type/v1` and the
-            candidate `ref`. Creates only a review consideration.
+        family: Vocabulary family for a meaning question; an edge needs
+            `relation-type/v1` and the candidate `ref`. Creates only a review
+            consideration.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
     """
@@ -10288,11 +10288,12 @@ def op_adoption_studio(
     """Review and import an existing collection of notes, documents, images, audio and video in a resumable run.
 
     Never rewrite, move or delete originals. Status/work-item read; other actions
-    save run state or material. Plan previews exact imports; apply commits that plan or refuses.
+    save run state or material. Apply commits the previewed plan or refuses.
 
     start scans; select chooses files; plan previews; apply copies each file
-    into Sources; cancel closes pre-apply; finish proves recall and reports
-    coverage. Repeat plan or apply with a returned `continuation`. Then
+    into Sources, and drafts a note under an own-note rule; cancel closes
+    pre-apply; finish proves recall and reports coverage. Repeat plan or apply
+    with a returned `continuation`. Then
     work-item reads context, propose submits proposals, apply-proposal
     approves one. Details: references/operations.md.
 
@@ -10301,24 +10302,23 @@ def op_adoption_studio(
         run_id: From `start`; required except for `start` and run-listing `status`.
         path: For `start`, subtree to scan (default: vault root).
         include_hidden: For `start`, include hidden files.
-        initialize_kb: For `start`, bootstrap a missing Knowledge Base
-            (otherwise KB_NOT_INITIALIZED).
+        initialize_kb: For `start`, bootstrap a missing Knowledge Base.
         collection: For `start`, a name kept across re-imports.
-        include: For `select`, paths whose files are selected, or
-            {path, source_kind, domain} to file a folder under registered keys.
+        include: For `select`, paths whose files are selected, or {path,
+            source_kind?, domain?} to file a folder under registered keys, or
+            {path, adopt_as: note, note_type, project?, domain?} for a draft
+            note of each Markdown file.
         exclude: For `select`, paths to deselect.
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
-        plan_id: For `apply`, from `plan`/`status`; a mismatch or changed
-            selection refuses with PLAN_STALE.
+        plan_id: For `apply`, from `plan`/`status`.
         continuation: For `plan` and `apply`, from the previous result.
         retry_failed: For `apply`, re-apply only failures.
         only_paths: For `apply`, restrict to these originals.
         why: Required for `apply-proposal`; also the `cancel` reason.
         sources: For `work-item`, source paths instead of the first imports.
         ref: For `apply-proposal`, the `exomem://review/adoption/<id>` ref.
-        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint;
-            a mismatch refuses.
+        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint.
         expected_hash: For `apply-proposal`, target page hash for relation and
             reconciliation-relate approvals.
     """
