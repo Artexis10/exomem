@@ -241,14 +241,19 @@ def test_legacy_original_uuid_cannot_redirect_canonical_source(vault, source_sch
     assert source_corrections.resolve_current(vault, captured.path).selected_ref == corrected.ref
 
 
-def test_renamed_successor_uses_identity_when_hint_is_reused(vault, source_schema):
+@pytest.mark.parametrize("deny_occupant", [False, True])
+def test_renamed_successor_uses_identity_when_hint_is_reused(vault, source_schema, deny_occupant):
     old = add.add(vault, source_schema, title="Earlier original", content="Earlier content", source_type="session")
     current = add.add(vault, source_schema, title="Current original", content="Current content", source_type="session", correction={"supersedes": old.path, "expected_hash": vault_module.content_hash((vault / old.path).read_text()), "reason": "Restore original"})
     renamed = (vault / current.path).with_name("renamed-current.md")
     (vault / current.path).rename(renamed)
     unrelated = add.add(vault, source_schema, title="Current original", content="Unrelated content", source_type="session")
     assert unrelated.path == current.path
-    resolved = source_corrections.resolve_current(vault, old.path)
+
+    def authorize(path):
+        return not deny_occupant or path != unrelated.path
+
+    resolved = source_corrections.resolve_current(vault, old.path, authorize_path=authorize)
     assert resolved.selected_path == renamed.relative_to(vault).as_posix()
     assert resolved.selected_ref == current.ref
     assert "Current content" in resolved.source

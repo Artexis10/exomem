@@ -188,7 +188,13 @@ def resolve_current(
         guards: list[vault.PathGuard] = []
         basis = note_types.Basis(root)
         for hop in range(MAX_HOPS + 1):
-            text, guard, metadata, marker = _read_page(root, selected, authorize)
+            try:
+                text, guard, metadata, marker = _read_page(root, selected, authorize)
+            except (OSError, ValueError):
+                if expected_ref is None:
+                    raise
+                selected = _canonical_reference_path(root, expected_ref)
+                text, guard, metadata, marker = _read_page(root, selected, authorize)
             reference = memory_refs.ref_from_markdown(text)
             if expected_ref is not None and reference != expected_ref:
                 selected = _canonical_reference_path(root, expected_ref)
@@ -224,9 +230,7 @@ def resolve_current(
             # The guarded hint keeps ordinary hops to point reads; stable refs still survive a rename.
             try:
                 selected = _path(root, entry["new_path"])
-            except reserved_paths.ReservedPathLeafError as error:
-                if error.code != "MISSING":
-                    raise SourceCorrectionUnavailable from None
+            except reserved_paths.ReservedPathLeafError:
                 selected = _canonical_reference_path(root, expected_ref)
         raise SourceCorrectionUnavailable
     except (OSError, ValueError, TypeError, KeyError, memory_refs.ReferenceError, reserved_paths.ReservedPathLeafError):
