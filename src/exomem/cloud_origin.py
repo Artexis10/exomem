@@ -71,7 +71,7 @@ class Origin:
 
 # Each signed object carries exactly the login's fields, the version and the RFC 7519 claims.
 _ORIGIN_FIELDS = tuple(field.name for field in fields(Origin))
-_SIGNED_FIELDS = ("v", "iss", "aud", "iat", "exp", "jti")
+_SIGNED_FIELDS = ("v", "iss", "aud", "iat", "exp", "jti")  # nosemgrep: ep-word-set -- RFC 7519 claims and the wire version.
 _PROOF_FIELDS = frozenset((*_ORIGIN_FIELDS, *_SIGNED_FIELDS, "purpose"))
 _ROUTE_FIELDS = frozenset((*_ORIGIN_FIELDS, *_SIGNED_FIELDS, "upload_url"))
 
