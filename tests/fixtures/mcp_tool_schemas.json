@@ -3643,7 +3643,7 @@
     }
   },
   "recall_context": {
-    "description": "Recall bounded authorized context; abstain if uncertain.\n\nReuse held policy/context; conversation supplies relevant thread/attachment excerpts.\norigin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.\nWhen sensing is enabled, anchors may carry epistemic_status: released\nrefinement/contradiction evidence with reading provenance and completeness,\nfor agent review. It never changes ranking or authorizes a write.",
+    "description": "Recall bounded authorized context; abstain if uncertain.\n\nReuse held policy/context; conversation supplies relevant thread/attachment excerpts.\norigin=focus: agent cues, not human words;\nfocus cannot settle human ambiguity. Reads no attachments.\nClarify unknown subjects first. Keep source identity and scope.\nDue items/refresh grant no writes.\nPackets may carry maps; pull refs with read_memory.\nWhen sensing is enabled, anchors may carry compact epistemic_status counts\nand completeness for released evidence. Use read_memory for items and\nreading provenance. Status never changes ranking or authorizes a write.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

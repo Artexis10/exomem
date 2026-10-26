@@ -278,3 +278,26 @@ def test_an_anchor_after_the_shared_budget_empties_still_reports_incomplete_evid
     assert packet["anchors"][1]["epistemic_status"] == {
         "refined_by_later": 0, "open_contradictions": 0, "evidence_complete": False,
     }
+
+
+def test_a_spent_budget_does_not_add_status_to_unrelated_or_neutral_anchors(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Omitting one anchor's evidence must not invent incompleteness for another."""
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    unrelated = f"{sf.KB}/Notes/Insights/unrelated.md"
+    fx.write(vault, unrelated, sf.note("Unrelated", "2026-06-01", "A separate finding."))
+    fx.seed(vault)
+    fx.publish_graph(vault)
+    sf.converge(vault, sf.StubInstrument(sf.default_table()))
+    monkeypatch.setattr(sensed_model, "REQUEST_EDGE_BOUND", 1)
+    packet = {"anchors": [
+        {"path": sf.DENIAL, "status": "resolved"},
+        {"path": unrelated, "status": "resolved"},
+        {"path": sf.INLET, "status": "resolved"},
+    ]}
+    sensed_model.for_packet(vault, packet)
+    assert "epistemic_status" in packet["anchors"][0]
+    assert "epistemic_status" not in packet["anchors"][1]
+    assert "epistemic_status" not in packet["anchors"][2]

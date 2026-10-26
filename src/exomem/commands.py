@@ -6615,9 +6615,9 @@ def op_activate_context(
     Clarify unknown subjects first. Keep source identity and scope.
     Due items/refresh grant no writes.
     Packets may carry maps; pull refs with read_memory.
-    When sensing is enabled, anchors may carry epistemic_status: released
-    refinement/contradiction evidence with reading provenance and completeness,
-    for agent review. It never changes ranking or authorizes a write.
+    When sensing is enabled, anchors may carry compact epistemic_status counts
+    and completeness for released evidence. Use read_memory for items and
+    reading provenance. Status never changes ranking or authorizes a write.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.

@@ -148,9 +148,10 @@ already injected this turn's working set. For a known information gap, use
 abstains rather than guessing.
 
 When sensing is enabled, a page read or activation anchor may carry
-`epistemic_status`. It reports released refinement and contradiction evidence,
-with reading provenance and `evidence_complete`. Treat it as evidence for review;
-it never authorizes a write. When completeness is false, counts may be partial.
+`epistemic_status`. Activation carries compact counts and `evidence_complete`.
+Use `read_memory` for released refinement and contradiction items with reading
+provenance. Treat status as evidence for review; it never authorizes a write.
+When completeness is false, counts may be partial.
 
 A packet may instead carry a map: an index of what exists, with titles, refs,
 descriptions and current state when available. Read the map and pull by ref

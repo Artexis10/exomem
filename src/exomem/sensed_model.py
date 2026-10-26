@@ -1485,7 +1485,7 @@ class _View:
         self._dropped: dict[str, int] = {}
         self._loaded: dict[tuple[str, str], set[str]] = {}
         self._remaining = REQUEST_EDGE_BOUND
-        self.truncated = False
+        self._truncated: set[str] = set()
 
     def visible(self, path: str) -> bool:
         return self.keep is None or bool(self.keep(path))
@@ -1551,7 +1551,7 @@ class _View:
                 loaded = self._loaded.get(page_pair, set())
                 limit = min(int(details), self._remaining + len(loaded))
                 if int(details) > limit:
-                    self.truncated = True
+                    self._truncated.add(path)
                 if not limit:
                     continue
                 self._loaded[page_pair] = loaded
@@ -1614,7 +1614,7 @@ class _View:
     def complete(self, path: str) -> bool:
         """No edge of `path` was dropped as stale and none still needs a reading."""
         self.edges(path)
-        if self._dropped.get(path) or self.truncated:
+        if self._dropped.get(path) or self.truncated(path):
             return False
         for path_a, path_b in self.conn.execute(
             "SELECT path_a, path_b FROM pairs WHERE (path_a=? OR path_b=?) AND selected=1 "
@@ -1625,6 +1625,9 @@ class _View:
             if self.visible(other) and self.page(other) is not None:
                 return False
         return True
+
+    def truncated(self, path: str) -> bool:
+        return path in self._truncated
 
 
 def _live_sig(vault_root: Path, rel: str) -> str | None:
@@ -1646,26 +1649,30 @@ def _live_sig(vault_root: Path, rel: str) -> str | None:
     return dreamer_store.encode_sig(signature)
 
 
-def _component(view: _View, start: str) -> int:
-    """Size of `start`'s contradiction component over released, open edges."""
+def _component(view: _View, start: str) -> tuple[int, bool]:
+    """Size of the released contradiction component, and whether its detail was truncated."""
     seen = {start}
     frontier = [start]
+    truncated = False
     while frontier and len(seen) < COMPONENT_BOUND:
         current = frontier.pop(0)
-        for edge in view.edges(current):
+        edges = view.edges(current)
+        truncated |= view.truncated(current)
+        for edge in edges:
             if edge.other in seen or not view.open_contradiction(edge):
                 continue
             seen.add(edge.other)
             frontier.append(edge.other)
             if len(seen) >= COMPONENT_BOUND:
                 break
-    return len(seen)
+    return len(seen), truncated
 
 
-def _chain(view: _View, start: str) -> list[str]:
-    """Pages that later refine or supersede `start`, transitively, in time order."""
+def _chain(view: _View, start: str) -> tuple[list[str], bool]:
+    """Later refinement pages in time order, and whether their detail was truncated."""
     found = {start}
     frontier = [start]
+    truncated = False
     while frontier and len(found) < CHAIN_BOUND:
         current = frontier.pop(0)
         page = view.page(current)
@@ -1674,6 +1681,7 @@ def _chain(view: _View, start: str) -> list[str]:
             for edge in view.edges(current)
             if edge.state == "current" and edge.other_refines and view.later(edge.other, current)
         }
+        truncated |= view.truncated(current)
         if page is not None:
             successors |= {
                 other
@@ -1687,7 +1695,7 @@ def _chain(view: _View, start: str) -> list[str]:
             if other not in found and len(found) < CHAIN_BOUND:
                 found.add(other)
                 frontier.append(other)
-    return sorted(found, key=lambda p: ((view.page(p) or ("",))[0], p))
+    return sorted(found, key=lambda p: ((view.page(p) or ("",))[0], p)), truncated
 
 
 def _plural(count: int, noun: str) -> str:
@@ -1726,7 +1734,7 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
     if not refined and not contradictions:
         # Dropped or budgeted-out released edges still report incomplete evidence,
         # even when no count survives. Withheld partners cause neither state.
-        if view.dropped(path) or view.truncated:
+        if view.dropped(path) or view.truncated(path):
             return {"refined_by_later": 0, "open_contradictions": 0, "evidence_complete": False}
         return None
     parts = []
@@ -1744,12 +1752,14 @@ def _status(view: _View, path: str) -> dict[str, Any] | None:
     }
     if disagreements:
         status["disagreements"] = [_item(edge) for edge in disagreements[:ITEMS_SHOWN]]
-    chain = _chain(view, path)
+    chain, chain_truncated = _chain(view, path)
     if len(chain) > 1:
         status["chain"] = chain
     if contradictions:
-        status["contradiction_component"] = _component(view, path)
-    status["evidence_complete"] = view.complete(path)
+        status["contradiction_component"], component_truncated = _component(view, path)
+    else:
+        component_truncated = False
+    status["evidence_complete"] = view.complete(path) and not (chain_truncated or component_truncated)
     return status
 
 

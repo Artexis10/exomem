@@ -112,7 +112,7 @@ Tasks 7.3, 8.6, and 8.7 form one repair batch.
 The instrument batch waits for its CPU runtime and source-keyed fixture spike.
 This dependency separates the deliveries; it does not close tasks 8.4 or 9.1.
 Sensing remains off by default.
-The repair checks cover 92 cases across sensing, caller egress, tool schemas, workflow skills, and cloud packages.
+The repair checks cover sensing, caller egress, tool schemas, workflow skills, and cloud packages.
 A mixed-endpoint query probe covers 10,000 hub pairs and confirms the composite partner lookup.
 Strict OpenSpec validation and the repository privacy gate pass before delivery.
 The integrated batch still needs independent review and the full CI corpus before merge.
