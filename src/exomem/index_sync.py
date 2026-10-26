@@ -132,13 +132,23 @@ class DerivedAcknowledgementSnapshot:
 
 def derived_acknowledgement_snapshot(
     statuses: Iterable[DerivedComponentStatus],
+    *,
+    required: Iterable[DerivedComponent] | None = None,
 ) -> DerivedAcknowledgementSnapshot:
-    """Separate non-graph, graph and advisory outcomes from one exact snapshot."""
+    """Project observed outcomes; unread required components remain pending."""
     by_component = {status.component: status for status in statuses}
-    if set(by_component) != set(DerivedComponent):
+    if required is None and set(by_component) != set(DerivedComponent):
         raise ValueError("derived acknowledgement requires every closed component")
+    required_components = frozenset(DerivedComponent if required is None else required)
+    if not (set(by_component) | required_components) <= set(DerivedComponent):
+        raise ValueError("derived acknowledgement requires closed components")
 
-    def outcome(status: DerivedComponentStatus, *, advisory: bool = False) -> str:
+    def outcome(component: DerivedComponent, *, advisory: bool = False) -> str:
+        status = by_component.get(component)
+        if status is None:
+            if component in required_components:
+                return "pending"
+            return "not_required" if advisory else "completed"
         if status.state == "not_required":
             return "not_required" if advisory else "completed"
         if status.state == "completed":
@@ -156,7 +166,7 @@ def derived_acknowledgement_snapshot(
     unfinished: list[str] = []
     non_graph_outcomes: list[str] = []
     for component in _FAST_ACK_NON_GRAPH_COMPONENTS:
-        component_outcome = outcome(by_component[component])
+        component_outcome = outcome(component)
         non_graph_outcomes.append(component_outcome)
         if component_outcome != "completed":
             unfinished.append(component.value)
@@ -181,9 +191,7 @@ def derived_acknowledgement_snapshot(
     return DerivedAcknowledgementSnapshot(
         derived_sync=derived_sync,
         derived_sync_components=tuple(sorted(unfinished)),
-        advisory_sync=outcome(
-            by_component[DerivedComponent.WRITE_ADVISORY], advisory=True
-        ),
+        advisory_sync=outcome(DerivedComponent.WRITE_ADVISORY, advisory=True),
         diagnostics=diagnostics,
     )
 
@@ -1792,10 +1800,13 @@ def upsert_after_write(
     eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
     if not eligible and not watcher_mode:
         from . import epistemic_graph
+        from .writer_lease import active_derived_batch_custody
 
         graph_component = (
             _graph_component(lambda: epistemic_graph.converge_full_graph_marker(vault_root))
-            if deferred_index.graph_full_rebuild_pending(vault_root) is not None
+            # Operational writes must leave existing graph debt with its durable owner.
+            if not active_derived_batch_custody(vault_root)
+            and deferred_index.graph_full_rebuild_pending(vault_root) is not None
             else None
         )
         return IndexSyncReport(
@@ -2291,9 +2302,10 @@ def converge_derived_component(
             if removed:
                 publications.append(delete_after_remove(root, removed))
             if written:
+                # Receipt-owned fan-out replays committed paths through the graph's currency proof.
                 publications.append(upsert_after_write(
                     root, written, created_paths=created,
-                    publish_corpus_change=True, semantic_edited=not service,
+                    publish_corpus_change=True, semantic_edited=not service, replayed=True,
                 ))
         reports = tuple(publications)
         if any(item.reconcile_required for item in reports):
