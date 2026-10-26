@@ -336,6 +336,11 @@ def fingerprint(proofs: list[Proof]) -> str:
     return vault.content_hash(json.dumps([proof.fingerprint for proof in proofs], separators=(",", ":")))
 
 
+def subject_fingerprint(subject: Mapping[str, Any]) -> str:
+    """Bind the original incarnation independently of later page or history bytes."""
+    return vault.content_hash(json.dumps(dict(subject), sort_keys=True, separators=(",", ":")))
+
+
 def require_same(proofs: list[Proof]) -> None:
     if any(proof.status == "unverified" for proof in proofs):
         raise ValueError("PROMOTION_SUBJECT_UNVERIFIED: original subject continuity is unavailable")

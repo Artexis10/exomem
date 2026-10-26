@@ -4663,7 +4663,7 @@ def commit_creation(
         # A successor page is a new version of an entity, not a new entity.
         promotions.record_page_write(
             vault_root, preflight.destination, before_source=None, after_source=preflight.source,
-            origin=promotion_origin, corpus=preflight.corpus,
+            origin=promotion_origin, corpus=preflight.corpus, source_state=preflight.semantic_state,
         )
     suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
     routing = _records_routing(vault_root, preflight.semantic_state)

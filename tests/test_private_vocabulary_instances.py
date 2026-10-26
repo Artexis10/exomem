@@ -44,6 +44,56 @@ def private_instances(configured_boundary, vault):
     return authenticate
 
 
+def test_private_relation_alias_records_the_canonical_promoted_edge(private_instances, vault):
+    from exomem import commands, review_state
+    from exomem.governance.principal import request_scope
+
+    with request_scope(private_instances("full")):
+        inspected = commands.op_schema_memory(
+            vault, "inspect", subject="relations", registry_scope=SCOPE,
+        )
+        saved = commands.op_schema_memory(
+            vault, "save", subject="relations", registry_scope=SCOPE,
+            expected_hash=inspected["content_hash"], why="Register a private relation.",
+            proposal={"upsert": {"vault.accounts_for": {
+                "parent": "supports", "description": "Accounts for a synthetic ledger.",
+                "aliases": ["accounts"],
+            }}},
+        )
+        assert saved["valid"], saved
+        inspected_type = commands.op_schema_memory(
+            vault, "inspect", subject="entity-types", registry_scope=SCOPE,
+        )
+        saved_type = commands.op_schema_memory(
+            vault, "save", subject="entity-types", registry_scope=SCOPE,
+            expected_hash=inspected_type["content_hash"], why="Register private entity placement.",
+            proposal={"upsert": {"venue": {
+                "label": "Venue", "guidance": "A recurring meeting place.", "parent": "concept",
+                "attributes": {"folder": "Private Venues", "optional_frontmatter": ["project"]},
+            }}},
+        )
+        assert saved_type["valid"], saved_type
+        target = commands.op_connect_memory(
+            vault, "create-entity", entity_type="venue", name="Tidal Ledger",
+            summary="A recurring synthetic ledger.", project="private-project", registry_scope=SCOPE,
+        )["path"]
+        source = commands.op_connect_memory(
+            vault, "create-entity", entity_type="venue", name="Harbour Accounts",
+            summary="A recurring synthetic account.", project="private-project", registry_scope=SCOPE,
+            relations=[{"kind": "accounts", "target": target}],
+        )["path"]
+
+        edges = [
+            subject for entry in review_state.ReviewStateStore(vault).load()["promotions"].values()
+            if entry["kind"] == "edge" for subject in entry["subjects"]
+            if subject["subject"] == source
+        ]
+
+        assert len(edges) == 1
+        assert edges[0]["predicate"] == "vault.accounts_for"
+        assert edges[0]["target"] == target
+
+
 @pytest.mark.parametrize("include_public_subject", [False, True])
 def test_private_promotion_is_admitted_before_count_read_or_settlement(
     private_instances, vault, monkeypatch, include_public_subject,

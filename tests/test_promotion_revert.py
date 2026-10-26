@@ -117,6 +117,43 @@ def test_an_edge_reverts_in_one_call_and_only_that_bullet_goes(
     assert _revert(vault, ref, fingerprint)["outcome"] == "absent", "a repeat reports absent"
 
 
+def test_one_notice_with_two_edges_reverts_both_in_one_call(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _as(monkeypatch, "creator")
+    first = _create_entity(vault, "Tidal Ledger")
+    second = _create_entity(vault, "Harbour Ledger")
+    subject = _create_entity(vault, "Tidal Accounts", relations=[
+        {"kind": "supports", "target": first},
+        {"kind": "supports", "target": second},
+    ])
+    ref = _entry_ref(vault, "edge")
+    _as(monkeypatch, "reader")
+    preview = _context(vault, ref)
+    assert len(preview["item"]["subjects"]) == 2
+
+    result = _revert(vault, ref, preview["revert_fingerprint"])
+
+    assert result["outcome"] == "reverted"
+    assert len(result["removed"]) == 2
+    assert not promotions.edge_present(vault, subject, "supports", first)
+    assert not promotions.edge_present(vault, subject, "supports", second)
+
+
+def test_an_endpoint_edit_invalidates_the_callers_full_revert_preview(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject, target, ref = _edge_vault(vault, monkeypatch)
+    preview = _context(vault, ref)
+    _link_from(vault, target, subject)
+    before = (vault / subject).read_bytes()
+
+    with pytest.raises(ValueError, match="CURATION_PLAN_IDENTITY_MISMATCH"):
+        _revert(vault, ref, preview["revert_fingerprint"])
+
+    assert (vault / subject).read_bytes() == before
+
+
 def test_a_revert_needs_the_current_fingerprint_and_a_stale_one_changes_nothing(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

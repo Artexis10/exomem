@@ -37,6 +37,11 @@ A missing, unreadable, inadmissible, legacy, forked, cyclic, disconnected, or ca
 The notice remains readable when admitted, but no destructive undo is offered or partially applied for unknown subjects.
 A proved absence ends the original promotion; restoring the edge or key creates a separate incarnation.
 
+The caller's revert fingerprint includes current page and history evidence for every subject.
+Each sealed edge step binds the original subject descriptor and proves its continuity again before commit.
+Earlier undo steps can change page bytes without invalidating another edge from the same promotion.
+Fresh proof guards still reject replacement endpoints and interrupted edge continuity.
+
 Supported moves can rewrite inbound pages without compiled history.
 This change adds neither move history nor predecessor metadata, so those gaps and earlier cycles can make destructive undo unavailable.
 Registry history pruning can also make undo unavailable when it removes the introducing version.

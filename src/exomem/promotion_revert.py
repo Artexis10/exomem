@@ -82,7 +82,7 @@ def remove_relation(
                 raise ValueError("PROMOTION_SUBJECT_UNVERIFIED: edge binding unavailable")
             proof = promotion_proof.page(vault_root, "edge", matches[0])
             promotion_proof.require_same([proof])
-            if proof.fingerprint != binding["expected_fingerprint"]:
+            if promotion_proof.subject_fingerprint(matches[0]) != binding["expected_fingerprint"]:
                 raise ValueError("PROMOTION_SUBJECT_CHANGED: the edge proof changed")
             for guard in proof.guards:
                 guard.recheck(vault_root)
@@ -149,16 +149,22 @@ class RevertPlan:
     trash_hashes: tuple[tuple[str, str], ...]
 
 
-def _edge_steps(vault_root: Path, subjects: list[dict[str, Any]], promotion_id: str) -> list[dict[str, Any]]:
-    proofs = promotion_proof.subjects(vault_root, "edge", subjects)
+def _edge_steps(
+    vault_root: Path, subjects: list[dict[str, Any]], promotion_id: str,
+    proofs: list[promotion_proof.Proof],
+) -> list[dict[str, Any]]:
     promotion_proof.require_same(proofs)
     ledger = promotions.ledger(vault_root)
 
-    def binding(subject: dict[str, Any], proof: promotion_proof.Proof) -> dict[str, Any]:
+    def binding(subject: dict[str, Any]) -> dict[str, Any]:
         owner = promotion_id if subject in ledger[promotion_id]["subjects"] else next(
             key for key, row in ledger.items() if row["kind"] == "edge" and subject in row["subjects"]
         )
-        return {"ref": promotions.promotion_ref(owner), "expected_fingerprint": proof.fingerprint}
+        # Earlier steps may change page bytes; each leaf proves the bound incarnation afresh.
+        return {
+            "ref": promotions.promotion_ref(owner),
+            "expected_fingerprint": promotion_proof.subject_fingerprint(subject),
+        }
 
     return [
         {
@@ -169,10 +175,10 @@ def _edge_steps(vault_root: Path, subjects: list[dict[str, Any]], promotion_id: 
                 "predicate": subject["predicate"],
                 "target": subject["target"],
                 "why": f"Revert recent promotion {promotions.promotion_ref(promotion_id)}",
-                "_promotion": binding(subject, proof),
+                "_promotion": binding(subject),
             },
         }
-        for ordinal, (subject, proof) in enumerate(zip(subjects, proofs, strict=True), 1)
+        for ordinal, subject in enumerate(subjects, 1)
     ]
 
 
@@ -264,7 +270,8 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
         dying |= {origin} if origin else set()
         dependants.sort(key=lambda link: (link["path"], link["line"]))
     title = f"Revert recent promotion {promotions.promotion_ref(promotion_id)}"
-    steps = _edge_steps(vault_root, edges, promotion_id)
+    edge_proofs = promotion_proof.subjects(vault_root, "edge", edges)
+    steps = _edge_steps(vault_root, edges, promotion_id, edge_proofs)
     prepared = (
         curation.prepare_proposal(
             vault_root, {"version": 1, "title": title, "steps": steps}, allow_records=True
@@ -291,7 +298,11 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
     else:
         fingerprint = curation.plan_fingerprint(
             {"version": 1, "title": title, "steps": [*(prepared.plan["steps"] if prepared else []), *trash_steps]},
-            [*(prepared.binding_manifest if prepared else []), *trash_manifest],
+            [
+                *(prepared.binding_manifest if prepared else []), *trash_manifest,
+                # Caller review binds current evidence; leaves bind only the original incarnation.
+                {"promotion_proofs": promotion_proof.fingerprint([*proofs, *edge_proofs])},
+            ],
             prepared.registry_ids if prepared else {},
         )
     return RevertPlan(

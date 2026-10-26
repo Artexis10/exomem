@@ -248,6 +248,7 @@ def record_page_write(
     after_source: str,
     origin: Mapping[str, Any] | None = None,
     corpus: Any = None,
+    source_state: Any = None,
     transition_id: str | None = None,
 ) -> None:
     """Record an entity creation and the typed edges an entity page gained.
@@ -280,11 +281,16 @@ def record_page_write(
         def resolve(raw: str) -> str | None:
             return semantic_contract._resolve_reference_wikilink_from_context(corpus, raw).path
 
+        registry = (
+            semantic_contract._authored_relations(source_state, corpus.registry)
+            if source_state is not None else corpus.registry_for(path)
+        )
+
         def edges(source: str) -> set[tuple[str, str]]:
             return {
                 (canonical, target)
                 for _line, kind, target in authored_edges(vault_root, source, resolve)
-                if (canonical := corpus.registry.resolve(kind).canonical) is not None
+                if (canonical := registry.resolve(kind).canonical) is not None
             }
 
         before = edges(before_source) if before_source is not None else set()
@@ -297,10 +303,9 @@ def record_page_write(
         else:
             return
         subjects = []
-        for kind, target in gained:
+        for canonical, target in gained:
             state = corpus.pages.get(target)
-            canonical = corpus.registry.resolve(kind).canonical
-            if state is None or not _is_entity(state.frontmatter) or canonical is None:
+            if state is None or not _is_entity(state.frontmatter):
                 continue
             target_id = memory_refs.normalize_id(state.frontmatter.get(memory_refs.ID_FIELD))
             if target_id is None:
