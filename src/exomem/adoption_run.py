@@ -29,7 +29,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode
 
 from . import adopt as adopt_module
@@ -763,6 +763,36 @@ def _collection_of(root: Path, source_root: str, label: str | None) -> dict:
     return {"label": adoption_plan.nfc(chosen), "root": collection_root}
 
 
+def _refuse_outside_vault(root: Path, path: str) -> None:
+    """Refuse a `start` path that names a place outside the vault, before `_clean` can reshape it.
+
+    `_clean` and the overview resolver strip leading slashes, so `/etc` would read as the
+    vault-relative `etc` and fail as NOT_FOUND, hiding that the caller meant a folder elsewhere.
+    """
+    raw = path or ""
+    route = (
+        "start scans folders inside the vault; stage a folder elsewhere with "
+        "`exomem import <folder>`, then start on the path it prints"
+    )
+    # Both spellings, whatever the host: a drive letter or UNC share is absolute on Windows
+    # and an ordinary relative name on POSIX, and either one means "not a vault path".
+    if PurePosixPath(raw).is_absolute() or PureWindowsPath(raw).anchor:
+        try:
+            inside = Path(raw).resolve().relative_to(root.resolve()).as_posix()
+        except (OSError, ValueError):
+            raise AdoptionRunError("IMPORT_PATH_OUTSIDE_VAULT", route) from None
+        raise AdoptionRunError(
+            "IMPORT_PATH_OUTSIDE_VAULT",
+            f"start takes a vault-relative path, not an absolute one; use {inside!r}",
+        )
+    try:
+        resolved = (root / raw.replace("\\", "/")).resolve()
+    except OSError:
+        return  # an unresolvable component is the overview resolver's INVALID_PATH
+    if not resolved.is_relative_to(root.resolve()):
+        raise AdoptionRunError("IMPORT_PATH_OUTSIDE_VAULT", route)
+
+
 def start(
     root: Path,
     *,
@@ -773,6 +803,7 @@ def start(
     today: dt.date | None = None,
 ) -> dict:
     root = Path(root)
+    _refuse_outside_vault(root, path)
     run_date = _today(today)
     kb = root / kb_dirname()
     if not kb.is_dir():

@@ -124,6 +124,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "governance-schema",
         "relations",
         "collections",
+        "import",
     }
 )
 
@@ -291,6 +292,9 @@ def _dispatch_main(raw: list[str]) -> int:
         return _relations_main(raw[1:])
     if raw and raw[0] == "collections":
         return _collections_main(raw[1:])
+    if raw and raw[0] == "import":
+        from .local_import import main as local_import_main
+        return local_import_main(raw[1:])
     if raw and raw[0] == "cloud":
         if raw[1:2] == ["export"]:
             from .cloud_export_client import main as cloud_export_main
